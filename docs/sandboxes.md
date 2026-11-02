@@ -42,7 +42,7 @@ The published numbers describe different parts of startup:
 | Small Linux workload | The upstream benchmark reports a 320 ms median from CLI invocation through process exit for an Alpine workload on a bare-metal Linux host. The results are dated May 12, 2026. [Benchmark methodology and results](https://github.com/superradcompany/sandbox-bench/blob/main/benches/boot-time/README.md). | Useful evidence of short startup times for a small guest. It is an upstream measurement on different hardware and software, not an else.bot desktop benchmark. |
 | Guest memory | The Rust SDK defaults to 512 MiB. It allocates physical pages as the guest touches them. [Memory configuration](https://docs.microsandbox.dev/sdk/rust/sandbox). | This is the guest memory setting. It does not state the runtime's host memory overhead or what our browser workload needs. |
 
-The local test used 1 vCPU and 2 GiB guest memory. A restored desktop with one local Chromium page used about 563 MiB of host VM-worker RSS. The first desktop run retained about 1.49 GiB after package installation, including guest caches. These are samples of a small workload. Keep the 2 GiB budget for the prototype and measure actual websites and provider CLIs before treating it as a requirement. See the [resource measurements](experiments/bot-vm-verification.md#resource-behavior).
+The local test used 1 vCPU and 2 GiB guest memory. A restored desktop with one local Chromium page used about 563 MiB of host VM-worker RSS. The first desktop run retained about 1.49 GiB after package installation, including guest caches. These are samples of a small workload. Keep the 2 GiB budget for the prototype and measure actual websites and guest tasks before treating it as a requirement. Budget host provider processes separately. See the [resource measurements](experiments/bot-vm-verification.md#resource-behavior).
 
 The simplest proposed deployment is a native Linux service for the Rust API with access to `/dev/kvm`. Provision a writable runtime home and image cache, a pinned `msb` executable, and its matching `libkrunfw` library, which contains the guest kernel. Preload the guest image so the first conversation does not wait for a download. The SDK handles command execution through its guest-agent channel without requiring SSH. [Linux setup and startup sequence](https://docs.microsandbox.dev/getting-started/quickstart), [runtime provisioning](https://docs.microsandbox.dev/sdk/setup).
 
@@ -56,7 +56,17 @@ The Rust SDK test created a named VM, executed a command, stopped it, and reconn
 
 The SDK documents `connect_or_create()` for reusing a named environment. Existing configuration wins, and builder settings apply only when creating a new one. It also supports detached sandboxes that survive the creating process. `connect_or_create()` starts stopped environments, so else.bot must check the desired running state in PostgreSQL before calling it. Avoid the destructive `.replace()` option during normal startup. Validate detached operation and reconnection across API restarts with the pinned release. [SDK lifecycle reference](https://docs.microsandbox.dev/sdk/rust/sandbox).
 
-The target is one persistent micro-VM environment per bot, including the main assistant. Its identity and saved filesystem persist while its compute can pause or stop between uses. A provider switch should reuse that bot's computer. Test a custom image with both CLIs installed and invoke the chosen CLI inside the existing environment. Conversation handoffs and provider session handling remain else.bot's responsibility.
+The target is one persistent micro-VM environment per bot, including the main assistant. Its identity and saved filesystem persist while its compute can pause or stop between uses. A provider switch should reuse that bot's computer. Provider CLIs run on the host and operate the VM through scoped else.bot tools. Conversation handoffs and native provider sessions remain on the host under else.bot's control.
+
+## First-version execution lifecycle
+
+Use one scheduler in the Rust API and durable PostgreSQL records. Track host provider turns, guest jobs, and VM leases independently. Allow one active provider turn and one mutating guest operation per bot initially. Other bots can run within the configured host budget.
+
+Persist intent before external dispatch and confirm the actual outcome before releasing reservations. A running guest job retains its lease after a provider switch or client disconnect. Expiry requests reconciliation. It does not prove that work ended. Unknown dispatch outcomes stay unknown until inspected and must not trigger automatic retries.
+
+Keep bot status separate from desired computer state. An explicitly stopped computer permits host conversation and memory work, but guest tools cannot wake it until explicit resume. Soft deletion revokes access and stops all work while retaining chats, memory, native session files, and VM disks for later explicit purge. Startup preserves tombstones and never replaces a missing recorded computer with an empty environment.
+
+The [execution-lifecycle research](research/execution-lifecycle.md) defines the records, scheduler pseudocode, resource admission, deadlines, and restart checks. Its fixture passes 28 interleaving and crash cases plus nine edge checks. Real runtime job recovery, SQL races, process containment, and dispatch correlation remain unverified.
 
 ## VM locks and resource management
 
@@ -68,13 +78,17 @@ Locks should have renewable leases so a crashed caller cannot keep a VM running 
 
 After the final release and a configurable idle timeout, stop the VM when RAM must be reclaimed. The local pause test retained about 190 MiB of worker RSS, while stop removed the worker process. Pause can still serve brief idle periods within the memory budget. Count paused VMs' retained memory until it is released. Both operations must preserve the bot's saved filesystem.
 
-Configuration should set the maximum active VMs, total CPU and memory budgets, per-bot limits, and idle timeout. Reserve resources for the host, Rust API, and PostgreSQL. Queue new VM usage when the available budget is exhausted. Dedicated bot environments should not require every bot's VM to run at once.
+Conversation, memory, and connector work can continue without acquiring a VM lock. Acquire locks only when a tool needs the bot computer, and retain them for live guest jobs or desktop use. Host CLI activity alone must not keep an idle VM running.
 
-## Desktop and provider integration
+Configuration should set the maximum active VMs, total CPU and memory budgets, per-bot limits, and idle timeout. Reserve resources for the host provider processes, Rust API, and PostgreSQL. Queue new VM usage when the available budget is exhausted. Dedicated bot environments should not require every bot's VM to run at once.
 
-The proposed guest image should include Chromium, a desktop, a terminal, a VNC server, noVNC, and both provider CLIs. We can reuse the desktop setup from the existing projects as a reference. Validate the complete image with the selected micro-VM runtime.
+## Desktop and host tool integration
 
-Provider authentication must work with the owner's existing subscriptions on a headless server. Validate login, token renewal, and saved CLI sessions in the guest environment. An account-free runtime does not remove the need to authenticate with the chosen AI provider.
+The proposed guest image should include Chromium, a desktop, a terminal, a VNC server, noVNC, and task utilities. Provider CLIs and their subscription credentials stay on the host. We can reuse the desktop setup from the existing projects as a reference. Validate the complete image with the selected micro-VM runtime.
+
+The host agent uses the [computer skill and tools](providers.md#host-to-vm-tools-and-skills) to execute guest work and inspect results. The Rust API manages the guest-agent connection and VM lifecycle. Guest software receives only the task-specific credentials it needs. It receives no general access to the host or other bots.
+
+Validate provider login, token renewal, and saved CLI sessions separately on the host. An account-free VM runtime does not remove the need to authenticate with the chosen AI provider.
 
 ## Lifecycle and recovery
 
@@ -86,14 +100,14 @@ Client disconnection must not interrupt work that still holds a VM lock. Once no
 
 Back up each bot's saved filesystem and browser profile through encrypted VM snapshots alongside the PostgreSQL export. PostgreSQL keeps application records and references to those artifacts. VM files do not need a second copy inside the database. A new server should restore the matching database and VM backup set without overwriting existing environments during normal startup.
 
-else.bot's recovery procedure must recreate required credentials and CLI session state from the database and VM archives through supported interfaces. Host-side secrets and external mounts need explicit backup coverage. Test subscription token renewal and any required provider login before claiming that recovery restores provider access.
+VM archives preserve guest files and browser state. They do not contain the host's provider authentication or native CLI sessions. The [backup inventory](backups.md#host-provider-state) must cover required host provider state separately through supported interfaces, or require a fresh login and rebuild native context from PostgreSQL. Test subscription token renewal and any required provider login before claiming that recovery restores provider access.
 
 ## Validation before adoption
 
 The first implementation investigation should establish these facts:
 
 - A clean headless server can create and reuse two separately named bot micro-VMs without an infrastructure vendor login.
-- Chromium, the desktop, VNC streaming, and both CLI subscription logins work in the custom environment.
+- Chromium, the desktop, and VNC streaming work in the custom environment. Host CLIs can operate them through scoped tools without exposing host execution access.
 - Switching providers preserves the bot's computer and continues its task with else.bot's handoff context.
 - Disconnecting clients preserves work with active VM locks. Releasing the final lock allows the idle policy to pause or stop the VM. Owner-stopped bots remain stopped after else.bot restarts.
 - Failed tasks and crashed callers release or expire their locks without interrupting other active users. Concurrent acquisitions and idle shutdowns cannot race.
