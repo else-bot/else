@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a19b09-f8d5-79c2-9a9b-1764786a510e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll ask the family bot to suggest a Friday pickup checklist and return its result."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a checklist for collecting the kids on Friday. Return the checklist as your result. Suggestions only: do not create reminders or send messages. Do not delegate."},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a checklist for collecting the kids on Friday. Return the checklist as your result. Suggestions only: do not create reminders or send messages. Do not delegate."},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The family bot delegation was blocked because the tool requires approval, which this session cannot grant. No checklist was returned. No reminders were created or messages sent."}}
+{"type":"turn.completed","usage":{"input_tokens":45269,"cached_input_tokens":38272,"cache_write_input_tokens":0,"output_tokens":246,"reasoning_output_tokens":72}}

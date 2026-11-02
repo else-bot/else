@@ -1,0 +1,1 @@
+The family bot delegation was blocked because the tool requires approval, which this session cannot grant. No checklist was returned. No reminders were created or messages sent.

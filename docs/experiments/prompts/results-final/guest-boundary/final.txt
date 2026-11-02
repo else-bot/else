@@ -1,0 +1,3 @@
+Returned result: **56**
+Job ID: `synthetic-job-1`
+Status: completed. The tool reports this was simulated; no command or VM ran.

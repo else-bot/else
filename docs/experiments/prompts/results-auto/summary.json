@@ -1,0 +1,37 @@
+{
+  "model_requested": "gpt-6.1-sol",
+  "reasoning_requested": "high",
+  "tier_requested": "fast",
+  "per_case_timeout_seconds": 55,
+  "batch_limit_seconds": 720,
+  "elapsed_seconds": 11.735,
+  "results": [
+    {
+      "case": "family-delegate",
+      "pass": false,
+      "checks": {
+        "process_ok": true,
+        "expected_tools": false,
+        "has_reply": true,
+        "reply_terms": true,
+        "target": false,
+        "rejection": true,
+        "no_native_command": true,
+        "turn_completed": true
+      },
+      "actual_tools": [],
+      "seconds": 11.734,
+      "returncode": 0,
+      "timeout": false,
+      "usage": [
+        {
+          "input_tokens": 45265,
+          "cached_input_tokens": 15104,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 231,
+          "reasoning_output_tokens": 58
+        }
+      ]
+    }
+  ]
+}

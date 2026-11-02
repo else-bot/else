@@ -1,0 +1,29 @@
+{
+  "case": "deleted-bot-race",
+  "pass": true,
+  "checks": {
+    "process_ok": true,
+    "expected_tools": true,
+    "has_reply": true,
+    "reply_terms": true,
+    "target": true,
+    "rejection": true,
+    "no_native_command": true,
+    "turn_completed": true
+  },
+  "actual_tools": [
+    "delegate"
+  ],
+  "seconds": 9.532,
+  "returncode": 0,
+  "timeout": false,
+  "usage": [
+    {
+      "input_tokens": 45202,
+      "cached_input_tokens": 23040,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 138,
+      "reasoning_output_tokens": 0
+    }
+  ]
+}

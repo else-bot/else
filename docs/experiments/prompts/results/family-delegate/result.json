@@ -1,0 +1,27 @@
+{
+  "case": "family-delegate",
+  "pass": false,
+  "checks": {
+    "process_ok": true,
+    "expected_tools": false,
+    "has_reply": true,
+    "reply_terms": true,
+    "target": false,
+    "rejection": true,
+    "no_native_command": true,
+    "turn_completed": true
+  },
+  "actual_tools": [],
+  "seconds": 12.383,
+  "returncode": 0,
+  "timeout": false,
+  "usage": [
+    {
+      "input_tokens": 45269,
+      "cached_input_tokens": 38272,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 246,
+      "reasoning_output_tokens": 72
+    }
+  ]
+}

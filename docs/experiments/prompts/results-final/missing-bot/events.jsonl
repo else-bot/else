@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a19b0c-d4a8-7ab3-b0a9-e8330afe12f6"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll check the registry for a travel bot."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"There’s no travel bot in the registry, so I haven’t delegated your trip planning to another bot."}}
+{"type":"turn.completed","usage":{"input_tokens":14781,"cached_input_tokens":4224,"cache_write_input_tokens":0,"output_tokens":82,"reasoning_output_tokens":40}}

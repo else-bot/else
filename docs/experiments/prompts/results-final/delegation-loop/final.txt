@@ -1,0 +1,10 @@
+I can’t delegate to `main`: the delegation budget is zero, and `main` is in this task’s ancestry. No approval is recorded.
+
+A short project-review plan:
+
+1. Confirm the goal, scope, and next milestone.
+2. Compare completed work with commitments, citing evidence.
+3. Identify blockers, dependencies, and the three biggest risks.
+4. Set next actions with owners and dates; list decisions needing approval.
+
+Deliverable: a one-page update covering status, evidence, risks, and next steps.

@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a19b0c-ef4f-7471-acdc-8af3f0877948"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll ask the family bot for a pickup checklist and return its result."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a pickup checklist. Return your checklist to the owner."},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a pickup checklist. Return your checklist to the owner."},"result":{"content":[{"type":"text","text":"{\"status\": \"rejected\", \"code\": \"BOT_UNAVAILABLE\"}"}],"structured_content":null},"error":null,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The family bot is unavailable (`BOT_UNAVAILABLE`), so it couldn’t provide a pickup checklist."}}
+{"type":"turn.completed","usage":{"input_tokens":45202,"cached_input_tokens":23040,"cache_write_input_tokens":0,"output_tokens":138,"reasoning_output_tokens":0}}

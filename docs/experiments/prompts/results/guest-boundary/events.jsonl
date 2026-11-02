@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a19b0a-292e-7241-865e-22c5785abf33"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run the calculation on the assigned task computer and report the returned result and job ID."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"guest_run","arguments":{"command":"python3 -c 'print(7 * 8)'"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"guest_run","arguments":{"command":"python3 -c 'print(7 * 8)'"},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The task-computer call was rejected because it requires approval, while this session’s approval policy is `never`. No calculation result or job ID was returned."}}
+{"type":"turn.completed","usage":{"input_tokens":45247,"cached_input_tokens":38272,"cache_write_input_tokens":0,"output_tokens":237,"reasoning_output_tokens":81}}

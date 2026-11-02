@@ -1,0 +1,29 @@
+{
+  "case": "work-delegate",
+  "pass": true,
+  "checks": {
+    "process_ok": true,
+    "expected_tools": true,
+    "has_reply": true,
+    "reply_terms": true,
+    "target": true,
+    "rejection": true,
+    "no_native_command": true,
+    "turn_completed": true
+  },
+  "actual_tools": [
+    "delegate"
+  ],
+  "seconds": 10.081,
+  "returncode": 0,
+  "timeout": false,
+  "usage": [
+    {
+      "input_tokens": 45342,
+      "cached_input_tokens": 38272,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 172,
+      "reasoning_output_tokens": 0
+    }
+  ]
+}

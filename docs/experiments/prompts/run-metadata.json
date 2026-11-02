@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-02",
+  "cli_version": "codex-cli 0.166.0",
+  "auth_status": "Logged in using ChatGPT; supported CLI auth only; no auth file inspection",
+  "actual_inference_invocations": {
+    "readiness_probe": 1,
+    "initial_tool_pilots": 2,
+    "auto_mode_pilot": 1,
+    "approved_pilot": 1,
+    "final_cases": 13,
+    "app_server_tier_probe": 1,
+    "total": 22,
+    "async_v2_cases": 3
+  },
+  "failed_before_inference": {
+    "outer_restricted_environment": 1
+  },
+  "iterations": [
+    {
+      "results": "results",
+      "prompt": "v1",
+      "mcp_mode": "unspecified",
+      "annotations": "unspecified",
+      "outcome": "2 calls blocked by native MCP approval gate before fixture execution",
+      "service_tier_requested": "fast"
+    },
+    {
+      "results": "results-auto",
+      "prompt": "v1",
+      "mcp_mode": "auto",
+      "annotations": "unspecified",
+      "outcome": "1 call blocked by native MCP approval gate before fixture execution",
+      "service_tier_requested": "fast"
+    },
+    {
+      "results": "results-approved",
+      "prompt": "v1",
+      "mcp_mode": "approve",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "outcome": "actual fixture dispatch succeeds",
+      "service_tier_requested": "priority"
+    },
+    {
+      "results": "results-final",
+      "prompt": "v1",
+      "mcp_mode": "approve",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "outcome": "13/13 checks pass",
+      "service_tier_requested": "priority"
+    },
+    {
+      "results": "results-async",
+      "prompt": "v2, prompt-async.txt",
+      "mcp_mode": "approve",
+      "outcome": "3/3 checks pass; pending ID, no same-attempt polling, fresh continuation with recorded result",
+      "service_tier_requested": "priority",
+      "actual_scheduler_tested": false
+    }
+  ],
+  "tier_evidence": "tier-probe.json has returned configured serviceTier=priority; no backend scheduling telemetry",
+  "worker_tier": "not established; no claim parent research workers ran Fast",
+  "synthetic_only": "MCP result bodies and delegate completions are scripted. No VM or child model is started by the fixture.",
+  "log_policy": {
+    "raw_reasoning_events_retained": 0,
+    "async_runner_filters_before_write": true,
+    "environment_dumped": false,
+    "auth_files_read_or_copied": false
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "model_requested": "gpt-6.1-sol",
+  "reasoning_requested": "high",
+  "tier_requested": "priority",
+  "per_case_timeout_seconds": 55,
+  "batch_limit_seconds": 720,
+  "elapsed_seconds": 33.943,
+  "results": [
+    {
+      "case": "async-family",
+      "pass": true,
+      "checks": {
+        "process_ok": true,
+        "expected_tools": true,
+        "has_reply": true,
+        "reply_terms": true,
+        "reply_exclusions": true,
+        "target": true,
+        "rejection": true,
+        "status": true,
+        "no_native_command": true,
+        "turn_completed": true
+      },
+      "actual_tools": [
+        "delegate"
+      ],
+      "seconds": 11.53,
+      "returncode": 0,
+      "timeout": false,
+      "filtered_output": {
+        "reasoning_events": 0,
+        "unparsed_events": 0
+      },
+      "usage": [
+        {
+          "input_tokens": 45649,
+          "cached_input_tokens": 23296,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 192,
+          "reasoning_output_tokens": 0
+        }
+      ]
+    },
+    {
+      "case": "async-work-no-poll",
+      "pass": true,
+      "checks": {
+        "process_ok": true,
+        "expected_tools": true,
+        "has_reply": true,
+        "reply_terms": true,
+        "reply_exclusions": true,
+        "target": true,
+        "rejection": true,
+        "status": true,
+        "no_native_command": true,
+        "turn_completed": true
+      },
+      "actual_tools": [
+        "delegate"
+      ],
+      "seconds": 12.982,
+      "returncode": 0,
+      "timeout": false,
+      "filtered_output": {
+        "reasoning_events": 0,
+        "unparsed_events": 0
+      },
+      "usage": [
+        {
+          "input_tokens": 46140,
+          "cached_input_tokens": 30208,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 215,
+          "reasoning_output_tokens": 0
+        }
+      ]
+    },
+    {
+      "case": "async-family-continuation",
+      "pass": true,
+      "checks": {
+        "process_ok": true,
+        "expected_tools": true,
+        "has_reply": true,
+        "reply_terms": true,
+        "reply_exclusions": true,
+        "target": true,
+        "rejection": true,
+        "status": true,
+        "no_native_command": true,
+        "turn_completed": true
+      },
+      "actual_tools": [],
+      "seconds": 9.428,
+      "returncode": 0,
+      "timeout": false,
+      "filtered_output": {
+        "reasoning_events": 0,
+        "unparsed_events": 0
+      },
+      "usage": [
+        {
+          "input_tokens": 15023,
+          "cached_input_tokens": 8448,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 144,
+          "reasoning_output_tokens": 105
+        }
+      ]
+    }
+  ]
+}

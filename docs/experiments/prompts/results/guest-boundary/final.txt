@@ -1,0 +1,1 @@
+The task-computer call was rejected because it requires approval, while this session’s approval policy is `never`. No calculation result or job ID was returned.

@@ -1,0 +1,1 @@
+Have the appropriate bot suggest a checklist for collecting the kids on Friday. Return its result. No reminder or message sending.

@@ -1,0 +1,33 @@
+{
+  "bot_id": "family",
+  "root_task_id": "synthetic-root",
+  "ancestry": [
+    "family"
+  ],
+  "delegation_remaining": 0,
+  "allowed_memory_bots": [
+    "family"
+  ],
+  "allowed_actions": [
+    "chat",
+    "memory_read",
+    "delegate",
+    "guest_run"
+  ],
+  "registry": [
+    {
+      "id": "main",
+      "role": "General assistant and domain coordination"
+    },
+    {
+      "id": "family",
+      "role": "Family logistics and pickup plans"
+    },
+    {
+      "id": "work",
+      "role": "Work planning and project updates"
+    }
+  ],
+  "deleted": [],
+  "approval_records": []
+}

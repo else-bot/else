@@ -1,0 +1,4 @@
+{"type": "thread.started", "thread_id": "01a19b10-3984-7a53-818b-1474a9029716"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Family\u2019s pickup checklist:\n\n- Agree on a pickup time.\n- Pack bags.\n\nRecorded completed result: `synthetic-child-family` \u00b7 Source: `bot_result`."}}
+{"type": "turn.completed", "usage": {"input_tokens": 15023, "cached_input_tokens": 8448, "cache_write_input_tokens": 0, "output_tokens": 144, "reasoning_output_tokens": 105}}

@@ -1,0 +1,1 @@
+I couldn’t access the work bot’s project review memory. The API rejected the request with `MEMORY_SCOPE_DENIED`; my memory access is limited to the family bot.
