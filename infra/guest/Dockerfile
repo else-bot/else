@@ -3,7 +3,11 @@
 # else.bot's private Microsandbox home. The base is pinned by digest.
 FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
-RUN apt-get update \
+# Packages come from a fixed Debian snapshot, so a fresh build installs
+# the same versions (bump SNAPSHOT deliberately to update).
+ARG SNAPSHOT=20261101T000000Z
+RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\nTypes: deb\nURIs: http://snapshot.debian.org/archive/debian-security/%s\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' "$SNAPSHOT" "$SNAPSHOT" > /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates chromium curl fonts-dejavu-core novnc openbox procps \
       python3 python3-websocket supervisor websockify x11vnc xterm xvfb \

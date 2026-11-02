@@ -256,7 +256,7 @@ pub(crate) fn tool_result(value: Value) -> Value {
 }
 
 /// Bytes of the complete tool result that would carry `value`.
-fn wire_size(value: &Value) -> usize {
+pub(crate) fn wire_size(value: &Value) -> usize {
     tool_result(value.clone()).to_string().len()
 }
 

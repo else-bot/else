@@ -363,6 +363,60 @@ async fn guest_tools_desktop_and_isolation() {
         .collect();
     assert_eq!(hex, sha);
 
+    // A directory is not an artifact, and nothing is left in the store.
+    let refused = manager
+        .fetch_artifact(lease, bot, None, "/home/elsebot/work", 1 << 20)
+        .await
+        .unwrap();
+    assert!(refused.is_err(), "{refused:?}");
+    let stored: Vec<_> = std::fs::read_dir(dir.path().join("artifacts").join(bot.to_string()))
+        .unwrap()
+        .collect();
+    assert_eq!(stored.len(), 1, "only the earlier artifact");
+    // Exact byte reads.
+    manager.write_file(lease, "utf.txt", "éABC").await.unwrap();
+    let (size, bytes) = manager
+        .read_file(lease, "utf.txt", 1, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((size, bytes), (5, vec![0xA9, b'A', b'B']));
+    // Cancelling a job stops its whole process group.
+    let started = manager
+        .start_job(
+            bot,
+            None,
+            "sleep 301 & sleep 302; wait",
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap();
+    let else_api::computers::jobs::Started::Job(long) = started else {
+        panic!("{started:?}")
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let cancelled = manager.cancel_job(bot, long).await.unwrap().unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    let left = manager
+        .run_command(
+            bot,
+            "test:turn2",
+            "pgrep -f 'sleep 30[12]' || echo none",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(left.stdout.trim(), "none", "the job's processes are gone");
+    // Output is bounded in the guest: only the end comes back.
+    let noisy = manager
+        .run_command(bot, "test:turn2", "seq 1 200000", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(noisy.stdout_bytes > 1_000_000 && noisy.stdout.len() <= 6_000);
+    assert!(noisy.stdout.trim_end().ends_with("200000"));
+
     // The browser operates a local page; its storage persists across a stop.
     let page = "<html><head><title>Probe Page</title></head><body>\
         <input id='q'><button id='b' onclick=\"localStorage.setItem('kept', document.getElementById('q').value); \

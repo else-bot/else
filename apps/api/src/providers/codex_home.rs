@@ -86,7 +86,7 @@ pub fn config_toml(tool_url: Option<&str>) -> String {
              required = true\n\
              default_tools_approval_mode = \"approve\"\n\
              startup_timeout_sec = 15\n\
-             tool_timeout_sec = 30\n",
+             tool_timeout_sec = 360\n",
             name = crate::http::mcp::SERVER_NAME,
             tools = tools.join(", "),
         ));

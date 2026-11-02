@@ -10,9 +10,11 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::mcp::{Outcome, slice, tool_error, tool_result};
+use super::mcp::{Outcome, slice, tool_error, tool_result, wire_size};
+use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
-use crate::computers::{Acquire, ComputerError, ExecOutput};
+use crate::computers::{Acquire, ComputerError};
+use crate::db::memory::RESPONSE_BUDGET;
 use crate::grants::Grant;
 
 pub const TOOL_NAMES: &[&str] = &[
@@ -26,8 +28,6 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_browser",
 ];
 
-/// Bytes of stdout and of stderr returned by one call.
-const OUTPUT_BYTES: usize = 6_000;
 const MAX_ARTIFACT: u64 = 10 * 1024 * 1024;
 const READ_CHUNK: u64 = 12_000;
 
@@ -143,21 +143,57 @@ fn failure(err: ComputerError) -> Outcome {
     (tool_error(&format!("COMPUTER_ERROR: {err}")), None)
 }
 
-fn output_json(out: &ExecOutput) -> Value {
-    let cut = |text: &str| {
-        let (_, kept) = slice(text, text.len().saturating_sub(OUTPUT_BYTES), OUTPUT_BYTES);
-        (kept.to_owned(), kept.len() < text.len())
-    };
-    let (stdout, out_cut) = cut(&out.stdout);
-    let (stderr, err_cut) = cut(&out.stderr);
+fn output_json(out: &CommandOutput) -> Value {
     json!({
-        "exit_code": out.status,
-        "stdout": stdout,
-        "stderr": stderr,
-        // Earlier output was dropped; only the end is shown.
-        "stdout_truncated": out_cut || out.truncated,
-        "stderr_truncated": err_cut || out.truncated,
+        "exit_code": out.exit_code,
+        // The end of each stream; earlier output is dropped and marked.
+        "stdout": out.stdout,
+        "stderr": out.stderr,
+        "stdout_bytes": out.stdout_bytes,
+        "stderr_bytes": out.stderr_bytes,
+        "stdout_truncated": (out.stdout.len() as u64) < out.stdout_bytes,
+        "stderr_truncated": (out.stderr.len() as u64) < out.stderr_bytes,
     })
+}
+
+/// Fit a result into the response budget after JSON escaping: the longest
+/// text field is cut (output keeps its end, page text its start) and marked
+/// until the complete serialized result fits.
+fn fit(mut value: Value) -> Value {
+    const KEEP_END: &[&str] = &["stdout", "stderr", "output_tail"];
+    const FIELDS: &[&str] = &[
+        "stdout",
+        "stderr",
+        "output_tail",
+        "text",
+        "content",
+        "preview",
+        "title",
+        "url",
+    ];
+    for _ in 0..16 {
+        let size = wire_size(&value);
+        if size <= RESPONSE_BUDGET {
+            break;
+        }
+        let Some(field) = FIELDS
+            .iter()
+            .filter(|f| value[**f].is_string())
+            .max_by_key(|f| value[**f].as_str().map_or(0, str::len))
+        else {
+            break;
+        };
+        let text = value[*field].as_str().unwrap_or_default().to_owned();
+        let keep = text.len().saturating_sub(size - RESPONSE_BUDGET + 64);
+        let cut = if KEEP_END.contains(field) {
+            slice(&text, text.len() - keep, keep).1.to_owned()
+        } else {
+            slice(&text, 0, keep).1.to_owned()
+        };
+        value[*field] = json!(cut);
+        value[format!("{field}_truncated")] = json!(true);
+    }
+    value
 }
 
 /// A lease on the bot's own computer for this turn, or the tool error.
@@ -209,8 +245,12 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 .await
             {
                 Ok(Ok(out)) => {
-                    let log = format!("run exit {:?}: {}", out.status, slice(&command, 0, 200).1);
-                    (tool_result(output_json(&out)), Some(log))
+                    let log = format!(
+                        "run exit {:?}: {}",
+                        out.exit_code,
+                        slice(&command, 0, 200).1
+                    );
+                    (tool_result(fit(output_json(&out))), Some(log))
                 }
                 Ok(Err(acquired)) => (not_ready(&acquired), None),
                 Err(err) => failure(err),
@@ -260,7 +300,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
             };
             match result {
                 Ok(Some(job)) => (
-                    tool_result(job_json(&job)),
+                    tool_result(fit(job_json(&job))),
                     Some(format!("{name} {id}: {}", job.status)),
                 ),
                 // Another bot's job looks the same as no job.
@@ -301,22 +341,40 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 Err(outcome) => return outcome,
             };
             match computers.read_file(lease, &path, offset, READ_CHUNK).await {
-                Ok(out) if out.status == Some(0) => {
-                    let (size, content) = out.stdout.split_once('\n').unwrap_or(("0", ""));
-                    let size: u64 = size.trim().parse().unwrap_or(0);
-                    let end = offset + content.len() as u64;
+                Ok(Ok((size, bytes))) => {
+                    // Whole characters only: a chunk ending inside one stops
+                    // before it, and next_offset counts the bytes consumed.
+                    let (text, consumed, binary) = match std::str::from_utf8(&bytes) {
+                        Ok(text) => (text.to_owned(), bytes.len(), false),
+                        Err(err) if err.error_len().is_none() => {
+                            let valid = err.valid_up_to();
+                            (
+                                String::from_utf8_lossy(&bytes[..valid]).into_owned(),
+                                valid,
+                                false,
+                            )
+                        }
+                        Err(_) => {
+                            use base64::Engine;
+                            (
+                                base64::engine::general_purpose::STANDARD.encode(&bytes),
+                                bytes.len(),
+                                true,
+                            )
+                        }
+                    };
+                    let end = offset + consumed as u64;
                     (
-                        tool_result(json!({
-                            "path": path, "size_bytes": size, "offset": offset, "content": content,
+                        tool_result(fit(json!({
+                            "path": path, "size_bytes": size, "offset": offset,
+                            "encoding": if binary { "base64" } else { "utf-8" },
+                            "content": text,
                             "next_offset": (end < size).then_some(end),
-                        })),
+                        }))),
                         Some(format!("read {path} at {offset}")),
                     )
                 }
-                Ok(out) => (
-                    tool_error(&format!("read failed: {}", slice(&out.stderr, 0, 500).1)),
-                    None,
-                ),
+                Ok(Err(reason)) => (tool_error(&format!("read failed: {reason}")), None),
                 Err(err) => failure(err),
             }
         }
@@ -339,10 +397,10 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 .await
             {
                 Ok(Ok((id, size, sha256, preview))) => (
-                    tool_result(json!({
+                    tool_result(fit(json!({
                         "artifact_id": id, "guest_path": path, "size_bytes": size,
                         "sha256": sha256, "preview": slice(&preview, 0, 2000).1,
-                    })),
+                    }))),
                     Some(format!("fetched {path}: artifact {id}, {size} bytes")),
                 ),
                 Ok(Err(reason)) => (tool_error(&format!("fetch failed: {reason}")), None),
@@ -387,12 +445,29 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                             Some(log),
                         )
                     } else {
-                        (tool_result(parsed), Some(log))
+                        (tool_result(fit(parsed)), Some(log))
                     }
                 }
                 Err(err) => failure(err),
             }
         }
         _ => (tool_error("Unknown tool."), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn results_are_fitted_to_the_budget_after_escaping() {
+        // Quotes double when escaped twice; 20,000 of them far exceed it.
+        let value = json!({ "stdout": "\"".repeat(20_000), "stderr": "ok", "exit_code": 0 });
+        let fitted = fit(value);
+        assert!(wire_size(&fitted) <= RESPONSE_BUDGET);
+        assert_eq!(fitted["stdout_truncated"], true);
+        assert_eq!(fitted["stderr"], "ok");
+        let small = json!({ "text": "hello" });
+        assert_eq!(fit(small.clone()), small);
     }
 }

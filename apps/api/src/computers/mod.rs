@@ -270,6 +270,9 @@ impl ComputerManager {
                 "running" => {
                     let lease = self.lease(&mut tx, bot_id, holder, row.generation).await?;
                     tx.commit().await?;
+                    // A boot whose services never started (a failed or
+                    // interrupted init) is retried on use.
+                    self.ensure_services(bot_id, &row.runtime_name).await?;
                     return Ok(Acquire::Ready {
                         lease_id: lease,
                         runtime_name: row.runtime_name,
@@ -326,41 +329,39 @@ impl ComputerManager {
 
         // The runtime call happens outside the database locks.
         let result = match wake {
-            Wake::Create => match self.desktop_resources(bot_id).await {
-                Ok((ports, files)) => {
-                    self.runtime
-                        .create(&Spec {
-                            name: row.runtime_name.clone(),
-                            image: row.image.clone(),
-                            cpus: row.cpus as u32,
-                            memory_mib: row.memory_mib as u32,
-                            network: self.config.network.clone(),
-                            ports,
-                            files,
-                        })
-                        .await
+            Wake::Create => {
+                // A port taken between allocation and the runtime's bind
+                // is retried with another one.
+                let mut outcome = Err(RuntimeError::Unavailable("not attempted".into()));
+                for _ in 0..3 {
+                    outcome = match self.desktop_resources(bot_id).await {
+                        Ok((ports, files)) => {
+                            self.runtime
+                                .create(&Spec {
+                                    name: row.runtime_name.clone(),
+                                    image: row.image.clone(),
+                                    cpus: row.cpus as u32,
+                                    memory_mib: row.memory_mib as u32,
+                                    network: self.config.network.clone(),
+                                    ports,
+                                    files,
+                                })
+                                .await
+                        }
+                        Err(err) => Err(err),
+                    };
+                    let collided = matches!(&outcome, Err(err)
+                        if { let e = err.to_string().to_lowercase(); e.contains("address") || e.contains("in use") || e.contains("desktop_port") });
+                    let exists = matches!(self.runtime.state(&row.runtime_name).await, Ok(Some(_)));
+                    if !(self.config.desktop && collided && !exists) {
+                        break;
+                    }
                 }
-                Err(err) => Err(err),
-            },
+                outcome
+            }
             Wake::Start => self.runtime.start(&row.runtime_name).await,
             Wake::Resume => self.runtime.resume(&row.runtime_name).await,
         };
-        // A fresh boot (not a resume) starts the desktop services.
-        if result.is_ok() && wake != Wake::Resume && self.config.desktop {
-            match self
-                .runtime
-                .exec(&row.runtime_name, GUEST_INIT, &[], Duration::from_secs(60))
-                .await
-            {
-                Ok(out) if out.status == Some(0) => {}
-                Ok(out) => {
-                    tracing::warn!(bot = %bot_id, stderr = %out.stderr, "guest services did not start")
-                }
-                Err(err) => {
-                    tracing::warn!(bot = %bot_id, error = %err, "guest services did not start")
-                }
-            }
-        }
         if let Err(err) = result {
             // What is actually there now? Record it; unknown keeps the
             // reservation until maintenance can tell.
@@ -395,6 +396,7 @@ impl ComputerManager {
             .await?;
         let lease = self.lease(&mut tx, bot_id, holder, next).await?;
         tx.commit().await?;
+        self.ensure_services(bot_id, &row.runtime_name).await?;
         Ok(Acquire::Ready {
             lease_id: lease,
             runtime_name: row.runtime_name,
@@ -482,11 +484,19 @@ impl ComputerManager {
         let Acquire::Ready { lease_id, .. } = acquired else {
             return Ok(Err(acquired));
         };
-        let port: Option<i32> =
-            sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = $1")
-                .bind(bot_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let (port, ready): (Option<i32>, bool) = sqlx::query_as(
+            "SELECT desktop_port, services_generation IS NOT DISTINCT FROM generation
+             FROM bot_computers WHERE bot_id = $1",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !ready {
+            self.release(lease_id).await?;
+            return Ok(Err(Acquire::Queued {
+                reason: "the desktop services are not running yet; try again shortly".into(),
+            }));
+        }
         let password = std::fs::read_to_string(self.secret_dir(bot_id).join("vnc.pass"))
             .map(|p| p.trim().to_owned())
             .ok();
@@ -517,6 +527,52 @@ impl ComputerManager {
         .await?;
         if let Some(lease) = lease {
             self.release(lease).await?;
+        }
+        Ok(())
+    }
+
+    /// Start the desktop services for the current boot unless already done
+    /// for this generation. The caller holds the bot's operation lock. A
+    /// failure is recorded and retried on the next use.
+    async fn ensure_services(&self, bot_id: Uuid, name: &str) -> Result<(), ComputerError> {
+        if !self.config.desktop {
+            return Ok(());
+        }
+        let (generation, done): (i64, Option<i64>) = sqlx::query_as(
+            "SELECT generation, services_generation FROM bot_computers WHERE bot_id = $1",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if done == Some(generation) {
+            return Ok(());
+        }
+        let result = self
+            .runtime
+            .exec(name, GUEST_INIT, &[], Duration::from_secs(60))
+            .await;
+        match result {
+            Ok(out) if out.status == Some(0) => {
+                sqlx::query(
+                    "UPDATE bot_computers SET services_generation = $2 WHERE bot_id = $1 AND generation = $2",
+                )
+                .bind(bot_id)
+                .bind(generation)
+                .execute(&self.pool)
+                .await?;
+            }
+            other => {
+                let error = match other {
+                    Ok(out) => format!("guest services did not start: {}", out.stderr.trim()),
+                    Err(err) => format!("guest services did not start: {err}"),
+                };
+                tracing::warn!(bot = %bot_id, %error, "desktop services");
+                sqlx::query("UPDATE bot_computers SET last_error = $2 WHERE bot_id = $1")
+                    .bind(bot_id)
+                    .bind(bounded(&error, 2000))
+                    .execute(&self.pool)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -711,6 +767,23 @@ impl ComputerManager {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, ComputerError> {
+        let (bot, name, _op) = self.checked(lease_id).await?;
+        let out = self.runtime.exec(&name, program, args, timeout).await?;
+        sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
+            .bind(bot)
+            .execute(&self.pool)
+            .await?;
+        Ok(out)
+    }
+
+    /// Validate a lease under its bot's operation lock: live, its bot
+    /// active, and its computer running at the lease's generation with no
+    /// owner stop. The returned guard keeps a stop from slipping in before
+    /// the caller's runtime call (which could otherwise wake a stopped VM).
+    pub(crate) async fn checked(
+        &self,
+        lease_id: Uuid,
+    ) -> Result<(Uuid, String, tokio::sync::OwnedMutexGuard<()>), ComputerError> {
         let bot: Option<Uuid> =
             sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = $1")
                 .bind(lease_id)
@@ -719,7 +792,7 @@ impl ComputerManager {
         let Some(bot) = bot else {
             return Err(ComputerError::LeaseEnded);
         };
-        let _op = self.op(bot).await;
+        let op = self.op(bot).await;
         let ok: Option<(String, bool, bool)> = sqlx::query_as(
             "SELECT c.runtime_name,
                     c.observed_state = 'running' AND c.desired_state = 'auto'
@@ -732,14 +805,7 @@ impl ComputerManager {
         .fetch_optional(&self.pool)
         .await?;
         match ok {
-            Some((name, true, true)) => {
-                let out = self.runtime.exec(&name, program, args, timeout).await?;
-                sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
-                    .bind(bot)
-                    .execute(&self.pool)
-                    .await?;
-                Ok(out)
-            }
+            Some((name, true, true)) => Ok((bot, name, op)),
             Some((_, false, true)) => Err(ComputerError::NotRunning),
             _ => Err(ComputerError::LeaseEnded),
         }
@@ -1055,6 +1121,16 @@ impl ComputerManager {
             .execute(&self.pool)
             .await?;
         }
+        // Work that survived (jobs in a still-running computer) keeps its
+        // leases on the new generation; maintenance probes it from there.
+        sqlx::query(
+            "UPDATE computer_leases l SET generation = c.generation
+             FROM bot_computers c
+             WHERE c.bot_id = l.bot_id AND l.released_at IS NULL
+               AND c.observed_state IN ('running', 'paused')",
+        )
+        .execute(&self.pool)
+        .await?;
         self.inspected.store(true, Ordering::SeqCst);
         Ok(())
     }

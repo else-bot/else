@@ -382,7 +382,19 @@ impl ComputerRuntime for Msb {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        let mut all = vec!["exec", name, "--", program];
+        // `--stream` keeps the runtime from buffering the whole output
+        // (it is bounded here, and by the guest scripts); `--timeout` kills
+        // the guest command itself.
+        let guest_timeout = format!("{}s", timeout.as_secs().max(1));
+        let mut all = vec![
+            "exec",
+            "--stream",
+            "--timeout",
+            &guest_timeout,
+            name,
+            "--",
+            program,
+        ];
         all.extend_from_slice(args);
         self.run("exec", &all, timeout).await
     }
