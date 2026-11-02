@@ -33,6 +33,11 @@ pub enum Step {
 /// Claim and process one job.
 pub async fn step(pool: &PgPool) -> Result<Step, sqlx::Error> {
     let Some(job) = memory_tree::claim(pool, LEASE).await? else {
+        // No job: publish any built leaves still waiting (a long backlog
+        // continues in bounded steps).
+        if memory_tree::advance(pool).await? {
+            return Ok(Step::Built);
+        }
         return Ok(Step::Idle);
     };
     let Some(prepared) = memory_tree::prepare(pool, &job).await? else {

@@ -231,6 +231,7 @@ async fn view(
         "compacting": saved.compacting,
         "blocked": blocked,
         "nodes": nodes,
+        "context_nodes": saved.context.iter().map(|n| json!([n.start, n.span])).collect::<Vec<_>>(),
     })))
 }
 
@@ -263,6 +264,8 @@ struct RecipeBody {
     node_bytes: usize,
     view_high: usize,
     view_low: usize,
+    context_high: Option<usize>,
+    context_low: Option<usize>,
 }
 
 /// Change the budgets for generations created from now on. Existing
@@ -271,15 +274,27 @@ async fn set_recipe(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<RecipeBody>,
 ) -> Result<Json<Value>, ApiError> {
+    // The compaction view defaults to 16,000/32,000 bytes, scaled down to
+    // fit a smaller main view but never below one node.
+    let context_low = body
+        .context_low
+        .unwrap_or_else(|| body.node_bytes.max(16_000.min(body.view_low / 2)));
+    let context_high = body
+        .context_high
+        .unwrap_or_else(|| 32_000.min(body.view_low).max(context_low + 1));
     if !(64..=65_536).contains(&body.node_bytes)
         || body.view_low < body.node_bytes * 4
         || body.view_high <= body.view_low
         || body.view_high > 4_000_000
+        || context_low < body.node_bytes
+        || context_high <= context_low
+        || context_high > body.view_high
     {
         return Err(ApiError::bad_request(
             "invalid_recipe",
             "Use 64 <= node_bytes <= 65536, view_low >= 4 * node_bytes, and \
-             view_low < view_high <= 4000000.",
+             view_low < view_high <= 4000000; for the compaction view \
+             node_bytes <= context_low < context_high <= view_high.",
         ));
     }
     let recipe = crate::app::memory_tree::Recipe {
@@ -287,6 +302,8 @@ async fn set_recipe(
         node_bytes: body.node_bytes,
         view_high: body.view_high,
         view_low: body.view_low,
+        context_high,
+        context_low,
     };
     let updated = sqlx::query("UPDATE installation SET memory_recipe = $1")
         .bind(sqlx::types::Json(recipe))

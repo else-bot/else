@@ -22,6 +22,21 @@ pub struct Recipe {
     /// `view_low`, counting labels, separators, and the wrapper.
     pub view_high: usize,
     pub view_low: usize,
+    /// The smaller saved compaction view, used as summarization context:
+    /// it merges above `context_high` (or whenever the main view merges)
+    /// toward `context_low`.
+    #[serde(default = "default_context_high")]
+    pub context_high: usize,
+    #[serde(default = "default_context_low")]
+    pub context_low: usize,
+}
+
+fn default_context_high() -> usize {
+    32_000
+}
+
+fn default_context_low() -> usize {
+    16_000
 }
 
 impl Default for Recipe {
@@ -31,6 +46,8 @@ impl Default for Recipe {
             node_bytes: 512,
             view_high: 128_000,
             view_low: 64_000,
+            context_high: 32_000,
+            context_low: 16_000,
         }
     }
 }
@@ -49,11 +66,16 @@ impl NodeId {
         }
     }
 
+    /// Largest span, as in the database constraint.
+    pub const MAX_SPAN: i64 = 1 << 60;
+
     pub fn is_valid(self) -> bool {
         self.start >= 0
             && self.span > 0
+            && self.span <= Self::MAX_SPAN
             && self.span & (self.span - 1) == 0
             && self.start % self.span == 0
+            && self.start.checked_add(self.span).is_some()
     }
 
     pub fn end(self) -> i64 {
@@ -228,14 +250,61 @@ pub fn publish(
     size_of: &dyn Fn(NodeId) -> usize,
     built: &dyn Fn(NodeId) -> bool,
 ) -> bool {
+    publish_within(
+        view,
+        leaves,
+        count,
+        (recipe.view_low, recipe.view_high),
+        false,
+        size_of,
+        built,
+    )
+}
+
+/// Both saved views take the same leaves: the main view, then the smaller
+/// compaction view, which also batches whenever the main view merged.
+/// Returns whether the main view merged.
+pub fn publish_both(
+    main: &mut View,
+    context: &mut View,
+    leaves: &[NodeId],
+    count: i64,
+    recipe: &Recipe,
+    size_of: &dyn Fn(NodeId) -> usize,
+    built: &dyn Fn(NodeId) -> bool,
+) -> bool {
+    let merged = publish(main, leaves, count, recipe, size_of, built);
+    publish_within(
+        context,
+        leaves,
+        count,
+        (recipe.context_low, recipe.context_high),
+        merged,
+        size_of,
+        built,
+    );
+    merged
+}
+
+/// Append leaves, then merge toward `low` once above `high` (or when
+/// `force`), keeping compaction due while no built parent allows a merge.
+pub fn publish_within(
+    view: &mut View,
+    leaves: &[NodeId],
+    count: i64,
+    (low, high): (usize, usize),
+    force: bool,
+    size_of: &dyn Fn(NodeId) -> usize,
+    built: &dyn Fn(NodeId) -> bool,
+) -> bool {
     view.nodes.extend_from_slice(leaves);
     let mut size = WRAPPER_BYTES + view.nodes.iter().map(|n| size_of(*n)).sum::<usize>();
-    if size > recipe.view_high {
+    if size > high || (force && size > low) {
         view.compacting = true;
     }
     let mut merged = false;
     if view.compacting {
-        while size > recipe.view_low {
+        while size > low {
             let Some(pos) = next_merge(&view.nodes, count, built) else {
                 break;
             };
@@ -246,7 +315,7 @@ pub fn publish(
             merged = true;
         }
         // Without a built parent, coverage stays and compaction resumes later.
-        view.compacting = size > recipe.view_low;
+        view.compacting = size > low;
     }
     merged
 }
@@ -351,7 +420,7 @@ mod tests {
             node_bytes: 512,
             view_high: 400,
             view_low: 200,
-            version: 1,
+            ..Recipe::default()
         };
         let size = |node: NodeId| line_bytes(node, "x".repeat(20).as_str());
         let mut view = View {
@@ -390,5 +459,7 @@ mod tests {
         assert_eq!(n(4, 4).parent(), (n(0, 8), false));
         assert_eq!(n(8, 4).sibling(), n(12, 4));
         assert_eq!(n(0, 8).children(), Some((n(0, 4), n(4, 4))));
+        assert!(!n(i64::MAX, 1).is_valid(), "the end would overflow");
+        assert!(!n(0, 1 << 61).is_valid(), "beyond the database span limit");
     }
 }

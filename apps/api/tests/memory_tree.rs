@@ -394,3 +394,231 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     .unwrap();
     assert_eq!(recipe["node_bytes"], 128);
 }
+
+/// Review fixes: truncation is explicit, long backlogs keep publishing,
+/// rebuilds switch only after catching up, the compaction view is saved,
+/// and damaged views are reported, not normalized.
+#[tokio::test(flavor = "multi_thread")]
+async fn cut_text_is_marked_with_where_the_rest_is() {
+    let app = TestApp::installed().await;
+    let reply = app
+        .owner(
+            "PATCH",
+            "/v1/settings/memory",
+            Some(json!({ "node_bytes": 20000, "view_high": 200000, "view_low": 100000 })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let bot = app.create_bot("Wide", "wide").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let long = "w".repeat(10_009);
+    add(&app, bot_id, "long", &long).await;
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let reply = app
+        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
+        .await;
+    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    app.wait_turn(&turn.to_string(), &["running"]).await;
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let token = app.scheduler.grants().issue(
+        bot_id,
+        conversation,
+        turn,
+        vec![Tool::ReadMemory],
+        DEFAULT_TTL,
+    );
+    let reply = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "memory_view", "arguments": {} } })),
+            Some(&token),
+        )
+        .await;
+    let view: Value =
+        serde_json::from_str(reply.body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let node = &view["nodes"][0];
+    assert_eq!(node["truncated"], true);
+    assert_eq!(node["text_bytes"], 10_016, "\"Owner: \" + 10,009 bytes");
+    assert_eq!(node["continue_with"]["tool"], "memory_read");
+    assert_eq!(node["continue_with"]["start_seq"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backlog_longer_than_one_batch_keeps_publishing() {
+    let app = TestApp::installed().await;
+    let bot: Uuid = app.create_bot("Backlog", "backlog").await.parse().unwrap();
+    add(&app, bot, "first", "first").await;
+    // Seed 10,050 built leaves behind a stalled first leaf.
+    sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = $1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_node (bot_id, generation, start_seq, span, body, method, input_hash)
+         SELECT $1, 1, s, 1, 'Owner: x', 'verbatim', $2 FROM generate_series(1, 10049) s",
+    )
+    .bind(bot)
+    .bind(vec![0u8; 32])
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM memory_job WHERE bot_id = $1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memory_node (bot_id, generation, start_seq, span, body, method, input_hash)
+         VALUES ($1, 1, 0, 1, 'Owner: first', 'verbatim', $2)",
+    )
+    .bind(bot)
+    .bind(vec![0u8; 32])
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
+    assert_eq!(
+        saved.published_seq, 10049,
+        "published through the whole backlog"
+    );
+    assert!(saved.valid);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
+    let app = TestApp::installed().await;
+    small_recipe(&app).await;
+    let bot = app.create_bot("Catch", "catch").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    for n in 0..5 {
+        add(&app, bot_id, &format!("u{n}"), &format!("u{n}")).await;
+    }
+    // Nothing built or published yet; the rebuild must not switch at once.
+    let started = app
+        .owner("POST", &format!("/v1/bots/{bot}/memory/rebuild"), None)
+        .await;
+    assert_eq!(started.body["building_generation"], 2);
+    let view = app
+        .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
+        .await
+        .body;
+    assert_eq!(view["generation"], 1);
+    assert_eq!(view["building_generation"], 2);
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let view = app
+        .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
+        .await
+        .body;
+    assert_eq!(view["generation"], 2);
+    assert_eq!(view["published_seq"], 4);
+
+    // A leaf that needs a summary holds the rebuild open; nothing is lost.
+    add(&app, bot_id, "long", &"long ".repeat(40)).await;
+    let started = app
+        .owner("POST", &format!("/v1/bots/{bot}/memory/rebuild"), None)
+        .await;
+    assert_eq!(started.body["building_generation"], 3);
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let view = app
+        .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
+        .await
+        .body;
+    assert_eq!(view["generation"], 2);
+    assert_eq!(view["building_generation"], 3);
+    assert_eq!(view["published_seq"], 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
+    let app = TestApp::installed().await;
+    let reply = app
+        .owner(
+            "PATCH",
+            "/v1/settings/memory",
+            Some(
+                json!({ "node_bytes": 64, "view_high": 1200, "view_low": 900,
+                         "context_high": 400, "context_low": 200 }),
+            ),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let bot = app.create_bot("Ctx", "ctx").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    for n in 0..60 {
+        add(&app, bot_id, &format!("c{n}"), &format!("c{n}")).await;
+    }
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let saved = memory_tree::load_view(&app.db.pool, bot_id).await.unwrap();
+    assert!(saved.valid);
+    assert!(else_api::app::memory_tree::covers(&saved.context, 60));
+    assert!(
+        saved.context.len() < saved.nodes.len(),
+        "the compaction view is coarser"
+    );
+    let before = app
+        .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
+        .await
+        .body;
+    let app = app.restart().await;
+    let after = app
+        .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
+        .await
+        .body;
+    assert_eq!(before["context_nodes"], after["context_nodes"]);
+
+    // A malformed element is reported and preserved, never normalized.
+    sqlx::query(
+        "UPDATE memory_store SET view_nodes = view_nodes || '\"damaged\"' WHERE bot_id = $1",
+    )
+    .bind(bot_id)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let damaged: Value =
+        sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = $1")
+            .bind(bot_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !memory_tree::load_view(&app.db.pool, bot_id)
+            .await
+            .unwrap()
+            .valid
+    );
+    add(&app, bot_id, "after", "after").await;
+    memory_worker::drain(&app.db.pool).await.unwrap();
+    let kept: Value = sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = $1")
+        .bind(bot_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, damaged, "publication paused instead of rewriting");
+
+    // A view pointing at a generation that does not exist is invalid.
+    let other: Uuid = app.create_bot("Gen", "gen").await.parse().unwrap();
+    add(&app, other, "g", "g").await;
+    sqlx::query("ALTER TABLE memory_store DROP CONSTRAINT memory_store_building")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memory_store SET generation = 999 WHERE bot_id = $1")
+        .bind(other)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        !memory_tree::load_view(&app.db.pool, other)
+            .await
+            .unwrap()
+            .valid
+    );
+}

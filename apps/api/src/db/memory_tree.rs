@@ -301,21 +301,21 @@ fn ancestors(nodes: &[NodeId], count: i64) -> Vec<NodeId> {
     seen.into_iter().collect()
 }
 
-fn decode_view(value: &Value) -> Vec<NodeId> {
+/// Decode a saved view strictly: any malformed element makes the whole
+/// record invalid, so it is reported and preserved instead of normalized.
+fn decode_view(value: &Value) -> Option<Vec<NodeId>> {
     value
-        .as_array()
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(|n| {
-                    Some(NodeId {
-                        start: n[0].as_i64()?,
-                        span: n[1].as_i64()?,
-                    })
-                })
-                .collect()
+        .as_array()?
+        .iter()
+        .map(|n| {
+            let pair = n.as_array().filter(|p| p.len() == 2)?;
+            let node = NodeId {
+                start: pair[0].as_i64()?,
+                span: pair[1].as_i64()?,
+            };
+            node.is_valid().then_some(node)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn encode_view(nodes: &[NodeId]) -> Value {
@@ -330,29 +330,33 @@ fn encode_view(nodes: &[NodeId]) -> Value {
 /// Publish newly built leaves of the active generation in sequence and
 /// compact if due. Runs under the store row lock held by the caller.
 pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
-    let (generation, published, nodes, compacting, Json(recipe)): (
-        i32,
-        i64,
-        Value,
-        bool,
-        Json<Recipe>,
-    ) = sqlx::query_as(
-        "SELECT s.generation, s.published_seq, s.view_nodes, s.compacting, g.recipe
-             FROM memory_store s
-             JOIN memory_generation g ON g.bot_id = s.bot_id AND g.generation = s.generation
-             WHERE s.bot_id = $1",
+    let row: (i32, i64, Value, bool, Value, bool, Json<Recipe>) = sqlx::query_as(
+        "SELECT s.generation, s.published_seq, s.view_nodes, s.compacting,
+                s.context_nodes, s.context_compacting, g.recipe
+         FROM memory_store s
+         JOIN memory_generation g ON g.bot_id = s.bot_id AND g.generation = s.generation
+         WHERE s.bot_id = $1",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
     .await?;
+    let (generation, published, nodes, compacting, context_nodes, context_compacting, Json(recipe)) =
+        row;
+    let (Some(main_nodes), Some(context_ids)) = (decode_view(&nodes), decode_view(&context_nodes))
+    else {
+        // Never rewrite a damaged record; load_view reports it.
+        tracing::warn!(bot = %bot_id, "saved memory view is malformed; publication paused");
+        return Ok(false);
+    };
     let ready: Vec<i64> = sqlx::query_scalar(
         "SELECT start_seq FROM memory_node
          WHERE bot_id = $1 AND generation = $2 AND span = 1 AND start_seq > $3
-         ORDER BY start_seq LIMIT 10000",
+         ORDER BY start_seq LIMIT $4",
     )
     .bind(bot_id)
     .bind(generation)
     .bind(published)
+    .bind(PUBLISH_BATCH)
     .fetch_all(&mut *conn)
     .await?;
     let mut leaves = Vec::new();
@@ -362,20 +366,31 @@ pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx
         }
         leaves.push(NodeId::leaf(*seq));
     }
-    if leaves.is_empty() && !compacting {
+    if leaves.is_empty() && !compacting && !context_compacting {
         return Ok(false);
     }
     let count = published + 1 + leaves.len() as i64;
-    let mut view = View {
-        nodes: decode_view(&nodes),
+    let mut main = View {
+        nodes: main_nodes,
         compacting,
     };
-    let mut wanted: Vec<NodeId> = view.nodes.iter().chain(&leaves).copied().collect();
+    let mut context = View {
+        nodes: context_ids,
+        compacting: context_compacting,
+    };
+    let mut wanted: Vec<NodeId> = main
+        .nodes
+        .iter()
+        .chain(&context.nodes)
+        .chain(&leaves)
+        .copied()
+        .collect();
     wanted.extend(ancestors(&wanted.clone(), count));
     let bodies = bodies(&mut *conn, bot_id, generation, &wanted).await?;
-    let before = view.clone();
-    memory_tree::publish(
-        &mut view,
+    let before = (main.clone(), context.clone());
+    memory_tree::publish_both(
+        &mut main,
+        &mut context,
         &leaves,
         count,
         &recipe,
@@ -386,21 +401,65 @@ pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx
         },
         &|node| bodies.contains_key(&node),
     );
-    if view == before && leaves.is_empty() {
+    let changed = (main.clone(), context.clone()) != before;
+    if !changed && leaves.is_empty() {
         return Ok(false);
     }
     sqlx::query(
         "UPDATE memory_store SET view_nodes = $2, published_seq = $3, compacting = $4,
-             view_revision = view_revision + 1
+             context_nodes = $5, context_compacting = $6, view_revision = view_revision + 1
          WHERE bot_id = $1",
     )
     .bind(bot_id)
-    .bind(encode_view(&view.nodes))
+    .bind(encode_view(&main.nodes))
     .bind(count - 1)
-    .bind(view.compacting)
+    .bind(main.compacting)
+    .bind(encode_view(&context.nodes))
+    .bind(context.compacting)
     .execute(&mut *conn)
     .await?;
     Ok(true)
+}
+
+/// Leaves published per step; a longer ready run continues in later steps.
+const PUBLISH_BATCH: i64 = 10_000;
+
+/// Publish for one bot whose next leaf is already built but unpublished
+/// (a backlog longer than one batch, or completions that raced). Returns
+/// whether anything was published.
+pub async fn advance(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    // Several candidates, so one bot whose view cannot publish (a damaged
+    // record) never starves the others.
+    let candidates: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT s.bot_id FROM memory_store s JOIN bots b ON b.id = s.bot_id
+         WHERE b.status = 'active' AND EXISTS (
+             SELECT 1 FROM memory_node n
+             WHERE n.bot_id = s.bot_id AND n.generation = s.generation
+               AND n.span = 1 AND n.start_seq = s.published_seq + 1)
+         ORDER BY s.bot_id LIMIT 16",
+    )
+    .fetch_all(pool)
+    .await?;
+    for bot_id in candidates {
+        let mut tx = pool.begin().await?;
+        let active: Option<bool> =
+            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+                .bind(bot_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if active != Some(true) {
+            continue;
+        }
+        sqlx::query("SELECT 1 FROM memory_store WHERE bot_id = $1 FOR NO KEY UPDATE")
+            .bind(bot_id)
+            .execute(&mut *tx)
+            .await?;
+        if publish(&mut tx, bot_id).await? {
+            tx.commit().await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Start an explicit rebuild into a new generation with the installation's
@@ -479,8 +538,8 @@ pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, s
 /// at least everything the active view covers. Its view is recomputed by
 /// replaying publication; the old generation and its nodes remain.
 async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
-    let (generation, building, published): (i32, Option<i32>, i64) = sqlx::query_as(
-        "SELECT generation, building_generation, published_seq FROM memory_store WHERE bot_id = $1",
+    let (generation, building, next): (i32, Option<i32>, i64) = sqlx::query_as(
+        "SELECT generation, building_generation, next_seq FROM memory_store WHERE bot_id = $1",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -503,7 +562,9 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     while bodies.contains_key(&NodeId::leaf(prefix)) {
         prefix += 1;
     }
-    if prefix < published + 1 {
+    // Every leaf through the current append watermark (checked under the
+    // store lock): a rebuild completes only after catching up.
+    if prefix < next {
         return Ok(false);
     }
     let Json(recipe): Json<Recipe> = sqlx::query_scalar(
@@ -513,10 +574,11 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     .bind(building)
     .fetch_one(&mut *conn)
     .await?;
-    let mut view = View {
+    let empty = View {
         nodes: Vec::new(),
         compacting: false,
     };
+    let (mut view, mut context) = (empty.clone(), empty);
     let size = |node: NodeId| {
         bodies
             .get(&node)
@@ -524,9 +586,11 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     };
     let built = |node: NodeId| bodies.contains_key(&node);
     for count in 1..=prefix {
-        memory_tree::publish(
+        let leaf = [NodeId::leaf(count - 1)];
+        memory_tree::publish_both(
             &mut view,
-            &[NodeId::leaf(count - 1)],
+            &mut context,
+            &leaf,
             count,
             &recipe,
             &size,
@@ -535,7 +599,8 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     }
     sqlx::query(
         "UPDATE memory_store SET generation = $2, building_generation = NULL, view_nodes = $3,
-             published_seq = $4, compacting = $5, view_revision = view_revision + 1
+             published_seq = $4, compacting = $5, context_nodes = $6, context_compacting = $7,
+             view_revision = view_revision + 1
          WHERE bot_id = $1",
     )
     .bind(bot_id)
@@ -543,6 +608,8 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     .bind(encode_view(&view.nodes))
     .bind(prefix - 1)
     .bind(view.compacting)
+    .bind(encode_view(&context.nodes))
+    .bind(context.compacting)
     .execute(&mut *conn)
     .await?;
     // Jobs of retired generations are never claimed; drop them.
@@ -572,7 +639,10 @@ pub struct SavedView {
     pub compacting: bool,
     pub building_generation: Option<i32>,
     pub nodes: Vec<ViewNode>,
-    /// The view is an aligned contiguous prefix whose nodes all exist.
+    /// The smaller compaction view over the same prefix.
+    pub context: Vec<NodeId>,
+    /// Both saved views decode, are aligned contiguous prefixes whose nodes
+    /// all exist, and their generation exists.
     pub valid: bool,
     /// Jobs waiting, by reason (for example `summary_unavailable`).
     pub blocked: Vec<(String, i64)>,
@@ -581,15 +651,28 @@ pub struct SavedView {
 /// Load the exact saved view. Nothing is recomputed; a damaged view is
 /// reported as invalid rather than repaired.
 pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::Error> {
-    let row: Option<(i32, i64, i64, i64, bool, Option<i32>, Value)> = sqlx::query_as(
-        "SELECT generation, view_revision, published_seq, next_seq, compacting,
-                building_generation, view_nodes
-         FROM memory_store WHERE bot_id = $1",
+    type Row = (i32, i64, i64, i64, bool, Option<i32>, Value, Value, bool);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT s.generation, s.view_revision, s.published_seq, s.next_seq, s.compacting,
+                s.building_generation, s.view_nodes, s.context_nodes,
+                EXISTS (SELECT 1 FROM memory_generation g
+                        WHERE g.bot_id = s.bot_id AND g.generation = s.generation)
+         FROM memory_store s WHERE s.bot_id = $1",
     )
     .bind(bot_id)
     .fetch_optional(pool)
     .await?;
-    let Some((generation, revision, published_seq, length, compacting, building, nodes)) = row
+    let Some((
+        generation,
+        revision,
+        published_seq,
+        length,
+        compacting,
+        building,
+        nodes,
+        context_nodes,
+        generation_exists,
+    )) = row
     else {
         return Ok(SavedView {
             generation: 1,
@@ -599,11 +682,14 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
             compacting: false,
             building_generation: None,
             nodes: Vec::new(),
+            context: Vec::new(),
             valid: true,
             blocked: Vec::new(),
         });
     };
-    let ids = decode_view(&nodes);
+    let decoded = decode_view(&nodes);
+    let context = decode_view(&context_nodes);
+    let ids = decoded.clone().unwrap_or_default();
     let starts: Vec<i64> = ids.iter().map(|n| n.start).collect();
     let spans: Vec<i64> = ids.iter().map(|n| n.span).collect();
     let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
@@ -630,8 +716,16 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
             method: found.get(id).map(|(_, m)| m.clone()),
         })
         .collect();
-    let valid =
-        memory_tree::covers(&ids, published_seq + 1) && nodes.iter().all(|n| n.body.is_some());
+    let context_ids = context.clone().unwrap_or_default();
+    let context_built = bodies(pool, bot_id, generation, &context_ids).await?;
+    // Every store row is created together with its first generation.
+    let valid = decoded.is_some()
+        && context.is_some()
+        && generation_exists
+        && memory_tree::covers(&ids, published_seq + 1)
+        && nodes.iter().all(|n| n.body.is_some())
+        && memory_tree::covers(&context_ids, published_seq + 1)
+        && context_ids.iter().all(|n| context_built.contains_key(n));
     let blocked: Vec<(String, i64)> = sqlx::query_as(
         "SELECT blocked_reason, count(*) FROM memory_job
          WHERE bot_id = $1 AND blocked_reason IS NOT NULL AND generation = $2
@@ -649,6 +743,7 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
         compacting,
         building_generation: building,
         nodes,
+        context: context_ids,
         valid,
         blocked,
     })
