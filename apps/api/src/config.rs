@@ -4,7 +4,10 @@
 //! invalid configuration exits without creating or replacing saved data.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::credentials::SecretKeySource;
 
 /// Default loopback listener for the owner API.
 pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
@@ -14,6 +17,11 @@ const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
+    /// Private runtime storage: credentials, the singleton lock, and bot
+    /// session directories.
+    pub data_dir: PathBuf,
+    pub owner_token_file: PathBuf,
+    pub secret_key: SecretKeySource,
     pub max_body_bytes: usize,
     pub shutdown_grace: Duration,
 }
@@ -48,6 +56,22 @@ impl Source for ProcessEnv {
 impl Config {
     pub fn load(source: &dyn Source) -> Result<Self, ConfigError> {
         let bind = parse_bind(source.get("ELSE_API_BIND").as_deref())?;
+        let data_dir = match source.get("ELSE_DATA_DIR") {
+            Some(dir) => absolute_path("ELSE_DATA_DIR", dir)?,
+            None => default_data_dir(source)?,
+        };
+        let owner_token_file = match source.get("OWNER_TOKEN_FILE") {
+            Some(path) => absolute_path("OWNER_TOKEN_FILE", path)?,
+            None => data_dir.join("owner-token"),
+        };
+        // SECRET_KEY is validated when credentials load; it is never echoed.
+        let secret_key = match source.get("SECRET_KEY") {
+            Some(value) => SecretKeySource::Env(value),
+            None => SecretKeySource::File(match source.get("SECRET_KEY_FILE") {
+                Some(path) => absolute_path("SECRET_KEY_FILE", path)?,
+                None => data_dir.join("secret-key"),
+            }),
+        };
         let max_body_bytes = parse_number(
             source,
             "ELSE_MAX_BODY_BYTES",
@@ -64,9 +88,31 @@ impl Config {
         )?);
         Ok(Self {
             bind,
+            data_dir,
+            owner_token_file,
+            secret_key,
             max_body_bytes,
             shutdown_grace,
         })
+    }
+}
+
+/// Relative paths resolve against the current directory once, so later
+/// directory changes cannot redirect credential reads.
+fn absolute_path(name: &'static str, value: String) -> Result<PathBuf, ConfigError> {
+    std::path::absolute(&value).map_err(|err| invalid(name, err.to_string()))
+}
+
+fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
+    if let Some(xdg) = source.get("XDG_DATA_HOME") {
+        return Ok(absolute_path("XDG_DATA_HOME", xdg)?.join("else-bot"));
+    }
+    match source.get("HOME") {
+        Some(home) => Ok(absolute_path("HOME", home)?.join(".local/share/else-bot")),
+        None => Err(invalid(
+            "ELSE_DATA_DIR",
+            "not set, and neither XDG_DATA_HOME nor HOME is available",
+        )),
     }
 }
 
@@ -137,24 +183,53 @@ pub mod tests {
 
     #[test]
     fn defaults_bind_loopback() {
-        let config = Config::load(&MapSource::new(&[])).unwrap();
+        let config = Config::load(&MapSource::new(&[("HOME", "/home/x")])).unwrap();
         assert_eq!(config.bind.to_string(), DEFAULT_BIND);
+        assert_eq!(
+            config.data_dir,
+            PathBuf::from("/home/x/.local/share/else-bot")
+        );
+        assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
+    }
+
+    #[test]
+    fn secret_key_env_takes_precedence_and_is_not_echoed() {
+        let config = Config::load(&MapSource::new(&[
+            ("ELSE_DATA_DIR", "/srv/else"),
+            ("SECRET_KEY", "canary-value"),
+        ]))
+        .unwrap();
+        assert!(matches!(config.secret_key, SecretKeySource::Env(_)));
+        assert!(!format!("{:?}", config).contains("canary-value"));
     }
 
     #[test]
     fn rejects_remote_plaintext_bind() {
         for bind in ["0.0.0.0:7878", "192.168.1.4:7878", "[::]:7878"] {
-            let err = Config::load(&MapSource::new(&[("ELSE_API_BIND", bind)])).unwrap_err();
+            let err = Config::load(&MapSource::new(&[("ELSE_API_BIND", bind), ("HOME", "/h")]))
+                .unwrap_err();
             assert!(err.to_string().contains("loopback"), "{bind}: {err}");
         }
-        Config::load(&MapSource::new(&[("ELSE_API_BIND", "[::1]:9000")])).unwrap();
+        Config::load(&MapSource::new(&[
+            ("ELSE_API_BIND", "[::1]:9000"),
+            ("HOME", "/h"),
+        ]))
+        .unwrap();
     }
 
     #[test]
     fn rejects_malformed_numbers_with_variable_name() {
-        let err = Config::load(&MapSource::new(&[("ELSE_MAX_BODY_BYTES", "lots")])).unwrap_err();
+        let err = Config::load(&MapSource::new(&[
+            ("ELSE_MAX_BODY_BYTES", "lots"),
+            ("HOME", "/h"),
+        ]))
+        .unwrap_err();
         assert!(err.to_string().starts_with("ELSE_MAX_BODY_BYTES"));
-        let err = Config::load(&MapSource::new(&[("ELSE_SHUTDOWN_GRACE_SECS", "0")])).unwrap_err();
+        let err = Config::load(&MapSource::new(&[
+            ("ELSE_SHUTDOWN_GRACE_SECS", "0"),
+            ("HOME", "/h"),
+        ]))
+        .unwrap_err();
         assert!(err.to_string().contains("between"));
     }
 }

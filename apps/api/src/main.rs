@@ -1,9 +1,11 @@
 //! else.bot API executable: command parsing and process composition only.
 
 mod config;
+mod credentials;
 mod http;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -11,8 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 use config::{Config, ProcessEnv};
 
-const USAGE: &str = "usage: else-api [serve]\n\n\
-commands:\n  serve   run the API (default)\n";
+const USAGE: &str = "usage: else-api [serve|setup]\n\n\
+commands:\n  serve   run the API (default)\n  \
+setup   provision missing credentials once; never replaces existing ones\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
@@ -33,6 +36,7 @@ fn main() -> ExitCode {
     }
     let result = match command {
         "serve" => run_serve(),
+        "setup" => run_setup(),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -55,22 +59,55 @@ fn load_config() -> anyhow::Result<Config> {
     Config::load(&ProcessEnv).context("invalid configuration")
 }
 
+/// Explicit installation setup. Creates only what is missing and reports
+/// paths, never credential values.
+fn run_setup() -> anyhow::Result<()> {
+    use credentials::Provisioned;
+    let config = load_config()?;
+    credentials::ensure_private_dir(&config.data_dir)?;
+    let describe = |what: &str, result: Provisioned, location: String| {
+        let state = match result {
+            Provisioned::Created => "created",
+            Provisioned::Existing => "kept existing",
+            Provisioned::FromEnvironment => "validated from environment",
+        };
+        println!("{what}: {state} ({location})");
+    };
+    let token = credentials::provision_owner_token(&config.owner_token_file)?;
+    describe(
+        "owner token",
+        token,
+        config.owner_token_file.display().to_string(),
+    );
+    let key = credentials::provision_secret_key(&config.secret_key)?;
+    let location = match &config.secret_key {
+        credentials::SecretKeySource::Env(_) => "SECRET_KEY".to_owned(),
+        credentials::SecretKeySource::File(path) => path.display().to_string(),
+    };
+    describe("secret key", key, location);
+    Ok(())
+}
+
 fn run_serve() -> anyhow::Result<()> {
     let config = load_config()?;
+    // Credentials load before the listener opens. Neither is logged.
+    let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
+    let _secret_key = credentials::load_secret_key(&config.secret_key)?;
+    let state = Arc::new(http::AppState::new(owner_token));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting async runtime")?;
-    runtime.block_on(serve(config))
+    runtime.block_on(serve(config, state))
 }
 
-async fn serve(config: Config) -> anyhow::Result<()> {
+async fn serve(config: Config, state: Arc<http::AppState>) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("binding {}", config.bind))?;
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
-    let app = http::router(&config);
+    let app = http::router(&config, state);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(async move {
         let mut stop_rx = stop_rx;

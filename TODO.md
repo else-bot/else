@@ -19,7 +19,7 @@ Use the first usable POC as the default target. If the implementation request in
 ## First usable POC
 
 - [x] [POC-001: API runtime and configuration](docs/implementation/01-api.md#poc-001-api-runtime-and-configuration)
-- [ ] [POC-002: Owner authentication and secret provisioning](docs/implementation/01-api.md#poc-002-owner-authentication-and-secret-provisioning)
+- [x] [POC-002: Owner authentication and secret provisioning](docs/implementation/01-api.md#poc-002-owner-authentication-and-secret-provisioning)
 - [ ] [POC-003: Database migrations and installation setup](docs/implementation/01-api.md#poc-003-database-migrations-and-installation-setup)
 - [ ] [POC-004: Bot creation, listing, and soft deletion](docs/implementation/01-api.md#poc-004-bot-creation-listing-and-soft-deletion)
 - [ ] [POC-005: Durable messages and turn scheduling](docs/implementation/01-api.md#poc-005-durable-messages-and-turn-scheduling)

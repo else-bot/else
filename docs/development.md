@@ -63,21 +63,44 @@ cargo test --workspace --locked
 
 ## Run the API
 
-Start the API from the repository root:
+Provision credentials once, then start the API from the repository root:
 
 ```sh
+cargo run -p else-api -- setup
 cargo run -p else-api -- serve
 curl -s http://127.0.0.1:7878/healthz
+curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
+	http://127.0.0.1:7878/v1/capabilities
 ```
 
 `serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
 
+`setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`. Running it again reports `kept existing` and changes nothing. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed values, symbolic links, files owned by another user, and files readable by group or others.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ELSE_API_BIND` | `127.0.0.1:7878` | Listener address. Only loopback addresses are accepted because the API serves plaintext HTTP. Use an SSH tunnel such as `ssh -L 7878:127.0.0.1:7878 host` for remote access. |
+| `ELSE_DATA_DIR` | `$XDG_DATA_HOME/else-bot`, else `~/.local/share/else-bot` | Private runtime storage for credentials and later bot session data. Use a separate directory per checkout or test installation. |
+| `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
+| `SECRET_KEY` | unset | Installation master key: 32 bytes as standard base64. When set, it is validated and used instead of the file. |
+| `SECRET_KEY_FILE` | `$ELSE_DATA_DIR/secret-key` | Master key file used when `SECRET_KEY` is unset. |
 | `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. Larger bodies receive `413 too_large`. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never headers or bodies. |
+
+### Credentials
+
+The API has three independent kinds of credential. Do not substitute one for another.
+
+| Credential | Holder | Authority |
+| --- | --- | --- |
+| Owner token | The desktop and trusted owner tooling | Every `/v1` route, sent as exactly one `Authorization: Bearer <token>` header. The API keeps only its SHA-256 digest and compares in constant time. |
+| `SECRET_KEY` | The API process only | Encrypts recoverable secrets and backups in later tasks. It authenticates no request. |
+| Task grant | One restricted provider session, in a later task | Its own bot, conversation, and tool allowlist. It cannot use owner routes. Not implemented yet. |
+
+Missing, malformed, duplicated, or wrong bearer headers receive `401` with `WWW-Authenticate: Bearer`, including on unknown `/v1` paths. Tokens in query strings are ignored. After 30 failed attempts in a minute, further failures receive `429` with `Retry-After`; the valid token still works. Requests carrying an `Origin` header receive `403`, and a `Host` that is not a loopback name receives `400`. The Host port is not checked, so a tunnel's local port works. Provider processes will never inherit either credential.
+
+To rotate the owner token, stop the API, move the old file away, run `setup`, update the desktop's copy, and restart. Rotation does not touch `SECRET_KEY`.
 
 `GET /healthz` returns `{"status":"ok"}` while the process serves HTTP. It requires no authentication and reports liveness only. All errors use the JSON shape from the [desktop contract](research/desktop-and-feature-contracts.md#proposed-rest-endpoints).
 
