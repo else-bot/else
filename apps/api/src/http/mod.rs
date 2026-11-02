@@ -9,6 +9,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::get;
 use axum::{Json, Router, middleware};
 use serde_json::json;
+use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -19,15 +20,17 @@ use error::ApiError;
 /// Shared request state. Credentials are held only as digests.
 pub struct AppState {
     pub owner_token: OwnerToken,
+    pub db: PgPool,
     /// Nonsecret identity of this API process, used to bind event cursors.
     pub server_instance_id: Uuid,
     pub auth_failures: auth::FailureLimiter,
 }
 
 impl AppState {
-    pub fn new(owner_token: OwnerToken) -> Self {
+    pub fn new(owner_token: OwnerToken, db: PgPool) -> Self {
         Self {
             owner_token,
+            db,
             server_instance_id: Uuid::new_v4(),
             auth_failures: auth::FailureLimiter::default(),
         }
@@ -48,6 +51,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/healthz", get(liveness))
+        .route("/readyz", get(readiness))
         .nest("/v1", v1)
         .fallback(|| async { ApiError::not_found() })
         .with_state(state)
@@ -61,6 +65,20 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
 /// dependencies are ready.
 async fn liveness() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// Readiness: the database is reachable. Unauthenticated and content-free.
+async fn readiness(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if crate::db::ready(&state.db).await {
+        Ok(Json(json!({ "status": "ready" })))
+    } else {
+        Err(ApiError::unavailable(
+            "database_unavailable",
+            "The database is not reachable.",
+        ))
+    }
 }
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -94,9 +112,13 @@ pub mod tests {
             32
         );
         let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+        // A lazy pool never connects unless a handler queries it.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unused@127.0.0.1:1/unused")
+            .unwrap();
         router(
             &config,
-            Arc::new(AppState::new(OwnerToken::parse(TOKEN).unwrap())),
+            Arc::new(AppState::new(OwnerToken::parse(TOKEN).unwrap(), pool)),
         )
     }
 

@@ -14,8 +14,32 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 
+/// PostgreSQL connection URL. It may contain a password, so it is never
+/// printed through `Debug` or error messages.
+#[derive(Clone)]
+pub struct DatabaseUrl(String);
+
+impl DatabaseUrl {
+    pub fn new(url: String) -> Self {
+        Self(url)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DatabaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatabaseUrl(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// `None` when neither `DATABASE_URL` nor the Compose `POSTGRES_*`
+    /// variables are set. Commands that need the database report it.
+    pub database_url: Option<DatabaseUrl>,
     pub bind: SocketAddr,
     /// Private runtime storage: credentials, the singleton lock, and bot
     /// session directories.
@@ -87,12 +111,59 @@ impl Config {
             120,
         )?);
         Ok(Self {
+            database_url: database_url(source)?,
             bind,
             data_dir,
             owner_token_file,
             secret_key,
             max_body_bytes,
             shutdown_grace,
+        })
+    }
+}
+
+/// `DATABASE_URL` wins. Otherwise the development `.env` Compose variables
+/// describe the local container on 127.0.0.1.
+fn database_url(source: &dyn Source) -> Result<Option<DatabaseUrl>, ConfigError> {
+    if let Some(url) = source.get("DATABASE_URL") {
+        return Ok(Some(DatabaseUrl(url)));
+    }
+    let (Some(user), Some(password), Some(db)) = (
+        source.get("POSTGRES_USER"),
+        source.get("POSTGRES_PASSWORD"),
+        source.get("POSTGRES_DB"),
+    ) else {
+        return Ok(None);
+    };
+    let port = parse_number(source, "POSTGRES_PORT", 5432, 1, 65535)?;
+    Ok(Some(DatabaseUrl(format!(
+        "postgresql://{}:{}@127.0.0.1:{port}/{}",
+        percent_encode(&user),
+        percent_encode(&password),
+        percent_encode(&db)
+    ))))
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+impl Config {
+    pub fn require_database(&self) -> Result<&DatabaseUrl, ConfigError> {
+        self.database_url.as_ref().ok_or_else(|| {
+            invalid(
+                "DATABASE_URL",
+                "not set; set it or the POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_DB \
+                 variables from .env.example",
+            )
         })
     }
 }
@@ -190,6 +261,32 @@ pub mod tests {
             PathBuf::from("/home/x/.local/share/else-bot")
         );
         assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
+    }
+
+    #[test]
+    fn database_url_falls_back_to_compose_variables() {
+        let config = Config::load(&MapSource::new(&[
+            ("HOME", "/h"),
+            ("POSTGRES_USER", "else"),
+            ("POSTGRES_PASSWORD", "p@ss word"),
+            ("POSTGRES_DB", "else"),
+            ("POSTGRES_PORT", "5433"),
+        ]))
+        .unwrap();
+        let url = config.require_database().unwrap();
+        assert_eq!(
+            url.expose(),
+            "postgresql://else:p%40ss%20word@127.0.0.1:5433/else"
+        );
+        assert!(!format!("{config:?}").contains("p%40ss"));
+        let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+        assert!(
+            config
+                .require_database()
+                .unwrap_err()
+                .to_string()
+                .starts_with("DATABASE_URL")
+        );
     }
 
     #[test]

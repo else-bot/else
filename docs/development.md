@@ -1,6 +1,6 @@
 # Set up local development
 
-The repository contains the Rust API, a desktop starter, and a PostgreSQL Compose service. The API serves a loopback HTTP liveness route. The desktop has no GPUI dependency or window yet.
+The repository contains the Rust API, a desktop starter, and a PostgreSQL Compose service. The API stores installation state in PostgreSQL and serves authenticated loopback HTTP. The desktop has no GPUI dependency or window yet.
 
 ## Prerequisites
 
@@ -49,7 +49,7 @@ Open a database shell inside the container:
 docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-For a client running on the host, use `127.0.0.1`, the configured port, database, user, and password. The default connection URI is `postgresql://else:else_dev_only@127.0.0.1:5432/else`. Percent-encode credentials if you construct a URI with different values. The API does not read a database URL yet.
+For a client running on the host, use `127.0.0.1`, the configured port, database, user, and password. The default connection URI is `postgresql://else:else_dev_only@127.0.0.1:5432/else`. Percent-encode credentials if you construct a URI with different values. The API reads `DATABASE_URL`, or builds this URI from the `POSTGRES_*` variables when `DATABASE_URL` is unset.
 
 ## Check the Rust workspace
 
@@ -63,9 +63,10 @@ cargo test --workspace --locked
 
 ## Run the API
 
-Provision credentials once, then start the API from the repository root:
+Start PostgreSQL, provision the installation once, then start the API from the repository root:
 
 ```sh
+docker compose up -d --wait
 cargo run -p else-api -- setup
 cargo run -p else-api -- serve
 curl -s http://127.0.0.1:7878/healthz
@@ -75,11 +76,12 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
 
 `serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
 
-`setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`. Running it again reports `kept existing` and changes nothing. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed values, symbolic links, files owned by another user, and files readable by group or others.
+`setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`, applies migrations, seeds any missing provider profile, and creates the main bot `Assistant` with its conversation the first time. Running it again reports `kept existing` and changes nothing: saved profiles keep their values, and a deleted main bot or cleared default stays as it is. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed values, symbolic links, files owned by another user, and files readable by group or others.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ELSE_API_BIND` | `127.0.0.1:7878` | Listener address. Only loopback addresses are accepted because the API serves plaintext HTTP. Use an SSH tunnel such as `ssh -L 7878:127.0.0.1:7878 host` for remote access. |
+| `DATABASE_URL` | built from `POSTGRES_*` | PostgreSQL connection URI. Never logged; connection errors omit it. |
 | `ELSE_DATA_DIR` | `$XDG_DATA_HOME/else-bot`, else `~/.local/share/else-bot` | Private runtime storage for credentials and later bot session data. Use a separate directory per checkout or test installation. |
 | `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
 | `SECRET_KEY` | unset | Installation master key: 32 bytes as standard base64. When set, it is validated and used instead of the file. |
@@ -87,6 +89,18 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
 | `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. Larger bodies receive `413 too_large`. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never headers or bodies. |
+
+### Database and migrations
+
+Versioned SQL migrations live in `apps/api/migrations` and are embedded in the binary. Applied versions are recorded in `_sqlx_migrations`, so applying them again is a no-op. Apply them explicitly with:
+
+```sh
+cargo run -p else-api -- migrate
+```
+
+`serve` and `setup` also apply pending migrations before doing anything else. `serve` then requires completed setup: on an empty installation it exits with `installation setup has not completed; run else-api setup` and creates nothing. An unreachable database fails startup within five seconds with `cannot reach PostgreSQL`. `GET /healthz` reports process liveness; `GET /readyz` returns `200 {"status":"ready"}` while PostgreSQL answers and `503 database_unavailable` otherwise. Neither requires authentication or returns data.
+
+Migrations never delete or rewrite saved rows to make startup succeed. The saved Codex profile is seeded as `gpt-6.1-sol`, `medium`, `priority` only when its row is missing.
 
 ### Credentials
 
@@ -103,6 +117,10 @@ Missing, malformed, duplicated, or wrong bearer headers receive `401` with `WWW-
 To rotate the owner token, stop the API, move the old file away, run `setup`, update the desktop's copy, and restart. Rotation does not touch `SECRET_KEY`.
 
 `GET /healthz` returns `{"status":"ok"}` while the process serves HTTP. It requires no authentication and reports liveness only. All errors use the JSON shape from the [desktop contract](research/desktop-and-feature-contracts.md#proposed-rest-endpoints).
+
+### PostgreSQL tests
+
+`cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests.
 
 The desktop starter still prints `Hello, world!`:
 

@@ -1,9 +1,5 @@
 //! else.bot API executable: command parsing and process composition only.
 
-mod config;
-mod credentials;
-mod http;
-
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -11,11 +7,15 @@ use anyhow::Context;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use config::{Config, ProcessEnv};
+use else_api::config::{Config, ProcessEnv};
+use else_api::{credentials, db, http};
 
-const USAGE: &str = "usage: else-api [serve|setup]\n\n\
-commands:\n  serve   run the API (default)\n  \
-setup   provision missing credentials once; never replaces existing ones\n";
+const USAGE: &str = "usage: else-api [serve|setup|migrate]\n\n\
+commands:\n  \
+serve    apply pending migrations and run the API (default)\n  \
+setup    provision missing credentials, apply migrations, and create the main\n           \
+bot and default provider profiles once; never replaces existing state\n  \
+migrate  apply pending versioned migrations only\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -37,6 +37,7 @@ fn main() -> ExitCode {
     let result = match command {
         "serve" => run_serve(),
         "setup" => run_setup(),
+        "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -57,6 +58,29 @@ fn main() -> ExitCode {
 
 fn load_config() -> anyhow::Result<Config> {
     Config::load(&ProcessEnv).context("invalid configuration")
+}
+
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting async runtime")
+}
+
+async fn database(config: &Config) -> anyhow::Result<sqlx::PgPool> {
+    let url = config.require_database().context("invalid configuration")?;
+    let pool = db::connect(url).await?;
+    db::migrate(&pool).await?;
+    Ok(pool)
+}
+
+fn run_migrate() -> anyhow::Result<()> {
+    let config = load_config()?;
+    runtime()?.block_on(async {
+        database(&config).await?;
+        println!("migrations: up to date");
+        Ok(())
+    })
 }
 
 /// Explicit installation setup. Creates only what is missing and reports
@@ -85,7 +109,24 @@ fn run_setup() -> anyhow::Result<()> {
         credentials::SecretKeySource::File(path) => path.display().to_string(),
     };
     describe("secret key", key, location);
-    Ok(())
+
+    runtime()?.block_on(async {
+        let pool = database(&config).await?;
+        let report = db::installation::setup(&pool).await?;
+        for provider in &report.seeded_profiles {
+            println!("provider profile {provider}: created default");
+        }
+        match report.main_bot {
+            db::installation::MainBot::Created(id) => println!("main bot: created ({id})"),
+            db::installation::MainBot::AlreadyInstalled(Some(id)) => {
+                println!("main bot: installation already set up; default bot {id} kept")
+            }
+            db::installation::MainBot::AlreadyInstalled(None) => {
+                println!("main bot: installation already set up; no default bot (kept empty)")
+            }
+        }
+        Ok(())
+    })
 }
 
 fn run_serve() -> anyhow::Result<()> {
@@ -93,12 +134,12 @@ fn run_serve() -> anyhow::Result<()> {
     // Credentials load before the listener opens. Neither is logged.
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
     let _secret_key = credentials::load_secret_key(&config.secret_key)?;
-    let state = Arc::new(http::AppState::new(owner_token));
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("starting async runtime")?;
-    runtime.block_on(serve(config, state))
+    runtime()?.block_on(async {
+        let pool = database(&config).await?;
+        db::installation::check_installed(&pool).await?;
+        let state = Arc::new(http::AppState::new(owner_token, pool));
+        serve(config, state).await
+    })
 }
 
 async fn serve(config: Config, state: Arc<http::AppState>) -> anyhow::Result<()> {
