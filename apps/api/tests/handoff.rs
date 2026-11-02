@@ -283,11 +283,11 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     assert_eq!(status, "completed");
     let packet = last(&b.packets());
     assert!(
-        packet.contains("[turn 2] Owner: Long work [synthetic:hang]"),
+        packet.contains("[turn 2, interrupted] Owner: Long work [synthetic:hang]"),
         "{packet}"
     );
     assert!(
-        packet.contains("[turn 3] Owner: Pay the invoice"),
+        packet.contains("[turn 3, uncertain] Owner: Pay the invoice"),
         "{packet}"
     );
     assert_eq!(packet.matches("What happened so far?").count(), 1);
@@ -341,7 +341,7 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     assert_eq!(status, "completed");
     let packet = last(&b.packets());
     assert!(packet.contains("[turn 1] Owner: On A."), "{packet}");
-    assert!(packet.contains("[turn 2] Owner: On B [synthetic:stall-send]"));
+    assert!(packet.contains("[turn 2, uncertain] Owner: On B [synthetic:stall-send]"));
     assert!(packet.ends_with("Next on B."));
     let _ = a;
 }
@@ -413,4 +413,109 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
     assert_eq!(entry(&caps)["available"], true);
     let (_, status) = say(&app, &bot, "codex", "now it runs").await;
     assert_eq!(status, "completed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records() {
+    let Two { app, a, b } = two().await;
+    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    // A job the API recorded, which no assistant reply mentions.
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
+         VALUES ($1, 'elsebot-x', 'img', 1, 2048)",
+    )
+    .bind(bot_id)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
+         VALUES ($1, $2, 'make release', 'running', now() + interval '1 hour')",
+    )
+    .bind(job)
+    .bind(bot_id)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    // A hangs on its turn; a message for B must not wait behind it.
+    let reply = app
+        .send(&bot, Uuid::new_v4(), "Working [synthetic:hang]", Some(A))
+        .await;
+    let hung = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&hung, &["running"]).await;
+    let (_, status) = say(&app, &bot, B, "Switching to B.").await;
+    assert_eq!(status, "completed");
+    assert_eq!(app.wait_turn(&hung, &["interrupted"]).await, "interrupted");
+    let packet = last(&b.packets());
+    assert!(
+        packet.contains("[turn 1, interrupted] Owner: Working [synthetic:hang]"),
+        "{packet}"
+    );
+    assert!(
+        packet.contains(&format!("- job {job} (running, started "))
+            && packet.contains("make release"),
+        "the job record is carried: {packet}"
+    );
+    // The job itself is untouched.
+    let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "running");
+    // A same-provider follow-up does not preempt anything.
+    let (_, status) = say(&app, &bot, B, "Still B.").await;
+    assert_eq!(status, "completed");
+    let _ = a;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_after_sending_makes_the_handoff_uncertain() {
+    let Two { app, a, b } = two().await;
+    let bot = app.create_bot("Planner", "plans trips").await;
+    say(&app, &bot, A, "On A.").await;
+    let reply = app
+        .send(&bot, Uuid::new_v4(), "On B [synthetic:stall-send]", Some(B))
+        .await;
+    let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&turn, &["sending"]).await;
+    // The API dies here. Stop this scheduler (which records its own
+    // outcome), then put back the state a crash would have left: the turn
+    // and its handoff still `sending`. Startup reconciliation runs.
+    let db = app.db.clone();
+    drop(app);
+    let id: Uuid = turn.parse().unwrap();
+    for _ in 0..100 {
+        let s: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        if s != "sending" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE handoffs SET state = 'sending' WHERE turn_id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    else_api::db::turns::recover_after_restart(&db.pool)
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("SELECT state FROM handoffs WHERE turn_id = $1")
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "uncertain");
+    let _ = (a, b);
 }

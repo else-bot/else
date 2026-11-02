@@ -432,7 +432,7 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
          job running `sleep 150; echo JOB-DONE` and tell me its job ID. Do not wait for it.",
     )
     .await;
-    let (_, s2, t2) = ask(
+    let (t2_id, s2, t2) = ask(
         &app,
         &bot,
         "claude",
@@ -470,6 +470,16 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     .await
     .unwrap();
     eprintln!("jobs {jobs:?}\nhandoffs {handoffs:#?}\nactivity {activity:#?}");
+    let claude_checks: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM memory_entry
+         WHERE bot_id = $1 AND kind = 'tool_activity'
+           AND source->>'tool' = 'computer_job' AND source->>'turn_id' = $2",
+    )
+    .bind(bot_id)
+    .bind(t2_id.to_string())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
     let name = else_api::computers::ComputerManager::runtime_name(bot_id);
     for args in [
         ["stop", "--force", name.as_str()].as_slice(),
@@ -488,11 +498,10 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     let job = jobs[0].0.to_string();
     assert!(t1.contains(&job[..8]) || t1.contains(&job), "{t1}");
     assert!(t2.contains("QUARTZ-5"), "{t2}");
+    // Claude's own turn called computer_job (not job start) with this ID.
     assert!(
-        activity
-            .iter()
-            .any(|a| a.contains("computer_job") && a.contains(&job)),
-        "Claude inspected the job by ID"
+        claude_checks.iter().any(|body| body.contains(&job)),
+        "Claude inspected the job by ID: {claude_checks:?}"
     );
     assert_eq!(handoffs.len(), 2, "{handoffs:?}");
     let (_, src, dst, _, state, selected) = &handoffs[0];

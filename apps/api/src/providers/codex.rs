@@ -628,6 +628,8 @@ impl Codex {
                 }
                 _ = tokio::time::sleep_until(park_at.unwrap_or(deadline)), if park_at.is_some() && interrupted => {
                     tracing::warn!(turn = %native_turn, "parked attempt did not stop; ending it");
+                    // Its native turn never finished: never resume it.
+                    sink.retire_session().await;
                     return TurnOutcome::Interrupted;
                 }
                 message = server.next() => message,
@@ -782,6 +784,7 @@ mod tests {
             attempt: 1,
             delegation: Default::default(),
             handoff: None,
+            jobs: Vec::new(),
         }
     }
 

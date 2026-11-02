@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::app::providers::{HandoffContext, Selection};
+use crate::app::providers::{HandoffContext, JobReceipt, Selection};
 
 /// Version of the checkpoint request and the handoff block in packets.
 pub const PROMPT_VERSION: &str = "else-handoff-v1";
@@ -172,4 +172,51 @@ pub async fn transition(
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// A handoff still `sending` whose turn has ended without acknowledgment
+/// (restart or orphan recovery) has an unknown delivery.
+pub async fn settle_ended(
+    conn: &mut PgConnection,
+    turn_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE handoffs h SET state = 'uncertain', updated_at = now()
+         FROM turns t
+         WHERE h.turn_id = t.id AND h.state = 'sending'
+           AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
+           AND ($1::uuid IS NULL OR h.turn_id = $1)",
+    )
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The bot's jobs that may still be running or whose outcome is unknown
+/// (`lost` within a week), newest first, at most 20.
+pub async fn job_receipts(
+    conn: &mut PgConnection,
+    bot_id: Uuid,
+) -> Result<Vec<JobReceipt>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT id, status, left(command, 300), to_char(started_at AT TIME ZONE 'UTC',
+                'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         FROM guest_jobs
+         WHERE bot_id = $1 AND (status IN ('starting', 'running', 'cancelling')
+               OR (status = 'lost' AND started_at > now() - interval '7 days'))
+         ORDER BY started_at DESC LIMIT 20",
+    )
+    .bind(bot_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, status, command, started_at)| JobReceipt {
+            id,
+            status,
+            command,
+            started_at,
+        })
+        .collect())
 }

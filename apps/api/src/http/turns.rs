@@ -136,6 +136,9 @@ async fn send(
                 .map_err(|err| with_id(err.into()))?
         }
     };
+    if let Some(active) = accepted.preempted {
+        state.scheduler.interrupt(active);
+    }
     if accepted.created {
         state.scheduler.wake();
     }

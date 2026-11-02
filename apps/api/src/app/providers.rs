@@ -41,6 +41,16 @@ pub struct HistoryEntry {
     pub status: String,
 }
 
+/// A guest job of the bot, recorded by the API (not by any provider), so a
+/// receiving session can inspect it by ID instead of starting it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobReceipt {
+    pub id: Uuid,
+    pub status: String,
+    pub command: String,
+    pub started_at: String,
+}
+
 /// Context handed to the receiving provider on a provider switch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffContext {
@@ -99,6 +109,9 @@ pub struct TurnInput {
     pub delegation: DelegationContext,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
+    /// The bot's active and unresolved guest jobs, given with any rebuilt
+    /// or handed-off context regardless of which history was selected.
+    pub jobs: Vec<JobReceipt>,
 }
 
 /// A provider's native session for one conversation.
@@ -182,6 +195,9 @@ pub trait TurnSink: Send + Sync {
         let _ = (selection, payload);
         Ok(())
     }
+    /// Retire the native session this attempt used: its native turn may be
+    /// unfinished, so it must never be resumed. Bookkeeping only.
+    async fn retire_session(&self) {}
     /// Called immediately before the first write of the owner's message to
     /// the provider. After this, a crash leaves delivery uncertain.
     async fn sending(&self) -> Result<(), Fenced>;

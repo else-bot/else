@@ -74,6 +74,8 @@ const PARK_STOP: Duration = Duration::from_secs(15);
 /// One event line; larger is a protocol failure.
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const STDERR_TAIL: usize = 4096;
+/// Writing the owner's message or a control line to the CLI.
+const PIPE_TIMEOUT: Duration = Duration::from_secs(30);
 const SANDBOX_SETTINGS: &str = "/var/lib/provider-home/else-settings.json";
 const SANDBOX_MCP: &str = "/var/lib/provider-home/elsebot-mcp.json";
 
@@ -316,6 +318,8 @@ fn interrupt_request() -> String {
 struct ResultInfo {
     success: bool,
     message: String,
+    /// Model turns the CLI ran; 0 means it ended before running any.
+    num_turns: Option<i64>,
 }
 
 /// What one event means for the turn.
@@ -342,6 +346,8 @@ struct Tracker {
     wrote_text: bool,
     separate: bool,
     text: String,
+    /// The model produced anything (a message start, text, or a tool use).
+    activity: bool,
 }
 
 impl Tracker {
@@ -359,6 +365,7 @@ impl Tracker {
             wrote_text: false,
             separate: false,
             text: String::new(),
+            activity: false,
         }
     }
 
@@ -459,6 +466,7 @@ impl Tracker {
                 }
             }
             "stream_event" => {
+                self.activity = true;
                 let inner = &event["event"];
                 match inner["type"].as_str().unwrap_or_default() {
                     "message_start" => self.check_model(inner["message"]["model"].as_str()),
@@ -481,6 +489,7 @@ impl Tracker {
                 }
             }
             "assistant" => {
+                self.activity = true;
                 self.check_model(event["message"]["model"].as_str());
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_use" {
@@ -535,7 +544,11 @@ impl Tracker {
                             event["subtype"].as_str().unwrap_or("unknown")
                         )
                     });
-                steps.push(Step::Result(ResultInfo { success, message }));
+                steps.push(Step::Result(ResultInfo {
+                    success,
+                    message,
+                    num_turns: event["num_turns"].as_i64(),
+                }));
             }
             _ => {}
         }
@@ -543,28 +556,46 @@ impl Tracker {
     }
 }
 
-/// Reads bounded event lines from the CLI.
-struct Events {
-    reader: BufReader<tokio::process::ChildStdout>,
+/// Reads bounded event lines from the CLI. Partially read bytes stay in
+/// `buf`, so a read abandoned by a `select!` (a timer or cancellation) loses
+/// nothing: the next call continues the same line.
+struct Events<R> {
+    reader: R,
+    buf: Vec<u8>,
 }
 
-impl Events {
+impl<R: tokio::io::AsyncBufRead + Unpin> Events<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+        }
+    }
+
     /// The next event, `Ok(None)` at end of output.
     async fn next(&mut self) -> Result<Option<Value>, String> {
         loop {
-            let mut line = Vec::new();
-            let read = (&mut self.reader)
-                .take(MAX_LINE)
-                .read_until(b'\n', &mut line)
-                .await
-                .map_err(|e| e.to_string())?;
-            if read == 0 {
-                return Ok(None);
-            }
-            if !line.ends_with(b"\n") && read as u64 >= MAX_LINE {
+            let room = (MAX_LINE as usize).saturating_sub(self.buf.len()) as u64;
+            if room == 0 {
                 return Err("Claude sent an oversized event".into());
             }
+            let read = (&mut self.reader)
+                .take(room)
+                .read_until(b'\n', &mut self.buf)
+                .await
+                .map_err(|e| e.to_string())?;
+            if read == 0 && self.buf.is_empty() {
+                return Ok(None);
+            }
+            if read != 0 && !self.buf.ends_with(b"\n") {
+                // The limit cut the line, or more is coming.
+                continue;
+            }
+            let line = std::mem::take(&mut self.buf);
             if line.iter().all(u8::is_ascii_whitespace) {
+                if read == 0 {
+                    return Ok(None);
+                }
                 continue;
             }
             return serde_json::from_slice(&line)
@@ -738,9 +769,7 @@ impl Provider for Claude {
         let mut stdin = child.child.stdin.take();
         let stdout = child.child.stdout.take().expect("piped");
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
-        let mut events = Events {
-            reader: BufReader::new(stdout),
-        };
+        let mut events = Events::new(BufReader::new(stdout));
         let message_uuid = Uuid::new_v4().to_string();
         let expected = if tools {
             claude_home::tool_names()
@@ -754,16 +783,19 @@ impl Provider for Claude {
             child.terminate(EXIT_GRACE).await;
             return TurnOutcome::Interrupted;
         }
+        let line = user_message(&message_uuid, &packet);
         let written = match stdin.as_mut() {
-            Some(pipe) => pipe
-                .write_all(user_message(&message_uuid, &packet).as_bytes())
-                .await
-                .and(pipe.flush().await),
+            Some(pipe) => tokio::time::timeout(PIPE_TIMEOUT, async {
+                pipe.write_all(line.as_bytes()).await?;
+                pipe.flush().await
+            })
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("the CLI stopped reading its input"))),
             None => Err(std::io::Error::other("no stdin")),
         };
         if let Err(err) = written {
             child.terminate(EXIT_GRACE).await;
-            let reason = stderr.await.unwrap_or_default();
+            let reason = stderr_tail(stderr).await;
             return TurnOutcome::Uncertain {
                 message: format!("Delivery to Claude is unknown: {err} {reason}"),
             };
@@ -790,6 +822,9 @@ impl Provider for Claude {
                         // tree; the outcome of the turn is unknown, unless
                         // it was a parked attempt the request waits on.
                         child.terminate(EXIT_GRACE).await;
+                        // The native turn never finished: its session must
+                        // not be resumed, whatever the request does next.
+                        sink.retire_session().await;
                         if parked {
                             break TurnOutcome::Interrupted;
                         }
@@ -819,8 +854,8 @@ impl Provider for Claude {
             let event = match event {
                 Ok(Some(event)) => event,
                 Ok(None) => {
-                    let reason = stderr.await.unwrap_or_default();
                     child.terminate(EXIT_GRACE).await;
+                    let reason = stderr_tail(stderr).await;
                     break TurnOutcome::Uncertain {
                         message: format!(
                             "The Claude process exited before the turn finished. {reason}"
@@ -893,26 +928,7 @@ impl Provider for Claude {
                 send(&mut stdin, &interrupt_request()).await;
             }
             if let Some(info) = result {
-                break if let Some((code, reason)) = tracker.violation.clone() {
-                    failed(code, reason)
-                } else if !tracker.accepted {
-                    if interrupted {
-                        TurnOutcome::Uncertain {
-                            message: "Claude ended before acknowledging the message.".into(),
-                        }
-                    } else {
-                        // An explicit end before the echo: nothing consumed.
-                        failed("provider_refused", info.message)
-                    }
-                } else if deadline_hit {
-                    failed("turn_deadline", "The turn exceeded its 30 minute deadline.")
-                } else if info.success {
-                    TurnOutcome::Completed
-                } else if interrupted {
-                    TurnOutcome::Interrupted
-                } else {
-                    failed("provider_failed", info.message)
-                };
+                break decide(&tracker, &info, interrupted, deadline_hit);
             }
         };
         // Close input so the CLI exits, then reap the sandbox.
@@ -932,15 +948,73 @@ impl Provider for Claude {
     }
 }
 
+/// The turn's outcome from its terminal `result` and what was observed.
+fn decide(
+    tracker: &Tracker,
+    info: &ResultInfo,
+    interrupted: bool,
+    deadline_hit: bool,
+) -> TurnOutcome {
+    if let Some((code, reason)) = tracker.violation.clone() {
+        return failed(code, reason);
+    }
+    if !tracker.accepted {
+        // Refusal only when the CLI provably consumed nothing: an error
+        // result with no model turn and no output at all (for example a
+        // session it could not open). Anything else may have acted.
+        let refused = !info.success
+            && !interrupted
+            && !tracker.activity
+            && !tracker.accepted
+            && info.num_turns == Some(0);
+        return if refused {
+            failed("provider_refused", info.message.clone())
+        } else {
+            TurnOutcome::Uncertain {
+                message: "Claude ended without acknowledging the message.".into(),
+            }
+        };
+    }
+    if !tracker.init_seen {
+        // The tool set, servers, and model were never verified.
+        return failed(
+            "policy_violation",
+            "Claude did not report its tool set and model.",
+        );
+    }
+    if deadline_hit {
+        failed("turn_deadline", "The turn exceeded its 30 minute deadline.")
+    } else if info.success {
+        TurnOutcome::Completed
+    } else if interrupted {
+        TurnOutcome::Interrupted
+    } else {
+        failed("provider_failed", info.message.clone())
+    }
+}
+
 fn event_model(event: &Value) -> Option<&str> {
     event["message"]["model"].as_str()
 }
 
+/// Write a control line; a CLI that stops reading cannot hold the turn.
 async fn send(stdin: &mut Option<tokio::process::ChildStdin>, line: &str) {
     if let Some(pipe) = stdin.as_mut() {
-        let _ = pipe.write_all(line.as_bytes()).await;
-        let _ = pipe.flush().await;
+        let _ = tokio::time::timeout(PIPE_TIMEOUT, async {
+            pipe.write_all(line.as_bytes()).await?;
+            pipe.flush().await
+        })
+        .await;
     }
+}
+
+/// The stderr tail, without waiting long for a process being reaped.
+async fn stderr_tail(stderr: tokio::task::JoinHandle<String>) -> String {
+    tokio::time::timeout(Duration::from_secs(2), stderr)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 impl Claude {
@@ -963,9 +1037,7 @@ impl Claude {
         let mut stdin = child.child.stdin.take();
         let stdout = child.child.stdout.take().expect("piped");
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
-        let mut events = Events {
-            reader: BufReader::new(stdout),
-        };
+        let mut events = Events::new(BufReader::new(stdout));
         let uuid = Uuid::new_v4().to_string();
         send(&mut stdin, &user_message(&uuid, prompt_text)).await;
         let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
@@ -977,9 +1049,10 @@ impl Claude {
             let event = match event {
                 Ok(Some(event)) => event,
                 Ok(None) => {
+                    child.terminate(EXIT_GRACE).await;
                     break Err(format!(
                         "Claude exited before the checkpoint finished: {}",
-                        stderr.await.unwrap_or_default()
+                        stderr_tail(stderr).await
                     ));
                 }
                 Err(err) => break Err(err),
@@ -1067,7 +1140,8 @@ mod tests {
             steps,
             vec![Step::Result(ResultInfo {
                 success: true,
-                message: "Hi\n\nagain".into()
+                message: "Hi\n\nagain".into(),
+                num_turns: None,
             })]
         );
         assert!(t.violation.is_none());
@@ -1220,5 +1294,73 @@ mod tests {
                 .iter()
                 .any(|a| a == "--continue" || a == "-c" || a == "--bare")
         );
+    }
+
+    fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
+        ResultInfo {
+            success,
+            message: "m".into(),
+            num_turns,
+        }
+    }
+
+    #[test]
+    fn only_a_provable_non_start_is_a_refusal() {
+        // No session could be opened: nothing ran.
+        let t = tracker();
+        assert!(matches!(
+            decide(&t, &info(false, Some(0)), false, false),
+            TurnOutcome::Failed { ref code, .. } if code == "provider_refused"
+        ));
+        // A success, model output, or an unknown turn count without the
+        // echo may have consumed the message.
+        assert!(matches!(
+            decide(&t, &info(true, Some(1)), false, false),
+            TurnOutcome::Uncertain { .. }
+        ));
+        assert!(matches!(
+            decide(&t, &info(false, None), false, false),
+            TurnOutcome::Uncertain { .. }
+        ));
+        let mut active = tracker();
+        active.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}));
+        assert!(matches!(
+            decide(&active, &info(false, Some(0)), false, false),
+            TurnOutcome::Uncertain { .. }
+        ));
+    }
+
+    #[test]
+    fn completion_requires_a_verified_init() {
+        let mut t = tracker();
+        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}));
+        assert!(matches!(
+            decide(&t, &info(true, Some(1)), false, false),
+            TurnOutcome::Failed { ref code, .. } if code == "policy_violation"
+        ));
+        t.on(&init(claude_home::tool_names(), connected()));
+        assert_eq!(
+            decide(&t, &info(true, Some(1)), false, false),
+            TurnOutcome::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_read_keeps_its_partial_line() {
+        use tokio::io::AsyncWriteExt;
+        let (mut tx, rx) = tokio::io::duplex(64);
+        let mut events = Events::new(BufReader::new(rx));
+        tx.write_all(br#"{"type":"result","#).await.unwrap();
+        // A timer wins the select while half the line has been read.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.next())
+                .await
+                .is_err()
+        );
+        tx.write_all(b"\"subtype\":\"success\"}\n").await.unwrap();
+        let event = events.next().await.unwrap().unwrap();
+        assert_eq!(event["subtype"], "success");
+        drop(tx);
+        assert_eq!(events.next().await.unwrap(), None);
     }
 }

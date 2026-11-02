@@ -91,6 +91,9 @@ pub struct Accepted {
     pub created: bool,
     pub turn: TurnRecord,
     pub item: ItemRecord,
+    /// An active turn on another provider this message switched away from;
+    /// it was moved to `cancelling` and must be interrupted.
+    pub preempted: Option<Uuid>,
 }
 
 pub struct SendRequest<'a> {
@@ -148,6 +151,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
             created: false,
             turn,
             item,
+            preempted: None,
         });
     }
     if cancel_pending {
@@ -227,6 +231,26 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
         .execute(&mut *tx)
         .await?;
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
+    // Switching provider stops the active turn on the other provider (its
+    // output is recorded as it drains; guest jobs keep running), so the
+    // switch is not stuck behind it. Children's bots are locked before the
+    // turn, in the usual order.
+    crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
+    let preempted: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE turns SET status = 'cancelling', updated_at = now()
+         WHERE bot_id = $1 AND conversation_id = $2 AND turn_no < $3 AND provider_id <> $4
+           AND status IN ('preparing', 'sending', 'running')
+         RETURNING id",
+    )
+    .bind(req.bot_id)
+    .bind(conversation_id)
+    .bind(turn_no)
+    .bind(req.provider_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(active) = preempted {
+        crate::db::events::turn_changed(&mut tx, req.bot_id, active).await?;
+    }
     // The owner's message enters the bot's memory with its acceptance.
     crate::db::memory::log_item(&mut tx, item_id).await?;
     let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
@@ -235,6 +259,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
         created: true,
         turn,
         item,
+        preempted,
     })
 }
 
@@ -292,6 +317,7 @@ pub async fn existing_send(
                 created: false,
                 turn,
                 item,
+                preempted: None,
             }))
         }
     }
@@ -470,6 +496,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         attempt: turn.attempt,
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
         handoff: None,
+        jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
     };
     // Return this connection before memory loading checks out others.
     drop(conn);
@@ -857,6 +884,20 @@ impl TurnSink for PgSink {
         Ok(())
     }
 
+    async fn retire_session(&self) {
+        if let Err(err) = sqlx::query(
+            "UPDATE provider_sessions SET status = 'retired', updated_at = now()
+             WHERE id = (SELECT provider_session_id FROM turns WHERE id = $1)
+               AND status = 'active'",
+        )
+        .bind(self.turn_id)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(turn = %self.turn_id, error = %err, "retiring the provider session failed");
+        }
+    }
+
     async fn sending(&self) -> Result<(), Fenced> {
         self.transition("preparing", "sending").await
     }
@@ -1080,6 +1121,7 @@ It was not resent; send a follow-up to continue.',
     for (turn_id, bot_id) in requeued.iter().chain(&uncertain) {
         crate::db::events::turn_changed(&mut tx, *bot_id, *turn_id).await?;
     }
+    crate::db::handoffs::settle_ended(&mut tx, None).await?;
     for (turn_id, _) in &uncertain {
         crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
         // A root that ended here leaves no child running for it.
@@ -1131,6 +1173,7 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
             crate::db::memory::log_turn_end(&mut tx, turn_id).await?;
             crate::db::delegations::cancel_for_root(&mut tx, turn_id).await?;
+            crate::db::handoffs::settle_ended(&mut tx, Some(turn_id)).await?;
             crate::db::stop::settle(&mut tx, bot_id).await?;
             settled += 1;
         }
