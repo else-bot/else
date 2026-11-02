@@ -27,7 +27,40 @@ pub enum LockError {
 /// Held for the process lifetime; dropping it releases both locks.
 pub struct RuntimeLock {
     _file: File,
-    _db: PgConnection,
+    db: Option<PgConnection>,
+}
+
+const LOCK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl RuntimeLock {
+    /// Watch the database session that holds the advisory lock. If it is
+    /// lost (the server restarted or the connection was terminated), the lock
+    /// is gone and another API could start; `lost` fires so this process
+    /// stops dispatching and exits instead of competing.
+    pub fn watch(&mut self, lost: tokio_util::sync::CancellationToken) {
+        let Some(mut db) = self.db.take() else {
+            return;
+        };
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = lost.cancelled() => return,
+                    _ = tokio::time::sleep(LOCK_CHECK_INTERVAL) => {}
+                }
+                let held: Result<bool, sqlx::Error> = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                         AND pid = pg_backend_pid() AND granted)",
+                )
+                .fetch_one(&mut db)
+                .await;
+                if !matches!(held, Ok(true)) {
+                    tracing::error!("lost the database singleton lock; stopping this API");
+                    lost.cancel();
+                    return;
+                }
+            }
+        });
+    }
 }
 
 pub async fn acquire(data_dir: &Path, pool: &PgPool) -> Result<RuntimeLock, LockError> {
@@ -66,6 +99,6 @@ pub async fn acquire(data_dir: &Path, pool: &PgPool) -> Result<RuntimeLock, Lock
     }
     Ok(RuntimeLock {
         _file: file,
-        _db: db,
+        db: Some(db),
     })
 }

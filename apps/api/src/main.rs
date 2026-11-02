@@ -158,7 +158,9 @@ fn run_serve() -> anyhow::Result<()> {
         db::installation::check_installed(&pool).await?;
         // Take the singleton locks and bind before touching runtime state: a
         // second instance must not reconcile or dispatch another's work.
-        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
+        let mut lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
+        let lock_lost = CancellationToken::new();
+        lock.watch(lock_lost.clone());
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;
@@ -175,9 +177,17 @@ fn run_serve() -> anyhow::Result<()> {
                 .clone()
                 .run(stop_scheduler.clone(), config.shutdown_grace),
         );
+        // Losing the singleton lock stops dispatch at once.
+        let stop_on_loss = stop_scheduler.clone();
+        let lost = lock_lost.clone();
+        tokio::spawn(async move {
+            lost.cancelled().await;
+            stop_on_loss.cancel();
+        });
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
-        let result = serve(&config, listener, state).await;
+        let result = serve(&config, listener, state, lock_lost.clone()).await;
+        drop(lock);
         // Stop provider work after HTTP so no new message is accepted.
         stop_scheduler.cancel();
         let _ = scheduler_task.await;
@@ -190,6 +200,7 @@ async fn serve(
     config: &Config,
     listener: TcpListener,
     state: Arc<http::AppState>,
+    lock_lost: CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
@@ -209,6 +220,11 @@ async fn serve(
             return result.context("server task")?.context("serving HTTP");
         }
         signal = shutdown_signal() => signal?,
+        _ = lock_lost.cancelled() => {
+            let _ = stop_tx.send(true);
+            server.abort();
+            anyhow::bail!("lost the database singleton lock; another API may start, so this one stopped");
+        }
     }
     tracing::info!("shutdown requested; draining connections");
     let _ = stop_tx.send(true);

@@ -135,16 +135,21 @@ pub async fn stop_work(
 ) -> Result<StopReceipt, StopError> {
     let mut tx = pool.begin().await?;
     lock_request(&mut tx, request_id).await?;
-    let bot: Option<(String, i64)> = sqlx::query_as(
-        "SELECT b.status, c.last_turn_no FROM bots b JOIN conversations c ON c.bot_id = b.id
-         WHERE b.id = $1 FOR UPDATE OF b",
-    )
-    .bind(bot_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((status, last_turn_no)) = bot else {
+    // Lock first, then read the boundary in a new statement: a send that
+    // held the lock has committed by then, so its turn is inside the stop.
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
+            .bind(bot_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(status) = status else {
         return Err(BotError::NotFound.into());
     };
+    let last_turn_no: i64 =
+        sqlx::query_scalar("SELECT last_turn_no FROM conversations WHERE bot_id = $1")
+            .bind(bot_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let receipt: Option<(String, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
         "SELECT operation, bot_id, payload_hash, state FROM request_receipts WHERE request_id = $1",
     )

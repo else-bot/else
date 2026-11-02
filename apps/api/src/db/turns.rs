@@ -6,7 +6,7 @@
 //! writes are fenced on the turn still being active and the bot still active.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -437,10 +437,9 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     })
 }
 
+/// State owned by whoever holds the flush lock.
 struct Buffer {
-    pending: String,
     assistant_item: Option<Uuid>,
-    last_flush: Instant,
 }
 
 /// Persists one turn's progress. Writes succeed only while the turn is in
@@ -451,7 +450,12 @@ pub struct PgSink {
     bot_id: Uuid,
     conversation_id: Uuid,
     provider_id: String,
+    /// Held across each text write, serializing flushes and `finish`.
     buffer: tokio::sync::Mutex<Buffer>,
+    /// Text not yet committed. Appended by `text()` without any I/O and
+    /// drained only after the transaction that wrote it commits.
+    pending: Mutex<String>,
+    flush_wanted: tokio::sync::Notify,
     fenced: Mutex<bool>,
 }
 
@@ -464,12 +468,21 @@ impl PgSink {
             conversation_id: input.conversation_id,
             provider_id: provider_id.to_owned(),
             buffer: tokio::sync::Mutex::new(Buffer {
-                pending: String::new(),
                 assistant_item: None,
-                last_flush: Instant::now(),
             }),
+            pending: Mutex::new(String::new()),
+            flush_wanted: tokio::sync::Notify::new(),
             fenced: Mutex::new(false),
         }
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, String> {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Resolves when enough text is buffered to flush before the interval.
+    pub async fn flush_wanted(&self) {
+        self.flush_wanted.notified().await;
     }
 
     fn is_fenced(&self) -> bool {
@@ -599,7 +612,8 @@ impl PgSink {
         if self.is_fenced() {
             return Err(Fenced);
         }
-        if buffer.pending.is_empty() {
+        let chunk = self.pending().clone();
+        if chunk.is_empty() {
             return Ok(());
         }
         let result: Result<Option<Uuid>, sqlx::Error> = async {
@@ -613,17 +627,17 @@ impl PgSink {
                 return Ok(None);
             };
             let item = self
-                .write_text(&mut tx, buffer.assistant_item, last_seq, &buffer.pending)
+                .write_text(&mut tx, buffer.assistant_item, last_seq, &chunk)
                 .await?;
             tx.commit().await?;
             Ok(Some(item))
         }
         .await;
-        buffer.last_flush = Instant::now();
         match result {
             Ok(Some(item_id)) => {
                 buffer.assistant_item = Some(item_id);
-                buffer.pending.clear();
+                // Text appended during the write stays for the next flush.
+                self.pending().drain(..chunk.len());
                 Ok(())
             }
             Ok(None) => Err(self.fence()),
@@ -655,12 +669,13 @@ impl PgSink {
             ),
         };
         let mut buffer = self.buffer.lock().await;
+        let chunk = self.pending().clone();
         let mut tx = self.pool.begin().await?;
         let mut wrote_item = None;
-        if !buffer.pending.is_empty() && !self.is_fenced() {
+        if !chunk.is_empty() && !self.is_fenced() {
             if let Some(last_seq) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
                 wrote_item = Some(
-                    self.write_text(&mut tx, buffer.assistant_item, last_seq, &buffer.pending)
+                    self.write_text(&mut tx, buffer.assistant_item, last_seq, &chunk)
                         .await?,
                 );
             }
@@ -692,7 +707,7 @@ impl PgSink {
         if let Some(item_id) = wrote_item {
             buffer.assistant_item = Some(item_id);
         }
-        buffer.pending.clear();
+        self.pending().drain(..chunk.len());
         Ok(())
     }
 }
@@ -711,12 +726,14 @@ impl TurnSink for PgSink {
         if self.is_fenced() {
             return Err(Fenced);
         }
-        let due = {
-            let mut buffer = self.buffer.lock().await;
-            buffer.pending.push_str(chunk);
-            buffer.pending.len() >= FLUSH_BYTES || buffer.last_flush.elapsed() >= FLUSH_INTERVAL
-        };
-        if due { self.flush().await } else { Ok(()) }
+        // Buffer only. Database writes belong to the scheduler's flusher, so
+        // abandoning an adapter future can never interrupt a commit.
+        let mut pending = self.pending();
+        pending.push_str(chunk);
+        if pending.len() >= FLUSH_BYTES {
+            self.flush_wanted.notify_one();
+        }
+        Ok(())
     }
 }
 
@@ -763,4 +780,55 @@ It was not resent; send a follow-up to continue.',
     // turns of deleted bots never run (claim requires an active bot).
     crate::db::stop::settle_all(pool).await?;
     Ok((requeued.len() as u64, uncertain.len() as u64))
+}
+
+/// Turns in an active status that no provider task in this process owns.
+/// The singleton lock means no other process runs them, so they are settled:
+/// one never started fails, one that may have reached its provider becomes
+/// `uncertain` (never resent). Pending stops and deletions then complete.
+pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::Error> {
+    let orphans: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT (id = ANY($1))"
+    )))
+    .bind(live)
+    .fetch_all(pool)
+    .await?;
+    let mut settled = 0;
+    for (turn_id, bot_id) in orphans {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+            .bind(bot_id)
+            .execute(&mut *tx)
+            .await?;
+        let updated = sqlx::query(
+            "UPDATE turns SET
+                 status = CASE WHEN status = 'preparing' THEN 'failed' ELSE 'uncertain' END,
+                 effect_uncertain = effect_uncertain OR status <> 'preparing',
+                 error_code = CASE WHEN status = 'preparing' THEN 'start_failed' ELSE 'orphaned' END,
+                 error_message = CASE WHEN status = 'preparing'
+                     THEN 'The message could not be started. Send it again.'
+                     ELSE 'Processing stopped unexpectedly. It was not resent; send a follow-up to continue.'
+                 END,
+                 finished_at = now(), updated_at = now()
+             WHERE id = $1 AND status IN ('preparing', 'sending', 'running', 'cancelling')",
+        )
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated == 1 {
+            crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
+            crate::db::stop::settle(&mut tx, bot_id).await?;
+            settled += 1;
+        }
+        tx.commit().await?;
+    }
+    Ok(settled)
+}
+
+/// IDs of turns being stopped.
+pub async fn cancelling(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM turns WHERE status = 'cancelling'")
+        .fetch_all(pool)
+        .await
 }

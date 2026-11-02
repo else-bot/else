@@ -89,7 +89,8 @@ pub trait TurnSink: Send + Sync {
     async fn sending(&self) -> Result<(), Fenced>;
     /// The provider acknowledged the input.
     async fn running(&self) -> Result<(), Fenced>;
-    /// Append assistant text. May be buffered briefly before persistence.
+    /// Append assistant text. It is buffered and persisted by the scheduler
+    /// within about 100 ms; this call performs no I/O.
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
 }
 

@@ -109,6 +109,18 @@ impl Scheduler {
     }
 
     async fn dispatch(self: &Arc<Self>) -> Result<(), sqlx::Error> {
+        // Redeliver interruption: a stop or deletion committed even if its
+        // request never reached `interrupt` (for example, a lost response).
+        for turn_id in turns::cancelling(&self.pool).await? {
+            self.interrupt(turn_id);
+        }
+        // Claims below insert into `running` before the next scan, so every
+        // turn missing from it here has no provider task.
+        let live: Vec<Uuid> = self.running().keys().copied().collect();
+        let orphaned = turns::settle_orphans(&self.pool, &live).await?;
+        if orphaned > 0 {
+            tracing::warn!(orphaned, "settled turns without a running provider task");
+        }
         while self.running().len() < self.max_active {
             let Some(turn_id) = turns::claim_next(&self.pool, &[]).await? else {
                 break;
@@ -128,25 +140,37 @@ impl Scheduler {
     }
 
     async fn execute(&self, turn_id: Uuid, cancel: CancellationToken) {
-        let input = match turns::input(&self.pool, turn_id).await {
-            Ok(input) => input,
+        let loaded = async {
+            let input = turns::input(&self.pool, turn_id).await?;
+            let provider_id: String =
+                sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = $1")
+                    .bind(turn_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            Ok::<_, sqlx::Error>((input, provider_id))
+        }
+        .await;
+        let (input, provider_id) = match loaded {
+            Ok(loaded) => loaded,
             Err(err) => {
                 tracing::error!(turn = %turn_id, error = %err, "loading turn failed");
+                // Nothing was sent, so ending the turn is safe. Retry so a
+                // transient error cannot leave the bot's slot occupied.
+                let mut delay = Duration::from_millis(100);
+                for _ in 0..FINISH_ATTEMPTS {
+                    let message = "The message could not be prepared. Send it again.";
+                    if turns::fail_unstarted(&self.pool, turn_id, message)
+                        .await
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
                 return;
             }
         };
-        let provider_id: String =
-            match sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = $1")
-                .bind(turn_id)
-                .fetch_one(&self.pool)
-                .await
-            {
-                Ok(id) => id,
-                Err(err) => {
-                    tracing::error!(turn = %turn_id, error = %err, "loading turn provider failed");
-                    return;
-                }
-            };
         let sink = PgSink::new(self.pool.clone(), &input, &provider_id);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {
@@ -155,21 +179,36 @@ impl Scheduler {
             },
             Some(provider) => {
                 let provider = provider.clone();
-                // The adapter and a periodic flusher run concurrently in this
-                // task. The flusher stops only between flushes, so a flush is
-                // never abandoned halfway, and neither future can starve the
-                // other while one holds the sink's buffer lock.
                 let done = CancellationToken::new();
+                // The adapter only buffers text; it never writes it. That
+                // lets the watchdog abandon an adapter that ignores
+                // interruption without cutting a database commit short.
                 let run = async {
-                    let outcome = provider.run(input, &sink, cancel.clone()).await;
+                    let watchdog = async {
+                        cancel.cancelled().await;
+                        tokio::time::sleep(self.cancel_grace).await;
+                    };
+                    let outcome = tokio::select! {
+                        outcome = provider.run(input, &sink, cancel.clone()) => outcome,
+                        () = watchdog => TurnOutcome::Uncertain {
+                            message: format!(
+                                "The provider did not stop within {} seconds after being \
+                                 interrupted; its effects are unknown.",
+                                self.cancel_grace.as_secs()
+                            ),
+                        },
+                    };
                     done.cancel();
                     outcome
                 };
+                // The flusher owns every text write and always finishes the
+                // flush it started; it stops only between flushes.
                 let flusher = async {
                     loop {
                         tokio::select! {
                             _ = done.cancelled() => break,
                             _ = tokio::time::sleep(FLUSH_INTERVAL) => {}
+                            _ = sink.flush_wanted() => {}
                         }
                         if sink.flush().await.is_err() {
                             // Fenced: the turn was stopped or the bot deleted.
@@ -177,22 +216,7 @@ impl Scheduler {
                         }
                     }
                 };
-                // A provider that ignores interruption is abandoned after
-                // the grace period; its effects are then unknown.
-                let watchdog = async {
-                    cancel.cancelled().await;
-                    tokio::time::sleep(self.cancel_grace).await;
-                };
-                tokio::select! {
-                    (outcome, ()) = async { tokio::join!(run, flusher) } => outcome,
-                    () = watchdog => TurnOutcome::Uncertain {
-                        message: format!(
-                            "The provider did not stop within {} seconds after being interrupted; \
-                             its effects are unknown.",
-                            self.cancel_grace.as_secs()
-                        ),
-                    },
-                }
+                tokio::join!(run, flusher).0
             }
         };
         tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");

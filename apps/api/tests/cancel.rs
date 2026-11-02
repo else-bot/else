@@ -465,3 +465,144 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     assert!(status == 202 || status == 200, "{body}");
     wait_status(&api, &db.pool, &hanging, "interrupted").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_waiting_on_a_send_includes_that_send() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    // Hold the bot lock and commit a new queued turn while Stop waits.
+    let mut tx = app.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+        .bind(bot_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let request = Uuid::new_v4();
+    let stop_task = {
+        let router = app.router.clone();
+        tokio::spawn(async move {
+            use tower::ServiceExt;
+            let request = axum::http::Request::post(format!("/v1/bots/{bot_id}/cancel"))
+                .header("host", "127.0.0.1")
+                .header("authorization", format!("Bearer {}", common::TOKEN))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "request_id": request }).to_string(),
+                ))
+                .unwrap();
+            router.oneshot(request).await.unwrap().status()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let turn_id = Uuid::new_v4();
+    let conversation: Uuid = sqlx::query_scalar(
+        "UPDATE conversations SET last_turn_no = last_turn_no + 1, last_item_seq = last_item_seq + 1
+         WHERE bot_id = $1 RETURNING id",
+    )
+    .bind(bot_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id)
+         VALUES ($1, $2, $3, $4, decode(repeat('00', 32), 'hex'), 1, $5, 'synthetic')",
+    )
+    .bind(turn_id)
+    .bind(bot_id)
+    .bind(conversation)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(stop_task.await.unwrap(), StatusCode::OK);
+    let (status, code, _) = status_of(&app.db.pool, &turn_id.to_string()).await;
+    assert_eq!(
+        (status.as_str(), code.as_deref()),
+        ("interrupted", Some("cancelled"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_interrupts_are_redelivered_and_orphans_settle() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    // A stop whose interrupt never reached the provider task.
+    let hang = app
+        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
+        .await;
+    app.wait_turn(&turn_id(&hang), &["running"]).await;
+    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = $1")
+        .bind(turn_id(&hang).parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.wait_turn(&turn_id(&hang), &["interrupted"]).await,
+        "interrupted"
+    );
+
+    // An active turn that no provider task owns.
+    let other = app.create_bot("Orphan", "orphan").await;
+    let queued = app
+        .send(
+            &other,
+            Uuid::new_v4(),
+            "[synthetic:hang]",
+            Some("synthetic"),
+        )
+        .await;
+    app.wait_turn(&turn_id(&queued), &["running"]).await;
+    app.scheduler.interrupt(turn_id(&queued).parse().unwrap());
+    app.wait_turn(&turn_id(&queued), &["interrupted"]).await;
+    sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = $1")
+        .bind(turn_id(&queued).parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.wait_turn(&turn_id(&queued), &["uncertain"]).await,
+        "uncertain"
+    );
+    let (_, code, uncertain) = status_of(&app.db.pool, &turn_id(&queued)).await;
+    assert_eq!((code.as_deref(), uncertain), (Some("orphaned"), true));
+    // The bot is usable again.
+    let next = app
+        .send(&other, Uuid::new_v4(), "after orphan", Some("synthetic"))
+        .await;
+    assert_eq!(
+        app.wait_turn(&turn_id(&next), &["completed"]).await,
+        "completed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn losing_the_database_lock_stops_the_api() {
+    let db = TestDb::migrated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut api = ApiProcess::start(&db, dir.path()).await;
+    let terminated: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) FROM pg_locks
+         WHERE locktype = 'advisory' AND granted AND database =
+             (SELECT oid FROM pg_database WHERE datname = current_database())) t",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(terminated, 1);
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = api.child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "API kept running without its lock"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
