@@ -527,16 +527,15 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
-        let Some(conversation) = view.conversation.as_ref() else {
-            return;
-        };
+        // Pending sends are shown even before history has loaded.
+        let conversation = view.conversation.as_ref();
         // A pending send disappears once its canonical item is present.
-        if let Some(pending) = self.pending.get_mut(&bot) {
+        if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
         let mut rows = Vec::new();
         let mut texts: Vec<(RowKey, String)> = Vec::new();
-        for item in conversation.items() {
+        for item in conversation.into_iter().flat_map(|c| c.items()) {
             rows.push(RowKey::Item(item.id));
             texts.push((RowKey::Item(item.id), item.text.clone()));
         }
@@ -1513,7 +1512,7 @@ impl ElseApp {
         let theme = cx.theme();
         let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
         let transcript: AnyElement = match view {
-            Some(view) if view.conversation.is_some() => {
+            Some(view) if view.conversation.is_some() || !view.rows.is_empty() => {
                 if view.rows.is_empty() {
                     div()
                         .flex_1()

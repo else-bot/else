@@ -239,4 +239,4 @@ This deletes the current Compose project's database. Use ordinary `down` when yo
 
 ## Start implementation work
 
-Read the [POC backlog](../TODO.md) and [agent runbook](implementation/README.md). Resume from the [latest handoff](implementation/progress.md). The backlog separates the first usable messaging checkpoint from later assistant capabilities and defines the evidence required for each task.
+Read the [POC backlog](../TODO.md) and [agent runbook](implementation/README.md). Resume from the [latest handoff](implementation/progress.md). The first usable POC (POC-001 to POC-012) is complete; the [smoke procedure](implementation/smoke.md) repeats its acceptance against a disposable installation. The next milestone is the assistant POC.

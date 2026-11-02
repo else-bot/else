@@ -1,6 +1,6 @@
 # Application architecture
 
-These are the current application choices. The repository contains the API and desktop crates and development infrastructure. Implementation follows the [POC backlog](../TODO.md).
+These are the current application choices. The first usable POC is implemented: the API (Axum, one in-process scheduler, PostgreSQL, sandboxed host Codex adapter) and the GPUI desktop. Implementation follows the [POC backlog](../TODO.md).
 
 The project should use a monorepo. Start with the Rust API and GPUI desktop client for one owner. Add the mobile app later.
 

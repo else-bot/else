@@ -4,7 +4,7 @@ else.bot is a personal AI agent that learns to reflect its owner. One main assis
 
 You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
 
-The repository has Rust starter crates and local development infrastructure. Application implementation has not started.
+The first usable POC runs: a native GPUI desktop where you create bots, chat with each through your host Codex subscription, stop work, and delete bots, backed by a Rust API and PostgreSQL that survive restarts. Memory, delegation, bot computers, provider switching, and backups are the next milestone.
 
 The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
 
@@ -45,6 +45,20 @@ The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings a
 
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
+## Try the POC
+
+You need Rust, Docker, `bubblewrap`, and a logged-in `codex` CLI (`codex login`). From the repository root:
+
+```sh
+test -e .env || cp .env.example .env
+docker compose up -d --wait
+cargo run -p else-api -- setup     # once: credentials, migrations, main bot
+cargo run -p else-api -- serve     # leave running
+cargo run -p else-desktop          # in another terminal
+```
+
+The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs in a bubblewrap sandbox with no tools, no shell, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
+
 ## Repository and local setup
 
 The Cargo workspace separates the API and desktop client. Development services live under `infra/`.
@@ -53,27 +67,25 @@ The Cargo workspace separates the API and desktop client. Development services l
 Cargo.toml
 Cargo.lock
 apps/
-	api/
-		Cargo.toml
-		src/main.rs
-	desktop/
-		Cargo.toml
-		src/main.rs
+	api/          Axum API, scheduler, PostgreSQL store, provider adapters, migrations
+	desktop/      GPUI desktop client
 infra/
-	compose.yaml
+	compose.yaml  PostgreSQL
+scripts/
+	demo.sh       disposable demo installation
 docs/
 .env.example
 ```
 
-From the repository root, create the local environment file, start PostgreSQL, and check the Rust workspace:
+Check and test the workspace (the tests need the Compose PostgreSQL and `bwrap`; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
 
 ```sh
-test -e .env || cp .env.example .env
-docker compose up -d --wait
+cargo fmt --all -- --check
 cargo check --workspace --locked
+cargo test --workspace --locked
 ```
 
-The two binaries contain only generated `cargo init` starters. See [local development](docs/development.md) for prerequisites, configuration, run commands, and database persistence. The [architecture notes](docs/architecture.md#repository-boundaries) explain directory ownership and the intended dependency direction.
+See [local development](docs/development.md) for prerequisites, configuration, run commands, and database persistence. The [architecture notes](docs/architecture.md#repository-boundaries) explain directory ownership and the intended dependency direction.
 
 ## Implementation backlog
 
