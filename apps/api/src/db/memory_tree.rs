@@ -267,9 +267,23 @@ pub async fn defer(
     error: Option<&str>,
     retry_in: Duration,
 ) -> Result<(), sqlx::Error> {
+    defer_counting(pool, job, reason, error, retry_in, false).await
+}
+
+/// Release a job; `failure` counts a provider failure toward its backoff.
+/// Returns the job's failure count afterwards.
+pub async fn defer_counting(
+    pool: &PgPool,
+    job: &Job,
+    reason: &str,
+    error: Option<&str>,
+    retry_in: Duration,
+    failure: bool,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE memory_job SET lease_token = NULL, lease_until = NULL, blocked_reason = $6,
-             last_error = left($7, 1000), available_at = now() + make_interval(secs => $8)
+             last_error = left($7, 1000), available_at = now() + make_interval(secs => $8),
+             failures = failures + $9::int
          WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4
            AND lease_token = $5",
     )
@@ -281,9 +295,25 @@ pub async fn defer(
     .bind(reason)
     .bind(error)
     .bind(retry_in.as_secs_f64())
+    .bind(i32::from(failure))
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Provider failures recorded for a job so far.
+pub async fn failures(pool: &PgPool, job: &Job) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT failures FROM memory_job
+         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4",
+    )
+    .bind(job.bot_id)
+    .bind(job.generation)
+    .bind(job.node.start)
+    .bind(job.node.span)
+    .fetch_optional(pool)
+    .await
+    .map(Option::unwrap_or_default)
 }
 
 fn ancestors(nodes: &[NodeId], count: i64) -> Vec<NodeId> {
@@ -859,7 +889,12 @@ pub async fn session_context(
             kept.push((*node, body.clone()));
         }
         kept.reverse();
-        omitted = kept.first().map(|(n, _)| n.start);
+        // Everything before the first kept node is omitted; with nothing
+        // kept (a single node larger than the budget), all of it is.
+        omitted = Some(
+            kept.first()
+                .map_or(saved.published_seq + 1, |(n, _)| n.start),
+        );
         chosen = kept;
     }
     let covered = if saved.published_seq >= 0 && saved.valid {

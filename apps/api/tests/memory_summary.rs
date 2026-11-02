@@ -14,6 +14,7 @@ use else_api::db::memory::{self, Kind, NewEntry};
 use else_api::db::memory_tree;
 use else_api::memory_worker::{Compactor, Step, Summarizer};
 use serde_json::{Value, json};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Answers with scripted replies, then echoes a short summary.
@@ -21,6 +22,7 @@ use uuid::Uuid;
 struct Scripted {
     replies: Mutex<VecDeque<Result<String, String>>>,
     prompts: Mutex<Vec<String>>,
+    delay: Mutex<std::time::Duration>,
 }
 
 #[async_trait]
@@ -38,7 +40,15 @@ impl Summarizer for Scripted {
         _bot: Uuid,
         profile: &Profile,
         prompt: &str,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<String, String> {
+        let delay = *self.delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err("cancelled".into()),
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
         assert_eq!(profile.model, "gpt-6.1-sol", "the saved profile is used");
         self.prompts.lock().unwrap().push(prompt.to_owned());
         self.replies
@@ -138,7 +148,7 @@ async fn oversized_or_failed_summaries_are_never_installed() {
         }
     }
     let worker = compactor(&app, fake.clone());
-    assert_eq!(worker.step().await.unwrap(), Step::Deferred);
+    worker.drain().await.unwrap();
     let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_node WHERE bot_id = $1")
         .bind(bot)
         .fetch_one(&app.db.pool)
@@ -171,7 +181,7 @@ async fn oversized_or_failed_summaries_are_never_installed() {
     fake.replies.lock().unwrap().push_back(Err(
         "policy_violation: Codex produced a commandExecution item".into(),
     ));
-    assert_eq!(worker.step().await.unwrap(), Step::Deferred);
+    worker.drain().await.unwrap();
     let view = app
         .owner("GET", &format!("/v1/bots/{bot}/memory/view"), None)
         .await
@@ -268,4 +278,168 @@ async fn new_sessions_get_bounded_memory_once() {
         .unwrap();
     let carried = input.memory.unwrap();
     assert!(carried.revision >= memory.revision);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_continue_while_a_summary_runs() {
+    let app = TestApp::installed().await;
+    recipe(&app, 64).await;
+    let slow: Uuid = app.create_bot("Slow", "slow").await.parse().unwrap();
+    let quick: Uuid = app.create_bot("Quick", "quick").await.parse().unwrap();
+    add(&app, slow, "long", &"x".repeat(200)).await;
+    let fake = Arc::new(Scripted::default());
+    *fake.delay.lock().unwrap() = Duration::from_secs(2);
+    let worker = compactor(&app, fake.clone());
+    let mut started = false;
+    for _ in 0..10 {
+        if worker.step().await.unwrap() == Step::Summarizing {
+            started = true;
+            break;
+        }
+    }
+    assert!(started);
+    // Another bot's short entry is built while the summary is in flight.
+    add(&app, quick, "q", "quick one").await;
+    for _ in 0..10 {
+        worker.step().await.unwrap();
+    }
+    assert_eq!(
+        memory_tree::load_view(&app.db.pool, quick)
+            .await
+            .unwrap()
+            .published_seq,
+        0
+    );
+    assert_eq!(
+        memory_tree::load_view(&app.db.pool, slow)
+            .await
+            .unwrap()
+            .published_seq,
+        -1
+    );
+    worker.drain().await.unwrap();
+    assert_eq!(
+        memory_tree::load_view(&app.db.pool, slow)
+            .await
+            .unwrap()
+            .published_seq,
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_cancels_an_active_summary_promptly() {
+    let app = TestApp::installed().await;
+    recipe(&app, 64).await;
+    let bot: Uuid = app.create_bot("Stop", "stop").await.parse().unwrap();
+    add(&app, bot, "long", &"x".repeat(200)).await;
+    let fake = Arc::new(Scripted::default());
+    *fake.delay.lock().unwrap() = Duration::from_secs(60);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let runner = tokio::spawn(compactor(&app, fake.clone()).run(cancel.clone()));
+    // Wait until the summary holds the job.
+    for _ in 0..100 {
+        let leased: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM memory_job WHERE bot_id = $1 AND lease_token IS NOT NULL)",
+        )
+        .bind(bot)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if leased {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let began = std::time::Instant::now();
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "no full summary batch after shutdown"
+    );
+    let (leased, failures): (bool, i32) = sqlx::query_as(
+        "SELECT lease_token IS NOT NULL, failures FROM memory_job WHERE bot_id = $1",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(!leased, "the job was released for the next start");
+    assert_eq!(failures, 0, "stopping is not a provider failure");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
+    let app = TestApp::installed().await;
+    recipe(&app, 64).await;
+    let bot: Uuid = app.create_bot("Wait", "wait").await.parse().unwrap();
+    add(&app, bot, "long", &"x".repeat(200)).await;
+    let fake = Arc::new(Scripted::default());
+    let worker = compactor(&app, fake.clone());
+    // Ten capacity waits while every slot is held.
+    let held: Vec<_> = (0..4)
+        .map(|_| app.scheduler.try_begin_summary(4).unwrap())
+        .collect();
+    for _ in 0..10 {
+        sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
+            .bind(bot)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+        worker.drain().await.unwrap();
+    }
+    drop(held);
+    sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    fake.replies
+        .lock()
+        .unwrap()
+        .push_back(Err("provider error".into()));
+    worker.drain().await.unwrap();
+    let (failures, wait): (i32, f64) = sqlx::query_as(
+        "SELECT failures, extract(epoch FROM available_at - now())::float8 FROM memory_job WHERE bot_id = $1",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(failures, 1);
+    assert!(
+        wait > 30.0 && wait <= 61.0,
+        "first failure backs off one minute: {wait}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_larger_than_the_session_budget_is_reported_omitted() {
+    let app = TestApp::installed().await;
+    let reply = app
+        .owner(
+            "PATCH",
+            "/v1/settings/memory",
+            Some(json!({ "node_bytes": 65536, "view_high": 400000, "view_low": 300000 })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let bot: Uuid = app.create_bot("Huge", "huge").await.parse().unwrap();
+    add(&app, bot, "huge", &"h".repeat(30_000)).await;
+    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    let memory = memory_tree::session_context(&app.db.pool, bot)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        memory.text.contains("Entries before 1 are omitted"),
+        "{}",
+        &memory.text[..300]
+    );
+    assert!(memory.text.len() <= memory_tree::SESSION_MEMORY_BYTES);
 }

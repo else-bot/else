@@ -33,8 +33,16 @@ pub struct Scheduler {
     cancel_grace: Duration,
     tasks: TaskTracker,
     grants: Arc<Grants>,
-    /// Memory summaries running; they share the provider budget.
-    summaries: std::sync::atomic::AtomicUsize,
+    /// Provider slots in use: turns (reserved before their claim) and
+    /// memory summaries share one count, so together they never exceed
+    /// `max_active`.
+    slots: Mutex<Slots>,
+}
+
+#[derive(Default)]
+struct Slots {
+    used: usize,
+    summaries: usize,
 }
 
 /// A provider slot held by one memory summary. Released on drop.
@@ -44,9 +52,11 @@ pub struct SummaryPermit {
 
 impl Drop for SummaryPermit {
     fn drop(&mut self) {
-        self.scheduler
-            .summaries
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut slots = self.scheduler.slots();
+            slots.used -= 1;
+            slots.summaries -= 1;
+        }
         self.scheduler.wake();
     }
 }
@@ -74,7 +84,7 @@ impl Scheduler {
             cancel_grace,
             grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
-            summaries: std::sync::atomic::AtomicUsize::new(0),
+            slots: Mutex::new(Slots::default()),
         })
     }
 
@@ -91,27 +101,33 @@ impl Scheduler {
     /// are low priority: the caller checks first that no turn is waiting,
     /// and at most `limit` run at once.
     pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
-        use std::sync::atomic::Ordering;
-        let running = self.running().len();
-        let mut current = self.summaries.load(Ordering::SeqCst);
-        loop {
-            if current >= limit || running + current >= self.max_active {
-                return None;
-            }
-            match self.summaries.compare_exchange(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    return Some(SummaryPermit {
-                        scheduler: self.clone(),
-                    });
-                }
-                Err(actual) => current = actual,
-            }
+        let mut slots = self.slots();
+        if slots.summaries >= limit || slots.used >= self.max_active {
+            return None;
         }
+        slots.used += 1;
+        slots.summaries += 1;
+        Some(SummaryPermit {
+            scheduler: self.clone(),
+        })
+    }
+
+    fn slots(&self) -> std::sync::MutexGuard<'_, Slots> {
+        self.slots.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Reserve a slot for a turn before claiming it from the database.
+    fn reserve_turn(&self) -> bool {
+        let mut slots = self.slots();
+        if slots.used >= self.max_active {
+            return false;
+        }
+        slots.used += 1;
+        true
+    }
+
+    fn release_turn(&self) {
+        self.slots().used -= 1;
     }
 
     /// Hint that new work may be eligible. Rows remain authoritative.
@@ -176,11 +192,20 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        while self.running().len() + self.summaries.load(std::sync::atomic::Ordering::SeqCst)
-            < self.max_active
-        {
-            let Some(turn_id) = turns::claim_next(&self.pool, &[]).await? else {
-                break;
+        // The slot is reserved before the claim, so a summary cannot take
+        // it while the claim is in flight.
+        while self.reserve_turn() {
+            let claimed = turns::claim_next(&self.pool, &[]).await;
+            let turn_id = match claimed {
+                Ok(Some(turn_id)) => turn_id,
+                Ok(None) => {
+                    self.release_turn();
+                    break;
+                }
+                Err(err) => {
+                    self.release_turn();
+                    return Err(err);
+                }
             };
             // Start each claim before the next query, so an error in a later
             // claim cannot strand this one.
@@ -191,6 +216,7 @@ impl Scheduler {
                 this.execute(turn_id, token).await;
                 this.grants.revoke_turn(turn_id);
                 this.running().remove(&turn_id);
+                this.release_turn();
                 this.wake();
             });
         }

@@ -2,17 +2,20 @@
 //!
 //! It copies an original that fits a node and joins two children that fit
 //! together. Anything longer is summarized by a no-tools provider attempt
-//! when one is configured and a provider slot is free (summaries are low
-//! priority and share the turn budget); otherwise the job waits with an
-//! explicit reason and the originals stay complete and traversable. No text
-//! is ever truncated to make it fit.
+//! when one is configured. A summary runs as its own task, so copies and
+//! joins for every bot keep progressing meanwhile; it takes a provider slot
+//! per attempt, only while no turn is queued, and releases it between
+//! attempts. Without a provider the job waits with an explicit reason and
+//! the originals stay complete and traversable. No text is ever truncated
+//! to make it fit.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::json;
 use sqlx::PgPool;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -21,8 +24,11 @@ use crate::app::providers::Profile;
 use crate::db::memory_tree::{self as store, Completion, Job};
 use crate::scheduler::Scheduler;
 
-/// Covers a summary with all its attempts; deterministic work needs little.
-const LEASE: Duration = Duration::from_secs(15 * 60);
+/// Longer than a whole summary batch (`BATCH_LIMIT` plus one attempt).
+const LEASE: Duration = Duration::from_secs(20 * 60);
+/// A summary batch starts no attempt after this long, so with an attempt's
+/// own deadline it ends well inside the lease.
+const BATCH_LIMIT: Duration = Duration::from_secs(12 * 60);
 /// Output attempts per claim, each told the measured size of the last.
 const SUMMARY_ATTEMPTS: usize = 5;
 /// Summaries in flight at once (the reference allows up to eight).
@@ -36,11 +42,13 @@ const IDLE: Duration = Duration::from_millis(500);
 pub trait Summarizer: Send + Sync {
     fn id(&self) -> &'static str;
     fn available(&self) -> bool;
+    /// One attempt. Cancellation stops it and reaps its process.
     async fn summarize(
         &self,
         bot_id: Uuid,
         profile: &Profile,
         prompt: &str,
+        cancel: &CancellationToken,
     ) -> Result<String, String>;
 }
 
@@ -51,6 +59,8 @@ pub enum Step {
     Built,
     Deferred,
     Stale,
+    /// A summary task started for this job.
+    Summarizing,
 }
 
 #[derive(Clone)]
@@ -58,6 +68,8 @@ pub struct Compactor {
     pool: PgPool,
     summarizer: Option<Arc<dyn Summarizer>>,
     scheduler: Option<Arc<Scheduler>>,
+    cancel: CancellationToken,
+    summary: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Compactor {
@@ -67,6 +79,8 @@ impl Compactor {
             pool,
             summarizer: None,
             scheduler: None,
+            cancel: CancellationToken::new(),
+            summary: Arc::default(),
         }
     }
 
@@ -77,9 +91,36 @@ impl Compactor {
         scheduler: Arc<Scheduler>,
     ) -> Self {
         Self {
-            pool,
             summarizer: Some(summarizer),
             scheduler: Some(scheduler),
+            ..Self::deterministic(pool)
+        }
+    }
+
+    fn summary_running(&self) -> bool {
+        self.summary
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+    }
+
+    fn summary_pending(&self) -> bool {
+        self.summary
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
+    /// Wait for the summary task, if one runs.
+    pub async fn settle(&self) {
+        let handle = self
+            .summary
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
         }
     }
 
@@ -105,102 +146,156 @@ impl Compactor {
         });
         match prepared.build {
             Build::Exact { method, body } => {
-                self.finish(&job, method, &body, &prepared.input_hash, audit)
-                    .await
+                match store::complete(pool, &job, method, &body, &prepared.input_hash, audit)
+                    .await?
+                {
+                    Completion::Done => Ok(Step::Built),
+                    Completion::Stale => Ok(Step::Stale),
+                }
             }
             Build::NeedsSummary { input } => {
-                self.summarize(&job, &input, &prepared.input_hash, audit)
-                    .await
+                let Some(summarizer) = self.summarizer.as_ref().filter(|s| s.available()) else {
+                    let reason = format!(
+                        "{} bytes exceed the {}-byte node limit and no summary provider is available",
+                        input.len(),
+                        job.recipe.node_bytes
+                    );
+                    store::defer(
+                        pool,
+                        &job,
+                        "summary_unavailable",
+                        Some(&reason),
+                        NO_SUMMARIZER_RETRY,
+                    )
+                    .await?;
+                    return Ok(Step::Deferred);
+                };
+                if self.summary_running() || self.cancel.is_cancelled() {
+                    // Woken as soon as the running summary ends.
+                    store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
+                        .await?;
+                    return Ok(Step::Deferred);
+                }
+                let task = SummaryTask {
+                    pool: pool.clone(),
+                    summarizer: summarizer.clone(),
+                    scheduler: self.scheduler.clone().expect("set with a summarizer"),
+                    cancel: self.cancel.clone(),
+                    job,
+                    input,
+                    input_hash: prepared.input_hash,
+                    audit,
+                };
+                let wake_pool = pool.clone();
+                let handle = tokio::spawn(async move {
+                    if let Err(err) = task.run().await {
+                        tracing::warn!(error = %err, "memory summary task failed");
+                    }
+                    // Jobs that waited for this summary may go next.
+                    let woken = sqlx::query(
+                        "UPDATE memory_job SET available_at = now()
+                         WHERE blocked_reason = 'waiting_for_summary' AND lease_token IS NULL",
+                    )
+                    .execute(&wake_pool)
+                    .await;
+                    if let Err(err) = woken {
+                        tracing::warn!(error = %err, "waking memory jobs failed");
+                    }
+                });
+                *self.summary.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+                Ok(Step::Summarizing)
             }
         }
     }
 
-    async fn finish(
-        &self,
-        job: &Job,
-        method: &str,
-        body: &str,
-        input_hash: &[u8],
-        audit: serde_json::Value,
-    ) -> Result<Step, sqlx::Error> {
-        match store::complete(&self.pool, job, method, body, input_hash, audit).await? {
-            Completion::Done => Ok(Step::Built),
-            Completion::Stale => Ok(Step::Stale),
+    /// Process every job that is available now, waiting for summaries
+    /// (tests and catch-up).
+    pub async fn drain(&self) -> Result<usize, sqlx::Error> {
+        let mut done = 0;
+        for _ in 0..1_000_000 {
+            match self.step().await? {
+                // A finished summary wakes the jobs that waited for it.
+                Step::Idle if self.summary_pending() => self.settle().await,
+                Step::Idle => break,
+                _ => done += 1,
+            }
         }
+        Ok(done)
     }
 
+    /// Run until cancelled; a running summary is stopped and awaited.
+    /// Errors are logged and retried after a pause.
+    pub async fn run(mut self, cancel: CancellationToken) {
+        self.cancel = cancel.clone();
+        loop {
+            let pause = match self.step().await {
+                Ok(Step::Idle) => IDLE,
+                Ok(_) => Duration::ZERO,
+                Err(err) => {
+                    tracing::warn!(error = %err, "memory compactor step failed");
+                    Duration::from_secs(5)
+                }
+            };
+            if cancel.is_cancelled() {
+                break;
+            }
+            if pause.is_zero() {
+                continue;
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(pause) => {}
+            }
+        }
+        self.settle().await;
+    }
+}
+
+/// One job's summary attempts, run beside the compactor loop.
+struct SummaryTask {
+    pool: PgPool,
+    summarizer: Arc<dyn Summarizer>,
+    scheduler: Arc<Scheduler>,
+    cancel: CancellationToken,
+    job: Job,
+    input: String,
+    input_hash: Vec<u8>,
+    audit: serde_json::Value,
+}
+
+impl SummaryTask {
     async fn wait(
         &self,
-        job: &Job,
         reason: &str,
         error: Option<&str>,
         retry: Duration,
-    ) -> Result<Step, sqlx::Error> {
-        store::defer(&self.pool, job, reason, error, retry).await?;
-        Ok(Step::Deferred)
+        failure: bool,
+    ) -> Result<(), sqlx::Error> {
+        store::defer_counting(&self.pool, &self.job, reason, error, retry, failure).await
     }
 
-    async fn summarize(
-        &self,
-        job: &Job,
-        input: &str,
-        input_hash: &[u8],
-        mut audit: serde_json::Value,
-    ) -> Result<Step, sqlx::Error> {
-        let pool = &self.pool;
-        let (Some(summarizer), Some(scheduler)) = (&self.summarizer, &self.scheduler) else {
-            let reason = format!(
-                "{} bytes exceed the {}-byte node limit and no summary provider is configured",
-                input.len(),
-                job.recipe.node_bytes
-            );
+    /// Back off by provider failures only (capacity waits do not count).
+    async fn fail(&self, reason: &str, error: &str) -> Result<(), sqlx::Error> {
+        let failures = store::failures(&self.pool, &self.job).await? + 1;
+        self.wait(reason, Some(error), backoff(failures), true)
+            .await
+    }
+
+    async fn run(mut self) -> Result<(), sqlx::Error> {
+        let pool = self.pool.clone();
+        let job = self.job.clone();
+        let Some(profile) = crate::db::profiles::get(&pool, self.summarizer.id()).await? else {
             return self
                 .wait(
-                    job,
-                    "summary_unavailable",
-                    Some(&reason),
-                    NO_SUMMARIZER_RETRY,
-                )
-                .await;
-        };
-        if !summarizer.available() {
-            let reason = "the summary provider is unavailable";
-            return self
-                .wait(
-                    job,
-                    "summary_unavailable",
-                    Some(reason),
-                    NO_SUMMARIZER_RETRY,
-                )
-                .await;
-        }
-        let Some(profile) = crate::db::profiles::get(pool, summarizer.id()).await? else {
-            return self
-                .wait(
-                    job,
                     "summary_unavailable",
                     Some("no saved profile"),
                     NO_SUMMARIZER_RETRY,
+                    false,
                 )
                 .await;
         };
-        // Low priority: never while a turn waits, and only in a free slot.
-        let waiting: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turns WHERE status = 'queued')")
-                .fetch_one(pool)
-                .await?;
-        let permit = if waiting {
-            None
-        } else {
-            scheduler.try_begin_summary(SUMMARY_CONCURRENCY)
-        };
-        let Some(_permit) = permit else {
-            return self
-                .wait(job, "waiting_for_capacity", None, CAPACITY_RETRY)
-                .await;
-        };
         let (revision, context) = store::context_before(
-            pool,
+            &pool,
             job.bot_id,
             job.generation,
             job.node.start,
@@ -213,24 +308,57 @@ impl Compactor {
                 .map(|(n, b)| (*n, b.as_str()))
                 .collect::<Vec<_>>(),
         );
+        let started = Instant::now();
         let mut sizes = Vec::new();
         let mut previous = None;
         for _ in 0..SUMMARY_ATTEMPTS {
+            if self.cancel.is_cancelled() {
+                return self
+                    .wait(
+                        "waiting_for_capacity",
+                        Some("the API is stopping"),
+                        CAPACITY_RETRY,
+                        false,
+                    )
+                    .await;
+            }
+            if started.elapsed() > BATCH_LIMIT {
+                break;
+            }
+            // Each attempt takes a slot only while no turn waits, and gives
+            // it back afterwards, so an arriving message is not held up by
+            // the remaining attempts.
+            let waiting: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turns WHERE status = 'queued')")
+                    .fetch_one(&pool)
+                    .await?;
+            let permit = if waiting {
+                None
+            } else {
+                self.scheduler.try_begin_summary(SUMMARY_CONCURRENCY)
+            };
+            let Some(permit) = permit else {
+                return self
+                    .wait("waiting_for_capacity", None, CAPACITY_RETRY, false)
+                    .await;
+            };
             let prompt = memory_tree::summary_prompt(
                 job.node,
-                input,
+                &self.input,
                 &context_text,
                 job.recipe.node_bytes,
                 previous,
             );
-            match summarizer
-                .summarize(job.bot_id, &profile.profile(), &prompt)
-                .await
-            {
+            let result = self
+                .summarizer
+                .summarize(job.bot_id, &profile.profile(), &prompt, &self.cancel)
+                .await;
+            drop(permit);
+            match result {
                 Ok(text) if !text.is_empty() && text.len() <= job.recipe.node_bytes => {
                     sizes.push(text.len());
-                    audit["model"] = json!({
-                        "provider": summarizer.id(),
+                    self.audit["model"] = json!({
+                        "provider": self.summarizer.id(),
                         "model": profile.model,
                         "reasoning_effort": profile.reasoning_effort,
                         "service_tier": profile.service_tier,
@@ -238,81 +366,58 @@ impl Compactor {
                         "prompt_version": crate::providers::codex::SUMMARY_PROMPT_VERSION,
                         "attempt_bytes": sizes,
                         "output_bytes": text.len(),
-                        "input_bytes": input.len(),
+                        "input_bytes": self.input.len(),
                     });
-                    audit["context"] = json!({
+                    self.audit["context"] = json!({
                         "view_revision": revision,
                         "nodes": context.iter().map(|(n, _)| json!([n.start, n.span])).collect::<Vec<_>>(),
                         "bytes": context_text.len(),
                     });
-                    return self.finish(job, "model", &text, input_hash, audit).await;
+                    store::complete(
+                        &pool,
+                        &job,
+                        "model",
+                        &text,
+                        &self.input_hash,
+                        self.audit.clone(),
+                    )
+                    .await?;
+                    return Ok(());
                 }
                 Ok(text) => {
                     // Oversized or empty: never cut it; ask again with the measure.
                     sizes.push(text.len());
                     previous = Some(text.len());
                 }
+                Err(_) if self.cancel.is_cancelled() => {
+                    return self
+                        .wait(
+                            "waiting_for_capacity",
+                            Some("the API is stopping"),
+                            CAPACITY_RETRY,
+                            false,
+                        )
+                        .await;
+                }
                 Err(error) => {
                     tracing::warn!(bot = %job.bot_id, node = ?job.node, %error, "memory summary failed");
-                    return self
-                        .wait(job, "summary_failed", Some(&error), backoff(job.attempts))
-                        .await;
+                    return self.fail("summary_failed", &error).await;
                 }
             }
         }
         let reason = format!(
-            "{SUMMARY_ATTEMPTS} attempts over the {}-byte limit: {sizes:?} bytes",
+            "{} attempts over the {}-byte limit: {sizes:?} bytes",
+            sizes.len(),
             job.recipe.node_bytes
         );
-        self.wait(
-            job,
-            "summary_oversized",
-            Some(&reason),
-            backoff(job.attempts),
-        )
-        .await
-    }
-
-    /// Process every job that is available now (tests and catch-up).
-    pub async fn drain(&self) -> Result<usize, sqlx::Error> {
-        let mut done = 0;
-        for _ in 0..1_000_000 {
-            match self.step().await? {
-                Step::Idle => break,
-                _ => done += 1,
-            }
-        }
-        Ok(done)
-    }
-
-    /// Run until cancelled. Errors are logged and retried after a pause.
-    pub async fn run(self, cancel: CancellationToken) {
-        loop {
-            let pause = match self.step().await {
-                Ok(Step::Idle) => IDLE,
-                Ok(_) => Duration::ZERO,
-                Err(err) => {
-                    tracing::warn!(error = %err, "memory compactor step failed");
-                    Duration::from_secs(5)
-                }
-            };
-            if pause.is_zero() {
-                if cancel.is_cancelled() {
-                    return;
-                }
-                continue;
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(pause) => {}
-            }
-        }
+        self.fail("summary_oversized", &reason).await
     }
 }
 
-/// Bounded exponential backoff after failed claims: 1 minute doubling to 1 hour.
-pub fn backoff(claims: i32) -> Duration {
-    let minutes = 1u64 << (claims.clamp(1, 7) - 1);
+/// Bounded exponential backoff after provider failures: 1 minute doubling
+/// to 1 hour.
+pub fn backoff(failures: i32) -> Duration {
+    let minutes = 1u64 << (failures.clamp(1, 7) - 1);
     Duration::from_secs(60 * minutes.min(60))
 }
 
