@@ -460,6 +460,27 @@ async fn cursor_errors_are_reported_per_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ended_channels_do_not_use_up_the_subscription_limit() {
+    let server = Server::start().await;
+    let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
+    // 40 channels that end at once (no cursor) leave no subscription behind.
+    for _ in 0..40 {
+        op(
+            &mut socket,
+            json!({"op": "subscribe", "channel": format!("bot:{}", Uuid::new_v4())}),
+        )
+        .await;
+    }
+    for _ in 0..40 {
+        let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(reply["error"]["code"], "cursor_required", "{reply}");
+    }
+    op(&mut socket, json!({"op": "subscribe", "channel": "bots"})).await;
+    let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(reply["event"], "bots.snapshot", "{reply}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
     let server = Server::start().await;
     let bot = server.app.create_bot("Temp", "temporary").await;

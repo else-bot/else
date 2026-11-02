@@ -27,7 +27,7 @@
 //! 30 seconds; outgoing delivery is bounded.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use axum::Router;
@@ -56,6 +56,7 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
 const WRITE_LIMIT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_LIMIT: Duration = Duration::from_secs(5);
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/ws", get(upgrade))
@@ -78,24 +79,149 @@ enum ClientMessage {
     },
 }
 
-/// One message queued for the client, tagged with its channel so messages
-/// of a revoked channel can be dropped before they are written.
+/// One message queued for the client. Channel messages carry the
+/// subscription generation that produced them, so the writer drops anything
+/// from a subscription that was since replaced, unsubscribed, or revoked.
 struct Outgoing {
-    channel: Option<String>,
+    tag: Option<Tag>,
     body: Value,
 }
 
-/// Channels whose data must no longer be delivered (deleted bots).
-type Revoked = Arc<Mutex<HashSet<String>>>;
+struct Tag {
+    channel: String,
+    generation: u64,
+    bot: Option<Uuid>,
+    /// The subscription's final message (an error). Delivering it retires
+    /// the subscription.
+    last: bool,
+}
+
+/// Subscription state shared by the reader, the channel workers, and the
+/// writer of one connection.
+#[derive(Default)]
+struct Registry {
+    /// The current subscription of each channel.
+    channels: HashMap<String, Entry>,
+    /// Bots seen deleted on this connection. Their data is never written
+    /// again, even after a new subscription.
+    deleted: HashSet<Uuid>,
+    next_generation: u64,
+}
+
+struct Entry {
+    generation: u64,
+    /// Whether its worker still runs; only running ones count against the
+    /// subscription limit.
+    running: bool,
+}
+
+impl Registry {
+    fn open(&mut self, channel: &str, running: bool) -> u64 {
+        self.next_generation += 1;
+        let generation = self.next_generation;
+        self.channels.insert(
+            channel.to_owned(),
+            Entry {
+                generation,
+                running,
+            },
+        );
+        generation
+    }
+
+    fn running(&self) -> usize {
+        self.channels.values().filter(|e| e.running).count()
+    }
+
+    /// Whether the writer may send this message; retires the subscription
+    /// when its final message goes out.
+    fn admit(&mut self, tag: &Tag) -> bool {
+        let current = self
+            .channels
+            .get(&tag.channel)
+            .is_some_and(|e| e.generation == tag.generation);
+        if !current {
+            return false;
+        }
+        if tag.last {
+            self.channels.remove(&tag.channel);
+            return true;
+        }
+        !tag.bot.is_some_and(|bot| self.deleted.contains(&bot))
+    }
+}
+
+type Shared = Arc<Mutex<Registry>>;
+
+fn lock(registry: &Shared) -> MutexGuard<'_, Registry> {
+    registry.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A channel worker's handle on its own subscription.
+struct Sub {
+    channel: String,
+    generation: u64,
+    bot: Option<Uuid>,
+    out: mpsc::Sender<Outgoing>,
+    registry: Shared,
+    token: CancellationToken,
+}
+
+impl Sub {
+    fn message(&self, body: Value, last: bool) -> Outgoing {
+        Outgoing {
+            tag: Some(Tag {
+                channel: self.channel.clone(),
+                generation: self.generation,
+                bot: self.bot,
+                last,
+            }),
+            body,
+        }
+    }
+
+    /// Queue a message. False once the subscription or connection ended;
+    /// a worker never stays blocked on a full queue after it is retired.
+    async fn send(&self, body: Value) -> bool {
+        let message = self.message(body, false);
+        tokio::select! {
+            _ = self.token.cancelled() => false,
+            sent = self.out.send(message) => sent.is_ok(),
+        }
+    }
+
+    /// End the subscription with an error, its final message.
+    async fn fail(&self, code: &str, message: &str) {
+        if let Some(entry) = lock(&self.registry).channels.get_mut(&self.channel)
+            && entry.generation == self.generation
+        {
+            entry.running = false;
+        }
+        let body =
+            json!({ "channel": self.channel, "error": { "code": code, "message": message } });
+        let message = self.message(body, true);
+        tokio::select! {
+            _ = self.token.cancelled() => {}
+            _ = self.out.send(message) => {}
+        }
+    }
+
+    /// End a bot's subscription because the bot was deleted. Data already
+    /// queued for it is dropped by the writer from now on.
+    async fn deleted(&self, bot: Uuid) {
+        lock(&self.registry).deleted.insert(bot);
+        self.fail("bot_deleted", "This bot has been deleted.").await;
+    }
+}
 
 async fn connection(state: Arc<AppState>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(OUTGOING);
-    let revoked: Revoked = Arc::default();
+    let registry: Shared = Arc::default();
     let closed = CancellationToken::new();
 
     // Writer: the only task touching the sink.
-    let writer_revoked = revoked.clone();
+    let writer_registry = registry.clone();
     let writer_closed = closed.clone();
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_EVERY);
@@ -106,12 +232,9 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                 _ = ping.tick() => Message::Ping(Vec::new().into()),
                 next = out_rx.recv() => {
                     let Some(next) = next else { break };
-                    let is_error = next.body.get("error").is_some();
-                    let dropped = next.channel.as_ref().is_some_and(|c| {
-                        writer_revoked.lock().unwrap_or_else(|p| p.into_inner()).contains(c)
-                    });
-                    // A revoked channel's final error is still delivered.
-                    if dropped && !is_error {
+                    if let Some(tag) = &next.tag
+                        && !lock(&writer_registry).admit(tag)
+                    {
                         continue;
                     }
                     Message::Text(next.body.to_string().into())
@@ -123,10 +246,12 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
             }
         }
         writer_closed.cancel();
-        let _ = sink.close().await;
+        // Closing flushes; a peer that stopped reading must not hold it open.
+        let _ = tokio::time::timeout(CLOSE_LIMIT, sink.close()).await;
     });
 
-    let mut subscriptions: HashMap<String, CancellationToken> = HashMap::new();
+    // Tokens of subscriptions started by this reader, by channel.
+    let mut tokens: HashMap<String, CancellationToken> = HashMap::new();
     loop {
         let next = tokio::select! {
             _ = closed.cancelled() => break,
@@ -146,109 +271,99 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
         let parsed: Result<ClientMessage, _> = serde_json::from_str(&text);
         match parsed {
             Err(_) => {
-                send(
-                    &out_tx,
-                    None,
-                    json!({ "error": {
-                        "code": "invalid_message",
-                        "message": "Expected {\"op\":\"subscribe\"|\"unsubscribe\",\"channel\":…}.",
-                    }}),
-                )
-                .await;
+                let body = json!({ "error": {
+                    "code": "invalid_message",
+                    "message": "Expected {\"op\":\"subscribe\"|\"unsubscribe\",\"channel\":…}.",
+                }});
+                if out_tx.send(Outgoing { tag: None, body }).await.is_err() {
+                    break;
+                }
             }
             Ok(ClientMessage::Unsubscribe { channel }) => {
-                if let Some(token) = subscriptions.remove(&channel) {
+                lock(&registry).channels.remove(&channel);
+                if let Some(token) = tokens.remove(&channel) {
                     token.cancel();
                 }
             }
             Ok(ClientMessage::Subscribe { channel, cursor }) => {
-                if let Some(old) = subscriptions.remove(&channel) {
+                if let Some(old) = tokens.remove(&channel) {
                     old.cancel();
                 }
-                if subscriptions.len() >= MAX_SUBSCRIPTIONS {
-                    channel_error(
-                        &out_tx,
-                        &channel,
-                        "too_many_subscriptions",
-                        "Unsubscribe first.",
-                    )
-                    .await;
-                    continue;
-                }
+                let bot = channel.strip_prefix("bot:").map(|id| id.parse::<Uuid>());
+                let refusal = {
+                    let mut registry = lock(&registry);
+                    registry.channels.remove(&channel);
+                    tokens.retain(|c, _| registry.channels.contains_key(c));
+                    if registry.running() >= MAX_SUBSCRIPTIONS {
+                        Some(("too_many_subscriptions", "Unsubscribe first."))
+                    } else {
+                        match &bot {
+                            Some(Err(_)) => Some(("not_found", "Unknown bot.")),
+                            None if channel != "bots" => {
+                                Some(("unknown_channel", "Use bots or bot:<id>."))
+                            }
+                            _ => None,
+                        }
+                    }
+                };
                 let token = closed.child_token();
-                if channel == "bots" {
-                    tokio::spawn(bots_channel(state.clone(), out_tx.clone(), token.clone()));
-                } else if let Some(bot) = channel.strip_prefix("bot:") {
-                    let Ok(bot_id) = bot.parse::<Uuid>() else {
-                        channel_error(&out_tx, &channel, "not_found", "Unknown bot.").await;
-                        continue;
-                    };
-                    revoked
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .remove(&channel);
-                    tokio::spawn(bot_channel(
-                        state.clone(),
-                        bot_id,
-                        channel.clone(),
-                        cursor,
-                        out_tx.clone(),
-                        revoked.clone(),
-                        token.clone(),
-                    ));
-                } else {
-                    channel_error(
-                        &out_tx,
-                        &channel,
-                        "unknown_channel",
-                        "Use bots or bot:<id>.",
-                    )
-                    .await;
+                let generation = lock(&registry).open(&channel, refusal.is_none());
+                let sub = Sub {
+                    channel: channel.clone(),
+                    generation,
+                    bot: bot.and_then(Result::ok),
+                    out: out_tx.clone(),
+                    registry: registry.clone(),
+                    token: token.clone(),
+                };
+                if let Some((code, message)) = refusal {
+                    sub.fail(code, message).await;
                     continue;
                 }
-                subscriptions.insert(channel, token);
+                match sub.bot {
+                    Some(bot_id) => {
+                        tokio::spawn(bot_channel(state.clone(), bot_id, cursor, sub));
+                    }
+                    None => {
+                        tokio::spawn(bots_channel(state.clone(), sub));
+                    }
+                }
+                tokens.insert(channel, token);
             }
         }
     }
     closed.cancel();
-    for token in subscriptions.into_values() {
+    for token in tokens.into_values() {
         token.cancel();
     }
     let _ = writer.await;
 }
 
-async fn send(out: &mpsc::Sender<Outgoing>, channel: Option<&str>, body: Value) -> bool {
-    out.send(Outgoing {
-        channel: channel.map(str::to_owned),
-        body,
-    })
-    .await
-    .is_ok()
+enum Read<T> {
+    Done(T),
+    /// The subscription ended while reading.
+    Cancelled,
+    /// The read failed or took too long.
+    Failed,
 }
 
-async fn channel_error(out: &mpsc::Sender<Outgoing>, channel: &str, code: &str, message: &str) {
-    send(
-        out,
-        Some(channel),
-        json!({ "channel": channel, "error": { "code": code, "message": message } }),
-    )
-    .await;
-}
-
-/// Run a database read unless the channel ends or it takes too long.
+/// Run a database read unless the subscription ends or it takes too long.
 async fn guarded<T>(
     token: &CancellationToken,
     fut: impl std::future::Future<Output = Result<T, sqlx::Error>>,
-) -> Option<T> {
+) -> Read<T> {
     tokio::select! {
-        _ = token.cancelled() => None,
+        _ = token.cancelled() => Read::Cancelled,
         result = tokio::time::timeout(QUERY_TIMEOUT, fut) => match result {
-            Ok(Ok(value)) => Some(value),
+            Ok(Ok(value)) => Read::Done(value),
             Ok(Err(err)) => {
                 tracing::warn!(error = %err, "websocket database read failed");
-                None
+                Read::Failed
             }
-            Err(_) => None,
+            Err(_) => {
+                tracing::warn!("websocket database read timed out");
+                Read::Failed
+            }
         },
     }
 }
@@ -279,148 +394,144 @@ async fn wait(
 }
 
 /// `bots`: the full list (with deletion receipts still pending) and the
-/// default pointer, sent on subscribe and whenever it changes.
-async fn bots_channel(state: Arc<AppState>, out: mpsc::Sender<Outgoing>, token: CancellationToken) {
+/// default pointer, sent on subscribe and whenever it changes. A failed read
+/// is retried.
+async fn bots_channel(state: Arc<AppState>, sub: Sub) {
     let mut wake = state.events.subscribe();
     let mut last: Option<Value> = None;
     loop {
-        let Some(listing) = guarded(&token, bots::list(&state.db, true)).await else {
-            if token.is_cancelled() {
-                return;
+        match guarded(&sub.token, bots::list(&state.db, true)).await {
+            Read::Cancelled => return,
+            Read::Failed => {}
+            Read::Done(listing) => {
+                let data = json!({
+                    "default_bot_id": listing.default_bot_id,
+                    "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
+                });
+                if last.as_ref() != Some(&data) {
+                    let body = json!({ "channel": "bots", "event": "bots.snapshot", "data": data });
+                    if !sub.send(body).await {
+                        return;
+                    }
+                    last = Some(data);
+                }
             }
-            if !wait(&mut wake, None, &token).await {
-                return;
-            }
-            continue;
-        };
-        let data = json!({
-            "default_bot_id": listing.default_bot_id,
-            "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
-        });
-        if last.as_ref() != Some(&data) {
-            let body = json!({ "channel": "bots", "event": "bots.snapshot", "data": data });
-            if !send(&out, Some("bots"), body).await {
-                return;
-            }
-            last = Some(data);
         }
-        if !wait(&mut wake, None, &token).await {
+        if !wait(&mut wake, None, &sub.token).await {
             return;
         }
     }
 }
 
-/// `bot:<id>`: committed journal events after the cursor, in order.
-async fn bot_channel(
-    state: Arc<AppState>,
-    bot_id: Uuid,
-    channel: String,
-    cursor: Option<String>,
-    out: mpsc::Sender<Outgoing>,
-    revoked: Revoked,
-    token: CancellationToken,
-) {
+/// Whether the bot is still active. Otherwise the subscription has been
+/// ended with the matching error (or was cancelled).
+async fn still_active(state: &AppState, bot_id: Uuid, sub: &Sub) -> bool {
+    match guarded(&sub.token, bot_is_active(state, bot_id)).await {
+        Read::Done(Some((true, _))) => true,
+        Read::Done(Some((false, _))) => {
+            sub.deleted(bot_id).await;
+            false
+        }
+        Read::Done(None) => {
+            sub.fail("not_found", "Unknown bot.").await;
+            false
+        }
+        Read::Cancelled => false,
+        Read::Failed => {
+            sub.fail("unavailable", "Resubscribe from the last cursor.")
+                .await;
+            false
+        }
+    }
+}
+
+/// `bot:<id>`: committed journal events after the cursor, in order. Any
+/// failure ends the subscription with an error, so the client resubscribes
+/// or reloads instead of waiting on a silent channel.
+async fn bot_channel(state: Arc<AppState>, bot_id: Uuid, cursor: Option<String>, sub: Sub) {
     let mut wake = state.events.subscribe();
     let Some(cursor) = cursor else {
-        return channel_error(
-            &out,
-            &channel,
-            "cursor_required",
-            "Subscribe with a snapshot's event_cursor.",
-        )
-        .await;
+        return sub
+            .fail(
+                "cursor_required",
+                "Subscribe with a snapshot's event_cursor.",
+            )
+            .await;
     };
     let Some((instance, cursor_bot, mut after)) = parse_cursor(&cursor) else {
-        return channel_error(
-            &out,
-            &channel,
-            "invalid_cursor",
-            "The event cursor is malformed.",
-        )
-        .await;
+        return sub
+            .fail("invalid_cursor", "The event cursor is malformed.")
+            .await;
     };
     if cursor_bot != bot_id {
-        return channel_error(
-            &out,
-            &channel,
-            "invalid_cursor",
-            "The cursor belongs to another bot.",
-        )
-        .await;
+        return sub
+            .fail("invalid_cursor", "The cursor belongs to another bot.")
+            .await;
     }
-    match guarded(&token, bot_is_active(&state, bot_id)).await {
-        None if token.is_cancelled() => return,
-        None => return channel_error(&out, &channel, "unavailable", "Try again.").await,
-        Some(None) => return channel_error(&out, &channel, "not_found", "Unknown bot.").await,
-        Some(Some((false, _))) => {
-            return channel_error(&out, &channel, "bot_deleted", "This bot has been deleted.")
-                .await;
-        }
-        Some(Some((true, last))) => {
+    match guarded(&sub.token, bot_is_active(&state, bot_id)).await {
+        Read::Cancelled => return,
+        Read::Failed => return sub.fail("unavailable", "Try again.").await,
+        Read::Done(None) => return sub.fail("not_found", "Unknown bot.").await,
+        Read::Done(Some((false, _))) => return sub.deleted(bot_id).await,
+        Read::Done(Some((true, last))) => {
             if instance != state.server_instance_id || after > last {
-                return channel_error(
-                    &out,
-                    &channel,
-                    "cursor_reset_required",
-                    "The event cursor is no longer valid. Load a fresh snapshot.",
-                )
-                .await;
+                return sub
+                    .fail(
+                        "cursor_reset_required",
+                        "The event cursor is no longer valid. Load a fresh snapshot.",
+                    )
+                    .await;
             }
         }
     }
-    let revoke = |revoked: &Revoked| {
-        revoked
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(channel.clone());
-    };
     loop {
-        let Some(rows) = guarded(&token, events::after(&state.db, bot_id, after, BATCH)).await
-        else {
-            return;
+        let rows = match guarded(&sub.token, events::after(&state.db, bot_id, after, BATCH)).await {
+            Read::Done(rows) => rows,
+            Read::Cancelled => return,
+            Read::Failed => {
+                return sub
+                    .fail("unavailable", "Resubscribe from the last cursor.")
+                    .await;
+            }
         };
         // Checked after the read: a deletion committed meanwhile is seen
         // before any of these rows are sent.
-        match guarded(&token, bot_is_active(&state, bot_id)).await {
-            Some(Some((true, _))) => {}
-            Some(_) => {
-                revoke(&revoked);
-                return channel_error(&out, &channel, "bot_deleted", "This bot has been deleted.")
-                    .await;
-            }
-            None => return,
+        if !still_active(&state, bot_id, &sub).await {
+            return;
         }
         let full = rows.len() as i64 == BATCH;
         for (seq, kind, data) in rows {
             let body = json!({
-                "channel": channel,
+                "channel": sub.channel,
                 "id": encode_cursor(state.server_instance_id, bot_id, seq),
                 "event": kind,
                 "data": data,
             });
-            // A slow reader must not delay revocation: watch this bot's
-            // wake hints while waiting for queue space.
-            let mut sending = std::pin::pin!(send(&out, Some(&channel), body));
+            // A slow reader must not delay revocation: while waiting for
+            // queue space, recheck on this bot's wake hints and on the
+            // fallback timer.
+            let mut sending = std::pin::pin!(sub.send(body));
+            let mut fallback = tokio::time::interval_at(
+                tokio::time::Instant::now() + POLL_FALLBACK,
+                POLL_FALLBACK,
+            );
             loop {
-                tokio::select! {
-                    _ = token.cancelled() => return,
+                let check = tokio::select! {
                     sent = &mut sending => {
                         if !sent {
                             return;
                         }
                         break;
                     }
-                    received = wake.recv() => {
-                        let ours = match received {
-                            Ok(id) => id == bot_id || id.is_nil(),
-                            Err(broadcast::error::RecvError::Lagged(_)) => true,
-                            Err(broadcast::error::RecvError::Closed) => false,
-                        };
-                        if ours && !matches!(guarded(&token, bot_is_active(&state, bot_id)).await, Some(Some((true, _)))) {
-                            revoke(&revoked);
-                            return channel_error(&out, &channel, "bot_deleted", "This bot has been deleted.").await;
-                        }
-                    }
+                    _ = fallback.tick() => true,
+                    received = wake.recv() => match received {
+                        Ok(id) => id == bot_id || id.is_nil(),
+                        Err(broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(broadcast::error::RecvError::Closed) => false,
+                    },
+                };
+                if check && !still_active(&state, bot_id, &sub).await {
+                    return;
                 }
             }
             after = seq;
@@ -428,8 +539,65 @@ async fn bot_channel(
         if full {
             continue;
         }
-        if !wait(&mut wake, Some(bot_id), &token).await {
+        if !wait(&mut wake, Some(bot_id), &sub.token).await {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tag(channel: &str, generation: u64, bot: Option<Uuid>, last: bool) -> Tag {
+        Tag {
+            channel: channel.to_owned(),
+            generation,
+            bot,
+            last,
+        }
+    }
+
+    #[test]
+    fn retired_generations_are_never_written() {
+        let mut registry = Registry::default();
+        let old = registry.open("bot:x", true);
+        let new = registry.open("bot:x", true);
+        // A queued error or event of the replaced subscription is dropped.
+        assert!(!registry.admit(&tag("bot:x", old, None, true)));
+        assert!(!registry.admit(&tag("bot:x", old, None, false)));
+        assert!(registry.admit(&tag("bot:x", new, None, false)));
+        // Unsubscribed: nothing more.
+        registry.channels.remove("bot:x");
+        assert!(!registry.admit(&tag("bot:x", new, None, false)));
+    }
+
+    #[test]
+    fn deleted_bots_stay_revoked_across_resubscription() {
+        let bot = Uuid::new_v4();
+        let channel = format!("bot:{bot}");
+        let mut registry = Registry::default();
+        let first = registry.open(&channel, true);
+        registry.deleted.insert(bot);
+        // Data queued before the deletion is dropped; the final error goes out.
+        assert!(!registry.admit(&tag(&channel, first, Some(bot), false)));
+        let second = registry.open(&channel, true);
+        assert!(!registry.admit(&tag(&channel, second, Some(bot), false)));
+        assert!(registry.admit(&tag(&channel, second, Some(bot), true)));
+        // Other bots are unaffected.
+        let other = Uuid::new_v4();
+        let g = registry.open(&format!("bot:{other}"), true);
+        assert!(registry.admit(&tag(&format!("bot:{other}"), g, Some(other), false)));
+    }
+
+    #[test]
+    fn ended_subscriptions_free_their_slot() {
+        let mut registry = Registry::default();
+        let g = registry.open("bot:a", true);
+        registry.open("bot:b", false);
+        assert_eq!(registry.running(), 1);
+        // Delivering the final message retires the subscription.
+        assert!(registry.admit(&tag("bot:a", g, None, true)));
+        assert!(!registry.channels.contains_key("bot:a"));
     }
 }
