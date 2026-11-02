@@ -122,7 +122,8 @@ impl Config {
         let origin = Origin::parse(&get("ELSE_API_URL").unwrap_or_else(|| DEFAULT_API_URL.into()))?;
         let token_source = if get("ELSE_OWNER_TOKEN").is_some() {
             TokenSource::Env
-        } else if let Some(path) = get("ELSE_OWNER_TOKEN_FILE") {
+        } else if let Some(path) = get("ELSE_OWNER_TOKEN_FILE").or_else(|| get("OWNER_TOKEN_FILE"))
+        {
             TokenSource::File(PathBuf::from(path))
         } else {
             let data = match (get("ELSE_DATA_DIR"), get("XDG_DATA_HOME"), get("HOME")) {

@@ -115,17 +115,15 @@ impl Codex {
         program: Option<PathBuf>,
         auth: Option<PathBuf>,
     ) -> Self {
-        let version = program
-            .as_ref()
-            .and_then(|program| {
-                std::process::Command::new(program)
-                    .arg("--version")
-                    .env_clear()
-                    .output()
-                    .ok()
-            })
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-            .unwrap_or_default();
+        // Run the version check inside the sandbox: this both reads the
+        // version and proves the executable can run there (a launcher or
+        // shim that needs the host environment cannot).
+        let version = match (&sandbox, &program) {
+            (Some(sandbox), Some(program)) => {
+                sandbox.probe(program, &["--version"]).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
         let allow_unverified = std::env::var("ELSE_CODEX_ALLOW_UNVERIFIED").as_deref() == Ok("1");
         let unavailable = match (&sandbox, &program, &auth) {
             (None, _, _) => Some("bubblewrap is not available on this host".to_owned()),
@@ -134,6 +132,11 @@ impl Codex {
                 Some("Codex is not logged in on the host (run `codex login`)".to_owned())
             }
             (_, _, None) => Some("the Codex login location is unknown".to_owned()),
+            _ if version.is_empty() => Some(
+                "the codex executable does not run inside the sandbox (a shim or launcher?); \
+                 set ELSE_CODEX_BIN to the native codex binary"
+                    .to_owned(),
+            ),
             _ if !allow_unverified && !VERIFIED_VERSIONS.iter().any(|v| version.starts_with(v)) => {
                 Some(format!(
                     "{} is not a verified Codex version (verified: 0.166); set \

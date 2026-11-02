@@ -125,6 +125,37 @@ impl HostSandbox {
         Ok(sandbox)
     }
 
+    /// Run `program args` in a minimal sandbox and return its stdout, or
+    /// `None` if it fails there.
+    pub fn probe(&self, program: &Path, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(&self.bwrap)
+            .args(self.base_args())
+            .args([
+                "--ro-bind".as_ref(),
+                program.as_os_str(),
+                SANDBOX_PROGRAM.as_ref(),
+            ])
+            .args([
+                "--clearenv",
+                "--setenv",
+                "HOME",
+                SANDBOX_HOME,
+                "--",
+                SANDBOX_PROGRAM,
+            ])
+            .args(args)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn marker_prefix(&self) -> &str {
         &self.marker_prefix
     }

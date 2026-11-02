@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+dotenvy = "0.15.7"
 futures-util = "0.3.34"
 gpui-kit = "=0.8.1"
 libc = "0.2.191"

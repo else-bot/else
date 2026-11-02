@@ -31,14 +31,29 @@ pub fn registry(config: &Config) -> Registry {
     Registry::new(providers)
 }
 
-/// An executable on `PATH`, resolved to its real file.
+/// An executable on `PATH`, resolved to its real file. Version-manager
+/// shims (such as mise's, which resolve to the `mise` binary) cannot run in
+/// the sandbox, so a shim is resolved through `mise which` to the native
+/// executable.
 fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH")?
+    let found = std::env::var_os("PATH")?
         .to_str()?
         .split(':')
         .map(|dir| std::path::Path::new(dir).join(name))
         .find(|path| path.is_file())
-        .and_then(|path| std::fs::canonicalize(path).ok())
+        .and_then(|path| std::fs::canonicalize(path).ok())?;
+    if found.file_name().is_some_and(|f| f == name) {
+        return Some(found);
+    }
+    if found.file_name().is_some_and(|f| f == "mise") {
+        let out = std::process::Command::new(&found)
+            .args(["which", name])
+            .output()
+            .ok()?;
+        let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        return std::fs::canonicalize(path).ok().filter(|p| p.is_file());
+    }
+    Some(found)
 }
 
 #[derive(Clone)]

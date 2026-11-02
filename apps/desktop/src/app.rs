@@ -316,6 +316,8 @@ impl ElseApp {
         // bot's server work is unaffected.
         self.view = id.map(ConversationView::new);
         if id.is_some() {
+            // Pending sends show at once, even before history loads.
+            self.sync_rows(window, cx);
             self.load_conversation(window, cx);
         }
         cx.notify();

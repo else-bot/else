@@ -1,14 +1,14 @@
 # Set up local development
 
-The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL Compose service. The API stores installation state in PostgreSQL and serves authenticated loopback HTTP. The desktop connects to it as the owner. The desktop has no GPUI dependency or window yet.
+The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL Compose service. The API stores installation state in PostgreSQL, serves authenticated loopback HTTP, and runs Codex turns in a bubblewrap sandbox. The desktop connects to it as the owner.
 
 ## Prerequisites
 
-Install Rust with Cargo and rustfmt, and Docker Engine with Docker Compose. The bootstrap was checked with Rust 1.98.0 and Compose 5.6.1. Run the commands below from the repository root.
+Install Rust with Cargo and rustfmt, Docker Engine with Docker Compose, and `bubblewrap`. Checked with Rust 1.98.0, Compose 5.6.1, and bubblewrap 0.13.1. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run the commands below from the repository root.
 
-Provider CLIs and KVM are needed when implementing provider and VM features. Cargo downloads the API's Rust dependencies on first build.
+To chat through Codex, install the Codex CLI (verified with 0.166) and log in once with `codex login` as the user that runs the API. A version-manager shim such as mise's is resolved to the real binary; otherwise set `ELSE_CODEX_BIN` to the native `codex` executable. Without Codex the API still runs, and the capabilities report why Codex is unavailable.
 
-The planned Codex runtime default is GPT 6.1 Sol Medium Fast, saved as `gpt-6.1-sol`, `medium`, and `priority` in PostgreSQL. Provider-native sub-agents are disabled for the POC. These settings are part of the [provider implementation tasks](implementation/02-desktop-and-codex.md), not active configuration in the generated starters. Future owner changes use the [saved profile contract](providers.md#saved-execution-profile).
+The saved Codex profile is GPT 6.1 Sol Medium Fast (`gpt-6.1-sol`, `medium`, `priority`), seeded by `else-api setup` and editable through the [saved profile contract](providers.md#saved-execution-profile). Provider-native sub-agents are always disabled.
 
 ## Configure the development services
 
@@ -188,7 +188,7 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, up
 
 The desktop is a native GPUI window built with [GPUI Kit](https://gpui-kit.com) `gpui-kit = "=0.8.1"`, which pins GPUI as `gpui-pre 0.3.10`. The pin is exact because GPUI is pre-1.0. It was built and run on Arch Linux (Omarchy) with Hyprland 0.56.2 on Wayland and Rust 1.98.0. Linux needs `libxkbcommon`, `libxcb`, `fontconfig`, and `freetype2`, plus a Vulkan-capable graphics driver; Wayland and X11 sessions are both supported by GPUI. The first build compiles GPUI and takes a few minutes.
 
-Start the API, then the desktop:
+Start the API, then the desktop. The desktop reads the same root `.env` as the API, so `ELSE_DATA_DIR` or `OWNER_TOKEN_FILE` set there apply to both:
 
 ```sh
 cargo run -p else-desktop
@@ -197,7 +197,7 @@ cargo run -p else-desktop
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ELSE_API_URL` | `http://127.0.0.1:7878` | API origin. Only `http://` loopback origins without a path, query, or credentials are accepted; this build has no TLS. For a remote server use `ssh -L 7878:127.0.0.1:7878 <server>`. |
-| `ELSE_OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The owner token written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
+| `ELSE_OWNER_TOKEN_FILE` (or the API's `OWNER_TOKEN_FILE`) | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The owner token written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
 | `ELSE_OWNER_TOKEN` | unset | Token value for a development launcher. Takes precedence over the file. Prefer the file. |
 
 The window lists bots on the left and the selected conversation on the right. New bot opens a dialog for the name and role; deleting asks for confirmation, keeps history, and shows the bot as Deleting until its work has stopped. The header shows a provider choice for the next message, Stop work while the bot is busy, and Delete. Replies stream into the transcript as the API commits them; per-turn notes show Queued, Working, Stopped, Failed, or Outcome unknown. Drafts are kept per bot while the desktop runs. A message whose send outcome is unknown stays visible as Not confirmed with Retry; after reconnecting the desktop asks the API whether it arrived and resends it under the same request ID only if it did not. The view follows new output only while it is at the bottom.

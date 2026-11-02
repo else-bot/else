@@ -15,6 +15,9 @@ fn env(name: &str) -> Option<String> {
 }
 
 fn main() {
+    // Same `.env` as the API, so `ELSE_DATA_DIR` or `OWNER_TOKEN_FILE` set
+    // there point both at one installation. Process variables win.
+    let _ = dotenvy::dotenv();
     // HTTP and streaming run on this runtime, separate from GPUI's executor.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
