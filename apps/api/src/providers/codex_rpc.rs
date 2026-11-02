@@ -1,7 +1,13 @@
 //! A JSON-RPC client for `codex app-server` over stdio, running inside the
-//! host sandbox. Responses are matched to requests by ID; notifications and
-//! server-initiated requests (approvals, tool calls) are delivered in order
-//! through [`AppServer::next`].
+//! host sandbox. Responses are matched to requests by ID; notifications are
+//! delivered in order through [`AppServer::next`].
+//!
+//! Server-initiated requests (approvals, tool calls, input requests) are
+//! refused immediately by the reader itself, so a request waiting for a
+//! response can never deadlock behind one; the refusal is reported to the
+//! caller as [`Incoming::Refused`]. Provider output is bounded: a line over
+//! [`MAX_LINE`] bytes or a backlog over [`MAX_QUEUED`] messages closes the
+//! connection rather than growing API memory.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -10,10 +16,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::host::{HostSandbox, LaunchSpec, Supervised};
+
+const MAX_LINE: u64 = 8 * 1024 * 1024;
+const MAX_QUEUED: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
@@ -31,7 +41,9 @@ pub enum RpcError {
     },
 }
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, (i64, String)>>>>>;
+type Waiter = oneshot::Sender<Result<Value, (i64, String)>>;
+type Pending = Arc<Mutex<HashMap<i64, Waiter>>>;
+type Stdin = Arc<tokio::sync::Mutex<Option<ChildStdin>>>;
 
 /// A message from the server that is not a response to our request.
 #[derive(Debug, Clone)]
@@ -40,21 +52,55 @@ pub enum Incoming {
         method: String,
         params: Value,
     },
-    /// The server asks us something (an approval, a tool call). It must be
-    /// answered with [`AppServer::respond`].
-    Request {
-        id: Value,
+    /// The server asked for something (an approval, a tool call) and was
+    /// refused; nothing it asked for happened.
+    Refused {
         method: String,
-        params: Value,
     },
 }
 
 pub struct AppServer {
     process: Supervised,
-    stdin: tokio::sync::Mutex<tokio::process::ChildStdin>,
+    stdin: Stdin,
     pending: Pending,
     next_id: AtomicI64,
-    incoming: mpsc::UnboundedReceiver<Incoming>,
+    incoming: mpsc::Receiver<Incoming>,
+}
+
+/// Removes a pending entry however the request ends, including when the
+/// calling future is dropped.
+struct PendingGuard<'a> {
+    pending: &'a Pending,
+    id: i64,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+async fn write_line(stdin: &Stdin, message: &Value) -> Result<(), RpcError> {
+    let mut line = message.to_string();
+    line.push('\n');
+    let mut guard = stdin.lock().await;
+    let Some(pipe) = guard.as_mut() else {
+        return Err(RpcError::Closed);
+    };
+    let written = async {
+        pipe.write_all(line.as_bytes()).await?;
+        pipe.flush().await
+    }
+    .await;
+    if written.is_err() {
+        // A partial write leaves the stream unusable; close it.
+        *guard = None;
+        return Err(RpcError::Closed);
+    }
+    Ok(())
 }
 
 impl AppServer {
@@ -68,61 +114,14 @@ impl AppServer {
             .stderr(Stdio::null());
         let mut process =
             Supervised::spawn(command).map_err(|err| RpcError::Spawn(err.to_string()))?;
-        let stdin = process.child.stdin.take().ok_or(RpcError::Closed)?;
+        let stdin: Stdin = Arc::new(tokio::sync::Mutex::new(process.child.stdin.take()));
         let stdout = process.child.stdout.take().ok_or(RpcError::Closed)?;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, incoming) = mpsc::unbounded_channel();
-        let reader_pending = pending.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                let method = message.get("method").and_then(Value::as_str);
-                match (message.get("id"), method) {
-                    (Some(id), None) => {
-                        let Some(id) = id.as_i64() else { continue };
-                        let waiter = reader_pending
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .remove(&id);
-                        if let Some(waiter) = waiter {
-                            let result = match message.get("error") {
-                                Some(error) => Err((
-                                    error["code"].as_i64().unwrap_or_default(),
-                                    error["message"].as_str().unwrap_or_default().to_owned(),
-                                )),
-                                None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
-                            };
-                            let _ = waiter.send(result);
-                        }
-                    }
-                    (Some(id), Some(method)) => {
-                        let _ = tx.send(Incoming::Request {
-                            id: id.clone(),
-                            method: method.to_owned(),
-                            params: message.get("params").cloned().unwrap_or(Value::Null),
-                        });
-                    }
-                    (None, Some(method)) => {
-                        let _ = tx.send(Incoming::Notification {
-                            method: method.to_owned(),
-                            params: message.get("params").cloned().unwrap_or(Value::Null),
-                        });
-                    }
-                    (None, None) => {}
-                }
-            }
-            // EOF: fail every outstanding request.
-            reader_pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clear();
-        });
+        let (tx, incoming) = mpsc::channel(MAX_QUEUED);
+        tokio::spawn(read_loop(stdout, pending.clone(), stdin.clone(), tx));
         let server = Self {
             process,
-            stdin: tokio::sync::Mutex::new(stdin),
+            stdin,
             pending,
             next_id: AtomicI64::new(1),
             incoming,
@@ -138,17 +137,8 @@ impl AppServer {
         Ok(server)
     }
 
-    async fn write(&self, message: Value) -> Result<(), RpcError> {
-        let mut line = message.to_string();
-        line.push('\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|_| RpcError::Closed)?;
-        stdin.flush().await.map_err(|_| RpcError::Closed)
-    }
-
+    /// Send a request and wait for its response. The deadline covers
+    /// writing as well as waiting.
     pub async fn request(
         &self,
         method: &str,
@@ -161,40 +151,42 @@ impl AppServer {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, tx);
-        self.write(json!({ "id": id, "method": method, "params": params }))
+        let _guard = PendingGuard {
+            pending: &self.pending,
+            id,
+        };
+        let exchange = async {
+            write_line(
+                &self.stdin,
+                &json!({ "id": id, "method": method, "params": params }),
+            )
             .await?;
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(result))) => Ok(result),
-            Ok(Ok(Err((code, message)))) => Err(RpcError::Remote {
-                method: method.to_owned(),
-                code,
-                message,
-            }),
-            Ok(Err(_)) => Err(RpcError::Closed),
-            Err(_) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
-                Err(RpcError::Timeout(method.to_owned()))
+            match rx.await {
+                Ok(Ok(result)) => Ok(result),
+                Ok(Err((code, message))) => Err(RpcError::Remote {
+                    method: method.to_owned(),
+                    code,
+                    message,
+                }),
+                Err(_) => Err(RpcError::Closed),
             }
-        }
+        };
+        tokio::time::timeout(timeout, exchange)
+            .await
+            .map_err(|_| RpcError::Timeout(method.to_owned()))?
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), RpcError> {
-        self.write(json!({ "method": method, "params": params }))
-            .await
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            write_line(&self.stdin, &json!({ "method": method, "params": params })),
+        )
+        .await
+        .map_err(|_| RpcError::Timeout(method.to_owned()))?
     }
 
-    /// Answer a server request with an error (used to refuse approvals and
-    /// tool calls this POC does not offer).
-    pub async fn refuse(&self, id: Value, message: &str) -> Result<(), RpcError> {
-        self.write(json!({ "id": id, "error": { "code": -32000, "message": message } }))
-            .await
-    }
-
-    /// The next notification or server request; `None` once the process
-    /// has closed its output.
+    /// The next notification or refused request; `None` once the process
+    /// has closed its output or exceeded the output bounds.
     pub async fn next(&mut self) -> Option<Incoming> {
         self.incoming.recv().await
     }
@@ -207,4 +199,80 @@ impl AppServer {
     pub async fn shutdown(mut self, grace: Duration) {
         self.process.terminate(grace).await;
     }
+}
+
+async fn read_loop(
+    stdout: tokio::process::ChildStdout,
+    pending: Pending,
+    stdin: Stdin,
+    tx: mpsc::Sender<Incoming>,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = (&mut reader)
+            .take(MAX_LINE + 1)
+            .read_until(b'\n', &mut line)
+            .await;
+        match read {
+            Ok(0) | Err(_) => break,
+            Ok(_) if line.len() as u64 > MAX_LINE => {
+                tracing::warn!("provider sent an oversized message; closing it");
+                break;
+            }
+            Ok(_) => {}
+        }
+        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let method = message.get("method").and_then(Value::as_str);
+        let delivered = match (message.get("id"), method) {
+            (Some(id), None) => {
+                if let Some(id) = id.as_i64() {
+                    let waiter = pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&id);
+                    if let Some(waiter) = waiter {
+                        let result = match message.get("error") {
+                            Some(error) => Err((
+                                error["code"].as_i64().unwrap_or_default(),
+                                error["message"].as_str().unwrap_or_default().to_owned(),
+                            )),
+                            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                        };
+                        let _ = waiter.send(result);
+                    }
+                }
+                true
+            }
+            (Some(id), Some(method)) => {
+                // Nothing the server can ask for is offered: refuse at once.
+                let refusal = json!({
+                    "id": id,
+                    "error": { "code": -32000, "message": "not available in else.bot" },
+                });
+                let _ = write_line(&stdin, &refusal).await;
+                tx.try_send(Incoming::Refused {
+                    method: method.to_owned(),
+                })
+                .is_ok()
+            }
+            (None, Some(method)) => tx
+                .try_send(Incoming::Notification {
+                    method: method.to_owned(),
+                    params: message.get("params").cloned().unwrap_or(Value::Null),
+                })
+                .is_ok(),
+            (None, None) => true,
+        };
+        if !delivered {
+            tracing::warn!("provider output backlog exceeded; closing it");
+            break;
+        }
+    }
+    // Closing fails every outstanding request with `Closed`.
+    pending.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    *stdin.lock().await = None;
 }

@@ -193,7 +193,10 @@ async fn cancel(
             }
             .with_request_id(body.request_id)
         })?;
-    state.scheduler.grants().revoke_bot(bot_id);
+    // A retried stop returns its old receipt and must not touch newer work.
+    if receipt.created {
+        state.scheduler.grants().revoke_bot(bot_id);
+    }
     if let Some(turn_id) = receipt.interrupt {
         state.scheduler.interrupt(turn_id);
     }

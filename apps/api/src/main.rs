@@ -168,7 +168,7 @@ fn run_serve() -> anyhow::Result<()> {
         // anything is reconciled or dispatched.
         match else_api::providers::host::HostSandbox::detect(&config.data_dir) {
             Ok(sandbox) => {
-                let swept = sandbox.sweep_orphans();
+                let swept = sandbox.sweep_orphans()?;
                 if swept > 0 {
                     tracing::warn!(
                         swept,

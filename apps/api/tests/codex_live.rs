@@ -115,13 +115,7 @@ async fn explicit_spawn_and_shell_requests_cannot_run() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     while let Ok(Some(message)) = tokio::time::timeout_at(deadline, server.next()).await {
         match message {
-            Incoming::Request { id, method, .. } => {
-                server_requests.push(method);
-                server
-                    .refuse(id, "not available in else.bot")
-                    .await
-                    .unwrap();
-            }
+            Incoming::Refused { method } => server_requests.push(method),
             Incoming::Notification { method, params } => match method.as_str() {
                 // Any thread other than ours would be a native child.
                 "thread/started" if params["thread"]["id"] != thread_id.as_str() => {

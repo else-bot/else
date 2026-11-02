@@ -292,6 +292,22 @@ impl Provider for Codex {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
+        // The effective configuration must not expose any MCP server, even
+        // one inherited from a configuration layer outside the bot's home.
+        match server
+            .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
+            .await
+        {
+            Ok(status) if status["data"].as_array().is_some_and(|d| d.is_empty()) => {}
+            Ok(_) => {
+                server.shutdown(SHUTDOWN_GRACE).await;
+                return failed("policy_violation", "Codex has MCP servers configured.");
+            }
+            Err(err) => {
+                server.shutdown(SHUTDOWN_GRACE).await;
+                return failed("provider_unavailable", err.to_string());
+            }
+        }
         let outcome = self
             .converse(&mut server, &input, &profile, sink, cancel)
             .await;
@@ -471,9 +487,9 @@ impl Codex {
                 };
             };
             match message {
-                Incoming::Request { id, method, .. } => {
-                    // No approvals or tools exist in this version.
-                    let _ = server.refuse(id, "not available in else.bot").await;
+                Incoming::Refused { method } => {
+                    // The client already refused it; no approval or tool
+                    // exists in this version.
                     violation.get_or_insert(format!("Codex requested {method}"));
                     if !interrupted {
                         interrupted = true;

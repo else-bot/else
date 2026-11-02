@@ -32,6 +32,22 @@ pub const SANDBOX_WORK: &str = "/work";
 pub const SANDBOX_PROGRAM: &str = "/opt/else/provider";
 pub const SANDBOX_PROVIDER_HOME: &str = "/var/lib/provider-home";
 
+/// Files copied into the sandbox's otherwise empty /etc.
+const ETC_FILES: &[&str] = &[
+    "resolv.conf",
+    "hosts",
+    "host.conf",
+    "gai.conf",
+    "nsswitch.conf",
+    "passwd",
+    "group",
+    "localtime",
+    "ld.so.cache",
+    "ld.so.conf",
+];
+/// Certificate stores (Arch, Debian, Fedora layouts).
+const ETC_DIRS: &[&str] = &["ssl", "ca-certificates", "pki"];
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error("bubblewrap (bwrap) is required to run provider CLIs: {0}")]
@@ -146,8 +162,9 @@ impl HostSandbox {
             "--ro-bind",
             "/usr",
             "/usr",
-            "--ro-bind",
-            "/etc",
+            // A minimal /etc: credentials or provider configuration placed
+            // under /etc (for example /etc/codex) are not visible.
+            "--tmpfs",
             "/etc",
             "--proc",
             "/proc",
@@ -177,10 +194,21 @@ impl HostSandbox {
                 Err(_) => {}
             }
         }
-        // DNS: resolv.conf often links into /run (systemd-resolved).
-        if let Ok(target) = fs::canonicalize("/etc/resolv.conf") {
-            if let Some(dir) = target.parent().filter(|d| !d.starts_with("/etc")) {
-                args.extend(["--ro-bind".into(), dir.into(), dir.into()]);
+        // Only what name resolution, TLS, users, and the dynamic linker
+        // need. Symlinked files are bound by their resolved target, so no
+        // directory outside /etc (such as /run) becomes visible.
+        for name in ETC_FILES {
+            let path = Path::new("/etc").join(name);
+            if let Ok(target) = fs::canonicalize(&path) {
+                if target.is_file() {
+                    args.extend(["--ro-bind".into(), target.into(), path.into()]);
+                }
+            }
+        }
+        for name in ETC_DIRS {
+            let path = Path::new("/etc").join(name);
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                args.extend(["--ro-bind".into(), path.clone().into(), path.into()]);
             }
         }
         args
@@ -245,22 +273,80 @@ impl HostSandbox {
     }
 
     /// Terminate every sandbox process of this installation left from an
-    /// earlier API process. Returns how many were signalled.
-    pub fn sweep_orphans(&self) -> usize {
-        let pids = find_marked(&self.marker_prefix, None);
-        for pid in &pids {
-            // SAFETY: plain signal delivery to a process we own.
-            unsafe {
-                libc::kill(*pid, libc::SIGKILL);
+    /// earlier API process and wait until they have exited. Each process is
+    /// pinned with a pidfd before its marker is re-checked and it is
+    /// signalled, so a reused PID can never be hit. Returns how many were
+    /// terminated, or an error if any survived.
+    pub fn sweep_orphans(&self) -> Result<usize, HostError> {
+        let wanted = format!("{MARKER_VAR}={}:", self.marker_prefix);
+        let mut killed = Vec::new();
+        for pid in find_marked(&self.marker_prefix, None) {
+            let Some(fd) = pidfd_open(pid) else { continue };
+            // The pidfd now refers to one process; confirm it is ours.
+            if !has_marker(pid, &wanted) {
+                continue;
+            }
+            if pidfd_kill(&fd) {
+                killed.push(fd);
             }
         }
-        pids.len()
+        let count = killed.len();
+        for fd in killed {
+            if !pidfd_wait(&fd, Duration::from_secs(5)) {
+                return Err(HostError::Io(
+                    "orphaned provider process".into(),
+                    std::io::Error::other("did not exit after SIGKILL"),
+                ));
+            }
+        }
+        Ok(count)
     }
 
     /// Processes still alive for one turn's sandbox.
     pub fn live_processes(&self, turn_id: Uuid) -> Vec<i32> {
         find_marked(&self.marker_prefix, Some(turn_id))
     }
+}
+
+fn has_marker(pid: i32, wanted: &str) -> bool {
+    fs::read(format!("/proc/{pid}/environ")).is_ok_and(|env| {
+        env.split(|b| *b == 0)
+            .any(|var| var.starts_with(wanted.as_bytes()))
+    })
+}
+
+fn pidfd_open(pid: i32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    // SAFETY: a non-negative return is a fresh descriptor we now own.
+    (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+}
+
+fn pidfd_kill(fd: &std::os::fd::OwnedFd) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: signals exactly the process the pidfd refers to.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        ) == 0
+    }
+}
+
+/// A pidfd becomes readable when its process exits.
+fn pidfd_wait(fd: &std::os::fd::OwnedFd, timeout: Duration) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the duration of the call.
+    unsafe { libc::poll(&mut poll, 1, timeout.as_millis() as i32) > 0 }
 }
 
 /// Scan `/proc` for processes owned by this user whose environment carries

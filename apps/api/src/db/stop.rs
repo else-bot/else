@@ -23,6 +23,8 @@ pub struct StopReceipt {
     pub state: String,
     /// The active turn to interrupt, when this call started the stop.
     pub interrupt: Option<Uuid>,
+    /// True when this call started the stop (not a retry).
+    pub created: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +168,7 @@ pub async fn stop_work(
             bot_id,
             state: state.unwrap_or_default(),
             interrupt: None,
+            created: false,
         });
     }
     if status != "active" {
@@ -202,6 +205,7 @@ pub async fn stop_work(
         }
         .to_owned(),
         interrupt,
+        created: true,
     })
 }
 

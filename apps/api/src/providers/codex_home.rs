@@ -10,7 +10,8 @@
 //! approval.
 
 use std::fs;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::host::{Bind, BotDirs, SANDBOX_PROVIDER_HOME};
@@ -80,20 +81,39 @@ pub fn host_auth_file(codex_home: Option<&str>, home: Option<&str>) -> Option<Pa
     Some(dir.join("auth.json"))
 }
 
-/// Prepare the bot's Codex home: rewrite the locked config and create the
+/// Replace `dir/name` atomically without following anything the sandbox
+/// may have planted there: the new file is created exclusively (never through
+/// a symlink) and renamed over the old entry, which replaces a symlink itself
+/// rather than its target.
+fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
+    if !fs::symlink_metadata(dir)?.is_dir() {
+        return Err(std::io::Error::other("provider home is not a directory"));
+    }
+    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    fs::rename(&temp, dir.join(name))
+}
+
+/// Prepare the bot's Codex home: rewrite the locked config and reset the
 /// empty mount point for the login. Returns the bind for the login file.
 pub fn prepare(dirs: &BotDirs, host_auth: &Path) -> std::io::Result<Bind> {
-    let config = dirs.provider_home.join("config.toml");
-    fs::write(&config, config_toml())?;
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
-    let mount_point = dirs.provider_home.join("auth.json");
-    // An empty placeholder the login is mounted over; never a copy.
-    if fs::symlink_metadata(&mount_point).is_err() {
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&mount_point)?;
+    replace_file(&dirs.provider_home, "config.toml", config_toml().as_bytes())?;
+    // An empty placeholder the login is mounted over; never a copy. Anything
+    // else at that path (a symlink, a directory, content) is replaced.
+    let placeholder = fs::symlink_metadata(dirs.provider_home.join("auth.json"));
+    if !placeholder.is_ok_and(|m| m.is_file() && m.len() == 0) {
+        let path = dirs.provider_home.join("auth.json");
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            fs::remove_dir_all(&path)?;
+        }
+        replace_file(&dirs.provider_home, "auth.json", b"")?;
     }
     Ok(Bind {
         source: host_auth.to_owned(),
@@ -118,6 +138,35 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+    }
+
+    #[test]
+    fn prepare_never_writes_through_planted_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codex-home");
+        fs::create_dir(&home).unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "HOST FILE").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("config.toml")).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("auth.json")).unwrap();
+        let dirs = BotDirs {
+            root: dir.path().to_owned(),
+            work: dir.path().join("work"),
+            provider_home: home.clone(),
+        };
+        prepare(&dirs, Path::new("/nonexistent/auth.json")).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "HOST FILE");
+        assert!(
+            fs::symlink_metadata(home.join("config.toml"))
+                .unwrap()
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            config_toml()
+        );
+        let auth = fs::symlink_metadata(home.join("auth.json")).unwrap();
+        assert!(auth.is_file() && auth.len() == 0);
     }
 
     #[test]

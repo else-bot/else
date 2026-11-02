@@ -77,7 +77,8 @@ async fn sandbox_environment_and_files_are_restricted() {
         "env; echo ---; cat own.txt; echo; \
          for f in '{data}/owner-token' '{data}/secret-key' '{sib}/sibling.txt' \
                   '{home}/.codex/auth.json' '{home}/.ssh' '/run/user/{uid}/bus' \
-                  '/var/run/docker.sock' '/run/docker.sock'; do \
+                  '/var/run/docker.sock' '/run/docker.sock' '/run' '/etc/os-release' \
+                  '/etc/codex' '/etc/machine-id'; do \
            if [ -e \"$f\" ]; then echo \"VISIBLE $f\"; else echo \"hidden $f\"; fi; done; \
          if [ -e /proc/{host_pid} ]; then echo \"VISIBLE host pid\"; fi; \
          echo procs=$(ls /proc | grep -c '^[0-9]')",
@@ -194,7 +195,7 @@ async fn sandbox_dies_with_its_parent_and_orphans_are_swept() {
     std::mem::forget(process);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!fx.sandbox.live_processes(spec.turn_id).is_empty());
-    assert!(fx.sandbox.sweep_orphans() >= 1);
+    assert!(fx.sandbox.sweep_orphans().unwrap() >= 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(fx.sandbox.live_processes(spec.turn_id).is_empty());
 }
@@ -388,10 +389,11 @@ async fn task_grants_are_scoped_to_their_turn() {
     );
 
     // Stop work revokes the grant.
+    let stop_request = Uuid::new_v4();
     app.owner(
         "POST",
         &format!("/v1/bots/{bot}/cancel"),
-        Some(json!({ "request_id": Uuid::new_v4() })),
+        Some(json!({ "request_id": stop_request })),
     )
     .await;
     assert_eq!(
@@ -412,6 +414,30 @@ async fn task_grants_are_scoped_to_their_turn() {
     assert_eq!(
         tool(&app, "/tools/v1/history", Some(&stale)).await.status,
         StatusCode::UNAUTHORIZED
+    );
+
+    // Retrying the completed stop leaves a newer turn's grant alone.
+    let (newer, conversation) = hanging_turn(&app, &bot).await;
+    let newer_grant = grants.issue(
+        bot.parse().unwrap(),
+        conversation,
+        newer,
+        vec![Tool::ReadHistory],
+        DEFAULT_TTL,
+    );
+    let retry = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": stop_request })),
+        )
+        .await;
+    assert_eq!(retry.body["state"], "done");
+    assert_eq!(
+        tool(&app, "/tools/v1/history", Some(&newer_grant))
+            .await
+            .status,
+        StatusCode::OK
     );
 }
 
