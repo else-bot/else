@@ -570,12 +570,15 @@ async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let rest = saved.nodes.get(from..).unwrap_or_default();
     let shown = fill(&mut result, "nodes", rest.len(), 4_000, |i, max| {
         let node = &rest[i];
-        json!({
+        let mut item = json!({
             "start_seq": node.node.start,
             "span": node.node.span,
             "method": node.method,
-            "text": node.body.as_deref().map(|b| slice(b, 0, max).1),
-        })
+        });
+        if let Some(body) = node.body.as_deref() {
+            text_fields(&mut item, node.node, body, max);
+        }
+        item
     });
     if shown < rest.len() {
         result["next_index"] = json!(from + shown);
@@ -589,6 +592,22 @@ async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         from
     );
     (tool_result(result), Some(log))
+}
+
+/// A node's text within `max` bytes. Cut text says so, with its full size
+/// and where the rest is: the halves (zoom) or the original (read).
+fn text_fields(item: &mut Value, node: NodeId, body: &str, max: usize) {
+    let text = slice(body, 0, max).1;
+    item["text"] = json!(text);
+    item["text_bytes"] = json!(body.len());
+    item["truncated"] = json!(text.len() < body.len());
+    if text.len() < body.len() {
+        item["continue_with"] = if node.span == 1 {
+            json!({ "tool": "memory_read", "start_seq": node.start, "count": 1, "offset": text.len() })
+        } else {
+            json!({ "tool": "memory_zoom", "start_seq": node.start, "span": node.span })
+        };
+    }
 }
 
 async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
@@ -643,10 +662,14 @@ async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             fill(&mut result, "parts", 2, 6_000, |i, max| {
                 let (child, built) = &parts[i];
                 match built {
-                    Some((body, method)) => json!({
-                        "start_seq": child.start, "span": child.span, "built": true,
-                        "method": method, "text": slice(body, 0, max).1,
-                    }),
+                    Some((body, method)) => {
+                        let mut item = json!({
+                            "start_seq": child.start, "span": child.span, "built": true,
+                            "method": method,
+                        });
+                        text_fields(&mut item, *child, body, max);
+                        item
+                    }
                     // Not built yet: zoom further down or read the originals.
                     None => json!({ "start_seq": child.start, "span": child.span, "built": false }),
                 }
