@@ -475,7 +475,8 @@ impl PgSink {
     }
 
     /// Persist buffered text. Called by the adapter path, a periodic timer,
-    /// and before the terminal outcome.
+    /// and before the terminal outcome. Not cancellation safe: callers must
+    /// await it to completion.
     pub async fn flush(&self) -> Result<(), Fenced> {
         let mut buffer = self.buffer.lock().await;
         if buffer.pending.is_empty() {

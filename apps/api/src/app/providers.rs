@@ -80,6 +80,8 @@ pub struct Fenced;
 
 /// Durable progress reporting for one turn. Every method persists before
 /// returning, so a crash cannot lose a state the provider already acted on.
+/// Adapters must await each call to completion and never race it in a
+/// `select!` that could drop it midway.
 #[async_trait]
 pub trait TurnSink: Send + Sync {
     /// Called immediately before the first write of the owner's message to

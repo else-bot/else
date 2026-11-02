@@ -17,6 +17,7 @@ use crate::db::turns::{self, FLUSH_INTERVAL, PgSink};
 use crate::providers::Registry;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const FINISH_ATTEMPTS: u32 = 20;
 
 pub struct Scheduler {
     pool: PgPool,
@@ -136,25 +137,48 @@ impl Scheduler {
             },
             Some(provider) => {
                 let provider = provider.clone();
-                // Flush buffered text periodically while the adapter runs.
-                let run = provider.run(input, &sink, cancel.clone());
-                tokio::pin!(run);
-                loop {
-                    tokio::select! {
-                        outcome = &mut run => break outcome,
-                        _ = tokio::time::sleep(FLUSH_INTERVAL) => {
-                            if sink.flush().await.is_err() {
-                                // Fenced: the turn was stopped or the bot deleted.
-                                cancel.cancel();
-                            }
+                // The adapter and a periodic flusher run concurrently in this
+                // task. The flusher stops only between flushes, so a flush is
+                // never abandoned halfway, and neither future can starve the
+                // other while one holds the sink's buffer lock.
+                let done = CancellationToken::new();
+                let run = async {
+                    let outcome = provider.run(input, &sink, cancel.clone()).await;
+                    done.cancel();
+                    outcome
+                };
+                let flusher = async {
+                    loop {
+                        tokio::select! {
+                            _ = done.cancelled() => break,
+                            _ = tokio::time::sleep(FLUSH_INTERVAL) => {}
+                        }
+                        if sink.flush().await.is_err() {
+                            // Fenced: the turn was stopped or the bot deleted.
+                            cancel.cancel();
                         }
                     }
-                }
+                };
+                tokio::join!(run, flusher).0
             }
         };
         tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");
-        if let Err(err) = sink.finish(&outcome).await {
-            tracing::error!(turn = %turn_id, error = %err, "recording turn outcome failed");
+        // The terminal outcome must not be lost to a transient database
+        // error; otherwise the bot's slot would stay occupied until restart.
+        let mut delay = Duration::from_millis(100);
+        for attempt in 1..=FINISH_ATTEMPTS {
+            match sink.finish(&outcome).await {
+                Ok(()) => break,
+                Err(err) if attempt < FINISH_ATTEMPTS => {
+                    tracing::warn!(turn = %turn_id, attempt, error = %err, "recording turn outcome failed; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+                Err(err) => tracing::error!(
+                    turn = %turn_id, error = %err,
+                    "recording turn outcome failed; startup reconciliation will settle it"
+                ),
+            }
         }
     }
 }
