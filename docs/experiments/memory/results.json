@@ -1,0 +1,159 @@
+{
+  "status": "PASS",
+  "container": "elsebot-memory-9c1367576e71",
+  "volume": "elsebot-memory-9c1367576e71-data",
+  "image_requested": "postgres@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8",
+  "checks": [
+    {
+      "name": "sql_constraints_idempotency_supersession_and_search",
+      "status": "PASS",
+      "assertions": "immutability, foreign key, owner corrections, UTF-8 bytes, alignment, retry mismatch"
+    },
+    {
+      "name": "concurrent_append_and_rollback",
+      "status": "PASS",
+      "workers": 6,
+      "unique_entries": 121,
+      "sequence_min": 0,
+      "sequence_max": 120,
+      "rolled_back_sequence_reused": true
+    },
+    {
+      "name": "skip_locked_and_expired_lease_fencing",
+      "status": "PASS",
+      "independently_claimed": [
+        "0",
+        "1"
+      ],
+      "stale_completion_rows": 0
+    },
+    {
+      "name": "reference_due_regression",
+      "status": "PASS",
+      "count": 10,
+      "merged": "8+1 and 9+1"
+    },
+    {
+      "name": "batched_view_and_database_restart",
+      "status": "PASS",
+      "messages": 2048,
+      "nodes": 4095,
+      "batches": [
+        {
+          "count": 247,
+          "bytes": 63823
+        },
+        {
+          "count": 371,
+          "bytes": 63836
+        },
+        {
+          "count": 495,
+          "bytes": 63851
+        },
+        {
+          "count": 619,
+          "bytes": 63860
+        },
+        {
+          "count": 743,
+          "bytes": 63869
+        },
+        {
+          "count": 867,
+          "bytes": 63873
+        },
+        {
+          "count": 991,
+          "bytes": 63877
+        },
+        {
+          "count": 1115,
+          "bytes": 63945
+        },
+        {
+          "count": 1239,
+          "bytes": 63966
+        },
+        {
+          "count": 1363,
+          "bytes": 63976
+        },
+        {
+          "count": 1487,
+          "bytes": 63984
+        },
+        {
+          "count": 1611,
+          "bytes": 63989
+        },
+        {
+          "count": 1735,
+          "bytes": 63993
+        },
+        {
+          "count": 1859,
+          "bytes": 63998
+        },
+        {
+          "count": 1983,
+          "bytes": 63481
+        }
+      ],
+      "maximum_post_merge_bytes": 127958,
+      "final_bytes": 97281,
+      "saved_view_sha256": "656d733289a3b9acd7597e3ba7b09b895fce788b22c60412d61fb96118a3f322"
+    },
+    {
+      "name": "unbuilt_parents_keep_coverage",
+      "status": "PASS",
+      "covered": 256,
+      "merges": 0
+    },
+    {
+      "name": "synthetic_generation_swap_with_concurrent_append",
+      "status": "PASS",
+      "copied_nodes": 4095,
+      "concurrent_appends": 10,
+      "published_seq": 2057,
+      "observed_open_copy_transaction_before_and_after_append": true,
+      "note": "Copies synthetic outputs; does not evaluate model regeneration"
+    },
+    {
+      "name": "out_of_order_completion_publishes_only_contiguous_prefix",
+      "status": "PASS",
+      "before": 2,
+      "after": 5
+    },
+    {
+      "name": "rollback_push_equivalence",
+      "status": "PASS",
+      "steps": 20001,
+      "note": "Local deterministic algorithm comparison, separate from SQL checks"
+    },
+    {
+      "name": "mvp_delete_tombstones_and_retains_memory",
+      "status": "PASS",
+      "retained_entries": 3,
+      "retained_jobs": 3,
+      "note": "Database-only check. VM files and native sessions are not exercised."
+    },
+    {
+      "name": "future_explicit_purge_one_bot_preserves_other_bot",
+      "status": "PASS",
+      "remaining_other_bot_entries": 121
+    }
+  ],
+  "image_id": "sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8",
+  "repo_digests": [
+    "postgres@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8"
+  ],
+  "postgres_version": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+  "settings": "on\non\nUTF8",
+  "port_bindings": "{}",
+  "sql_output": "1|Owner now prefers coffee\n1|Owner now prefers coffee\n8|1|1.00000000000000000000\nsql_checks_passed",
+  "cleanup": {
+    "container_removed": true,
+    "volume_removed": true
+  }
+}

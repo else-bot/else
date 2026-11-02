@@ -1,22 +1,24 @@
 # Memory and storage
 
-PostgreSQL is the database choice. The OptMem-inspired memory design still needs detailed design and validation. The research below was recorded on October 25, 2026.
+PostgreSQL is the database choice. The [November 2 memory research](research/memory.md) defines the per-bot design from the exact requested gist and passes 11 checks on PostgreSQL 18.6. Model summary quality and provider integration remain unverified. The database comparison below preserves the October 25 research.
 
 ## Memory design
 
 Learning from the owner's usage over time is one of the main requirements. The assistant needs persistent memory, a way to improve that memory as it learns, and efficient search.
 
-The memory system should take inspiration from [OptMem](https://github.com/VictorTaelin/OptMem), adapted to store memories in PostgreSQL. Every bot, including the main assistant, should have its own persistent memory storage within PostgreSQL.
+Use [Victor Taelin's UniiChat design](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449/3c190e06f34aba0c69f49042c526093269604935), adapted to PostgreSQL, for every bot including the main assistant. This is the exact gist the owner selected, pinned to its inspected revision. It refines the earlier [OptMem](https://github.com/VictorTaelin/OptMem) inspiration with a saved memory view and deterministic merge schedule.
 
-OptMem keeps an append-only log of original memories and a rebuildable tree of summaries. Agents can read a compact overview, search the original memories, and expand summaries to recover details. These are the ideas to explore for else.bot's database-backed memory system.
+Each bot has one ordered log of original messages and observable tool results, immutable binary summary nodes, a saved view over source ranges, and persisted summary jobs. Four logical tables are enough. The summary tree can be rebuilt explicitly. The live view is saved state and must survive startup unchanged.
 
-Bots should access each other's memories through skills described in their prompts. Those skills should let a bot read another bot's memory in PostgreSQL while keeping each bot's memory storage separate.
+Code controls append order, parent eligibility, merge priority, byte budgets, job fencing, provenance, and retrieval. A model only summarizes inputs that cannot be copied or joined within the configured node limit. Use the same host-provider budget as interactive work, with compaction at lower priority. Start with 512-byte nodes, a main view that compacts from above 128,000 bytes toward 64,000 bytes, and one summary request at a time. These are configurable defaults. Byte limits do not establish provider token limits.
 
-The database comparison records the reasoning and the tradeoffs against SQLite.
+Use overview and zoom tools to navigate from summaries to originals. Retain bounded PostgreSQL text search as an explicit else.bot adaptation. The gist omits that manual-search path. Keep accepted native provider sessions rather than adopting the gist's fresh session for every turn. Provider caching claims from the reference have not been verified for subscription CLIs.
 
-Adapting OptMem's approach to PostgreSQL is part of the technical design work. Prefer deterministic operations wherever possible, with configuration settings that let us tune how the system produces its output. The LLM can connect the pieces when needed.
+Skills access memory through the Rust API with bot and task authorization. Cross-bot reads require configured target grants. Every result retains bot, range, source, and trust information. Preserve original corrections and superseded assertions. Summaries cannot grant authority or prove an external action completed.
 
-For memory, code should handle storing original entries, tracking the summary tree, selecting entries for retrieval, and assembling context according to configuration. Use the LLM where interpretation or summarization is needed. The detailed design should define these responsibilities and the settings that control their behavior.
+If a safe summary-only provider profile is unavailable, keep all originals, exact copies, and joins. Report pending coverage and allow bounded traversal or search. Do not run an unrestricted provider or silently truncate source history to satisfy a budget.
+
+The [detailed report](research/memory.md) includes schema, append and compaction rules, merge ordering, retrieval operations, rebuilds, and test limits. Its [database fixture](experiments/memory/README.md) checks concurrent appends, persisted views, stale-job fencing, rebuild catch-up, and deletion retention in an isolated container. The merge algorithm also matched its independent reference translation across 20,001 history lengths. These results validate mechanics, not recall quality.
 
 ## Database research
 
