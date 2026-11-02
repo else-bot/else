@@ -28,6 +28,8 @@ use uuid::Uuid;
 pub const MARKER_VAR: &str = "ELSE_BOT_SANDBOX";
 /// Mount points inside the sandbox.
 pub const SANDBOX_HOME: &str = "/home/bot";
+/// Descriptor carrying bubblewrap's options in the child.
+const ARGS_FD: i32 = 3;
 pub const SANDBOX_WORK: &str = "/work";
 pub const SANDBOX_PROGRAM: &str = "/opt/else/provider";
 pub const SANDBOX_PROVIDER_HOME: &str = "/var/lib/provider-home";
@@ -292,15 +294,60 @@ impl HostSandbox {
 
     /// A command ready to spawn: no inherited environment, its own process
     /// group, and the marker on bubblewrap itself for discovery.
-    pub fn command(&self, spec: &LaunchSpec) -> tokio::process::Command {
+    ///
+    /// Bubblewrap's options (binds and `--setenv` values, which can carry a
+    /// task grant) go through an inherited memfd with `--args`, because any
+    /// local user can read a process's command line. Only the program and
+    /// its arguments stay on argv.
+    pub fn command(&self, spec: &LaunchSpec) -> std::io::Result<tokio::process::Command> {
+        use std::io::{Seek, Write};
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+        let args = self.args(spec);
+        let split = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("args end with -- and the program");
+        let (options, program) = args.split_at(split);
+        // SAFETY: memfd_create with a valid NUL-terminated name.
+        let raw = unsafe { libc::memfd_create(c"else-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `raw` is a new descriptor owned by nothing else.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut file = std::fs::File::from(fd);
+        for option in options {
+            file.write_all(option.as_bytes())?;
+            file.write_all(&[0])?;
+        }
+        file.rewind()?;
+        let fd = OwnedFd::from(file);
         let mut command = tokio::process::Command::new(&self.bwrap);
         command
-            .args(self.args(spec))
+            .arg("--args")
+            .arg(ARGS_FD.to_string())
+            .args(program)
             .env_clear()
             .env(MARKER_VAR, self.marker(spec.turn_id))
             .process_group(0)
             .kill_on_drop(true);
-        command
+        // SAFETY: only async-signal-safe calls between fork and exec. The
+        // memfd moves to a fixed number without close-on-exec for bwrap.
+        unsafe {
+            command.pre_exec(move || {
+                let raw = fd.as_raw_fd();
+                if raw == ARGS_FD {
+                    if libc::fcntl(raw, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else if libc::dup2(raw, ARGS_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(command)
     }
 
     /// Terminate every sandbox process of this installation left from an

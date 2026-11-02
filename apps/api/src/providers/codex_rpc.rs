@@ -106,7 +106,9 @@ async fn write_line(stdin: &Stdin, message: &Value) -> Result<(), RpcError> {
 impl AppServer {
     /// Start the server in the sandbox and complete the initialize handshake.
     pub async fn start(sandbox: &HostSandbox, spec: &LaunchSpec) -> Result<Self, RpcError> {
-        let mut command = sandbox.command(spec);
+        let mut command = sandbox
+            .command(spec)
+            .map_err(|err| RpcError::Spawn(err.to_string()))?;
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

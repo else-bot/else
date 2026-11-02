@@ -51,7 +51,7 @@ fn shell(fx: &Fixture, bot: Uuid, script: &str) -> LaunchSpec {
 }
 
 async fn output(fx: &Fixture, spec: &LaunchSpec) -> String {
-    let out = fx.sandbox.command(spec).output().await.unwrap();
+    let out = fx.sandbox.command(spec).unwrap().output().await.unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -144,7 +144,7 @@ async fn termination_reaps_the_whole_sandbox() {
         Uuid::new_v4(),
         "sleep 300 & sleep 300 & sh -c 'sleep 300' & wait",
     );
-    let mut process = Supervised::spawn(fx.sandbox.command(&spec)).unwrap();
+    let mut process = Supervised::spawn(fx.sandbox.command(&spec).unwrap()).unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         fx.sandbox.live_processes(spec.turn_id).len() >= 4,
@@ -191,7 +191,7 @@ async fn sandbox_dies_with_its_parent_and_orphans_are_swept() {
     // A sandbox whose supervisor vanished (as after an API crash that
     // bubblewrap did not see) is found and terminated by the startup sweep.
     let spec = shell(&fx, Uuid::new_v4(), "sleep 300 & wait");
-    let process = Supervised::spawn(fx.sandbox.command(&spec)).unwrap();
+    let process = Supervised::spawn(fx.sandbox.command(&spec).unwrap()).unwrap();
     std::mem::forget(process);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!fx.sandbox.live_processes(spec.turn_id).is_empty());
@@ -251,6 +251,7 @@ async fn codex_runs_locked_down_with_the_shared_login() {
     let status = fx
         .sandbox
         .command(&launch(&["login", "status"]))
+        .unwrap()
         .output()
         .await
         .unwrap();
@@ -470,4 +471,42 @@ async fn deleting_a_bot_revokes_its_grants() {
 
 async fn tool(app: &TestApp, path: &str, token: Option<&str>) -> common::Reply {
     app.call("GET", path, None, token).await
+}
+
+/// Environment values given to a provider (such as its task grant) reach it
+/// but never appear on any host command line, which other users can read.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_secrets_stay_off_host_command_lines() {
+    let fx = fixture();
+    let mut spec = shell(&fx, Uuid::new_v4(), "echo \"$GRANT_CANARY\"; sleep 3");
+    spec.env
+        .push(("GRANT_CANARY".into(), "tg_canary_secret".into()));
+    let mut command = fx.sandbox.command(&spec).unwrap();
+    command.stdout(std::process::Stdio::piped());
+    let process = Supervised::spawn(command).unwrap();
+    // Wait until the sandboxed shell runs (bubblewrap has read its options).
+    for _ in 0..100 {
+        if !fx.sandbox.live_processes(spec.turn_id).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!fx.sandbox.live_processes(spec.turn_id).is_empty());
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
+            let text = String::from_utf8_lossy(&cmdline);
+            assert!(!text.contains("tg_canary_secret"), "{text}");
+        }
+    }
+    let mut process = process;
+    let mut stdout = process.child.stdout.take().unwrap();
+    let mut seen = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut seen)
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.trim(),
+        "tg_canary_secret",
+        "the value reached the provider"
+    );
 }
