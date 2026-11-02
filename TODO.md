@@ -22,7 +22,7 @@ Use the first usable POC as the default target. If the implementation request in
 - [x] [POC-002: Owner authentication and secret provisioning](docs/implementation/01-api.md#poc-002-owner-authentication-and-secret-provisioning)
 - [x] [POC-003: Database migrations and installation setup](docs/implementation/01-api.md#poc-003-database-migrations-and-installation-setup)
 - [x] [POC-004: Bot creation, listing, and soft deletion](docs/implementation/01-api.md#poc-004-bot-creation-listing-and-soft-deletion)
-- [ ] [POC-005: Durable messages and turn scheduling](docs/implementation/01-api.md#poc-005-durable-messages-and-turn-scheduling)
+- [x] [POC-005: Durable messages and turn scheduling](docs/implementation/01-api.md#poc-005-durable-messages-and-turn-scheduling)
 - [ ] [POC-006: Conversation snapshots and event streaming](docs/implementation/01-api.md#poc-006-conversation-snapshots-and-event-streaming)
 - [ ] [POC-007: Cancellation and restart reconciliation](docs/implementation/01-api.md#poc-007-cancellation-and-restart-reconciliation)
 - [ ] [POC-008: GPUI window and API connection](docs/implementation/02-desktop-and-codex.md#poc-008-gpui-window-and-api-connection)

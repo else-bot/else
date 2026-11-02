@@ -86,6 +86,8 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 | `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
 | `SECRET_KEY` | unset | Installation master key: 32 bytes as standard base64. When set, it is validated and used instead of the file. |
 | `SECRET_KEY_FILE` | `$ELSE_DATA_DIR/secret-key` | Master key file used when `SECRET_KEY` is unset. |
+| `ELSE_SYNTHETIC_PROVIDER` | `0` | `1` exposes the deterministic `synthetic` provider, labeled "Synthetic (test)", for demos and manual checks. It runs no model. |
+| `ELSE_MAX_ACTIVE_TURNS` | `2` | Provider turns running at once across all bots, from 1 to 32. Each bot runs at most one turn at a time regardless. |
 | `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. A larger declared `Content-Length` receives `413 too_large` on every route; body extractors also stop chunked bodies at the limit. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never query strings, headers, or bodies. |
@@ -96,11 +98,15 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 
 | Route | Behavior |
 | --- | --- |
-| `GET /v1/capabilities` | API version and the per-process `server_instance_id`. |
+| `GET /v1/capabilities` | API version, per-process `server_instance_id`, enabled providers with availability, the default provider, and limits. Model settings and credentials are not exposed. |
 | `GET /v1/bots[?include_deleting=true]` | `default_bot_id` and active bots, oldest first. `include_deleting` adds tombstones whose shutdown is pending. |
 | `POST /v1/bots` | `{request_id, name, role}`. `201` with `Location` on first acceptance; the same request returns `200` with the same bot; changed input under that ID returns `409 request_conflict`. |
 | `GET /v1/bots/{id}` | An active bot, or a deletion receipt with `cleanup.state` and no role or conversation reference. |
 | `DELETE /v1/bots/{id}` | Commits the tombstone, clears the default if it pointed at this bot, and returns the receipt. Repeating it returns the same receipt. History and conversations are retained. |
+
+| `POST /v1/bots/{id}/turns` | `{request_id, text, provider_id}`. Saves the owner message and a queued turn in one transaction, then wakes the scheduler. `202` on acceptance; a matching retry returns `200` with the same item and turn; different text or provider under that ID returns `409`. A deleted bot returns `410 bot_deleted`. More than four waiting messages return `429 queue_full` with `Retry-After`. A `null` provider uses the default. |
+| `GET /v1/bots/{id}/turns/by-request/{request_id}` | Resolves a lost send response, or `404`. |
+| `GET`, `PATCH /v1/settings/providers/{provider_id}` | Read or update the saved execution profile. `PATCH` takes any of `model`, `reasoning_effort`, `service_tier`, and an optional `expected_revision`. The adapter validates the exact values; unsupported values return `400 invalid_profile` and nothing changes. A change bumps the revision. Accepted turns keep the revision they were accepted with. |
 
 Unknown or malformed IDs return `404 not_found`, always after authentication. Try it with a synthetic bot:
 
@@ -110,6 +116,14 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 	-d "{\"request_id\":\"$(uuidgen)\",\"name\":\"Work\",\"role\":\"Help with my work\"}" \
 	http://127.0.0.1:7878/v1/bots
 ```
+
+### Turns and the scheduler
+
+One scheduler runs inside the API. PostgreSQL rows are the queue: it claims the oldest queued message of each idle bot, oldest first across bots, within `ELSE_MAX_ACTIVE_TURNS`. A unique index allows one active turn per bot. Turn status moves through `queued`, `preparing`, `sending`, `running`, and a terminal `completed`, `interrupted`, `failed`, or `uncertain`. Assistant text is persisted at most every 100 ms or 2 KiB under one stable item ID. The completion of a turn comes only from the adapter's terminal outcome, never from text.
+
+History `seq` is arrival order. A message queued behind a running turn can therefore precede that turn's reply; each item carries its `turn_id`.
+
+On startup, before the scheduler runs, a turn claimed but never sent returns to the queue. A turn that may have reached its provider becomes `uncertain` with `effect_uncertain = true` and is never resent.
 
 ### Database and migrations
 

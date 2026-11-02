@@ -2,7 +2,10 @@
 //! transactional operations that persist application state.
 
 pub mod bots;
+pub mod events;
 pub mod installation;
+pub mod profiles;
+pub mod turns;
 
 use std::time::Duration;
 

@@ -2,4 +2,5 @@
 //! depend on HTTP or storage.
 
 pub mod bots;
+pub mod messages;
 pub mod providers;

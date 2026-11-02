@@ -57,14 +57,25 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         "created_at": bot.created_at,
         "deleted_at": null,
         "selected_provider_id": bot.selected_provider_id,
-        "activity": {
-            "phase": "idle",
-            "active_turn_id": null,
-            "queued_count": 0,
-            "running_job_count": 0,
-            "error": null,
-        },
+        "activity": activity_json(bot),
         "cleanup": null,
+    })
+}
+
+/// Project turn records into the sidebar activity. No separate state.
+pub fn activity_json(bot: &BotRecord) -> Value {
+    let phase = match (bot.cancel_pending, bot.active_turn_status.as_deref()) {
+        (true, _) | (_, Some("cancelling")) => "cancelling",
+        (_, Some(_)) => "working",
+        (_, None) if bot.queued_count > 0 => "queued",
+        _ => "idle",
+    };
+    json!({
+        "phase": phase,
+        "active_turn_id": bot.active_turn_id,
+        "queued_count": bot.queued_count,
+        "running_job_count": 0,
+        "error": null,
     })
 }
 

@@ -8,7 +8,9 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use else_api::config::{Config, ProcessEnv};
+use else_api::scheduler::Scheduler;
 use else_api::{credentials, db, http};
+use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate]\n\n\
 commands:\n  \
@@ -149,18 +151,36 @@ fn run_serve() -> anyhow::Result<()> {
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
-        let state = Arc::new(http::AppState::new(owner_token, pool));
-        serve(config, state).await
+        let registry = else_api::providers::registry(&config);
+        // Reconcile interrupted work before the scheduler admits anything.
+        let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
+        if requeued + uncertain > 0 {
+            tracing::info!(requeued, uncertain, "reconciled unfinished turns");
+        }
+        let scheduler = Scheduler::new(pool.clone(), registry, config.max_active_turns);
+        let stop_scheduler = CancellationToken::new();
+        let scheduler_task = tokio::spawn(
+            scheduler
+                .clone()
+                .run(stop_scheduler.clone(), config.shutdown_grace),
+        );
+        let state = Arc::new(http::AppState::new(owner_token, pool, scheduler));
+        let result = serve(&config, state).await;
+        // Stop provider work after HTTP so no new message is accepted.
+        stop_scheduler.cancel();
+        let _ = scheduler_task.await;
+        tracing::info!("API stopped");
+        result
     })
 }
 
-async fn serve(config: Config, state: Arc<http::AppState>) -> anyhow::Result<()> {
+async fn serve(config: &Config, state: Arc<http::AppState>) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("binding {}", config.bind))?;
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
-    let app = http::router(&config, state);
+    let app = http::router(config, state);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(async move {
         let mut stop_rx = stop_rx;
@@ -191,7 +211,6 @@ async fn serve(config: Config, state: Arc<http::AppState>) -> anyhow::Result<()>
             server.abort();
         }
     }
-    tracing::info!("API stopped");
     Ok(())
 }
 

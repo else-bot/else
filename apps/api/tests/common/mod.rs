@@ -114,8 +114,59 @@ pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 /// The real router over a test database, driven in-process.
 pub struct TestApp {
     pub router: axum::Router,
-    pub db: TestDb,
     pub state: std::sync::Arc<else_api::http::AppState>,
+    pub scheduler: std::sync::Arc<else_api::scheduler::Scheduler>,
+    stop: tokio_util::sync::CancellationToken,
+    // Declared last so the scheduler stops before the database is dropped.
+    pub db: std::sync::Arc<TestDb>,
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+/// A provider that uses saved profiles, standing in for Codex in tests. It
+/// accepts only the documented Codex profile values.
+pub struct ProfiledFake;
+
+#[async_trait::async_trait]
+impl else_api::app::providers::Provider for ProfiledFake {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+    fn label(&self) -> &'static str {
+        "Codex (test double)"
+    }
+    fn availability(&self) -> else_api::app::providers::Availability {
+        else_api::app::providers::Availability::Available
+    }
+    fn uses_profile(&self) -> bool {
+        true
+    }
+    fn validate_profile(&self, p: &else_api::app::providers::Profile) -> Result<(), String> {
+        if p.model != "gpt-6.1-sol" {
+            return Err(format!("unsupported model {}", p.model));
+        }
+        if !["low", "medium", "high", "xhigh"].contains(&p.reasoning_effort.as_str()) {
+            return Err("unsupported reasoning effort".into());
+        }
+        if !["default", "priority"].contains(&p.service_tier.as_str()) {
+            return Err("unsupported service tier".into());
+        }
+        Ok(())
+    }
+    async fn run(
+        &self,
+        input: else_api::app::providers::TurnInput,
+        sink: &dyn else_api::app::providers::TurnSink,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> else_api::app::providers::TurnOutcome {
+        else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5))
+            .run(input, sink, cancel)
+            .await
+    }
 }
 
 pub struct Reply {
@@ -133,13 +184,115 @@ impl TestApp {
     }
 
     pub fn with_db(db: TestDb) -> Self {
+        Self::with_options(std::sync::Arc::new(db), 4)
+    }
+
+    /// Simulate an API restart: stop this scheduler, run startup
+    /// reconciliation, and serve the same database again.
+    pub async fn restart(self) -> Self {
+        let db = self.db.clone();
+        let scheduler = self.scheduler.clone();
+        drop(self);
+        // Wait for the old scheduler's turns to record their outcomes.
+        for _ in 0..200 {
+            if std::sync::Arc::strong_count(&scheduler) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        else_api::db::turns::recover_after_restart(&db.pool)
+            .await
+            .unwrap();
+        Self::with_options(db, 4)
+    }
+
+    /// The real router and a running scheduler with the synthetic provider
+    /// (5 ms per chunk) and the profile-bearing test double.
+    pub fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
+        use std::sync::Arc;
         let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
-        let state = std::sync::Arc::new(else_api::http::AppState::new(
+        let registry = else_api::providers::Registry::new(vec![
+            Arc::new(else_api::providers::synthetic::Synthetic::new(
+                std::time::Duration::from_millis(5),
+            )),
+            Arc::new(ProfiledFake),
+        ]);
+        let scheduler = else_api::scheduler::Scheduler::new(db.pool.clone(), registry, max_active);
+        let stop = tokio_util::sync::CancellationToken::new();
+        tokio::spawn(
+            scheduler
+                .clone()
+                .run(stop.clone(), std::time::Duration::from_secs(2)),
+        );
+        let state = Arc::new(else_api::http::AppState::new(
             else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
             db.pool.clone(),
+            scheduler.clone(),
         ));
         let router = else_api::http::router(&config, state.clone());
-        Self { router, db, state }
+        Self {
+            router,
+            db,
+            state,
+            scheduler,
+            stop,
+        }
+    }
+
+    /// Poll the database until a turn reaches one of `statuses`.
+    pub async fn wait_turn(&self, turn_id: &str, statuses: &[&str]) -> String {
+        let id: uuid::Uuid = turn_id.parse().unwrap();
+        for _ in 0..400 {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+                .bind(id)
+                .fetch_one(&self.db.pool)
+                .await
+                .unwrap();
+            if statuses.contains(&status.as_str()) {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let all: Vec<(i64, String, Option<String>)> =
+            sqlx::query_as("SELECT turn_no, status, error_code FROM turns ORDER BY created_at")
+                .fetch_all(&self.db.pool)
+                .await
+                .unwrap();
+        panic!("turn {turn_id} did not reach {statuses:?}; turns: {all:?}");
+    }
+
+    pub async fn main_bot(&self) -> String {
+        self.owner("GET", "/v1/bots", None).await.body["default_bot_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    pub async fn create_bot(&self, name: &str, role: &str) -> String {
+        let reply = self
+            .owner(
+                "POST",
+                "/v1/bots",
+                Some(serde_json::json!({ "request_id": uuid::Uuid::new_v4(), "name": name, "role": role })),
+            )
+            .await;
+        assert_eq!(reply.status, axum::http::StatusCode::CREATED);
+        reply.body["bot"]["id"].as_str().unwrap().to_owned()
+    }
+
+    pub async fn send(
+        &self,
+        bot: &str,
+        request_id: uuid::Uuid,
+        text: &str,
+        provider: Option<&str>,
+    ) -> Reply {
+        self.owner(
+            "POST",
+            &format!("/v1/bots/{bot}/turns"),
+            Some(serde_json::json!({ "request_id": request_id, "text": text, "provider_id": provider })),
+        )
+        .await
     }
 
     pub async fn call(

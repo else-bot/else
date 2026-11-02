@@ -34,11 +34,19 @@ pub struct BotRecord {
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub selected_provider_id: Option<String>,
+    pub cancel_pending: bool,
+    pub active_turn_id: Option<Uuid>,
+    pub active_turn_status: Option<String>,
+    pub queued_count: i64,
 }
 
 const SELECT_BOT: &str = "SELECT b.id, b.name, b.role, c.id AS conversation_id, b.status,
-        b.created_at, b.deleted_at, b.selected_provider_id
-    FROM bots b JOIN conversations c ON c.bot_id = b.id";
+        b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending,
+        a.id AS active_turn_id, a.status AS active_turn_status,
+        (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
+    FROM bots b JOIN conversations c ON c.bot_id = b.id
+    LEFT JOIN turns a ON a.bot_id = b.id
+        AND a.status IN ('preparing', 'sending', 'running', 'cancelling')";
 
 #[derive(Debug)]
 pub enum Created {

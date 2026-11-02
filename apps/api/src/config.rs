@@ -48,6 +48,10 @@ pub struct Config {
     pub secret_key: SecretKeySource,
     pub max_body_bytes: usize,
     pub shutdown_grace: Duration,
+    /// Expose the deterministic synthetic provider (tests and demos).
+    pub synthetic_provider: bool,
+    /// Provider turns running at once across all bots.
+    pub max_active_turns: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,7 +116,11 @@ impl Config {
             1,
             120,
         )?);
+        let synthetic_provider = parse_bool(source, "ELSE_SYNTHETIC_PROVIDER")?;
+        let max_active_turns = parse_number(source, "ELSE_MAX_ACTIVE_TURNS", 2, 1, 32)? as usize;
         Ok(Self {
+            synthetic_provider,
+            max_active_turns,
             database_url: database_url(source)?,
             bind,
             data_dir,
@@ -209,6 +217,15 @@ fn parse_bind(value: Option<&str>) -> Result<SocketAddr, ConfigError> {
         ));
     }
     Ok(addr)
+}
+
+fn parse_bool(source: &dyn Source, name: &'static str) -> Result<bool, ConfigError> {
+    match source.get(name).as_deref() {
+        None => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some("0" | "false") => Ok(false),
+        Some(_) => Err(invalid(name, "expected 1, 0, true, or false")),
+    }
 }
 
 fn parse_number(

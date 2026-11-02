@@ -3,6 +3,8 @@
 pub mod auth;
 pub mod bots;
 pub mod error;
+pub mod settings;
+pub mod turns;
 
 use std::sync::Arc;
 
@@ -17,24 +19,28 @@ use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use crate::app::providers::Availability;
 use crate::config::Config;
 use crate::credentials::OwnerToken;
+use crate::scheduler::Scheduler;
 use error::ApiError;
 
 /// Shared request state. Credentials are held only as digests.
 pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: PgPool,
+    pub scheduler: Arc<Scheduler>,
     /// Nonsecret identity of this API process, used to bind event cursors.
     pub server_instance_id: Uuid,
     pub auth_failures: auth::FailureLimiter,
 }
 
 impl AppState {
-    pub fn new(owner_token: OwnerToken, db: PgPool) -> Self {
+    pub fn new(owner_token: OwnerToken, db: PgPool, scheduler: Arc<Scheduler>) -> Self {
         Self {
             owner_token,
             db,
+            scheduler,
             server_instance_id: Uuid::new_v4(),
             auth_failures: auth::FailureLimiter::default(),
         }
@@ -48,6 +54,8 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/capabilities", get(capabilities))
         .merge(bots::routes())
+        .merge(turns::routes())
+        .merge(settings::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
@@ -138,12 +146,34 @@ async fn readiness(
 }
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let registry = state.scheduler.registry();
+    let providers: Vec<_> = registry
+        .all()
+        .iter()
+        .map(|provider| {
+            let (available, reason) = match provider.availability() {
+                Availability::Available => (true, None),
+                Availability::Unavailable(reason) => (false, Some(reason)),
+            };
+            json!({
+                "id": provider.id(),
+                "label": provider.label(),
+                "available": available,
+                "unavailable_reason": reason,
+            })
+        })
+        .collect();
     Json(json!({
         "api_version": "v1",
         "server_instance_id": state.server_instance_id,
-        "default_provider_id": null,
-        "providers": [],
-        "limits": {},
+        "default_provider_id": registry.default_id(),
+        "providers": providers,
+        "limits": {
+            "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,
+            "max_queued_turns": crate::app::messages::MAX_QUEUED_TURNS,
+            "max_bot_name_chars": crate::app::bots::MAX_NAME_CHARS,
+            "max_bot_role_bytes": crate::app::bots::MAX_ROLE_BYTES,
+        },
     }))
 }
 
@@ -172,9 +202,14 @@ pub mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://unused@127.0.0.1:1/unused")
             .unwrap();
+        let scheduler = Scheduler::new(pool.clone(), crate::providers::Registry::new(vec![]), 1);
         router(
             &config,
-            Arc::new(AppState::new(OwnerToken::parse(TOKEN).unwrap(), pool)),
+            Arc::new(AppState::new(
+                OwnerToken::parse(TOKEN).unwrap(),
+                pool,
+                scheduler,
+            )),
         )
     }
 
