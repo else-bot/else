@@ -1,6 +1,6 @@
 # Backup design
 
-This is the proposed backup design. Snapshot capabilities are based on the cited upstream documentation. The [local snapshot experiment](experiments/vm-snapshots.md) could not create a VM because KVM was unavailable.
+This is the proposed backup design. The [November 2 verification](experiments/bot-vm-verification.md) tested disk and full archives, recovery into a separate runtime, and a restored desktop with its browser profile. Whole-assistant recovery, encryption, and R2 or S3 uploads remain untested.
 
 Backups should automatically capture encrypted PostgreSQL exports and encrypted VM snapshot archives. PostgreSQL owns the application configuration, bot definitions, memory, and chats. VM archives preserve each bot's computer, including its saved files and browser profile.
 
@@ -31,6 +31,10 @@ Owned volumes can be captured, but host bind-mount contents remain external. Avo
 
 Full restoration needs a compatible runtime and guest kernel with matching CPU and memory settings. External connections need reconnection. [Restore constraints](https://docs.microsandbox.dev/sdk/rust/snapshots).
 
+In the tested v0.7.13 runtime, full capture rejects active managed `exec` jobs. A guest daemon without an active managed execution session could be captured and resumed. Use disk snapshots for routine backups. Full checkpoints require draining managed jobs first and must not promise to resume an arbitrary active CLI turn. The [verification report](experiments/bot-vm-verification.md#snapshot-and-recovery-constraints) records the observed restriction.
+
+Browser profiles need an application checkpoint before a disk backup. The desktop restore passed after Chromium exited cleanly through its control API and removed its profile lock. Capturing the still-open browser had carried its hostname and process lock into the restored VM. A guest filesystem flush alone does not establish a consistent browser checkpoint.
+
 ## Full snapshot size estimates
 
 For planning with a 2 GiB guest, allow roughly 2 GiB for its RAM state before compression, then add captured filesystem data, metadata, and any included OCI image artifacts. This is a sizing assumption, not a measured snapshot size.
@@ -41,7 +45,7 @@ The exported archive uses zstd, so the uploaded size depends on the captured con
 
 Measure the actual exported and encrypted archive, including any required base artifacts. The SDK documents local `size_bytes()` as the apparent upper-file size, so that value alone is not a reliable total backup size. [Size reporting](https://docs.microsandbox.dev/sdk/rust/snapshots).
 
-The [snapshot experiment report](experiments/vm-snapshots.md) separates measured runtime installation sizes from unmeasured snapshot estimates. Its [rerun guide](experiments/run-vm-snapshot-benchmark.md) includes the synthetic benchmark.
+The [snapshot experiment report](experiments/vm-snapshots.md) includes measured compressed archive sizes. Full Python-guest archives ranged from about 24 MiB when idle to 806 MiB with random data. A desktop disk archive with its OCI image included was about 659 MiB. These are unencrypted samples, not fixed backup sizes. The [rerun guide](experiments/run-vm-snapshot-benchmark.md) includes the synthetic benchmark.
 
 ## Automatic VM backups to R2 or S3
 

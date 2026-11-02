@@ -1,0 +1,265 @@
+{
+  "verdict": "VERIFIED for the tested local bot VM prototype capabilities",
+  "date_utc": "2026-11-02",
+  "host": {
+    "platform": "Linux-7.2.8-9-omarchy-x86_64-with-glibc2.44",
+    "cpu_model": "AMD Ryzen 5 5600X 6-Core Processor",
+    "logical_cpus": 12,
+    "kvm_api": 12,
+    "virtualization": "svm"
+  },
+  "runtime": {
+    "version": "v0.7.13",
+    "release_published_at": "2026-11-01T15:37:36Z",
+    "bundle_bytes": 30542710,
+    "bundle_sha256": "sha256:c41aeefc050e97f42cd55ce55cc139efc13c6ee2dc371e8d30c325a305a5c3b1",
+    "guest_kernel": "6.12.113"
+  },
+  "guest": {
+    "cpus": 1,
+    "memory_mib": 2048,
+    "root_disk_mib": 4096,
+    "image": "python:3.12-slim",
+    "image_manifest_digest": "sha256:1148dbb014615300fa7e713b2f94f550c0d1c69780c0805f84f093ceee34dd0b",
+    "existing_credentials_copied": false
+  },
+  "lifecycle": {
+    "first_create_seconds": 3.996726416000456,
+    "cached_create_seconds": 0.22604933200000232,
+    "stop_start_preserves_files": {
+      "start_seconds": 0.18636734699975932,
+      "new_pid": 136925
+    },
+    "stop_releases_worker": true,
+    "pause_preserves_process": true,
+    "filesystem_checks": {
+      "a_filesystem_and_cpu": {
+        "marker": "a",
+        "host_path_visible": false,
+        "cpus": 1,
+        "kernel": "6.12.113"
+      },
+      "b_filesystem_and_cpu": {
+        "marker": "b",
+        "host_path_visible": false,
+        "cpus": 1,
+        "kernel": "6.12.113"
+      }
+    }
+  },
+  "worker_rss_kib": {
+    "empty_guest": 144468,
+    "running_test_service": 194276,
+    "paused_test_service": 194364,
+    "desktop_after_package_install": 1565464,
+    "desktop_after_restore": 576088
+  },
+  "desktop": {
+    "user": "elsebot",
+    "chromium_version": "156.0.8078.73-1~deb13u1",
+    "screen_width": 1280,
+    "screen_height": 800,
+    "chromium_no_sandbox_flag": false,
+    "vnc_keyboard_input_observed": "VNC worksVNC works",
+    "novnc_http_status": 200,
+    "novnc_websocket_upgrade": true,
+    "host_port_binding": "127.0.0.1"
+  },
+  "snapshot_cases": [
+    {
+      "kind": "idle",
+      "scope": "disk",
+      "bytes": 818728,
+      "sha256": "8a7ff2e60587d34c9223d88248d17a800e1c347ca1514ded6de7f49c0b1028bb",
+      "capture_seconds": 0.019487442999889026,
+      "verify_seconds": 0.010736737000115681,
+      "export_seconds": 0.022159492000355385,
+      "image_included": false,
+      "ram_workload_bytes": 16777216,
+      "disk_workload_bytes": 0
+    },
+    {
+      "kind": "idle",
+      "scope": "full",
+      "bytes": 25363639,
+      "sha256": "6632f025df9603fc06ded7fa724d75a7ae97a6f7b0038aa2a305f4b67849f297",
+      "capture_seconds": 0.5801254750003864,
+      "verify_seconds": 0.10044963600012125,
+      "export_seconds": 0.5552989349998825,
+      "image_included": false,
+      "ram_workload_bytes": 16777216,
+      "disk_workload_bytes": 0
+    },
+    {
+      "kind": "compressible",
+      "scope": "disk",
+      "bytes": 928758,
+      "sha256": "5566b0c3d36c38424c0c4f876a56f1f9f8bf989c4d622fea7a8b5419fb88168a",
+      "capture_seconds": 0.14967432800040115,
+      "verify_seconds": 0.03330775100039318,
+      "export_seconds": 0.21780998499980342,
+      "image_included": false,
+      "ram_workload_bytes": 536870912,
+      "disk_workload_bytes": 134217728
+    },
+    {
+      "kind": "compressible",
+      "scope": "full",
+      "bytes": 30766288,
+      "sha256": "e46160cf36f983905ce7015efcdcbc20bf9171072c25e910136837fde6fefc6d",
+      "capture_seconds": 0.4623036080001839,
+      "verify_seconds": 0.25408667599913315,
+      "export_seconds": 1.1756923680004547,
+      "image_included": false,
+      "ram_workload_bytes": 536870912,
+      "disk_workload_bytes": 134217728
+    },
+    {
+      "kind": "random",
+      "scope": "disk",
+      "bytes": 135206086,
+      "sha256": "1280bb835d3271cebc26e674628f7d3697d653e22b972d827b1e6c21390b247d",
+      "capture_seconds": 0.29195248399992124,
+      "verify_seconds": 0.046196458999475,
+      "export_seconds": 0.5013351269999475,
+      "image_included": false,
+      "ram_workload_bytes": 536870912,
+      "disk_workload_bytes": 134217728
+    },
+    {
+      "kind": "random",
+      "scope": "full",
+      "bytes": 844643696,
+      "sha256": "4283b7d426ed4cfc53d9bb0d7bc244f70d948efef47cc8100454ca91e2f09f33",
+      "capture_seconds": 0.6860344010001427,
+      "verify_seconds": 0.6085672629997134,
+      "export_seconds": 2.9419065969996154,
+      "image_included": false,
+      "ram_workload_bytes": 536870912,
+      "disk_workload_bytes": 134217728
+    }
+  ],
+  "standalone_disk_with_image": {
+    "image_included": true,
+    "bytes": 39286722,
+    "sha256": "9acd95d3b1baaf11e14a9cc7887530956eaf3510ccf6ac0110881c74c66daee7"
+  },
+  "restoration": {
+    "disk_files": {
+      "seconds": 0.215563898000255,
+      "marker": "a",
+      "passed": true
+    },
+    "full_guest_process_and_ram_nonce": true,
+    "empty_runtime": {
+      "seconds": 0.5970306339995659,
+      "marker": "a",
+      "passed": true,
+      "empty_runtime_before_restore": true
+    },
+    "exported_full_after_source_removal": {
+      "passed": true,
+      "restore_seconds": 1.9266127219998452,
+      "source_runtime_removed_before_restore": true,
+      "guest_daemon_resumed": true,
+      "ram_bytes": 536870912,
+      "ram_sha256": "798e99cced78390afd3a71b4bb6e3f64733cce7e38f67c5a37c973fa9522fc41",
+      "ram_nonce_preserved": true,
+      "image_recovered_from_standalone_baseline_archive": true
+    },
+    "desktop": {
+      "passed": true,
+      "browser_clean_exit_verified": true,
+      "archive_bytes": 690615082,
+      "archive_sha256": "4348df2f94dfa2bd68081aa2d1a4747a14d63a396b70a42655958ddc16bcbf21",
+      "image_included": true,
+      "export_seconds": 6.276777260000017,
+      "restore_seconds": 3.224361202000182,
+      "profile_sha256_before_and_after": "9d091967ce14ef27541ec762fa70babf32bbff23c0e1c0ac9db209de1b5c887c",
+      "browser_after_restore": {
+        "status": "passed",
+        "browser_no_sandbox_flag": false,
+        "browser_ready_seconds": 1.4679025119994549,
+        "vnc": {
+          "protocol": "RFB 003.008",
+          "width": 1280,
+          "height": 800,
+          "desktop_name": "elsebot-fit-txbvjsdy-desktop-restored:99",
+          "bytes": 41754
+        },
+        "novnc": {
+          "status": 200,
+          "bytes": 17810
+        },
+        "host_memory": {
+          "VmRSS_kib": 576088,
+          "RssAnon_kib": 547992,
+          "RssFile_kib": 2844,
+          "VmSwap_kib": 0,
+          "pid": 163442
+        },
+        "pages": [
+          {
+            "title": "else.bot VM verification",
+            "url": "file:///home/elsebot/verification.html"
+          },
+          {
+            "title": "Omnibox Popup",
+            "url": "chrome://omnibox-popup.top-chrome/"
+          },
+          {
+            "title": "Omnibox Popup",
+            "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html"
+          }
+        ]
+      },
+      "profile_file_verified": "/home/elsebot/profile/Local State"
+    }
+  },
+  "rust_sdk": {
+    "version": "0.7.13",
+    "features": [
+      "local",
+      "net"
+    ],
+    "default_features": false,
+    "toolchain": "rustc 1.98.0",
+    "initial_build_and_run_seconds": 89.35827930699998,
+    "checks": [
+      "create",
+      "exec",
+      "stop",
+      "connect_or_create",
+      "saved file preservation",
+      "existing CPU configuration preservation"
+    ],
+    "preserved_resources": {
+      "cpus": 1,
+      "max_cpus": 1,
+      "max_memory_mib": 2048,
+      "memory_mib": 2048
+    }
+  },
+  "constraints": [
+    "Full capture rejects active managed exec jobs. Guest daemon capture and restoration passed.",
+    "Pause retains resident RAM. Stop removed the VM workers.",
+    "A browser still open during disk capture left a profile lock tied to its source hostname. Verified clean browser exit fixed the desktop restore fixture.",
+    "No provider subscription login, encrypted R2/S3 upload, complete application recovery, or hostile-workload isolation audit was performed."
+  ],
+  "cleanup": {
+    "test_vms_stopped_and_removed": true,
+    "source_runtime_removed": true,
+    "build_caches_removed": true,
+    "compressed_archives_and_logs_retained": true
+  },
+  "documented_benchmark_check": {
+    "case": "idle",
+    "status": "measured",
+    "disk_archive_bytes": 287770,
+    "full_archive_bytes": 21487934,
+    "cleanup": {
+      "stop": 0,
+      "remove": 0
+    }
+  }
+}

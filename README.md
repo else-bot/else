@@ -57,4 +57,4 @@ The detailed notes separate requirements, decisions, proposals, and research res
 | [Bot computers](docs/sandboxes.md) | Runtime research, Rust deployment, VM locks, and resource limits. |
 | [Backup design](docs/backups.md) | Database exports, VM snapshots, encryption, retention, and size estimates. |
 | [Restore procedure](docs/restore.md) | Planned recovery on a new server and startup that preserves saved state. |
-| [Snapshot experiment](docs/experiments/vm-snapshots.md) | Measured runtime sizes, the KVM blocker, and a linked benchmark guide. |
+| [VM verification](docs/experiments/bot-vm-verification.md) | Local desktop, lifecycle, snapshot, and Rust SDK checks, including measured backup sizes. |

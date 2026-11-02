@@ -1,18 +1,20 @@
 # Run the VM snapshot benchmark
 
-This guide reruns the synthetic benchmark described in the [experiment report](vm-snapshots.md). A host with working KVM is required. The earlier attempt stopped at preflight, so the VM capture path remains untested.
+This guide runs synthetic disk and full captures on a host with working KVM. The [experiment report](vm-snapshots.md) records the measured workloads, and the [bot VM verification](bot-vm-verification.md) adds restoration and desktop checks. Exact archive sizes vary with the image and guest processes.
 
-Extract the pinned official runtime bundle into a directory containing `msb` and its matching `libkrunfw.so` file. Save the Python script below as `/tmp/elsebot-snapshot-bench.py`. It creates fresh state under `/tmp`, runs one VM at a time, and stops and removes only its own VM. Snapshot artifacts and logs remain in its output directory. Each run needs at least 8 GiB of free scratch space.
+Extract the [v0.7.13 runtime bundle](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.13) into a directory containing `msb` and its matching `libkrunfw.so*` library. Save the Python script below as `/tmp/elsebot-snapshot-bench.py`. It uses a private home and runtime, runs one VM at a time, and stops and removes only its own VM. Snapshot artifacts and logs remain in its output directory. Each run needs at least 8 GiB of free scratch space.
 
 Run each case separately after KVM is available. Replace the bundle path with the extracted runtime directory:
 
 ```sh
-python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.10 --case idle
-python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.10 --case compressible
-python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.10 --case random
+python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.13 --case idle
+python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.13 --case compressible
+python /tmp/elsebot-snapshot-bench.py --bundle /tmp/microsandbox-v0.7.13 --case random
 ```
 
 The `--disk-mib` option can increase the written data up to 1024 MiB. Results distinguish a measured run from a blocked or failed one. The script does not encrypt or upload the synthetic snapshots.
+
+The memory worker runs as a guest daemon. An active managed `exec --detach` job prevents full capture in v0.7.13. The launcher below exits its managed session after starting the worker.
 
 ```python
 #!/usr/bin/env python3
@@ -43,7 +45,14 @@ msb = bundle / "msb"
 firmware = sorted(bundle.glob("libkrunfw.so*"))
 if not msb.is_file() or len(firmware) != 1:
 	parser.error("bundle must contain msb and one matching libkrunfw.so file")
-env = dict(os.environ, MSB_HOME=str(root / "runtime"), MSB_PATH=str(msb),
+private_home = root / "home"
+private_home.mkdir()
+env = {key: value for key, value in os.environ.items() if key in [
+	"PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "no_proxy", "LANG", "TERM",
+]}
+env.update(HOME=str(private_home), XDG_CACHE_HOME=str(root / "cache"),
+	MSB_HOME=str(root / "runtime"), MSB_PATH=str(msb),
 	MSB_LIBKRUNFW_PATH=str(firmware[0]), MSB_BACKEND="local", NO_COLOR="1")
 report = {
 	"status": "running", "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -108,8 +117,23 @@ try:
 			"--max-duration", "20m")
 		created = True
 		report["inspect"] = command("inspect", name).stdout
-		command("exec", "--detach", name, "--", "python3", "-c",
-			guest, args.case, str(args.disk_mib))
+		launcher = r'''
+import os, sys
+source, case, disk_mib = sys.argv[1:]
+if os.fork():
+	raise SystemExit(0)
+os.setsid()
+if os.fork():
+	os._exit(0)
+fd = os.open("/dev/null", os.O_RDWR)
+for target in (0, 1, 2):
+	os.dup2(fd, target)
+if fd > 2:
+	os.close(fd)
+os.execv(sys.executable, [sys.executable, "-c", source, case, disk_mib])
+'''
+		command("exec", name, "--", "python3", "-c",
+			launcher, guest, args.case, str(args.disk_mib))
 		probe = 'from pathlib import Path; p=Path("/root/elsebot-bench-ready.json"); print(p.read_text() if p.exists() else "{}")'
 		for _ in range(120):
 			ready = json.loads(command("exec", name, "--", "python3", "-c", probe).stdout)

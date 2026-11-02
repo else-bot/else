@@ -1,6 +1,6 @@
 # Restore else.bot on a new server
 
-This is the planned recovery procedure for implementation. It has not been tested. It requires a completed [backup set](backups.md) and separately recovered [encryption keys](security.md#master-key-and-encrypted-secrets).
+This is the planned whole-assistant recovery procedure. VM archive and browser-profile restoration passed the [local runtime checks](experiments/bot-vm-verification.md). The complete application procedure remains untested. It requires a completed [backup set](backups.md) and separately recovered [encryption keys](security.md#master-key-and-encrypted-secrets).
 
 1. Install else.bot, PostgreSQL, and a compatible Microsandbox runtime. Include the required database roles and extensions.
 2. Provision the recovered `SECRET_KEY` and any older key versions needed by the chosen backup.
