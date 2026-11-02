@@ -171,6 +171,8 @@ impl Client {
     pub fn new(origin: Origin, token: &OwnerToken, runtime: tokio::runtime::Handle) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Never route the owner token through an environment proxy.
+            .no_proxy()
             .connect_timeout(Duration::from_secs(3))
             .build()
             .expect("HTTP client");

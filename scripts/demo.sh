@@ -24,15 +24,41 @@ set +a
 
 psql_() { docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$1" -Atq -c "$2"; }
 
+MARKER="else.bot disposable demo database"
+OWNER_DB=$(printf '%s' "${DATABASE_URL:-}" | sed -n 's|.*/\([^/?]*\).*|\1|p')
+if [ "$DB" = "$POSTGRES_DB" ] || [ "$DB" = "$OWNER_DB" ]; then
+	echo "refusing: demo database '$DB' is the owner's database" >&2
+	exit 1
+fi
+# Destructive commands only touch a database created by this script.
+owned_or_absent() {
+	local comment
+	comment=$(psql_ "$POSTGRES_DB" "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '$DB'")
+	if [ -n "$comment" ] && [ "$comment" != "$MARKER" ]; then
+		echo "refusing: database '$DB' was not created by scripts/demo.sh" >&2
+		exit 1
+	fi
+	if psql_ "$POSTGRES_DB" "SELECT 1 FROM pg_database WHERE datname = '$DB'" | grep -q 1 && [ -z "$comment" ]; then
+		echo "refusing: database '$DB' exists without the demo marker" >&2
+		exit 1
+	fi
+}
+
+# Never inherit the owner's credentials or credential paths.
+unset OWNER_TOKEN_FILE SECRET_KEY SECRET_KEY_FILE ELSE_OWNER_TOKEN ELSE_OWNER_TOKEN_FILE
+
 export ELSE_DATA_DIR="$DEMO/data"
+export OWNER_TOKEN_FILE="$DEMO/data/owner-token" SECRET_KEY_FILE="$DEMO/data/secret-key"
 export DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_PORT:-5432}/$DB"
 export ELSE_API_BIND="127.0.0.1:$PORT"
 export ELSE_SYNTHETIC_PROVIDER=${ELSE_SYNTHETIC_PROVIDER:-1}
 
 case "${1:-}" in
 reset)
+	owned_or_absent
 	psql_ "$POSTGRES_DB" "DROP DATABASE IF EXISTS $DB WITH (FORCE)"
 	psql_ "$POSTGRES_DB" "CREATE DATABASE $DB"
+	psql_ "$POSTGRES_DB" "COMMENT ON DATABASE $DB IS '$MARKER'"
 	rm -rf "$DEMO"
 	mkdir -p "$DEMO"
 	cargo run -q -p else-api -- setup
@@ -50,6 +76,7 @@ curl)
 	;;
 sql) psql_ "$DB" "$2" ;;
 drop)
+	owned_or_absent
 	psql_ "$POSTGRES_DB" "DROP DATABASE IF EXISTS $DB WITH (FORCE)"
 	rm -rf "$DEMO"
 	;;

@@ -152,7 +152,8 @@ fn read_token_file(path: &Path) -> Result<OwnerToken, String> {
     let shown = path.display();
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // Non-blocking so a FIFO cannot hang startup before validation.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => {
@@ -228,6 +229,12 @@ mod tests {
                 .unwrap_err()
                 .contains("else-api setup")
         );
+        // A FIFO is refused instead of blocking startup.
+        let fifo = dir.path().join("fifo");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(read_token_file(&fifo).unwrap_err().contains("regular file"));
         std::fs::write(&path, "short").unwrap();
         let err = read_token_file(&path).unwrap_err();
         assert!(err.contains("malformed") && !err.contains("short"));
