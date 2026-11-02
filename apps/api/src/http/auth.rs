@@ -144,29 +144,38 @@ pub async fn require_owner(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let authenticated =
-        bearer(request.headers()).is_some_and(|token| state.owner_token.matches(token));
+    match authenticate(&state, request.headers()) {
+        Ok(principal) => {
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(response) => response,
+    }
+}
+
+/// Check the owner bearer credential, returning the rejection response.
+pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
+    let authenticated = bearer(headers).is_some_and(|token| state.owner_token.matches(token));
     if !authenticated {
         // The valid owner is never locked out; failures beyond the budget
         // get a cheap 429 instead of a 401.
         if let Some(retry_after) = state.auth_failures.blocked_for() {
-            return ApiError::new(
+            return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_failures",
                 "Too many failed authentication attempts.",
             )
             .retry_after(retry_after)
-            .into_response();
+            .into_response());
         }
         state.auth_failures.record_failure();
         let mut response = ApiError::unauthorized().into_response();
         response
             .headers_mut()
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        return response;
+        return Err(response);
     }
-    request.extensions_mut().insert(Principal::Owner);
-    next.run(request).await
+    Ok(Principal::Owner)
 }
 
 #[cfg(test)]

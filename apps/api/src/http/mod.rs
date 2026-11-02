@@ -6,7 +6,10 @@ pub mod error;
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::header;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router, middleware};
 use serde_json::json;
@@ -46,21 +49,72 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .route("/capabilities", get(capabilities))
         .merge(bots::routes())
         .fallback(|| async { ApiError::not_found() })
+        .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_owner,
         ));
 
+    let max_body = config.max_body_bytes;
     Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         .nest("/v1", v1)
-        .fallback(|| async { ApiError::not_found() })
+        // Paths such as `/v1/` that the nested router does not match are
+        // still authenticated before reporting 404.
+        .fallback(fallback)
+        .method_not_allowed_fallback(|| async { method_not_allowed() })
         .with_state(state)
         .layer(middleware::from_fn(auth::check_origin))
-        .layer(DefaultBodyLimit::max(config.max_body_bytes))
-        // The default span records method and path only, never headers.
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(move |request, next| {
+            reject_large_body(max_body, request, next)
+        }))
+        // Body extractors also enforce the limit on chunked bodies.
+        .layer(DefaultBodyLimit::max(max_body))
+        // Record method and path only: never headers, query strings, or
+        // URI user information, which could carry a misplaced credential.
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request| {
+                tracing::info_span!("request", method = %request.method(), path = request.uri().path())
+            }),
+        )
+}
+
+fn method_not_allowed() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "This method is not allowed for this path.",
+    )
+}
+
+async fn fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let path = request.uri().path();
+    if path == "/v1" || path.starts_with("/v1/") {
+        if let Err(response) = auth::authenticate(&state, request.headers()) {
+            return response;
+        }
+    }
+    ApiError::not_found().into_response()
+}
+
+/// Reject a declared oversized body on every route, including routes that
+/// never read their body.
+async fn reject_large_body(max: usize, request: Request, next: Next) -> Response {
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|len| len > max as u64) {
+        return ApiError::new(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "The request body is too large.",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 /// Liveness only: it reports that the process serves HTTP, not that its
@@ -136,6 +190,40 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_and_wrong_method_requests_use_error_shape() {
+        let (status, body) = send(
+            app(),
+            get("/healthz")
+                .header(header::CONTENT_LENGTH, "70000")
+                .body(Body::from(vec![b'x'; 70000]))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["error"]["code"], "too_large");
+        let (status, body) = send(
+            app(),
+            Request::post("/healthz")
+                .header(header::HOST, "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["error"]["code"], "method_not_allowed");
+        let (status, _) = send(
+            app(),
+            Request::patch("/v1/capabilities")
+                .header(header::HOST, "127.0.0.1")
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
     async fn liveness_needs_no_token() {
         let (status, _) = send(app(), get("/healthz").body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::OK);
@@ -193,6 +281,10 @@ pub mod tests {
 
     #[tokio::test]
     async fn unknown_v1_routes_authenticate_before_not_found() {
+        for path in ["/v1", "/v1/"] {
+            let (status, _) = send(app(), get(path).body(Body::empty()).unwrap()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
         let (status, _) = send(app(), get("/v1/bots/unknown").body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = send(

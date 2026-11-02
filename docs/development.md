@@ -74,7 +74,7 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
 	http://127.0.0.1:7878/v1/capabilities
 ```
 
-`serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
+`serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. A `.env` that exists but cannot be parsed fails startup without printing its contents. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
 
 `setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`, applies migrations, seeds any missing provider profile, and creates the main bot `Assistant` with its conversation the first time. Running it again reports `kept existing` and changes nothing: saved profiles keep their values, and a deleted main bot or cleared default stays as it is. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed values, symbolic links, files owned by another user, and files readable by group or others.
 
@@ -86,9 +86,9 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
 | `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
 | `SECRET_KEY` | unset | Installation master key: 32 bytes as standard base64. When set, it is validated and used instead of the file. |
 | `SECRET_KEY_FILE` | `$ELSE_DATA_DIR/secret-key` | Master key file used when `SECRET_KEY` is unset. |
-| `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. Larger bodies receive `413 too_large`. |
+| `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. A larger declared `Content-Length` receives `413 too_large` on every route; body extractors also stop chunked bodies at the limit. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
-| `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never headers or bodies. |
+| `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never query strings, headers, or bodies. |
 
 ### Owner routes
 

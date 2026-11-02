@@ -19,8 +19,20 @@ migrate  apply pending versioned migrations only\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
-    // take precedence, and a missing file is not an error.
-    let _ = dotenvy::dotenv();
+    // take precedence, and a missing file is not an error. Any other problem
+    // fails startup rather than silently ignoring settings. Line contents are
+    // not printed because they may hold credentials.
+    if let Err(err) = dotenvy::dotenv() {
+        if !err.not_found() {
+            let detail = match &err {
+                dotenvy::Error::LineParse(_, index) => format!("parse error near byte {index}"),
+                dotenvy::Error::Io(io) => io.to_string(),
+                _ => "unreadable".to_owned(),
+            };
+            eprintln!("error: invalid .env file: {detail}");
+            return ExitCode::FAILURE;
+        }
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
