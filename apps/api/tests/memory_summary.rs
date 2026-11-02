@@ -382,9 +382,15 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
     // Ten capacity waits while every slot is held.
-    let held: Vec<_> = (0..4)
-        .map(|_| app.scheduler.try_begin_summary(4).unwrap())
-        .collect();
+    // The scheduler's dispatch briefly reserves a slot before each claim, so
+    // take every slot with retries.
+    let mut held = Vec::new();
+    while held.len() < 4 {
+        match app.scheduler.try_begin_summary(4) {
+            Some(permit) => held.push(permit),
+            None => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
     for _ in 0..10 {
         sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
             .bind(bot)
