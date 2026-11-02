@@ -2,6 +2,7 @@
 //! transactional operations that persist application state.
 
 pub mod bots;
+pub mod conversation;
 pub mod events;
 pub mod installation;
 pub mod profiles;

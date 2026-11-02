@@ -169,7 +169,8 @@ fn run_serve() -> anyhow::Result<()> {
                 .clone()
                 .run(stop_scheduler.clone(), config.shutdown_grace),
         );
-        let state = Arc::new(http::AppState::new(owner_token, pool, scheduler));
+        let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
+        let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
         let result = serve(&config, state).await;
         // Stop provider work after HTTP so no new message is accepted.
         stop_scheduler.cancel();

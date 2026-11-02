@@ -13,7 +13,8 @@ use uuid::Uuid;
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use crate::app::bots::{BotName, BotRole};
-use crate::db::bots::{self, BotError, BotRecord, BotStatus, Created};
+use crate::db::bots::{self, BotError, BotStatus, Created};
+use crate::views::*;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -33,50 +34,6 @@ impl From<BotError> for ApiError {
             BotError::Db(err) => err.into(),
         }
     }
-}
-
-/// Public projection of an active bot or a deletion receipt.
-pub fn bot_json(bot: &BotRecord) -> Value {
-    if bot.status != BotStatus::Active {
-        // Deletion receipts expose no role or conversation reference.
-        return json!({
-            "id": bot.id,
-            "name": bot.name,
-            "deleted_at": bot.deleted_at,
-            "cleanup": {
-                "state": if bot.status == BotStatus::Deleted { "done" } else { "pending" },
-                "error": null,
-            },
-        });
-    }
-    json!({
-        "id": bot.id,
-        "name": bot.name,
-        "role": bot.role,
-        "conversation_id": bot.conversation_id,
-        "created_at": bot.created_at,
-        "deleted_at": null,
-        "selected_provider_id": bot.selected_provider_id,
-        "activity": activity_json(bot),
-        "cleanup": null,
-    })
-}
-
-/// Project turn records into the sidebar activity. No separate state.
-pub fn activity_json(bot: &BotRecord) -> Value {
-    let phase = match (bot.cancel_pending, bot.active_turn_status.as_deref()) {
-        (true, _) | (_, Some("cancelling")) => "cancelling",
-        (_, Some(_)) => "working",
-        (_, None) if bot.queued_count > 0 => "queued",
-        _ => "idle",
-    };
-    json!({
-        "phase": phase,
-        "active_turn_id": bot.active_turn_id,
-        "queued_count": bot.queued_count,
-        "running_job_count": 0,
-        "error": null,
-    })
 }
 
 #[derive(Deserialize)]

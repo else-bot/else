@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod bots;
+pub mod conversation;
 pub mod error;
 pub mod settings;
 pub mod turns;
@@ -30,17 +31,24 @@ pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: PgPool,
     pub scheduler: Arc<Scheduler>,
+    pub events: crate::events::EventHub,
     /// Nonsecret identity of this API process, used to bind event cursors.
     pub server_instance_id: Uuid,
     pub auth_failures: auth::FailureLimiter,
 }
 
 impl AppState {
-    pub fn new(owner_token: OwnerToken, db: PgPool, scheduler: Arc<Scheduler>) -> Self {
+    pub fn new(
+        owner_token: OwnerToken,
+        db: PgPool,
+        scheduler: Arc<Scheduler>,
+        events: crate::events::EventHub,
+    ) -> Self {
         Self {
             owner_token,
             db,
             scheduler,
+            events,
             server_instance_id: Uuid::new_v4(),
             auth_failures: auth::FailureLimiter::default(),
         }
@@ -55,6 +63,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .route("/capabilities", get(capabilities))
         .merge(bots::routes())
         .merge(turns::routes())
+        .merge(conversation::routes())
         .merge(settings::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
@@ -209,6 +218,7 @@ pub mod tests {
                 OwnerToken::parse(TOKEN).unwrap(),
                 pool,
                 scheduler,
+                crate::events::EventHub::polling_only(),
             )),
         )
     }

@@ -15,7 +15,8 @@ use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use crate::app::messages::{InvalidMessage, MAX_QUEUED_TURNS, validate_text};
 use crate::app::providers::Availability;
-use crate::db::turns::{self, AcceptError, ItemRecord, SendRequest, TurnRecord};
+use crate::db::turns::{self, AcceptError, SendRequest};
+use crate::views::*;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -63,39 +64,6 @@ impl From<AcceptError> for ApiError {
             AcceptError::Db(err) => err.into(),
         }
     }
-}
-
-pub fn turn_json(turn: &TurnRecord) -> Value {
-    let error = turn
-        .error_code
-        .as_ref()
-        .map(|code| json!({ "code": code, "message": turn.error_message }));
-    json!({
-        "id": turn.id,
-        "bot_id": turn.bot_id,
-        "request_id": turn.request_id,
-        "turn_no": turn.turn_no,
-        "provider_id": turn.provider_id,
-        "profile_revision": turn.profile_revision,
-        "status": turn.status,
-        "error": error,
-        "effect_uncertain": turn.effect_uncertain,
-        "created_at": turn.created_at,
-        "finished_at": turn.finished_at,
-    })
-}
-
-pub fn item_json(item: &ItemRecord) -> Value {
-    json!({
-        "id": item.id,
-        "seq": item.seq,
-        "turn_id": item.turn_id,
-        "request_id": item.request_id,
-        "kind": item.kind,
-        "text": item.text,
-        "provider_id": item.provider_id,
-        "created_at": item.created_at,
-    })
 }
 
 #[derive(Deserialize)]

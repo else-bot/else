@@ -106,6 +106,8 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 
 | `POST /v1/bots/{id}/turns` | `{request_id, text, provider_id}`. Saves the owner message and a queued turn in one transaction, then wakes the scheduler. `202` on acceptance; a matching retry returns `200` with the same item and turn; different text or provider under that ID returns `409`. A deleted bot returns `410 bot_deleted`. More than four waiting messages return `429 queue_full` with `Retry-After`. A `null` provider uses the default. |
 | `GET /v1/bots/{id}/turns/by-request/{request_id}` | Resolves a lost send response, or `404`. |
+| `GET /v1/bots/{id}/conversation[?limit=50&before_seq=N]` | Consistent snapshot read in one repeatable-read transaction: the newest `limit` items (1 to 200) in ascending `seq`, their turns plus every unfinished turn, activity, `older_before_seq` for the previous page (or `null`), and `event_cursor`. |
+| `GET /v1/bots/{id}/events` | `text/event-stream` of committed events after the `Last-Event-ID` header, which must hold a snapshot or event cursor. Event kinds are `item.upsert`, `item.delta`, `turn.updated`, and `bot.updated`. Comment heartbeats every 15 seconds. |
 | `GET`, `PATCH /v1/settings/providers/{provider_id}` | Read or update the saved execution profile. `PATCH` takes any of `model`, `reasoning_effort`, `service_tier`, and an optional `expected_revision`. The adapter validates the exact values; unsupported values return `400 invalid_profile` and nothing changes. A change bumps the revision. Accepted turns keep the revision they were accepted with. |
 
 Unknown or malformed IDs return `404 not_found`, always after authentication. A role over 8 KiB or message text over 32 KiB returns `413 too_large`; other invalid input, including NUL characters, returns `400 invalid_input`. Try it with a synthetic bot:
@@ -124,6 +126,12 @@ One scheduler runs inside the API. PostgreSQL rows are the queue: it claims the 
 History `seq` is arrival order. A message queued behind a running turn can therefore precede that turn's reply; each item carries its `turn_id`.
 
 On startup, before the scheduler runs, a turn claimed but never sent returns to the queue. A turn that may have reached its provider becomes `uncertain` with `effect_uncertain = true` and is never resent.
+
+### Events and reconnecting
+
+Every change to history or turn state appends rows to `bot_events` in the same transaction, under the bot's row lock, so a bot's event sequence follows commit order. Cursors are `<server_instance_id>:<bot_id>:<seq>`; the instance ID changes on every API start. The stream sends only committed rows, then waits for a `pg_notify` wake hint or a one-second poll. `item.delta` carries `offset_utf8`, the byte length of the item's text before the delta; a client appends only when its current length matches.
+
+Clients take a snapshot, then open the stream with its cursor, apply only the next contiguous `seq`, ignore IDs at or below the applied one, and reconnect with the last applied cursor. A missing cursor returns `400 cursor_required`; a malformed one or a cursor for another bot returns `400 invalid_cursor`; a cursor from an earlier API process or beyond the latest event returns `409 cursor_reset_required`, meaning load a fresh snapshot. Deleting a bot ends its open streams within about a second; afterwards the stream and snapshot return `410 bot_deleted`. Event payloads contain no request hashes, profiles, native session IDs, or credentials.
 
 ### Database and migrations
 

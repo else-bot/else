@@ -129,9 +129,18 @@ pub async fn create(
 }
 
 pub async fn find(pool: &PgPool, bot_id: Uuid) -> Result<Option<BotRecord>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    find_in(&mut conn, bot_id).await
+}
+
+/// Look up a bot inside an existing transaction or connection.
+pub async fn find_in(
+    conn: &mut sqlx::PgConnection,
+    bot_id: Uuid,
+) -> Result<Option<BotRecord>, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT_BOT} WHERE b.id = $1")))
         .bind(bot_id)
-        .fetch_optional(pool)
+        .fetch_optional(conn)
         .await
 }
 

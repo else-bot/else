@@ -91,7 +91,9 @@ impl Drop for TestDb {
         let pool = self.pool.clone();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
-                pool.close().await;
+                // `close` waits for checked-out connections (such as the event
+                // listener's). Bound it; `WITH (FORCE)` ends the rest.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.close()).await;
                 if let Ok(admin_pool) = PgPoolOptions::new()
                     .max_connections(1)
                     .connect_with(admin)
@@ -210,6 +212,11 @@ impl TestApp {
     /// (5 ms per chunk) and the profile-bearing test double.
     pub fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
         use std::sync::Arc;
+        // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
         let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
         let registry = else_api::providers::Registry::new(vec![
             Arc::new(else_api::providers::synthetic::Synthetic::new(
@@ -228,6 +235,7 @@ impl TestApp {
             else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
             db.pool.clone(),
             scheduler.clone(),
+            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
         ));
         let router = else_api::http::router(&config, state.clone());
         Self {
