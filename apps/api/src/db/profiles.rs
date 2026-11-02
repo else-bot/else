@@ -109,3 +109,27 @@ pub async fn update(
     tx.commit().await?;
     Ok(updated)
 }
+
+/// Save the first profile for a provider (no default is seeded for some
+/// providers, so their profile must be configured explicitly). Returns
+/// `None` if one already exists.
+pub async fn create(
+    pool: &PgPool,
+    provider_id: &str,
+    profile: &Profile,
+    validate: impl FnOnce(&Profile) -> Result<(), String>,
+) -> Result<Option<ProfileRecord>, ProfileError> {
+    validate(profile).map_err(ProfileError::Invalid)?;
+    let record = sqlx::query_as(
+        "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (provider_id) DO NOTHING
+         RETURNING provider_id, model, reasoning_effort, service_tier, revision, updated_at",
+    )
+    .bind(provider_id)
+    .bind(&profile.model)
+    .bind(&profile.reasoning_effort)
+    .bind(&profile.service_tier)
+    .fetch_optional(pool)
+    .await?;
+    Ok(record)
+}

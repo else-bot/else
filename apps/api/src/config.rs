@@ -54,6 +54,8 @@ pub struct Config {
     pub max_active_turns: usize,
     /// Explicit Codex CLI path; otherwise `codex` on `PATH`.
     pub codex_bin: Option<PathBuf>,
+    /// The Claude Code CLI (`ELSE_CLAUDE_BIN`), else `claude` on `PATH`.
+    pub claude_bin: Option<PathBuf>,
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
     pub computers: crate::computers::ComputerConfig,
@@ -127,6 +129,10 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_CODEX_BIN", path)?),
             None => None,
         };
+        let claude_bin = match source.get("ELSE_CLAUDE_BIN") {
+            Some(path) => Some(absolute_path("ELSE_CLAUDE_BIN", path)?),
+            None => None,
+        };
         let msb_bin = match source.get("ELSE_MSB_BIN") {
             Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
             None => None,
@@ -189,6 +195,7 @@ impl Config {
             msb_bin,
             computers,
             codex_bin,
+            claude_bin,
             synthetic_provider,
             max_active_turns,
             database_url: database_url(source)?,

@@ -9,6 +9,7 @@ pub mod db;
 pub mod events;
 pub mod faults;
 pub mod grants;
+pub mod handoff;
 pub mod http;
 pub mod memory_worker;
 pub mod providers;

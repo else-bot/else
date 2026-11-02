@@ -37,6 +37,40 @@ pub struct HistoryEntry {
     pub turn_no: i64,
     pub kind: String,
     pub text: String,
+    /// The owner turn's recorded status (`completed`, `interrupted`, ...).
+    pub status: String,
+}
+
+/// Context handed to the receiving provider on a provider switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffContext {
+    pub id: Uuid,
+    pub source_provider: String,
+    /// The outgoing provider's checkpoint; `None` uses the recorded history
+    /// alone (the deterministic fallback).
+    pub checkpoint: Option<String>,
+    /// Why there is no checkpoint.
+    pub reason: Option<String>,
+}
+
+/// Which history a packet carried, for the handoff record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// Owner turns whose history items were included.
+    pub selected: Vec<i64>,
+    /// Owner turns whose history items were left out for the budget.
+    pub omitted: Vec<i64>,
+}
+
+/// A request for a bounded checkpoint from an outgoing provider. It must
+/// run with tools disabled and verified so.
+#[derive(Debug, Clone)]
+pub struct CheckpointRequest {
+    pub bot_id: Uuid,
+    /// The outgoing provider's saved profile, if it uses one.
+    pub profile: Option<Profile>,
+    pub prompt: String,
+    pub max_bytes: usize,
 }
 
 /// Everything an adapter needs for one turn. Identity comes from the
@@ -63,6 +97,8 @@ pub struct TurnInput {
     /// Provider attempt number of this turn (continuations count up).
     pub attempt: i32,
     pub delegation: DelegationContext,
+    /// Set when this turn switches provider and the session missed turns.
+    pub handoff: Option<HandoffContext>,
 }
 
 /// A provider's native session for one conversation.
@@ -140,6 +176,12 @@ pub struct Fenced;
 /// `select!` that could drop it midway.
 #[async_trait]
 pub trait TurnSink: Send + Sync {
+    /// Record the packet about to be sent (its history selection and a
+    /// digest), before [`TurnSink::sending`]. Bookkeeping only.
+    async fn packet(&self, selection: &Selection, payload: &str) -> Result<(), Fenced> {
+        let _ = (selection, payload);
+        Ok(())
+    }
     /// Called immediately before the first write of the owner's message to
     /// the provider. After this, a crash leaves delivery uncertain.
     async fn sending(&self) -> Result<(), Fenced>;
@@ -177,6 +219,18 @@ pub trait Provider: Send + Sync {
     fn uses_profile(&self) -> bool;
     /// Reject a profile the adapter cannot apply exactly. No substitution.
     fn validate_profile(&self, profile: &Profile) -> Result<(), String>;
+    /// A checkpoint of recorded history with no tools: only when the adapter
+    /// can enforce and verify that nothing but text is produced. Errors mean
+    /// the deterministic fallback is used. Cancellation stops it and reaps
+    /// its process.
+    async fn checkpoint(
+        &self,
+        request: CheckpointRequest,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let _ = (request, cancel);
+        Err("this provider cannot produce a verified no-tool checkpoint".into())
+    }
     /// Run one turn to a terminal outcome. Cancellation must interrupt the
     /// provider and return only after it has stopped or been terminated.
     async fn run(

@@ -417,8 +417,8 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         .bind(turn.owner_item_id)
         .fetch_one(&mut *conn)
         .await?;
-    let history = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT t.turn_no, i.kind, i.text FROM items i JOIN turns t ON t.id = i.turn_id
+    let history = sqlx::query_as::<_, (i64, String, String, String)>(
+        "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = $1 AND t.turn_no < $2 AND i.kind IN ('user', 'assistant')
          ORDER BY t.turn_no, i.seq",
     )
@@ -427,10 +427,11 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
-    .map(|(turn_no, kind, text)| HistoryEntry {
+    .map(|(turn_no, kind, text, status)| HistoryEntry {
         turn_no,
         kind,
         text,
+        status,
     })
     .collect();
     let session = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
@@ -468,6 +469,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         memory: None,
         attempt: turn.attempt,
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
+        handoff: None,
     };
     // Return this connection before memory loading checks out others.
     drop(conn);
@@ -580,6 +582,30 @@ impl PgSink {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
+            // A handoff this attempt carries follows the delivery state.
+            match to {
+                "sending" => {
+                    crate::db::handoffs::transition(
+                        &mut tx,
+                        self.turn_id,
+                        self.attempt,
+                        "prepared",
+                        "sending",
+                    )
+                    .await?
+                }
+                "running" => {
+                    crate::db::handoffs::transition(
+                        &mut tx,
+                        self.turn_id,
+                        self.attempt,
+                        "sending",
+                        "accepted",
+                    )
+                    .await?
+                }
+                _ => {}
+            }
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
             tx.commit().await?;
             Ok(true)
@@ -779,6 +805,18 @@ impl PgSink {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // A handoff sent but never acknowledged is uncertain, unless the
+        // provider explicitly refused it before consuming it.
+        let refused =
+            matches!(outcome, TurnOutcome::Failed { code, .. } if code == "provider_refused");
+        crate::db::handoffs::transition(
+            &mut tx,
+            self.turn_id,
+            self.attempt,
+            "sending",
+            if refused { "prepared" } else { "uncertain" },
+        )
+        .await?;
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
             // The reply's final text enters memory with the terminal status.
@@ -797,6 +835,28 @@ impl PgSink {
 
 #[async_trait]
 impl TurnSink for PgSink {
+    async fn packet(
+        &self,
+        selection: &crate::app::providers::Selection,
+        payload: &str,
+    ) -> Result<(), Fenced> {
+        if self.is_fenced() {
+            return Err(Fenced);
+        }
+        if let Err(err) = crate::db::handoffs::record_packet(
+            &self.pool,
+            self.turn_id,
+            self.attempt,
+            selection,
+            payload,
+        )
+        .await
+        {
+            tracing::warn!(turn = %self.turn_id, error = %err, "recording the packet failed");
+        }
+        Ok(())
+    }
+
     async fn sending(&self) -> Result<(), Fenced> {
         self.transition("preparing", "sending").await
     }
@@ -837,6 +897,22 @@ impl TurnSink for PgSink {
                 .await;
                 if matches!(cancelling, Ok(true)) {
                     *self.fenced.lock().unwrap_or_else(|p| p.into_inner()) = false;
+                    // Accepted all the same.
+                    let accepted = async {
+                        let mut conn = self.pool.acquire().await?;
+                        crate::db::handoffs::transition(
+                            &mut conn,
+                            self.turn_id,
+                            self.attempt,
+                            "sending",
+                            "accepted",
+                        )
+                        .await
+                    }
+                    .await;
+                    if let Err(err) = accepted {
+                        tracing::warn!(turn = %self.turn_id, error = %err, "recording handoff acceptance failed");
+                    }
                     Ok(())
                 } else {
                     Err(Fenced)

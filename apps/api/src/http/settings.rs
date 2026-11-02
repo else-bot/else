@@ -53,7 +53,9 @@ async fn update(
     ApiPath(provider_id): ApiPath<String>,
     ApiJson(body): ApiJson<UpdateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    if profiles::get(&state.db, &provider_id).await?.is_none() {
+    let saved = profiles::get(&state.db, &provider_id).await?.is_some();
+    let adapter = state.scheduler.registry().get(&provider_id);
+    if !saved && !adapter.is_some_and(|p| p.uses_profile()) {
         return Err(ApiError::not_found());
     }
     // Only the provider's adapter can say which exact values it applies.
@@ -69,6 +71,36 @@ async fn update(
             )
         })?
         .clone();
+    if !saved {
+        // A first profile is set explicitly and completely: nothing is
+        // inherited from a CLI default.
+        let (Some(model), Some(reasoning_effort), Some(service_tier)) =
+            (&body.model, &body.reasoning_effort, &body.service_tier)
+        else {
+            return Err(ApiError::bad_request(
+                "profile_required",
+                "This provider has no saved profile yet. Send model, reasoning_effort, and \
+                 service_tier to create it.",
+            ));
+        };
+        let profile = crate::app::providers::Profile {
+            model: model.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            service_tier: service_tier.clone(),
+        };
+        let created = profiles::create(&state.db, &provider_id, &profile, |p| {
+            provider.validate_profile(p)
+        })
+        .await
+        .map_err(|err| match err {
+            ProfileError::Invalid(reason) => ApiError::bad_request("invalid_profile", reason),
+            ProfileError::Db(err) => err.into(),
+            _ => ApiError::not_found(),
+        })?;
+        if let Some(record) = created {
+            return Ok(Json(json!({ "profile": profile_json(&record) })));
+        }
+    }
     let patch = ProfilePatch {
         model: body.model,
         reasoning_effort: body.reasoning_effort,

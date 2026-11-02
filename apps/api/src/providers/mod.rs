@@ -1,9 +1,12 @@
 //! Provider adapters and the registry the API exposes through capabilities.
 
+pub mod claude;
+pub mod claude_home;
 pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
 pub mod host;
+pub mod prompt;
 pub mod synthetic;
 
 use std::sync::Arc;
@@ -11,8 +14,8 @@ use std::sync::Arc;
 use crate::app::providers::{Availability, Provider};
 use crate::config::Config;
 
-/// Providers enabled by configuration, in default-selection order. Codex is
-/// always listed; it reports unavailable (with a reason) when bubblewrap,
+/// Providers enabled by configuration, in default-selection order. Codex and
+/// Claude are always listed; it reports unavailable (with a reason) when bubblewrap,
 /// the CLI, or its host login is missing.
 pub fn registry(config: &Config) -> Registry {
     build(config).0
@@ -33,8 +36,21 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
     }
     let tool_url = format!("http://{tool_addr}/tools/v1/mcp");
-    let codex = Arc::new(codex::Codex::detect(sandbox, program, auth).with_tools(tool_url));
+    let codex =
+        Arc::new(codex::Codex::detect(sandbox.clone(), program, auth).with_tools(tool_url.clone()));
     providers.push(codex.clone());
+    // Claude is listed too; it is used only once an explicit Claude
+    // profile is saved (no default is seeded).
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let home = std::env::var("HOME").ok();
+    let claude = claude::Claude::detect(
+        sandbox,
+        config.claude_bin.clone().or_else(|| find_on_path("claude")),
+        claude_home::host_credentials_file(config_dir.as_deref(), home.as_deref()),
+        claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+    )
+    .with_tools(tool_url);
+    providers.push(Arc::new(claude));
     if config.synthetic_provider {
         providers.push(Arc::new(synthetic::Synthetic::new(
             std::time::Duration::from_millis(40),
@@ -67,6 +83,26 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
         return std::fs::canonicalize(path).ok().filter(|p| p.is_file());
     }
     Some(found)
+}
+
+/// How long an outgoing provider may take to produce a checkpoint.
+pub const CHECKPOINT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Byte cap for a checkpoint's text.
+pub const CHECKPOINT_BYTES: usize = 8 * 1024;
+
+/// A checkpoint is used only whole and within its budget; never cut.
+pub fn bounded_checkpoint(text: String, max: usize) -> Result<String, String> {
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err("the checkpoint was empty".into());
+    }
+    if text.len() > max {
+        return Err(format!(
+            "the checkpoint was {} bytes, over its {max}-byte budget",
+            text.len()
+        ));
+    }
+    Ok(text)
 }
 
 #[derive(Clone)]

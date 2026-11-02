@@ -184,26 +184,59 @@ async fn readiness(
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let registry = state.scheduler.registry();
+    // A provider that needs a saved profile is usable only once one is
+    // configured; the picker shows why it is not.
+    // Unknown when the database does not answer quickly: then only the
+    // adapters' own availability is reported.
+    let configured: Option<Vec<String>> = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_scalar("SELECT provider_id FROM provider_profiles").fetch_all(&state.db),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let mut default_id = None;
     let providers: Vec<_> = registry
         .all()
         .iter()
         .map(|provider| {
+            let has_profile = configured
+                .as_ref()
+                .map(|ids| ids.iter().any(|id| id == provider.id()));
             let (available, reason) = match provider.availability() {
-                Availability::Available => (true, None),
                 Availability::Unavailable(reason) => (false, Some(reason)),
+                Availability::Available
+                    if provider.uses_profile() && has_profile == Some(false) =>
+                {
+                    (
+                        false,
+                        Some(format!(
+                            "No saved {} execution profile. Save an explicit model first \
+                         (PATCH /v1/settings/providers/{}).",
+                            provider.label(),
+                            provider.id()
+                        )),
+                    )
+                }
+                Availability::Available => (true, None),
             };
+            if available && default_id.is_none() {
+                default_id = Some(provider.id());
+            }
             json!({
                 "id": provider.id(),
                 "label": provider.label(),
                 "available": available,
                 "unavailable_reason": reason,
+                "requires_profile": provider.uses_profile(),
+                "profile_configured": has_profile,
             })
         })
         .collect();
     Json(json!({
         "api_version": "v1",
         "server_instance_id": state.server_instance_id,
-        "default_provider_id": registry.default_id(),
+        "default_provider_id": default_id,
         "providers": providers,
         "limits": {
             "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,

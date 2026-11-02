@@ -289,6 +289,20 @@ impl Scheduler {
             memory_scope,
             TOOL_GRANT_TTL,
         ));
+        // A provider switch: freeze settled history and prepare the
+        // checkpoint before anything is sent.
+        if self.registry.get(&provider_id).is_some() {
+            match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, &cancel)
+                .await
+            {
+                Ok(handoff) => input.handoff = handoff,
+                Err(err) => {
+                    // Without a durable record nothing is handed off; the
+                    // turn still gets the recorded history it missed.
+                    tracing::warn!(turn = %turn_id, error = %err, "preparing a handoff failed");
+                }
+            }
+        }
         let sink = PgSink::new(self.pool.clone(), &input, &provider_id);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {
