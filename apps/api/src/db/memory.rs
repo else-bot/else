@@ -114,8 +114,11 @@ pub async fn append(
     if (entry.kind == Kind::OwnerCorrection) != entry.supersedes_seq.is_some() {
         return Err(AppendError::InvalidCorrection);
     }
+    // Lock order: the bot row, then the memory store. `FOR SHARE` holds
+    // off a concurrent deletion (which updates the row) until commit, so
+    // nothing is appended to a bot whose deletion committed first.
     let active: Option<bool> =
-        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1")
+        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
             .bind(bot_id)
             .fetch_optional(&mut *conn)
             .await?;
@@ -295,11 +298,18 @@ pub struct EntryRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-const ENTRY_COLUMNS: &str = "e.seq, e.kind, e.authority, e.body, e.source, e.part_index,
-     e.part_count, e.supersedes_seq,
-     coalesce((SELECT array_agg(c.seq ORDER BY c.seq) FROM memory_entry c
-               WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq), '{}') AS superseded_by,
-     e.created_at";
+/// Entry columns; `bound` limits which corrections count (a search page
+/// sees only corrections below its watermark).
+fn entry_columns(bound: &str) -> String {
+    format!(
+        "e.seq, e.kind, e.authority, e.body, e.source, e.part_index,
+         e.part_count, e.supersedes_seq,
+         coalesce((SELECT array_agg(c.seq ORDER BY c.seq) FROM memory_entry c
+                   WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq {bound}), '{{}}')
+             AS superseded_by,
+         e.created_at"
+    )
+}
 
 /// Entries from `start_seq` on, in order.
 pub async fn read(
@@ -309,8 +319,9 @@ pub async fn read(
     count: i64,
 ) -> Result<Vec<EntryRow>, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ENTRY_COLUMNS} FROM memory_entry e
-         WHERE e.bot_id = $1 AND e.seq >= $2 ORDER BY e.seq LIMIT $3"
+        "SELECT {} FROM memory_entry e
+         WHERE e.bot_id = $1 AND e.seq >= $2 ORDER BY e.seq LIMIT $3",
+        entry_columns("")
     )))
     .bind(bot_id)
     .bind(start_seq)
@@ -353,13 +364,15 @@ pub async fn search(
         None => length(pool, bot_id).await?,
     };
     let mut hits: Vec<EntryRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ENTRY_COLUMNS} FROM memory_entry e
+        "SELECT {} FROM memory_entry e
          WHERE e.bot_id = $1 AND e.seq < $2
            AND e.search @@ websearch_to_tsquery('simple', $3)
            AND ($4 OR NOT EXISTS (SELECT 1 FROM memory_entry c
-                                  WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq))
+                                  WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq
+                                    AND c.seq < $2))
          ORDER BY ts_rank(e.search, websearch_to_tsquery('simple', $3)) DESC, e.seq DESC
-         OFFSET $5 LIMIT $6"
+         OFFSET $5 LIMIT $6",
+        entry_columns("AND c.seq < $2")
     )))
     .bind(bot_id)
     .bind(watermark)
