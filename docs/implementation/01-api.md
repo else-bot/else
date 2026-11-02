@@ -88,7 +88,7 @@ References: [Continuity records](../research/conversation-continuity.md), [sched
 
 Depends on: POC-005.
 
-Implement paged snapshots and authenticated SSE using a durable per-bot event cursor. Update history and journal entries in the same transaction. Send only committed text. Keep history ordering distinct from streaming-event ordering.
+Implement paged snapshots and authenticated event streaming using a durable per-bot event cursor. (Delivered first as SSE; live delivery has since moved to WebSocket channels.) Update history and journal entries in the same transaction. Send only committed text. Keep history ordering distinct from streaming-event ordering.
 
 Acceptance:
 
@@ -98,7 +98,7 @@ Acceptance:
 - Deletion or invalid authorization closes access. The stream exposes no internal checkpoint, credentials, or private reasoning.
 - Real PostgreSQL transactions and actual HTTP streaming pass the checks; the research parser alone is insufficient.
 
-References: [SSE and reconnect contract](../research/desktop-and-feature-contracts.md#proposed-sse-and-reconnect-behavior).
+References: [live update contract](../research/desktop-and-feature-contracts.md#live-updates-over-websocket-channels).
 
 ## POC-007: Cancellation and restart reconciliation
 

@@ -7,6 +7,7 @@ pub mod error;
 pub mod settings;
 pub mod tools;
 pub mod turns;
+pub mod ws;
 
 use std::sync::Arc;
 
@@ -65,6 +66,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(bots::routes())
         .merge(turns::routes())
         .merge(conversation::routes())
+        .merge(ws::routes())
         .merge(settings::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })

@@ -27,7 +27,7 @@ Disable provider-native sub-agents in both CLIs. Else.bot delegation uses regist
 
 Use one API process, PostgreSQL, and one scheduler. Add schema through versioned migrations as tasks need it. The desktop uses the API and never accesses the database directly. Provider CLIs run on the host. Guest computers execute scoped tasks. Do not add a broker, workflow engine, extra database, or agent framework to complete this backlog.
 
-Use the [desktop contract](../research/desktop-and-feature-contracts.md) for routes, messages, SSE, and cancellation. Treat its field names as a coherent proposed contract. If implementation requires a change, update server, client, tests, and the contract together. Record the reason in the handoff. Do not maintain two competing behaviors.
+Use the [desktop contract](../research/desktop-and-feature-contracts.md) for routes, messages, WebSocket channels, and cancellation. Treat its field names as a coherent proposed contract. If implementation requires a change, update server, client, tests, and the contract together. Record the reason in the handoff. Do not maintain two competing behaviors.
 
 Research fixtures provide useful cases and algorithms. Their PASS results do not complete an implementation task. Adapt the relevant cases to exercise the real API, database, process, or UI.
 

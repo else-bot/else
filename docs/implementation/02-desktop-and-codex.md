@@ -22,7 +22,7 @@ References: [GPUI boundary and window design](../research/desktop-and-feature-co
 
 Depends on: POC-006, POC-007, POC-008.
 
-Add create/delete dialogs, the selected transcript, composer, send and Stop work controls, provider selection, and SSE updates. Use the synthetic adapter to prove the full client/API path before Codex is connected. Keep drafts per bot and stable IDs for optimistic messages.
+Add create/delete dialogs, the selected transcript, composer, send and Stop work controls, provider selection, and live updates (first SSE, now WebSocket channels). Use the synthetic adapter to prove the full client/API path before Codex is connected. Keep drafts per bot and stable IDs for optimistic messages.
 
 Acceptance:
 

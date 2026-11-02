@@ -4,7 +4,6 @@ mod api;
 mod app;
 mod config;
 mod model;
-mod sse;
 
 use std::sync::Arc;
 

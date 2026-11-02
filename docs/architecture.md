@@ -53,7 +53,7 @@ The desktop client should use Rust and GPUI and connect to the API.
 
 The first desktop client should show a bot list, the selected conversation, and controls to create or delete a bot. Its main view should feel like a messaging app.
 
-Use ordinary authenticated HTTP requests and one SSE stream for the selected bot. PostgreSQL owns conversation snapshots and replay cursors. The desktop deduplicates messages by stable IDs and keeps an unsent draft per bot. Opening another conversation or closing the window does not cancel server work.
+Use ordinary authenticated HTTP requests for commands and one owner WebSocket for live updates, with pub/sub channels for the bot list and each open conversation. An SSE stream plus sidebar polling was tried first and replaced; the [contract](research/desktop-and-feature-contracts.md#history-sse-and-polling-were-tried-first) records why. PostgreSQL owns conversation snapshots and replay cursors. The desktop deduplicates messages by stable IDs and keeps an unsent draft per bot. Opening another conversation or closing the window does not cancel server work.
 
 The [desktop contracts](research/desktop-and-feature-contracts.md) define the proposed screens, endpoints, stream events, cancellation, and soft deletion. Twelve synthetic contract cases pass. A live GPUI build and real transport remain implementation checks. Rich markdown, attachments, account screens, and remote desktop tabs are outside the first slice.
 

@@ -9,7 +9,14 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::{Activity, Bot};
-use crate::sse::Frame;
+
+/// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub id: Option<String>,
+    pub event: String,
+    pub data: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Item {

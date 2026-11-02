@@ -16,7 +16,10 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{Bot, BotList, Capabilities, Client, ClientError, Sent, StreamMessage};
+use crate::api::{
+    Bot, BotList, Capabilities, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
+    StreamMessage,
+};
 use crate::model::{Applied, Conversation, Snapshot};
 
 actions!(
@@ -34,9 +37,6 @@ actions!(
     ]
 );
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
-/// Retrying a rejected token cannot succeed; poll rarely until it changes.
-const UNAUTHORIZED_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const SIDEBAR_CONTEXT: &str = "Sidebar";
 const COMPOSER_CONTEXT: &str = "Composer";
 const APP_CONTEXT: &str = "ElseApp";
@@ -149,7 +149,8 @@ pub struct ElseApp {
     create: Option<Entity<CreateFormHolder>>,
     _create_enter: Option<Subscription>,
     sidebar_focus: FocusHandle,
-    _poll: Option<Task<()>>,
+    live: Option<tokio::sync::mpsc::UnboundedSender<LiveCommand>>,
+    _live: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -202,81 +203,116 @@ impl ElseApp {
             create: None,
             _create_enter: None,
             sidebar_focus,
-            _poll: None,
+            live: None,
+            _live: None,
             _subscriptions: vec![subscription],
         };
-        app.start_polling(window, cx);
+        app.start_live(window, cx);
         app
     }
 
     // ----- Bot list ---------------------------------------------------------
 
-    /// Refresh capabilities and bot summaries now and every few seconds.
-    fn start_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the live connection. The `bots` channel keeps the sidebar
+    /// current; `bot:<id>` channels stream the open conversation.
+    /// Capabilities are fetched over HTTP each time the connection opens.
+    fn start_live(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
-        self._poll = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let caps = client.clone().capabilities().await;
-                let bots = match &caps {
-                    Ok(_) => Some(client.clone().bots().await),
-                    Err(_) => None,
-                };
-                let Ok(interval) = this.update_in(cx, |app, window, cx| {
-                    app.apply_refresh(caps, bots, window, cx);
-                    match app.connection {
-                        Connection::InvalidCredentials(_) => UNAUTHORIZED_POLL_INTERVAL,
-                        _ => POLL_INTERVAL,
-                    }
-                }) else {
+        let Live {
+            commands,
+            mut events,
+        } = client.clone().live();
+        self.live = Some(commands);
+        self._live = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                let connected = matches!(event, LiveEvent::Connected);
+                if this
+                    .update_in(cx, |app, window, cx| app.apply_live(event, window, cx))
+                    .is_err()
+                {
                     return;
-                };
-                cx.background_executor().timer(interval).await;
+                }
+                if connected {
+                    let caps = client.clone().capabilities().await;
+                    let _ = this.update_in(cx, |app, _, cx| app.apply_caps(caps, cx));
+                }
             }
         }));
     }
 
-    fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_polling(window, cx);
+    fn live_command(&self, command: LiveCommand) {
+        if let Some(live) = &self.live {
+            let _ = live.send(command);
+        }
     }
 
-    fn apply_refresh(
-        &mut self,
-        caps: Result<Capabilities, ClientError>,
-        bots: Option<Result<BotList, ClientError>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let result = caps.and_then(|caps| {
-            bots.expect("bots fetched with capabilities")
-                .map(|b| (caps, b))
-        });
-        match result {
-            Ok((caps, list)) => {
-                let was_connected = self.connection == Connection::Connected;
-                self.caps = Some(caps);
-                self.default_bot_id = list.default_bot_id;
-                self.bots = list.bots;
+    fn apply_live(&mut self, event: LiveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            LiveEvent::Connected => {
                 self.connection = Connection::Connected;
-                self.stopping.retain(|id| {
-                    self.bots.iter().any(|b| {
-                        b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle")
-                    })
-                });
-                self.reconcile_selection(window, cx);
-                if !was_connected {
-                    // Resolve sends whose outcome became unknown while offline.
-                    self.resolve_unknown_sends(window, cx);
+                if let Some(view) = self.view.as_mut() {
+                    view.stream_problem = None;
+                    if view.conversation.is_none() {
+                        self.load_conversation(window, cx);
+                    }
+                }
+                // Resolve sends whose outcome became unknown while offline.
+                self.resolve_unknown_sends(window, cx);
+            }
+            LiveEvent::Disconnected(reason) => {
+                // Keep whatever was loaded; show the problem and keep retrying.
+                self.connection = Connection::Disconnected(reason.clone());
+                if let Some(view) = self.view.as_mut() {
+                    view.stream_problem = Some(format!("Reconnecting… {reason}"));
                 }
             }
+            LiveEvent::Unauthorized => {
+                self.connection =
+                    Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+            }
+            LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
+            LiveEvent::Bot { bot, message } => self.apply_stream(bot, message, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn apply_caps(&mut self, caps: Result<Capabilities, ClientError>, cx: &mut Context<Self>) {
+        match caps {
+            Ok(caps) => self.caps = Some(caps),
             Err(ClientError::Unauthorized) => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
             }
-            // Keep whatever was loaded; show the problem and keep retrying.
-            Err(err) => self.connection = Connection::Disconnected(err.to_string()),
+            Err(_) => {}
         }
+        cx.notify();
+    }
+
+    /// Fetch the bot list once over HTTP, right after this window changed
+    /// it, without waiting for the `bots` channel.
+    fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(list) = client.bots().await {
+                let _ = this.update_in(cx, |app, window, cx| app.apply_bots(list, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
+        self.default_bot_id = list.default_bot_id;
+        self.bots = list.bots;
+        self.stopping.retain(|id| {
+            self.bots
+                .iter()
+                .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle"))
+        });
+        self.reconcile_selection(window, cx);
         cx.notify();
     }
 
@@ -312,8 +348,11 @@ impl ElseApp {
         self.composer
             .update(cx, |state, cx| state.set_value(draft, window, cx));
         self.notice = None;
-        // Dropping the old view drops its subscription and fetch tasks; the
-        // bot's server work is unaffected.
+        // Leaving a conversation unsubscribes from its channel and drops its
+        // fetch tasks; the bot's server work is unaffected.
+        if let Some(old) = self.view.as_ref() {
+            self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
+        }
         self.view = id.map(ConversationView::new);
         if id.is_some() {
             // Pending sends show at once, even before history loads.
@@ -343,33 +382,20 @@ impl ElseApp {
 
     // ----- Conversation and stream -----------------------------------------
 
-    /// Load a snapshot, then follow the stream from its cursor. Any reset
-    /// repeats this; reconnects resume from the last applied cursor.
+    /// Load a snapshot, then subscribe to the bot's channel from its cursor.
+    /// Any reset repeats this; reconnects resume from the last applied cursor.
     fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(client), Some(view)) = (self.client.clone(), self.view.as_mut()) else {
             return;
         };
         let bot = view.bot_id;
         view._load = Some(cx.spawn_in(window, async move |this, cx| {
-            let snapshot = client.clone().snapshot(bot, None).await;
-            let cursor = this
-                .update_in(cx, |app, window, cx| {
-                    app.apply_snapshot(bot, snapshot, window, cx)
-                })
-                .ok()
-                .flatten();
-            let Some(cursor) = cursor else { return };
-            let mut messages = client.clone().subscribe(bot, cursor);
-            while let Some(message) = messages.recv().await {
-                let keep = this
-                    .update_in(cx, |app, window, cx| {
-                        app.apply_stream(bot, message, window, cx)
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    return;
+            let snapshot = client.snapshot(bot, None).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Some(cursor) = app.apply_snapshot(bot, snapshot, window, cx) {
+                    app.live_command(LiveCommand::Subscribe { bot, cursor });
                 }
-            }
+            });
         }));
     }
 
@@ -417,31 +443,26 @@ impl ElseApp {
         }
     }
 
-    /// Returns false to end the subscription loop.
     fn apply_stream(
         &mut self,
         bot: Uuid,
         message: StreamMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
+        // Events for a conversation no longer open are ignored.
         let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
-            return false;
+            return;
         };
         match message {
-            StreamMessage::Connected => {
-                view.stream_problem = None;
-                cx.notify();
-                true
-            }
             StreamMessage::Frame(frame) => {
                 let Some(conversation) = view.conversation.as_mut() else {
-                    return false;
+                    return;
                 };
                 match conversation.apply(&frame) {
-                    Ok(Applied::Duplicate) => true,
+                    Ok(Applied::Duplicate) => {}
                     Ok(Applied::Changed) => {
-                        // The stream's activity is fresher than the last poll.
+                        // The channel's activity is fresher than the list.
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
                             self.stopping.remove(&bot);
@@ -452,34 +473,16 @@ impl ElseApp {
                             }
                         }
                         self.sync_rows(window, cx);
-                        true
                     }
                     Err(_) => {
-                        // Discard this subscription and reload a snapshot.
+                        // Drop this subscription and reload a snapshot.
+                        self.live_command(LiveCommand::Unsubscribe { bot });
                         self.load_conversation(window, cx);
-                        false
                     }
                 }
             }
-            StreamMessage::Disconnected(reason) => {
-                view.stream_problem = Some(format!("Reconnecting… {reason}"));
-                cx.notify();
-                true
-            }
-            StreamMessage::Reset => {
-                self.load_conversation(window, cx);
-                false
-            }
-            StreamMessage::Deleted => {
-                self.refresh_now(window, cx);
-                false
-            }
-            StreamMessage::Unauthorized => {
-                self.connection =
-                    Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
-                cx.notify();
-                false
-            }
+            StreamMessage::Reset => self.load_conversation(window, cx),
+            StreamMessage::Deleted => self.refresh_now(window, cx),
         }
     }
 

@@ -20,7 +20,7 @@ All behavior in this section is DESIGNED.
 
 The provider picker configures the next message. Each accepted message retains its chosen provider even if the picker changes later. Show the active turn's actual provider beside its status. While a different provider is working, a new message queues behind it. To switch immediately, use Stop work, wait for confirmed cancellation, then send the follow-up with the new provider. This makes interruption explicit without adding a task panel.
 
-The sidebar polls bot summaries every three seconds while the window is active. Only the selected bot has an SSE subscription. Refresh summaries on selection, focus, create, delete, cancellation, and reconnect. Unselected bots continue running. There is no unread counter or read-receipt protocol in this release.
+The sidebar subscribes to the `bots` channel on the owner WebSocket and redraws whenever the server pushes a changed list. Only the selected bot has a `bot:<id>` subscription. A one-shot HTTP list read is still allowed after the desktop's own create or delete, before the push arrives. Unselected bots continue running. There is no unread counter or read-receipt protocol in this release.
 
 Enter sends, Shift+Enter inserts a newline, and IME composition never sends accidentally. Keep a separate in-memory draft per bot. Closing the client can discard unsent drafts in this release. While a send outcome is unknown, keep the original draft and request ID as a pending send. Editing creates a separate draft, not a changed retry. Deduplicate the optimistic user bubble by request ID when the server item arrives.
 
@@ -97,11 +97,11 @@ All routes require the owner bearer token, including reads and streams. Task gra
 | `POST /v1/bots/{bot_id}/turns` | `{request_id, text, provider_id}`. `202` after saving the owner item and queued attempt. Returns canonical item and turn. Matching retries return `200` with their current state. |
 | `GET /v1/bots/{bot_id}/turns/by-request/{request_id}` | Resolves a lost send response. `404` means no committed matching request is visible. Retrying the same POST is also safe. |
 | `POST /v1/bots/{bot_id}/cancel` | `{request_id}`. Cancels all work accepted for that bot at the cancellation boundary. `202` until termination is confirmed, then `200`. Return `request_id` and `state = pending | done`. |
-| `GET /v1/bots/{bot_id}/events` | SSE after `Last-Event-ID`. The initial cursor comes from a snapshot. |
+| `GET /v1/ws` | Owner WebSocket upgrade. Live updates arrive as channels: `bots` and `bot:<bot_id>` after a snapshot cursor. See [live updates](#live-updates-over-websocket-channels). |
 
 Text accepts nonempty input up to a proposed 32 KiB in UTF-8. The API preserves its whitespace. Propose at most four waiting turns per bot, advertised in capabilities. Global resource limits can leave an accepted turn queued. The sidebar explains queued, working, switching, stopping, and unavailable states without a resource-management view.
 
-Owner authentication runs before object lookup. Unknown IDs return `404`. Known deleted bots return `410 bot_deleted` on message, history, and event routes. Their management receipt remains readable by the owner. General inaccessible-object behavior remains the auth report's generic `404`.
+Owner authentication runs before object lookup. Unknown IDs return `404`. Known deleted bots return `410 bot_deleted` on message and history routes, and a `bot_deleted` error on their event channel. Their management receipt remains readable by the owner. General inaccessible-object behavior remains the auth report's generic `404`.
 
 Use one error shape:
 
@@ -116,17 +116,55 @@ Use one error shape:
 }
 ```
 
-Return `400` for invalid input or cursor, `401` for invalid owner authentication, `403` for a valid task grant on an owner operation, `409` for reused IDs with different payloads or cancellation in progress, `413` for size limits, `429` for a full pending queue, and `503` for an unavailable provider or service. No rejected request creates a bubble or changes provider selection. Respect `Retry-After` when present. UI errors offer a relevant retry and retain the draft. Provider failures after acceptance become turn outcomes through snapshots and events.
+Return `400` for invalid input or cursor, `401` for invalid owner authentication, `403` for a valid task grant on an owner operation, `409` for reused IDs with different payloads or cancellation in progress, `413` for size limits, `429` for a full pending queue, and `503` for an unavailable provider or service. No rejected request creates a bubble or changes provider selection. Respect `Retry-After` when present. UI errors offer a relevant retry and retain the draft. Provider failures after acceptance become turn outcomes through snapshots and channel events.
 
 For create and cancel, keep small durable request receipts with the request ID, operation, target bot where relevant, payload hash, and result reference. Turns already retain their request ID and hash. Check and insert under a unique constraint in the same transaction as the mutation. Keep receipts through soft deletion. Do not impose a short retry expiry in the MVP. Cancel retries look up the existing receipt before admitting a new cancellation, so an old retry cannot cancel newer work.
 
 HTTP idempotency only deduplicates acceptance. It does not prove exactly-once provider input or external effects. An uncertain provider attempt never silently resubmits the original action. The desktop displays the uncertainty and permits a new explicit follow-up under a new request ID after server reconciliation.
 
-## Proposed SSE and reconnect behavior
+## Live updates over WebSocket channels
 
-VERIFIED from the standards and library documentation: SSE uses UTF-8 `text/event-stream`, blank-line framing, event types, and event IDs. Reconnection carries `Last-Event-ID`. Axum exposes `Sse`, `Event`, and `KeepAlive`. Reqwest exposes bearer headers and a streaming byte body, so this native client can authenticate without URL tokens. These sources establish transport building blocks, not replay storage. [WHATWG SSE specification](https://html.spec.whatwg.org/multipage/server-sent-events.html), [Axum SSE](https://docs.rs/axum/latest/axum/response/sse/index.html), [Reqwest authentication](https://docs.rs/reqwest/latest/reqwest/struct.RequestBuilder.html#method.bearer_auth), [Reqwest streaming](https://docs.rs/reqwest/latest/reqwest/struct.Response.html#method.bytes_stream).
+Commands stay on HTTP: create, delete, send, cancel, request lookup, snapshots, capabilities, and settings. They carry request IDs, return status codes, and are safe to retry, which a fire-and-forget socket message is not. Everything the server pushes travels on one authenticated WebSocket per desktop at `GET /v1/ws`, organized as subscribable channels.
 
-DESIGNED: use ordinary HTTP commands plus one authenticated SSE stream for the selected bot. No bidirectional protocol is needed for send, cancellation, or management. Use a tested SSE parser over Reqwest's bytes, rather than treating each network chunk as an event or UTF-8 string. Disable redirects on the client. Reqwest provides `Policy::none`. [Redirect policy](https://docs.rs/reqwest/latest/reqwest/redirect/struct.Policy.html#method.none).
+### History: SSE and polling were tried first
+
+POC-006 and POC-009 shipped the design this section originally proposed: one SSE stream (`GET /v1/bots/{id}/events` with `Last-Event-ID`) for the selected bot, and sidebar polling of `GET /v1/bots` every three seconds. It worked and passed its acceptance checks. The first usable POC still showed its limits:
+
+- Activity in unselected bots reached the sidebar up to three seconds late, and the polling sent a request every three seconds even while nothing changed.
+- Changing the selected bot meant tearing down one HTTP stream and opening another, each with its own reconnect loop.
+- Each additional live view (unread state, tabs, a mobile client) would need either another stream or another poller.
+- The client needed a hand-written byte-level SSE parser.
+
+The WebSocket keeps the journal, cursors, snapshot rules, and event kinds unchanged and replaces only the transport. A single connection multiplexes channels, subscriptions change without reconnecting, the sidebar is pushed, and frames are already message-delimited. Server wake-ups still come from `pg_notify` with a one-second database fallback; that fallback stays inside the API and never reaches the network.
+
+### Protocol
+
+The upgrade request is authenticated like every `/v1` route: the owner bearer token in the `Authorization` header, no browser `Origin`, and a loopback `Host`. A rejected upgrade returns the ordinary `401`, `403`, or `400` before any socket exists. Tokens never appear in the URL. Messages are JSON text frames.
+
+```text
+client → {"op":"subscribe","channel":"bots"}
+client → {"op":"subscribe","channel":"bot:<bot-uuid>","cursor":"<server-instance-uuid>:<bot-uuid>:42"}
+client → {"op":"unsubscribe","channel":"bot:<bot-uuid>"}
+
+server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":"<bot-uuid>","bots":[…]}}
+server → {"channel":"bot:<bot-uuid>","id":"<server-instance-uuid>:<bot-uuid>:43","event":"item.delta","data":{"bot_id":"<bot-uuid>","conversation_id":"<conversation-uuid>","item_id":"<item-uuid>","offset_utf8":6,"text":"world"}}
+server → {"channel":"bot:<bot-uuid>","error":{"code":"cursor_reset_required","message":"…"}}
+```
+
+`bots` sends the whole list (`include_deleting` semantics) on subscribe and again whenever it changes. Bot creation, deletion, cleanup, and every journaled activity change wake it. `bot:<id>` requires a cursor from a snapshot of that bot and sends committed journal rows after it, in order, each with its encoded cursor as `id`. Subscribing to a channel that is already open replaces it.
+
+A channel error ends only that channel; the connection and other channels continue.
+
+| Code | Meaning and client action |
+| --- | --- |
+| `cursor_required`, `invalid_cursor` | Missing or malformed cursor, or a cursor for another bot. Reload a snapshot. |
+| `cursor_reset_required` | Cursor from an earlier API process or beyond the latest event. Reload a snapshot. |
+| `bot_deleted` | The bot was deleted. Data already queued for the channel is dropped, then this error is sent. Refresh the list. |
+| `not_found` | Unknown bot. Refresh the list. |
+| `unknown_channel`, `invalid_message`, `too_many_subscriptions` | Client bug or more than 32 channels. |
+| `unavailable` | The database read failed. Resubscribe from the last cursor later. |
+
+Limits: client messages up to 64 KiB, 32 channels per connection, and a bounded 256-message outgoing queue. A journal read is at most 200 rows; a slow reader blocks only its channel and continues from its cursor, so memory does not grow. The server pings every 15 seconds and closes a connection that is silent for 60 seconds or cannot take a write within 30 seconds.
 
 Persist a small per-bot event journal with `bot_id`, `seq`, `kind`, and `data`. Existing history remains the source for snapshots. This journal provides replay, not a replacement event-sourced database. Retain it with conversation data initially. Do not build a compactor or message broker for the first release.
 
@@ -141,14 +179,13 @@ read_snapshot(bot):
 	commit
 	return state and event_cursor encoded with current server instance and bot
 
-stream(bot, after):
-	require owner authentication and an active bot
-	reject a different instance, wrong bot, future, or missing-retention cursor
+channel(bot, after):
+	reject a missing, malformed, other-bot, other-instance, or future cursor
 	loop:
 		read committed journal rows where seq > after, in ascending order
+		recheck that the bot is active; otherwise send bot_deleted and stop
 		send each row with its encoded cursor as id; advance local after
 		wait for a wake hint or a one-second fallback timer
-		check authorization and deletion before sending another batch
 ```
 
 DESIGNED: the repeatable-read snapshot keeps message contents and its cursor at one database boundary. PostgreSQL documents that successive reads in repeatable read see the same transaction snapshot. Actual query and lock correctness remains UNVERIFIED. [PostgreSQL isolation](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-REPEATABLE-READ).
@@ -162,20 +199,15 @@ Use these event kinds. Each JSON payload includes `bot_id` and `conversation_id`
 | `turn.updated` | Complete public turn projection, including terminal outcome. |
 | `bot.updated` | Current provider selection and activity projection. |
 
-```text
-id: <server-instance-uuid>:<bot-uuid>:42
-event: item.delta
-data: {"bot_id":"<bot-uuid>","conversation_id":"<conversation-uuid>","item_id":"<item-uuid>","offset_utf8":6,"text":"world"}
+Each event is one WebSocket message, shaped like the `item.delta` example above.
 
-```
+### Client behavior
 
-The example ends with a blank line. Send comment heartbeats every 15 seconds without IDs. Set `Cache-Control: no-cache, no-transform`, disable proxy buffering where a proxy exists, and avoid response compression that delays flushes. A stream has an inactivity timeout longer than the heartbeat interval, not the ordinary short REST timeout. A slow consumer reconnects and replays committed events rather than growing an unbounded memory queue.
+The client first fetches a snapshot over HTTP and then subscribes after its cursor. Events committed between those operations replay from the journal. Apply only the next contiguous event. Ignore an ID at or below the applied cursor. A gap, unknown event kind, missing item, or offset mismatch drops the subscription and reloads a snapshot. Advance the cursor only after successful application. Older-page responses merge by item ID and history order, without replacing newer loaded text or advancing the live cursor.
 
-The client first fetches a snapshot and then connects after its cursor. Events committed between those operations replay from the journal. Apply only the next contiguous event. Ignore an ID at or below the applied cursor. A gap, unknown event kind, missing item, or offset mismatch discards the subscription and reloads a snapshot. Advance the cursor only after successful application, not after reading a header or an incomplete frame. Older-page responses merge by item ID and history order, without replacing newer loaded text or advancing the live cursor.
+When the connection drops, reconnect with jittered exponential backoff from 500 ms to 15 seconds, subscribe to `bots` again, and resubscribe each open bot channel from its last applied cursor. A connection with no traffic for 45 seconds is treated as lost. On `401`, show the credential error and retry only every 30 seconds. After a desktop restart, obtain a fresh snapshot. Restoring a database requires restarting the API, which changes the instance ID and forces every cursor to reset.
 
-On reconnect, use the last applied cursor while the in-memory view survives. After desktop restart, obtain a fresh snapshot. Exponential retry with jitter, starting around 500 ms and capped at 15 seconds, is sufficient. Stop retrying on `401` until credentials change. `410 bot_deleted` on an event request refreshes the bot list. `409 cursor_reset_required` reloads a snapshot. A malformed cursor returns `400`. A valid cursor from a previous API instance also returns the reset error. Restoring a database requires restarting the API before serving traffic.
-
-Deletion closes the active stream immediately and invalidates history access. Do not promise delivery of a final deletion event through a stream whose authorization has been revoked. On EOF, refresh bot metadata before reconnecting. The disabled deletion receipt can still show pending cleanup. A normal disconnect, selection change, or window close never cancels the bot's work or releases a guest job lease.
+Deletion ends the bot's channel at once with `bot_deleted`, and nothing more is delivered for it. A disconnect, unsubscribe, selection change, or window close never cancels the bot's work or releases a guest job lease.
 
 ## Proposed cancellation, deletion, and main-bot behavior
 

@@ -122,6 +122,8 @@ pub async fn create(
     .bind(&hash)
     .execute(&mut *tx)
     .await?;
+    // Wake `bots` channel subscribers once this commits.
+    super::events::notify(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Created::New(
         find(pool, bot_id).await?.ok_or(BotError::NotFound)?,

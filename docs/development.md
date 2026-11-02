@@ -110,7 +110,7 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 | `POST /v1/bots/{id}/turns` | `{request_id, text, provider_id}`. Saves the owner message and a queued turn in one transaction, then wakes the scheduler. `202` on acceptance; a matching retry returns `200` with the same item and turn; different text or provider under that ID returns `409`. A deleted bot returns `410 bot_deleted`. More than four waiting messages return `429 queue_full` with `Retry-After`. A `null` provider uses the default. |
 | `GET /v1/bots/{id}/turns/by-request/{request_id}` | Resolves a lost send response, or `404`. |
 | `GET /v1/bots/{id}/conversation[?limit=50&before_seq=N]` | Consistent snapshot read in one repeatable-read transaction: the newest `limit` items (1 to 200) in ascending `seq`, their turns plus every unfinished turn, activity, `older_before_seq` for the previous page (or `null`), and `event_cursor`. |
-| `GET /v1/bots/{id}/events` | `text/event-stream` of committed events after the `Last-Event-ID` header, which must hold a snapshot or event cursor. Event kinds are `item.upsert`, `item.delta`, `turn.updated`, and `bot.updated`. Comment heartbeats every 15 seconds. |
+| `GET /v1/ws` | Owner WebSocket for live updates. Subscribe to `bots` (pushed list) and `bot:<id>` (committed events after a snapshot cursor). Event kinds are `item.upsert`, `item.delta`, `turn.updated`, and `bot.updated`. See [events and reconnecting](#events-and-reconnecting). |
 | `GET`, `PATCH /v1/settings/providers/{provider_id}` | Read or update the saved execution profile. `PATCH` takes any of `model`, `reasoning_effort`, `service_tier`, and an optional `expected_revision`. The adapter validates the exact values; unsupported values return `400 invalid_profile` and nothing changes. A change bumps the revision. Accepted turns keep the revision they were accepted with. |
 
 Unknown or malformed IDs return `404 not_found`, always after authentication. A role over 8 KiB or message text over 32 KiB returns `413 too_large`; other invalid input, including NUL characters, returns `400 invalid_input`. Try it with a synthetic bot:
@@ -146,9 +146,22 @@ ELSE_LIVE_CODEX=1 cargo test -p else-api --test codex_live -- --nocapture
 
 ### Events and reconnecting
 
-Every change to history or turn state appends rows to `bot_events` in the same transaction, under the bot's row lock, so a bot's event sequence follows commit order. Cursors are `<server_instance_id>:<bot_id>:<seq>`; the instance ID changes on every API start. The stream sends only committed rows, then waits for a `pg_notify` wake hint or a one-second poll. `item.delta` carries `offset_utf8`, the byte length of the item's text before the delta; a client appends only when its current length matches.
+Every change to history or turn state appends rows to `bot_events` in the same transaction, under the bot's row lock, so a bot's event sequence follows commit order. Cursors are `<server_instance_id>:<bot_id>:<seq>`; the instance ID changes on every API start. The socket sends only committed rows; inside the API, channels wake on a `pg_notify` hint or a one-second database poll. `item.delta` carries `offset_utf8`, the byte length of the item's text before the delta; a client appends only when its current length matches.
 
-Clients take a snapshot, then open the stream with its cursor, apply only the next contiguous `seq`, ignore IDs at or below the applied one, and reconnect with the last applied cursor. A missing cursor returns `400 cursor_required`; a malformed one or a cursor for another bot returns `400 invalid_cursor`; a cursor from an earlier API process or beyond the latest event returns `409 cursor_reset_required`, meaning load a fresh snapshot. Deleting a bot ends its open streams within about a second; afterwards the stream and snapshot return `410 bot_deleted`. Event payloads contain no request hashes, profiles, native session IDs, or credentials.
+Live updates use one WebSocket at `GET /v1/ws`, authenticated like every other route. Commands stay on HTTP because they carry request IDs and status codes. Messages are JSON:
+
+```text
+→ {"op":"subscribe","channel":"bots"}
+→ {"op":"subscribe","channel":"bot:<id>","cursor":"<cursor from a snapshot>"}
+→ {"op":"unsubscribe","channel":"bot:<id>"}
+← {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":…,"bots":[…]}}
+← {"channel":"bot:<id>","id":"<cursor>","event":"item.delta","data":{…}}
+← {"channel":"bot:<id>","error":{"code":"cursor_reset_required","message":"…"}}
+```
+
+`bots` pushes the whole list on subscribe and whenever a bot is created, deleted, or changes activity. Clients take a snapshot, subscribe to `bot:<id>` with its cursor, apply only the next contiguous `seq`, ignore IDs at or below the applied one, and after a reconnect resubscribe with the last applied cursor. Channel errors end only that channel: `cursor_required` or `invalid_cursor` (malformed or another bot's), `cursor_reset_required` (earlier API process or beyond the latest event; load a fresh snapshot), `bot_deleted`, and `not_found`. Deleting a bot ends its channel within about a second with `bot_deleted`, and the snapshot then returns `410 bot_deleted`. The server pings every 15 seconds; a connection allows 32 channels. Event payloads contain no request hashes, profiles, native session IDs, or credentials.
+
+The first version used a per-bot SSE route and three-second sidebar polling; the [desktop contract](research/desktop-and-feature-contracts.md#history-sse-and-polling-were-tried-first) explains the switch.
 
 ### Database and migrations
 
@@ -213,7 +226,7 @@ The window lists bots on the left and the selected conversation on the right. Ne
 | Ctrl+Shift+P | Cycle the provider for the next message |
 | Ctrl+Shift+Up | Load older messages |
 
-The token is sent only as an `Authorization` header to the configured origin. Redirects are never followed, and the token never appears in URLs, logs, or messages. A missing or invalid configuration, a rejected token, or an unreachable API is shown in the sidebar; loaded bots stay visible while the desktop retries. The sidebar refreshes every three seconds. Up/Down (or Ctrl+N/Ctrl+P) move the selection while the sidebar has focus. Closing the window quits the desktop; work already accepted by the API keeps running.
+The token is sent only as an `Authorization` header to the configured origin. Redirects are never followed, and the token never appears in URLs, logs, or messages. A missing or invalid configuration, a rejected token, or an unreachable API is shown in the sidebar; loaded bots stay visible while the desktop retries. The sidebar and the open conversation update live over the WebSocket; nothing polls. Up/Down (or Ctrl+N/Ctrl+P) move the selection while the sidebar has focus. Closing the window quits the desktop; work already accepted by the API keeps running.
 
 `scripts/demo.sh` runs a disposable installation for manual checks, with its own `else_demo` database and `/tmp/else-demo` data directory and the synthetic provider enabled: `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop` in separate terminals. `scripts/demo.sh drop` removes it.
 

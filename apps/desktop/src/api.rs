@@ -13,12 +13,13 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use futures_util::StreamExt as _;
+use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::json;
 
 use crate::config::{Origin, OwnerToken};
+use crate::model::Frame;
 use crate::model::{Item, Snapshot, Turn};
-use crate::sse::{Frame, Parser};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderInfo {
@@ -94,18 +95,72 @@ pub struct Sent {
     pub turn: Turn,
 }
 
-/// Messages from a bot's event-stream subscription.
+/// What a `bot:<id>` channel delivered.
 #[derive(Debug, Clone)]
 pub enum StreamMessage {
-    Connected,
     Frame(Frame),
-    /// Retrying after this problem; loaded history stays visible.
-    Disconnected(String),
     /// The cursor is no longer valid: load a fresh snapshot.
     Reset,
     /// The bot was deleted.
     Deleted,
+}
+
+/// Events from the live connection.
+#[derive(Debug, Clone)]
+pub enum LiveEvent {
+    Connected,
+    /// Retrying after this problem; loaded data stays visible.
+    Disconnected(String),
     Unauthorized,
+    /// The `bots` channel: the current list and default pointer.
+    Bots(BotList),
+    Bot {
+        bot: Uuid,
+        message: StreamMessage,
+    },
+}
+
+pub enum LiveCommand {
+    Subscribe { bot: Uuid, cursor: String },
+    Unsubscribe { bot: Uuid },
+}
+
+/// Handles to the live connection; dropping `events` ends it.
+pub struct Live {
+    pub commands: tokio::sync::mpsc::UnboundedSender<LiveCommand>,
+    pub events: tokio::sync::mpsc::Receiver<LiveEvent>,
+}
+
+/// Turn one server message into a UI event, tracking resume cursors.
+fn route(message: &serde_json::Value, wanted: &mut HashMap<Uuid, String>) -> Option<LiveEvent> {
+    let channel = message["channel"].as_str()?;
+    if channel == "bots" {
+        return serde_json::from_value(message["data"].clone())
+            .ok()
+            .map(LiveEvent::Bots);
+    }
+    let bot: Uuid = channel.strip_prefix("bot:")?.parse().ok()?;
+    if let Some(code) = message["error"]["code"].as_str() {
+        wanted.remove(&bot);
+        let message = match code {
+            "bot_deleted" | "not_found" => StreamMessage::Deleted,
+            _ => StreamMessage::Reset,
+        };
+        return Some(LiveEvent::Bot { bot, message });
+    }
+    let id = message["id"].as_str()?.to_owned();
+    // Only resume from cursors of channels still wanted.
+    if let Some(cursor) = wanted.get_mut(&bot) {
+        *cursor = id.clone();
+    }
+    Some(LiveEvent::Bot {
+        bot,
+        message: StreamMessage::Frame(Frame {
+            id: Some(id),
+            event: message["event"].as_str().unwrap_or_default().to_owned(),
+            data: message["data"].to_string(),
+        }),
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,114 +401,152 @@ impl Client {
             .map(|(_, v)| v.bot)
     }
 
-    /// Follow the bot's event stream from `cursor`, reconnecting with
-    /// backoff, until `messages` is dropped or the stream cannot continue.
-    pub fn subscribe(
-        self: Arc<Self>,
-        bot: Uuid,
-        cursor: String,
-    ) -> tokio::sync::mpsc::Receiver<StreamMessage> {
+    /// Open the live connection: one WebSocket carrying the `bots` channel
+    /// and any `bot:<id>` channels the UI subscribes to. It reconnects with
+    /// backoff and resubscribes every channel from its last delivered cursor.
+    pub fn live(self: Arc<Self>) -> Live {
+        let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
         // Bounded: a slow UI applies backpressure to the socket instead of
         // buffering an unbounded backlog in memory.
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let (event_tx, events) = tokio::sync::mpsc::channel(256);
         let this = self.clone();
         self.runtime
-            .spawn(async move { this.follow(bot, cursor, tx).await });
-        rx
+            .spawn(async move { this.run_live(command_rx, event_tx).await });
+        Live { commands, events }
     }
 
-    async fn follow(
+    fn ws_request(&self) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "ws://{}/v1/ws",
+            self.origin.as_str().trim_start_matches("http://")
+        );
+        let mut request = url.into_client_request().expect("valid ws URL");
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, self.auth.clone());
+        request
+    }
+
+    async fn run_live(
         &self,
-        bot: Uuid,
-        mut cursor: String,
-        tx: tokio::sync::mpsc::Sender<StreamMessage>,
+        mut commands: tokio::sync::mpsc::UnboundedReceiver<LiveCommand>,
+        events: tokio::sync::mpsc::Sender<LiveEvent>,
     ) {
-        /// Longer than the server's 15-second heartbeat.
+        use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+        /// Longer than the server's 15-second ping.
         const INACTIVITY: Duration = Duration::from_secs(45);
-        const HEADERS: Duration = Duration::from_secs(10);
-        // Every wait also ends when the subscriber goes away.
+        const HANDSHAKE: Duration = Duration::from_secs(10);
+        // Wanted `bot:<id>` channels and the cursor to resume from.
+        let mut wanted: HashMap<Uuid, String> = HashMap::new();
+        let mut backoff = Duration::from_millis(500);
         macro_rules! deliver {
-            ($message:expr) => {
+            ($event:expr) => {
                 tokio::select! {
-                    _ = tx.closed() => return,
-                    sent = tx.send($message) => if sent.is_err() { return },
+                    _ = events.closed() => return,
+                    sent = events.send($event) => if sent.is_err() { return },
                 }
             };
         }
-        let mut backoff = Duration::from_millis(500);
         loop {
-            let request = self
-                .request(Method::GET, &format!("/v1/bots/{bot}/events"))
-                .header("last-event-id", &cursor);
-            let response = tokio::select! {
-                _ = tx.closed() => return,
-                response = tokio::time::timeout(HEADERS, request.send()) => response,
+            let connected = tokio::select! {
+                _ = events.closed() => return,
+                result = tokio::time::timeout(
+                    HANDSHAKE,
+                    tokio_tungstenite::connect_async(self.ws_request()),
+                ) => result,
             };
-            match response {
-                Ok(Ok(response)) if response.status().is_success() => {
-                    backoff = Duration::from_millis(500);
-                    deliver!(StreamMessage::Connected);
-                    let mut parser = Parser::default();
-                    let mut body = response.bytes_stream();
-                    let reason = loop {
-                        let chunk = tokio::select! {
-                            _ = tx.closed() => return,
-                            chunk = tokio::time::timeout(INACTIVITY, body.next()) => chunk,
-                        };
-                        let bytes = match chunk {
-                            Err(_) => break "The event stream went silent.",
-                            Ok(Some(Ok(bytes))) => bytes,
-                            Ok(_) => break "The event stream ended.",
-                        };
-                        let Ok(frames) = parser.push(&bytes) else {
-                            deliver!(StreamMessage::Reset);
-                            return;
-                        };
-                        for frame in frames {
-                            if let Some(id) = &frame.id {
-                                cursor = id.clone();
-                            }
-                            deliver!(StreamMessage::Frame(frame));
-                        }
-                    };
-                    // EOF or silence: deletion, a restart, or a dead link. The
-                    // next attempt reports which.
-                    deliver!(StreamMessage::Disconnected(reason.into()));
-                }
-                Ok(Ok(response)) => {
-                    let status = response.status();
-                    let code = tokio::select! {
-                        _ = tx.closed() => return,
-                        body = tokio::time::timeout(HEADERS, response.json::<ErrorBody>()) => {
-                            body.ok().and_then(Result::ok).map(|b| b.error.code).unwrap_or_default()
-                        }
-                    };
-                    let terminal = match (status.as_u16(), code.as_str()) {
-                        (401, _) => Some(StreamMessage::Unauthorized),
-                        (410, _) => Some(StreamMessage::Deleted),
-                        (409, "cursor_reset_required") | (400, _) => Some(StreamMessage::Reset),
-                        _ => None,
-                    };
-                    if let Some(message) = terminal {
-                        deliver!(message);
-                        return;
+            let mut socket = match connected {
+                Ok(Ok((socket, _))) => socket,
+                Ok(Err(WsError::Http(response)))
+                    if response.status() == StatusCode::UNAUTHORIZED =>
+                {
+                    deliver!(LiveEvent::Unauthorized);
+                    // Retrying a rejected token cannot help; check rarely.
+                    tokio::select! {
+                        _ = events.closed() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
                     }
-                    deliver!(StreamMessage::Disconnected(format!("HTTP {status}")));
+                    continue;
                 }
                 Ok(Err(_)) | Err(_) => {
-                    deliver!(StreamMessage::Disconnected(format!(
+                    deliver!(LiveEvent::Disconnected(format!(
                         "Cannot reach the API at {}.",
                         self.origin.as_str()
                     )));
+                    let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_bytes()[0]) * 2);
+                    tokio::select! {
+                        _ = events.closed() => return,
+                        _ = tokio::time::sleep(backoff + jitter) => {}
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(15));
+                    continue;
                 }
+            };
+            backoff = Duration::from_millis(500);
+            let subscribe = |channel: String, cursor: Option<&String>| {
+                Message::Text(
+                    json!({ "op": "subscribe", "channel": channel, "cursor": cursor })
+                        .to_string()
+                        .into(),
+                )
+            };
+            let mut ok = socket.send(subscribe("bots".into(), None)).await.is_ok();
+            for (bot, cursor) in &wanted {
+                ok = ok
+                    && socket
+                        .send(subscribe(format!("bot:{bot}"), Some(cursor)))
+                        .await
+                        .is_ok();
             }
-            // Exponential backoff with jitter, capped at 15 seconds.
-            let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) * 2);
-            tokio::select! {
-                _ = tx.closed() => return,
-                _ = tokio::time::sleep(backoff + jitter) => {}
+            if ok {
+                deliver!(LiveEvent::Connected);
             }
-            backoff = (backoff * 2).min(Duration::from_secs(15));
+            let reason = loop {
+                if !ok {
+                    break "The live connection failed.";
+                }
+                tokio::select! {
+                    _ = events.closed() => return,
+                    command = commands.recv() => {
+                        let Some(command) = command else { return };
+                        let message = match command {
+                            LiveCommand::Subscribe { bot, cursor } => {
+                                let message = subscribe(format!("bot:{bot}"), Some(&cursor));
+                                wanted.insert(bot, cursor);
+                                message
+                            }
+                            LiveCommand::Unsubscribe { bot } => {
+                                wanted.remove(&bot);
+                                Message::Text(
+                                    json!({ "op": "unsubscribe", "channel": format!("bot:{bot}") })
+                                        .to_string()
+                                        .into(),
+                                )
+                            }
+                        };
+                        if socket.send(message).await.is_err() {
+                            break "The live connection failed.";
+                        }
+                    }
+                    incoming = tokio::time::timeout(INACTIVITY, socket.next()) => {
+                        let text = match incoming {
+                            Err(_) => break "The live connection went silent.",
+                            Ok(None) | Ok(Some(Err(_))) => break "The live connection closed.",
+                            Ok(Some(Ok(Message::Text(text)))) => text,
+                            Ok(Some(Ok(Message::Close(_)))) => break "The live connection closed.",
+                            Ok(Some(Ok(_))) => continue,
+                        };
+                        let Ok(message) = serde_json::from_str::<serde_json::Value>(&text) else {
+                            continue;
+                        };
+                        if let Some(event) = route(&message, &mut wanted) {
+                            deliver!(event);
+                        }
+                    }
+                }
+            };
+            deliver!(LiveEvent::Disconnected(reason.into()));
         }
     }
 
@@ -554,5 +647,132 @@ mod tests {
         let err = client(origin).bots().await.unwrap_err();
         assert_eq!(err.code(), Some("queue_full"));
         assert!(!err.outcome_unknown());
+    }
+
+    #[test]
+    fn routing_tracks_cursors_and_maps_channel_errors() {
+        let bot = Uuid::new_v4();
+        let mut wanted = HashMap::from([(bot, "i:b:1".to_owned())]);
+        let frame = json!({ "channel": format!("bot:{bot}"), "id": "i:b:2", "event": "item.delta", "data": { "x": 1 } });
+        match route(&frame, &mut wanted) {
+            Some(LiveEvent::Bot {
+                message: StreamMessage::Frame(f),
+                ..
+            }) => {
+                assert_eq!(f.id.as_deref(), Some("i:b:2"));
+                assert_eq!(f.event, "item.delta");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(wanted[&bot], "i:b:2", "resume cursor advanced");
+        let reset = json!({ "channel": format!("bot:{bot}"), "error": { "code": "cursor_reset_required" } });
+        assert!(matches!(
+            route(&reset, &mut wanted),
+            Some(LiveEvent::Bot {
+                message: StreamMessage::Reset,
+                ..
+            })
+        ));
+        assert!(
+            !wanted.contains_key(&bot),
+            "a failed channel is not resubscribed"
+        );
+        let deleted =
+            json!({ "channel": format!("bot:{bot}"), "error": { "code": "bot_deleted" } });
+        assert!(matches!(
+            route(&deleted, &mut wanted),
+            Some(LiveEvent::Bot {
+                message: StreamMessage::Deleted,
+                ..
+            })
+        ));
+        let bots = json!({ "channel": "bots", "event": "bots.snapshot", "data": { "default_bot_id": null, "bots": [] } });
+        assert!(matches!(
+            route(&bots, &mut wanted),
+            Some(LiveEvent::Bots(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_connection_authenticates_and_resumes_after_reconnect() {
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let bot = Uuid::new_v4();
+        let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            for round in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let seen_tx = seen_tx.clone();
+                let mut socket = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response| {
+                        let auth = request.headers()["authorization"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        let _ = seen_tx.send(format!("auth {auth}"));
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                // Read the client's subscriptions for a moment.
+                while let Ok(Some(Ok(Message::Text(text)))) =
+                    tokio::time::timeout(Duration::from_millis(300), socket.next()).await
+                {
+                    let _ = seen_tx.send(text.to_string());
+                }
+                if round == 0 {
+                    let frame = json!({ "channel": format!("bot:{bot}"), "id": "i:b:7", "event": "turn.updated", "data": {} });
+                    socket
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Drop the connection: the client must reconnect.
+                }
+            }
+        });
+        let client = client(origin);
+        let mut live = client.live();
+        assert!(matches!(
+            live.events.recv().await,
+            Some(LiveEvent::Connected)
+        ));
+        live.commands
+            .send(LiveCommand::Subscribe {
+                bot,
+                cursor: "i:b:5".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            live.events.recv().await,
+            Some(LiveEvent::Bot { .. })
+        ));
+        assert!(matches!(
+            live.events.recv().await,
+            Some(LiveEvent::Disconnected(_))
+        ));
+        assert!(matches!(
+            live.events.recv().await,
+            Some(LiveEvent::Connected)
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut log = Vec::new();
+        while let Ok(line) = seen.try_recv() {
+            log.push(line);
+        }
+        let token = format!("auth Bearer {}", "T".repeat(43));
+        assert_eq!(log.iter().filter(|l| **l == token).count(), 2, "{log:?}");
+        assert!(
+            log.iter().any(|l| l.contains("\"cursor\":\"i:b:5\"")),
+            "{log:?}"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("\"cursor\":\"i:b:7\"")),
+            "resubscribed from the last delivered cursor: {log:?}"
+        );
     }
 }
