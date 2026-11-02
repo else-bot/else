@@ -2,6 +2,18 @@
 
 These are security requirements and proposed controls. They have not been implemented or validated in else.bot. [System prompt drafts](prompts.md) describe model behavior, and [webhook authorization](routines.md#webhook-authorization) defines routine access.
 
+## First-release authentication
+
+Use one owner bearer token and a loopback-only Rust API. Provision a random 32-byte token independently of `SECRET_KEY` and provider credentials. Keep it in a private file, load its digest at startup, and require it on every owner route and message stream. The desktop can use an explicit private token file during development. OS keyring integration can follow without changing the protocol.
+
+For a VPS, start with an authenticated SSH tunnel to the same loopback API. Direct network deployment requires HTTPS. Development must not add an anonymous network-access mode.
+
+Provider sessions receive short-lived tool grants bound to a bot, conversation, task, and fixed allowlist. The API derives identity from the grant and checks current state before dispatch. Configured delegation and memory access specify permitted target bots. The owner token, database credentials, and `SECRET_KEY` stay outside the provider process. No user accounts, OAuth service, role editor, or general policy engine are needed initially.
+
+Deleting a bot records a tombstone, revokes grants, cancels active work, and stops its computer. Retain its chats, memory, and saved files for a later explicit purge. A late result must not restore the bot or restart its VM.
+
+Development agents work under the owner's authorization for their assigned repository and disposable development services. That authorization is separate from runtime bot permissions. The [authentication research](research/authentication-and-permissions.md) records the proposed setup, task checks, development policy, and 39 passing policy-model checks. Actual route enforcement, keyring behavior, and host process isolation remain unverified.
+
 ## Prompt injection protections
 
 Prompt injection protection is a system requirement. A system prompt alone cannot guarantee that injection is impossible. Separating instructions from data helps the model, while authorization and tool restrictions must also operate outside it. [OWASP prompt injection guidance](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html).
@@ -18,7 +30,7 @@ These are proposed controls for else.bot, informed by [OWASP's agent security gu
 
 ## Isolation and remote access
 
-The proposed deployment should give each bot its own writable filesystem, browser profile, and provider session files. Cross-bot memory access should continue through else.bot's skills and API.
+The proposed deployment should give each bot its own guest filesystem and browser profile. Native provider session files stay in separate bot directories on the host. Cross-bot memory access should continue through else.bot's skills and API.
 
 For the prototype, the runtime configuration should enforce these boundaries:
 
@@ -34,6 +46,20 @@ For VNC access, the proposed route is the client, else.bot's authenticated TLS p
 
 These controls limit access to the host and other bot environments. They do not prevent a bot from misusing data or connectors it can already access. Those permissions still belong in else.bot's API.
 
+## Host provider processes
+
+Provider CLIs run on the host. The micro-VM isolates guest tasks, while a separate restriction must contain each host CLI process. A skill instructing the model to use guest tools does not enforce that boundary.
+
+The proposed host execution requirements are:
+
+- Run provider processes with explicit working directories, isolated bot session storage, and an allowlist of environment variables. Keep `SECRET_KEY`, database administration credentials, backup keys, storage credentials, and unrelated host files inaccessible.
+- Use the intended provider account through supported authentication. Keep authentication material outside VMs and prompt text. Sharing one account must not expose another bot's conversation files or settings.
+- Configure or disable native shell, file, browser, network, and MCP capabilities that bypass else.bot's scoped tools. Apply operating-system restrictions to host files and processes. An approval prompt or a prompt instruction alone is insufficient.
+- Give each CLI session scoped tool authorization tied to its bot, conversation, and task. The Rust API checks permissions and guest targets before dispatch. VM lifecycle privileges belong to the trusted service.
+- Treat guest files, tool output, and callbacks as untrusted input. A guest cannot request arbitrary host commands, choose host paths, or obtain runtime management credentials.
+
+The experiment must determine which supported CLI controls and host process restrictions satisfy these requirements while preserving subscription login and structured communication. If either CLI retains unrestricted host execution, this design has not met its isolation requirement. [Provider integration validation](providers.md#integration-validation) records the checks.
+
 ## Master key and encrypted secrets
 
 The initial deployment should read an installation master key from the Rust API's environment:
@@ -44,7 +70,7 @@ SECRET_KEY=<base64-encoded 32 cryptographically random bytes>
 
 Provision this key once and preserve it across restarts and migrations. Keep it outside PostgreSQL, source control, and ordinary application configuration exports. Supply it only to the trusted API and its backup worker. Provider CLIs and bot VMs must not inherit it.
 
-Derive separate keys for recoverable database secrets and backup encryption using HKDF-SHA-256 with distinct purpose labels, such as `else.bot/secrets/v1` and `else.bot/backups/v1`. Use an established authenticated encryption library and a supported streaming format for large VM archives. Preserve the required salts, nonces, format versions, and key identifiers with encrypted data. The exact library and archive format remain implementation decisions. [HKDF purpose separation](https://www.rfc-editor.org/rfc/rfc5869.html#section-3.2), [authenticated encryption and key separation](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html).
+Derive separate keys for recoverable database secrets and backup encryption using HKDF-SHA-256 with distinct purpose labels, such as `else.bot/secrets/v1` and `else.bot/backups/v1`. Use Rust `age` streaming encryption for backup artifacts, initially pinned to the tested `0.12.1`. Derive its per-set identity with a fresh public salt and the backup purpose label. Preserve salts, format versions, and key identifiers with encrypted data. The [backup research](research/backup-and-recovery.md#encryption-and-key-separation) specifies that format. Selection of the database-secret encryption library remains open. [HKDF purpose separation](https://www.rfc-editor.org/rfc/rfc5869.html#section-3.2), [authenticated encryption and key separation](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html).
 
 The backup encryption covers PostgreSQL exports, VM archives, and recovery manifests before upload. Include the encryption format and key identifier in the outer backup metadata so recovery can select the key before decrypting the manifest.
 
