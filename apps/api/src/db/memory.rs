@@ -129,11 +129,23 @@ pub async fn append(
         .bind(bot_id)
         .execute(&mut *conn)
         .await?;
-    let next: i64 =
-        sqlx::query_scalar("SELECT next_seq FROM memory_store WHERE bot_id = $1 FOR NO KEY UPDATE")
-            .bind(bot_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let (next, generation, building): (i64, i32, Option<i32>) = sqlx::query_as(
+        "SELECT next_seq, generation, building_generation FROM memory_store
+         WHERE bot_id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(bot_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    // The first generation takes the installation's current recipe.
+    sqlx::query(
+        "INSERT INTO memory_generation (bot_id, generation, recipe)
+         VALUES ($1, 1, coalesce((SELECT memory_recipe FROM installation), $2))
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(bot_id)
+    .bind(sqlx::types::Json(crate::app::memory_tree::Recipe::default()))
+    .execute(&mut *conn)
+    .await?;
     let print = fingerprint(entry);
     let existing: Vec<(i64, Vec<u8>)> = sqlx::query_as(
         "SELECT seq, request_fingerprint FROM memory_entry
@@ -194,6 +206,19 @@ pub async fn append(
         .bind(next + seqs.len() as i64)
         .execute(&mut *conn)
         .await?;
+    // Each new entry needs its leaf in the active generation and in a
+    // rebuild in progress.
+    let generations: Vec<i32> = std::iter::once(generation).chain(building).collect();
+    sqlx::query(
+        "INSERT INTO memory_job (bot_id, generation, start_seq, span)
+         SELECT $1, g, s, 1 FROM unnest($2::int[]) g, unnest($3::bigint[]) s
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(bot_id)
+    .bind(&generations)
+    .bind(&seqs)
+    .execute(&mut *conn)
+    .await?;
     Ok(seqs)
 }
 

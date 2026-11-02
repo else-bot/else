@@ -21,6 +21,9 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bots/{bot_id}/memory", get(read))
         .route("/bots/{bot_id}/memory/corrections", post(correct))
+        .route("/bots/{bot_id}/memory/view", get(view))
+        .route("/bots/{bot_id}/memory/rebuild", post(rebuild))
+        .route("/settings/memory", get(recipe).patch(set_recipe))
         .route("/bots/{bot_id}/memory-access", get(access))
         .route(
             "/bots/{bot_id}/memory-access/{target_id}",
@@ -197,4 +200,101 @@ async fn revoke(
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn view(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    require_active(&state, bot_id).await?;
+    let saved = crate::db::memory_tree::load_view(&state.db, bot_id).await?;
+    let nodes: Vec<Value> = saved
+        .nodes
+        .iter()
+        .map(|n| {
+            json!({ "start_seq": n.node.start, "span": n.node.span,
+                    "method": n.method, "text": n.body })
+        })
+        .collect();
+    let blocked: Vec<Value> = saved
+        .blocked
+        .iter()
+        .map(|(reason, jobs)| json!({ "reason": reason, "jobs": jobs }))
+        .collect();
+    Ok(Json(json!({
+        "generation": saved.generation,
+        "building_generation": saved.building_generation,
+        "revision": saved.revision,
+        "valid": saved.valid,
+        "length": saved.length,
+        "published_seq": saved.published_seq,
+        "compacting": saved.compacting,
+        "blocked": blocked,
+        "nodes": nodes,
+    })))
+}
+
+async fn rebuild(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    require_active(&state, bot_id).await?;
+    match crate::db::memory_tree::start_rebuild(&state.db, bot_id).await? {
+        Some(generation) => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "building_generation": generation })),
+        )),
+        None => Err(bot_deleted()),
+    }
+}
+
+async fn recipe(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let recipe: Option<Value> = sqlx::query_scalar("SELECT memory_recipe FROM installation")
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(Json(recipe.unwrap_or_else(|| {
+        serde_json::to_value(crate::app::memory_tree::Recipe::default()).unwrap()
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeBody {
+    node_bytes: usize,
+    view_high: usize,
+    view_low: usize,
+}
+
+/// Change the budgets for generations created from now on. Existing
+/// generations keep theirs; apply to a bot with an explicit rebuild.
+async fn set_recipe(
+    State(state): State<Arc<AppState>>,
+    ApiJson(body): ApiJson<RecipeBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !(64..=65_536).contains(&body.node_bytes)
+        || body.view_low < body.node_bytes * 4
+        || body.view_high <= body.view_low
+        || body.view_high > 4_000_000
+    {
+        return Err(ApiError::bad_request(
+            "invalid_recipe",
+            "Use 64 <= node_bytes <= 65536, view_low >= 4 * node_bytes, and \
+             view_low < view_high <= 4000000.",
+        ));
+    }
+    let recipe = crate::app::memory_tree::Recipe {
+        version: 1,
+        node_bytes: body.node_bytes,
+        view_high: body.view_high,
+        view_low: body.view_low,
+    };
+    let updated = sqlx::query("UPDATE installation SET memory_recipe = $1")
+        .bind(sqlx::types::Json(recipe))
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(ApiError::unavailable("not_installed", "Run setup first."));
+    }
+    Ok(Json(serde_json::to_value(recipe).unwrap()))
 }

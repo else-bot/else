@@ -175,9 +175,12 @@ mod tests {
             text.contains("[mcp_servers.elsebot]\nurl = \"http://127.0.0.1:7878/tools/v1/mcp\"")
         );
         assert!(text.contains("bearer_token_env_var = \"ELSE_TASK_GRANT\""));
-        assert!(
-            text.contains("enabled_tools = [\"memory_bots\", \"memory_search\", \"memory_read\"]")
-        );
+        let expected: Vec<String> = crate::http::mcp::TOOL_NAMES
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect();
+        assert!(text.contains(&format!("enabled_tools = [{}]", expected.join(", "))));
+        assert!(text.contains("\"memory_search\""));
         // The grant itself is never written to disk.
         assert!(!text.contains("tg_"));
     }

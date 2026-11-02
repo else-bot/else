@@ -198,6 +198,11 @@ fn run_serve() -> anyhow::Result<()> {
             lost.cancelled().await;
             stop_on_loss.cancel();
         });
+        // Builds memory tree nodes; stops with the scheduler.
+        let compactor = tokio::spawn(else_api::memory_worker::run(
+            pool.clone(),
+            stop_scheduler.clone(),
+        ));
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
         let result = serve(&config, listener, state, lock_lost.clone()).await;
@@ -205,6 +210,7 @@ fn run_serve() -> anyhow::Result<()> {
         // Stop provider work after HTTP so no new message is accepted.
         stop_scheduler.cancel();
         let _ = scheduler_task.await;
+        let _ = compactor.await;
         tracing::info!("API stopped");
         result
     })

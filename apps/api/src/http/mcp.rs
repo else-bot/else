@@ -21,12 +21,21 @@ use uuid::Uuid;
 use super::AppState;
 use super::error::ApiError;
 use super::tools::check;
+use crate::app::memory_tree::NodeId;
 use crate::db::memory::{self, EntryRow, Kind, NewEntry, RESPONSE_BUDGET};
+use crate::db::memory_tree;
 use crate::grants::{Grant, Tool};
 
 pub const SERVER_NAME: &str = "elsebot";
 /// The tools this server offers. Adapters allow exactly these.
-pub const TOOL_NAMES: &[&str] = &["memory_bots", "memory_search", "memory_read"];
+pub const TOOL_NAMES: &[&str] = &[
+    "memory_bots",
+    "memory_search",
+    "memory_read",
+    "memory_view",
+    "memory_zoom",
+    "memory_date",
+];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
 const HIT_BODY: usize = 600;
@@ -143,6 +152,54 @@ fn tool_list() -> Value {
                     "bot_id": bot,
                 },
                 "required": ["start_seq"],
+                "additionalProperties": false,
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "memory_view",
+            "description": "The saved overview of a bot's memory: ordered nodes, each covering a range of \
+                entries (start+span), oldest first. Summaries are exact copies or joins of originals; \
+                zoom into a node, or read originals, before relying on it. Reports covered and pending \
+                ranges explicitly.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "bot_id": bot,
+                    "from_index": { "type": "integer", "minimum": 0,
+                                    "description": "next_index from a previous page" },
+                },
+                "additionalProperties": false,
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "memory_zoom",
+            "description": "Open one node from memory_view or a previous zoom: its two halves, or for \
+                span 1 the original entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "start_seq": { "type": "integer", "minimum": 0 },
+                    "span": { "type": "integer", "minimum": 1 },
+                    "bot_id": bot,
+                },
+                "required": ["start_seq", "span"],
+                "additionalProperties": false,
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "memory_date",
+            "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "seq": { "type": "integer", "minimum": 0 },
+                    "end_seq": { "type": "integer", "minimum": 0 },
+                    "bot_id": bot,
+                },
+                "required": ["seq"],
                 "additionalProperties": false,
             },
             "annotations": read_only,
@@ -267,6 +324,9 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_bots" => bots(state, grant).await,
         "memory_search" => search(state, grant, args).await,
         "memory_read" => read(state, grant, args).await,
+        "memory_view" => view(state, grant, args).await,
+        "memory_zoom" => zoom(state, grant, args).await,
+        "memory_date" => date(state, grant, args).await,
         _ => return tool_error("Unknown tool."),
     };
     if let Some(log) = log {
@@ -460,5 +520,175 @@ pub async fn no_stream() -> ApiError {
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
         "This MCP endpoint answers POST requests only.",
+    )
+}
+
+fn unavailable() -> Outcome {
+    (tool_error("Memory is unavailable right now."), None)
+}
+
+fn suffix(grant: &Grant, bot_id: Uuid) -> String {
+    if bot_id == grant.bot_id {
+        String::new()
+    } else {
+        format!(" bot {bot_id}")
+    }
+}
+
+async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let bot_id = match target(state, grant, args).await {
+        Ok(bot) => bot,
+        Err(err) => return (err, None),
+    };
+    let from = args.get("from_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let Ok(saved) = memory_tree::load_view(&state.db, bot_id).await else {
+        return unavailable();
+    };
+    let covered = (saved.published_seq >= 0)
+        .then(|| json!({ "start_seq": 0, "end_seq": saved.published_seq }));
+    let pending = (saved.published_seq + 1 < saved.length)
+        .then(|| json!({ "start_seq": saved.published_seq + 1, "end_seq": saved.length - 1 }));
+    let blocked: Vec<Value> = saved
+        .blocked
+        .iter()
+        .map(|(reason, jobs)| json!({ "reason": reason, "jobs": jobs }))
+        .collect();
+    let mut result = json!({
+        "bot_id": bot_id,
+        "generation": saved.generation,
+        "revision": saved.revision,
+        "valid": saved.valid,
+        "length": saved.length,
+        "covered": covered,
+        // Entries not yet in the view: read or search them as originals.
+        "pending": pending,
+        "blocked": blocked,
+        "compacting": saved.compacting,
+        "nodes": [],
+        "next_index": null,
+    });
+    let rest = saved.nodes.get(from..).unwrap_or_default();
+    let shown = fill(&mut result, "nodes", rest.len(), 4_000, |i, max| {
+        let node = &rest[i];
+        json!({
+            "start_seq": node.node.start,
+            "span": node.node.span,
+            "method": node.method,
+            "text": node.body.as_deref().map(|b| slice(b, 0, max).1),
+        })
+    });
+    if shown < rest.len() {
+        result["next_index"] = json!(from + shown);
+    }
+    let log = format!(
+        "view{} generation {} revision {}: {} nodes from {}",
+        suffix(grant, bot_id),
+        saved.generation,
+        saved.revision,
+        shown,
+        from
+    );
+    (tool_result(result), Some(log))
+}
+
+async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let (Some(start), Some(span)) = (args["start_seq"].as_i64(), args["span"].as_i64()) else {
+        return (tool_error("start_seq and span are required."), None);
+    };
+    let id = NodeId { start, span };
+    if !id.is_valid() {
+        return (
+            tool_error("span must be a power of two and start_seq a multiple of it."),
+            None,
+        );
+    }
+    let bot_id = match target(state, grant, args).await {
+        Ok(bot) => bot,
+        Err(err) => return (err, None),
+    };
+    let Ok(saved) = memory_tree::load_view(&state.db, bot_id).await else {
+        return unavailable();
+    };
+    if id.end() > saved.length {
+        return (tool_error("That range is beyond the end of memory."), None);
+    }
+    let generation = saved.generation;
+    let mut result = json!({ "bot_id": bot_id, "generation": generation,
+                             "start_seq": start, "span": span, "parts": [] });
+    match id.children() {
+        None => {
+            let Ok(rows) = memory::read(&state.db, bot_id, start, 1).await else {
+                return unavailable();
+            };
+            let Some(entry) = rows.first() else {
+                return (tool_error("No such entry."), None);
+            };
+            fill(
+                &mut result,
+                "parts",
+                1,
+                RESPONSE_BUDGET,
+                |_, max| json!({ "original": entry_json(bot_id, entry, 0, max) }),
+            );
+        }
+        Some((left, right)) => {
+            let mut parts = Vec::new();
+            for child in [left, right] {
+                let Ok(built) = memory_tree::node(&state.db, bot_id, generation, child).await
+                else {
+                    return unavailable();
+                };
+                parts.push((child, built));
+            }
+            fill(&mut result, "parts", 2, 6_000, |i, max| {
+                let (child, built) = &parts[i];
+                match built {
+                    Some((body, method)) => json!({
+                        "start_seq": child.start, "span": child.span, "built": true,
+                        "method": method, "text": slice(body, 0, max).1,
+                    }),
+                    // Not built yet: zoom further down or read the originals.
+                    None => json!({ "start_seq": child.start, "span": child.span, "built": false }),
+                }
+            });
+        }
+    }
+    let log = format!("zoom{} {start}+{span}", suffix(grant, bot_id));
+    (tool_result(result), Some(log))
+}
+
+async fn date(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let Some(seq) = args["seq"].as_i64().filter(|s| *s >= 0) else {
+        return (tool_error("seq must be a non-negative integer."), None);
+    };
+    let end = args.get("end_seq").and_then(Value::as_i64);
+    if end.is_some_and(|e| e < seq) {
+        return (tool_error("end_seq must not be before seq."), None);
+    }
+    let bot_id = match target(state, grant, args).await {
+        Ok(bot) => bot,
+        Err(err) => return (err, None),
+    };
+    let mut dates = Vec::new();
+    for at in std::iter::once(seq).chain(end) {
+        let Ok(rows) = memory::read(&state.db, bot_id, at, 1).await else {
+            return unavailable();
+        };
+        match rows.first().filter(|e| e.seq == at) {
+            Some(e) => dates.push(json!({
+                "seq": e.seq, "created_at": e.created_at, "kind": e.kind,
+                "authority": e.authority, "source": e.source,
+            })),
+            None => return (tool_error("No such entry."), None),
+        }
+    }
+    let log = format!(
+        "date{} {seq}{}",
+        suffix(grant, bot_id),
+        end.map(|e| format!("..{e}")).unwrap_or_default()
+    );
+    (
+        tool_result(json!({ "bot_id": bot_id, "dates": dates })),
+        Some(log),
     )
 }

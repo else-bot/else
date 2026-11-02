@@ -629,7 +629,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["memory_bots", "memory_search", "memory_read"]);
+    assert_eq!(names, else_api::http::mcp::TOOL_NAMES);
     assert!(
         listed.body["result"]["tools"]
             .as_array()

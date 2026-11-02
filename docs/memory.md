@@ -1,6 +1,6 @@
 # Memory and storage
 
-PostgreSQL is the database choice. The [November 2 memory research](research/memory.md) defines the per-bot design from the exact requested gist and passes 11 checks on PostgreSQL 18.6. The original log, lexical search, explicit owner corrections, cross-bot read grants, and Codex retrieval over MCP are implemented (POC-013); summary nodes and saved views follow in POC-014. Model summary quality remains unverified. The database comparison below preserves the October 25 research.
+PostgreSQL is the database choice. The [November 2 memory research](research/memory.md) defines the per-bot design from the exact requested gist and passes 11 checks on PostgreSQL 18.6. The original log, lexical search, explicit owner corrections, cross-bot read grants, and Codex retrieval over MCP are implemented (POC-013); the deterministic summary tree, saved view, rebuilds, and overview/zoom/date tools are implemented too (POC-014); model summaries follow in POC-015. Model summary quality remains unverified. The database comparison below preserves the October 25 research.
 
 ## Memory design
 
