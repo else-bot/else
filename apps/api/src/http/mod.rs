@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod bots;
+pub mod computers;
 pub mod conversation;
 pub mod error;
 pub mod mcp;
@@ -39,6 +40,8 @@ pub struct AppState {
     /// Nonsecret identity of this API process, used to bind event cursors.
     pub server_instance_id: Uuid,
     pub auth_failures: auth::FailureLimiter,
+    /// Bot computers, when a runtime is available.
+    pub computers: Option<Arc<crate::computers::ComputerManager>>,
 }
 
 impl AppState {
@@ -55,7 +58,13 @@ impl AppState {
             events,
             server_instance_id: Uuid::new_v4(),
             auth_failures: auth::FailureLimiter::default(),
+            computers: None,
         }
+    }
+
+    pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
+        self.computers = Some(computers);
+        self
     }
 }
 
@@ -70,6 +79,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(conversation::routes())
         .merge(ws::routes())
         .merge(memory::routes())
+        .merge(computers::routes())
         .merge(settings::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })

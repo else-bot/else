@@ -209,13 +209,33 @@ fn run_serve() -> anyhow::Result<()> {
         };
         let compactor = tokio::spawn(compactor.run(stop_scheduler.clone()));
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
-        let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
+        // Bot computers: inspect the runtime (never waking or recreating
+        // anything), then maintain leases and idle computers.
+        let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events);
+        let mut computer_task = None;
+        match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
+            Ok(msb) => {
+                let manager = Arc::new(else_api::computers::ComputerManager::new(
+                    pool.clone(),
+                    Arc::new(msb),
+                    config.computers.clone(),
+                ));
+                manager.reconcile_startup().await?;
+                computer_task = Some(tokio::spawn(manager.clone().run(stop_scheduler.clone())));
+                state = state.with_computers(manager);
+            }
+            Err(err) => tracing::warn!(error = %err, "bot computers unavailable"),
+        }
+        let state = Arc::new(state);
         let result = serve(&config, listener, state, lock_lost.clone()).await;
         drop(lock);
         // Stop provider work after HTTP so no new message is accepted.
         stop_scheduler.cancel();
         let _ = scheduler_task.await;
         let _ = compactor.await;
+        if let Some(task) = computer_task {
+            let _ = task.await;
+        }
         tracing::info!("API stopped");
         result
     })

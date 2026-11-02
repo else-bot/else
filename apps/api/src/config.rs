@@ -54,6 +54,9 @@ pub struct Config {
     pub max_active_turns: usize,
     /// Explicit Codex CLI path; otherwise `codex` on `PATH`.
     pub codex_bin: Option<PathBuf>,
+    /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
+    pub msb_bin: Option<PathBuf>,
+    pub computers: crate::computers::ComputerConfig,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -124,7 +127,56 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_CODEX_BIN", path)?),
             None => None,
         };
+        let msb_bin = match source.get("ELSE_MSB_BIN") {
+            Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
+            None => None,
+        };
+        let defaults = crate::computers::ComputerConfig::default();
+        let vm_memory = parse_number(
+            source,
+            "ELSE_VM_MEMORY_MIB",
+            defaults.memory_mib as u64,
+            256,
+            65_536,
+        )?;
+        let vm_cpus = parse_number(source, "ELSE_VM_CPUS", defaults.cpus as u64, 1, 16)?;
+        let computers = crate::computers::ComputerConfig {
+            image: source.get("ELSE_VM_IMAGE").unwrap_or(defaults.image),
+            cpus: vm_cpus as u32,
+            memory_mib: vm_memory as u32,
+            overhead_mib: parse_number(
+                source,
+                "ELSE_VM_OVERHEAD_MIB",
+                defaults.overhead_mib as u64,
+                0,
+                8192,
+            )? as u32,
+            max_cpus: parse_number(source, "ELSE_VM_MAX_CPUS", defaults.max_cpus as u64, 1, 256)?
+                as u32,
+            max_memory_mib: parse_number(
+                source,
+                "ELSE_VM_MAX_MEMORY_MIB",
+                defaults.max_memory_mib,
+                256,
+                1 << 22,
+            )?,
+            idle_after: Duration::from_secs(parse_number(
+                source,
+                "ELSE_VM_IDLE_SECS",
+                defaults.idle_after.as_secs(),
+                5,
+                86_400,
+            )?),
+            idle_action: match source.get("ELSE_VM_IDLE_ACTION").as_deref() {
+                None | Some("stop") => crate::computers::IdleAction::Stop,
+                Some("pause") => crate::computers::IdleAction::Pause,
+                Some(_) => return Err(invalid("ELSE_VM_IDLE_ACTION", "use stop or pause")),
+            },
+            lease_ttl: defaults.lease_ttl,
+        };
         Ok(Self {
+            msb_bin,
+            computers,
             codex_bin,
             synthetic_provider,
             max_active_turns,
