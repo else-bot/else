@@ -76,6 +76,12 @@ Each item has `id`, `seq`, `turn_id`, `request_id` for an owner message, `kind =
 
 Public turn statuses are `queued`, `preparing`, `sending`, `running`, `cancelling`, `completed`, `interrupted`, `failed`, and `uncertain`. These project the continuity and lifecycle records rather than introducing another execution state machine. Each turn includes a nullable safe error and an effect-certainty flag when the result is unknown. The API must not report success from the appearance of text alone.
 
+## Saved provider profile amendment
+
+The owner-selected starting Codex profile is GPT 6.1 Sol Medium Fast. The [provider settings contract](../providers.md#saved-execution-profile) defines its exact values, persistence, update rules, and per-turn snapshots. Provider-native sub-agents remain disabled independently of model selection.
+
+Add owner-only `GET` and `PATCH /v1/settings/providers/{provider_id}` as operator configuration routes. Keep model editing out of the initial desktop UI. The existing picker still chooses the provider for a new message. Task grants cannot update provider profiles. A profile update does not alter already accepted work or reset the conversation.
+
 ## Proposed REST endpoints
 
 All routes require the owner bearer token, including reads and streams. Task grants cannot use this route group. Follow the [auth report](authentication-and-permissions.md) for loopback binding, explicit tunnels, credential storage, and task-scoped MCP authorization.

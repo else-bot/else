@@ -12,6 +12,46 @@ Long-term continuity comes from the bot's persistent memory. Switching providers
 
 For example, I might start a task with Codex and switch to Claude before it is finished. When I switch and send my follow-up, else.bot should automatically ask the outgoing provider to summarize the ongoing task. Claude receives that summary and my follow-up in the same else.bot conversation.
 
+## Saved execution profile
+
+The initial Codex development profile is GPT 6.1 Sol Medium Fast:
+
+| Setting | Saved value | Adapter mapping |
+| --- | --- | --- |
+| Provider | `codex` | Host Codex adapter. |
+| Model | `gpt-6.1-sol` | Explicit `model` on thread creation, resume, and turn start. |
+| Reasoning effort | `medium` | `model_reasoning_effort` in Codex configuration and `effort` on turn start. |
+| Service tier | `priority` | `serviceTier` in app-server requests. The displayed name is Fast. |
+
+Persist one default profile per provider in PostgreSQL, with a revision. Seed the Codex profile only during explicit installation setup or a versioned migration that adds missing settings. Ordinary startup must preserve saved values. Initially all bots use these provider defaults. Per-bot overrides and a desktop model-settings screen can wait.
+
+Expose owner-authenticated `GET` and `PATCH /v1/settings/providers/{provider_id}` for reading and updating the profile. Validate the exact model ID and its supported effort and tier against the selected adapter's capabilities. Runtime task grants and prompt text cannot update settings. Reject unsupported or unavailable profiles clearly. Do not silently select another model, effort, or speed tier.
+
+Snapshot the effective profile and revision when accepting a turn. Queued and running attempts retain their snapshots. A settings change applies to subsequently accepted work, including new summary and delegated tasks. Record requested and provider-reported settings with each attempt when available. Configuration acceptance is not proof of backend scheduling speed.
+
+Apply explicit values when creating or resuming native sessions and starting turns. Include the profile in session compatibility checks. If a session cannot adopt the requested profile safely, replace that native session and rebuild context from PostgreSQL. Preserve the visible conversation and guest computer.
+
+OpenAI documents the reasoning setting and maps the Codex `fast` tier alias to the request value `priority`. Use the canonical saved value above. The local model metadata advertises `medium` and `priority` for `gpt-6.1-sol`. [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference), [recorded model metadata](experiments/prompts/model-probe.json).
+
+The earlier prompt experiments used High reasoning. Preserve their prompts, settings, and results as historical evidence. They do not validate the new Medium default. Adapter acceptance tests must exercise the saved development profile.
+
+## Provider-native sub-agents are deferred
+
+Each bot uses one provider-native agent at a time. Disable the CLI's own sub-agent spawning, automatic delegation, teams, and equivalent agent-launch tools for both Codex and Claude. This is a fixed POC execution policy. A model-setting update must not enable it. Models or modes that require native sub-agents are unsupported for now.
+
+Apply restrictions through the trusted adapter on every process launch and session resume. Keep inherited user/project configuration, plugins, hooks, and unrestricted command tools from reopening agent-launch routes. A prompt prohibition alone is insufficient. If the adapter cannot enforce the policy for a CLI version, report it unavailable rather than enabling native sub-agents.
+
+| CLI | Initial enforcement approach |
+| --- | --- |
+| Codex | Set `agents.enabled = false`. For the inspected 0.166.0 runtime, also explicitly disable `features.multi_agent` and `features.multi_agent_v2` in the per-process profile. Verify the exposed tools and actual behavior on create and resume. |
+| Claude | Use an explicit built-in tool allowlist that excludes agent spawning. The initial host design can use `--tools ""` and route task operations through scoped MCP. Deny `Agent` explicitly through `--disallowedTools`; verify equivalent legacy tools and other launch routes for the pinned version. |
+
+Codex documents `agents.enabled` as the switch for multi-agent tools. Claude documents denying `Agent` to prevent sub-agent delegation. Its built-in tool restriction does not restrict MCP tools, so allow only the intended else.bot MCP operations. [Codex controls](https://learn.chatgpt.com/docs/config-file/config-reference), [Claude sub-agents](https://code.claude.com/docs/en/sub-agents), [Claude tool flags](https://code.claude.com/docs/en/cli-reference).
+
+Local configuration inspection confirmed the Codex multi-agent flags resolve to false with explicit overrides. It did not run inference or prove that every native spawn route is blocked. Implementation acceptance requires adversarial requests and actual tool, native agent/thread lifecycle, and process observations for each provider, including resumed sessions. Native sub-agents may share a process, so an unchanged process count alone proves nothing.
+
+This policy concerns agents spawned inside a bot's CLI. Planned delegation between registered else.bot bots still goes through the Rust API, scoped tasks, and scheduler. It does not use native CLI sub-agents. Development agents working on the repository remain governed by their assigned development instructions.
+
 ## First-version continuity
 
 Start with one conversation per bot and one active provider turn per bot. PostgreSQL owns the ordered conversation. Each provider has a replaceable native session with its own delivered-history cursor. Host adapters handle create, resume, start, interrupt, and normalized events.
@@ -54,8 +94,9 @@ The database needs these records, with exact table names left for development:
 | Record | State to preserve |
 | --- | --- |
 | Conversation | Bot identity, active provider selection, and ordered conversation history. |
-| Turn | Stable request ID, owner message, provider used, execution status, assistant output, and recorded tool outcomes. |
-| Provider session | Conversation, provider and account identity, native session ID, runtime location, and confirmed history coverage. |
+| Turn | Stable request ID, owner message, provider used, saved profile revision and effective model settings, execution status, assistant output, and recorded tool outcomes. |
+| Provider session | Conversation, provider and account identity, native session ID, runtime location, compatible execution profile, and confirmed history coverage. |
+| Provider settings | Provider, exact model ID, reasoning effort, service tier, and revision. Owner-controlled defaults survive startup and backup restoration. |
 | Handoff | Source and destination sessions, covered history range, summary, selected and omitted item IDs, prompt version, and delivery status. |
 
 On a provider switch:
@@ -107,6 +148,8 @@ The outgoing summary and receiving continuation templates are in [prompt drafts]
 Synthetic handoff checks and installed CLI shape probes now pass. The next live integration experiment should use host-installed CLIs and cover:
 
 - Subscription login, token renewal, and native session resume on a headless host, with bot session state kept separate.
+- GPT 6.1 Sol Medium Fast is passed explicitly and recorded. Updated saved settings affect only new work, survive restart, and never silently fall back.
+- Native sub-agent tools and equivalent launch routes remain disabled after create, resume, settings updates, and provider switches. Record actual process and tool observations.
 - Both providers following the computer skill and calling the scoped tools for guest commands, files, and browser work.
 - A conversation and memory operation while the VM remains stopped, followed by a guest task that acquires and releases a VM lease.
 - Attempts to use native CLI tools to read host secrets, execute arbitrary host commands, or access another bot's files. Verify actual access is denied.

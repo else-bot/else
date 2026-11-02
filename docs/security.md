@@ -55,6 +55,7 @@ The proposed host execution requirements are:
 - Run provider processes with explicit working directories, isolated bot session storage, and an allowlist of environment variables. Keep `SECRET_KEY`, database administration credentials, backup keys, storage credentials, and unrelated host files inaccessible.
 - Use the intended provider account through supported authentication. Keep authentication material outside VMs and prompt text. Sharing one account must not expose another bot's conversation files or settings.
 - Configure or disable native shell, file, browser, network, and MCP capabilities that bypass else.bot's scoped tools. Apply operating-system restrictions to host files and processes. An approval prompt or a prompt instruction alone is insufficient.
+- Enforce the [native sub-agent prohibition](providers.md#provider-native-sub-agents-are-deferred) at launch and resume. Expose no equivalent spawning route through built-in tools, plugins, hooks, or MCP. Only the API may schedule work for another registered bot.
 - Give each CLI session scoped tool authorization tied to its bot, conversation, and task. The Rust API checks permissions and guest targets before dispatch. VM lifecycle privileges belong to the trusted service.
 - Treat guest files, tool output, and callbacks as untrusted input. A guest cannot request arbitrary host commands, choose host paths, or obtain runtime management credentials.
 

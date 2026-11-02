@@ -2,7 +2,7 @@
 
 This is the proposed backup design. The [VM verification](experiments/bot-vm-verification.md) tested disk and full archives, recovery into a separate runtime, and a restored desktop with its browser profile. The [backup research](research/backup-and-recovery.md) passed 17 local encryption and publication checks plus six PostgreSQL dump, encryption, and restore checks. Coordinated whole-assistant recovery and R2 or S3 uploads remain untested.
 
-Backups should automatically capture encrypted PostgreSQL exports, encrypted VM snapshot archives, and the host provider state needed for recovery. PostgreSQL owns the application configuration, bot definitions, memory, and chats. VM archives preserve each bot's computer, including its saved files and browser profile.
+Backups should automatically capture encrypted PostgreSQL exports, encrypted VM snapshot archives, and the host provider state needed for recovery. PostgreSQL owns the application configuration, including saved provider model profiles and revisions, bot definitions, memory, and chats. VM archives preserve each bot's computer, including its saved files and browser profile.
 
 If a machine fails, data becomes corrupted, or I want to migrate, I should be able to start else.bot on a new machine and restore the latest backup. The goal is to resume where I left off without rebuilding the assistant's knowledge or configuration by hand.
 

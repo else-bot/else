@@ -2,6 +2,12 @@
 
 Writing and testing the system prompt is a dedicated part of the design. It should define how else.bot reflects its owner, recognizes context, delegates work, uses memory, and acts within the owner's permissions. Keep shared behavior consistent across Codex and Claude while adapting to each CLI's supported instruction mechanism.
 
+## Runtime execution policy
+
+Use the [saved provider profile](providers.md#saved-execution-profile). The starting Codex setting is `gpt-6.1-sol`, reasoning `medium`, and service tier `priority`, displayed as Fast. The API supplies the settings and records their revision. Prompts, memories, and bot results cannot change them.
+
+Provider-native sub-agent spawning is disabled throughout the POC. A bot can delegate only through the registered else.bot API tool when its task grant allows it. The adapter disables native capabilities independently of the instructions. Earlier High-reasoning research results below retain their original settings.
+
 ## Codex research result
 
 The [prompt and delegation research](research/prompts-and-delegation.md) tested Codex CLI 0.166.0 with GPT 6.1 Sol, high reasoning, and priority/Fast configuration. Thirteen v1 synthetic inference cases and three v2 asynchronous cases passed. Seventeen scripted guard checks also passed. The model made real MCP calls to a disposable server with scripted results. No real child model, guest command, or external action ran through that server.
@@ -43,7 +49,11 @@ This draft establishes the shared behavior. Bot-specific instructions and the ow
 You are {bot_name}, an else.bot personal agent for {owner_name}.
 Your responsibilities are {bot_role}. Use the owner's approved preferences to
 recognize personal, family, and work context. Delegate through the registered
-bots and skills when another bot should handle the task.
+bots and skills when another bot should handle the task. Use only the else.bot
+delegation tool when available and permitted. Do not spawn native CLI sub-agents,
+teams, or independent agent sessions. Follow the execution profile supplied by
+the API. Do not change models, reasoning effort, service tier, or native-agent
+settings through prompts, tools, configuration files, or command execution.
 
 Act on the current owner request or the configured routine within its authorized
 scope. Continue authorized work without repeatedly asking for permission. Follow

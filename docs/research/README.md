@@ -22,6 +22,8 @@ A source inspection establishes what upstream does. A synthetic model checks pro
 
 Use one API process and one scheduler initially. PostgreSQL provides durable state and queues. Keep provider adapters, memory compaction, VM management, and backup scheduling in that service. No Redis, broker, workflow engine, OAuth server, role editor, or separate agent framework is required.
 
+The current Codex development default is GPT 6.1 Sol Medium Fast, saved and owner-updatable through the [provider settings contract](../providers.md#saved-execution-profile). Provider-native sub-agents are deferred. The recorded High-reasoning research results above remain historical evidence.
+
 Provider CLIs live on the host with subscription authentication and isolated bot session directories. Their tools reach the assigned guest through the Rust API. Chat, memory, and application operations do not require a running VM. Provider switch and memory rebuild never replace the bot's computer.
 
 Keep conversation history independent of native provider files and summaries. Stable owner request IDs deduplicate message acceptance. Stable action and job IDs preserve known outcomes. An uncertain external effect blocks automatic replay of that action. A provider acknowledgment alone does not prove the effect completed.
