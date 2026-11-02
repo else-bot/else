@@ -70,9 +70,17 @@ pub struct Compactor {
     scheduler: Option<Arc<Scheduler>>,
     cancel: CancellationToken,
     summary: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Steps are admitted through the backup gate when one is set.
+    gate: Option<Arc<crate::maintenance::Gate>>,
 }
 
 impl Compactor {
+    /// Admit each step through a backup's maintenance gate.
+    pub fn with_gate(mut self, gate: Arc<crate::maintenance::Gate>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
     /// Copies and joins only.
     pub fn deterministic(pool: PgPool) -> Self {
         Self {
@@ -81,6 +89,7 @@ impl Compactor {
             scheduler: None,
             cancel: CancellationToken::new(),
             summary: Arc::default(),
+            gate: None,
         }
     }
 
@@ -228,7 +237,23 @@ impl Compactor {
     pub async fn run(mut self, cancel: CancellationToken) {
         self.cancel = cancel.clone();
         loop {
-            let pause = match self.step().await {
+            // While a backup holds the gate, compaction waits.
+            let admission = match &self.gate {
+                Some(gate) => match gate.enter() {
+                    Some(admission) => Some(admission),
+                    None => {
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let step = self.step().await;
+            drop(admission);
+            let pause = match step {
                 Ok(Step::Idle) => IDLE,
                 Ok(_) => Duration::ZERO,
                 Err(err) => {

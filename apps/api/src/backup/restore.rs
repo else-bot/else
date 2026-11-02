@@ -167,10 +167,23 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         return invalid("the database dump must come first");
     }
     let mut seen = std::collections::HashSet::new();
+    let mut files = std::collections::HashSet::new();
     for artifact in rest {
         let Some(bot) = artifact.bot_id else {
-            return invalid("a disk archive without its bot");
+            return invalid("an archive without its bot");
         };
+        if artifact.kind == "file" {
+            let id = artifact
+                .object
+                .strip_prefix("file-")
+                .and_then(|o| o.strip_suffix(".age"))
+                .and_then(|id| uuid::Uuid::parse_str(id).ok());
+            match id {
+                Some(id) if artifact.object == format!("file-{id}.age") && files.insert(id) => {}
+                _ => return invalid(&artifact.object),
+            }
+            continue;
+        }
         if artifact.kind != "vm" || artifact.object != format!("vm-{bot}.msb.age") {
             return invalid(&artifact.object);
         }
@@ -290,7 +303,9 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     let has_computers = manifest.artifacts.len() > 1;
     if has_computers && request.computers.is_none() {
         return Err(BackupError::Refused(
-            "this set includes bot computers; restore it into a new installation directory".into(),
+            "this set includes bot computers or host artifacts; restore it into a new \
+             installation directory"
+                .into(),
         ));
     }
     // One restore at a time per staging directory; stale staging from a
@@ -468,9 +483,75 @@ async fn restore_computers(
     staging: &Path,
 ) -> Result<(), BackupError> {
     let mut restored = Vec::new();
+    let mut attempted: Vec<String> = Vec::new();
+    let result = restore_runtime(
+        request,
+        manifest,
+        identity,
+        staging,
+        &mut restored,
+        &mut attempted,
+    )
+    .await;
+    if let Err(err) = result {
+        // Nothing this restore started may keep running once its state is
+        // removed: stop every computer it tried to create and confirm it.
+        let mut running = Vec::new();
+        if let Some(target) = &request.computers {
+            for name in &attempted {
+                let _ = target.runtime.stop(name).await;
+                match target.runtime.state(name).await {
+                    Ok(None | Some(crate::computers::RuntimeState::Stopped)) => {}
+                    _ => running.push(name.clone()),
+                }
+            }
+        }
+        if !running.is_empty() {
+            return Err(BackupError::Leftover(format!(
+                "{err}; computers {running:?} may still run, so the new installation directory \
+                 was kept"
+            )));
+        }
+        return Err(err);
+    }
+    reconcile(request, manifest, &restored).await
+}
+
+async fn restore_runtime(
+    request: &RestoreRequest<'_>,
+    manifest: &Manifest,
+    identity: &age::x25519::Identity,
+    staging: &Path,
+    restored: &mut Vec<uuid::Uuid>,
+    attempted: &mut Vec<String>,
+) -> Result<(), BackupError> {
     if let Some(target) = &request.computers {
         for artifact in &manifest.artifacts[1..] {
             let bot = artifact.bot_id.expect("validated");
+            if artifact.kind == "file" {
+                let id = artifact
+                    .object
+                    .strip_prefix("file-")
+                    .and_then(|o| o.strip_suffix(".age"))
+                    .expect("validated");
+                let dir = target.data_dir.join("artifacts").join(bot.to_string());
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&dir)
+                    .map_err(|e| BackupError::io(dir.display(), e))?;
+                let set_dir = request.set_dir.to_owned();
+                let artifact = artifact.clone();
+                let identity = identity.clone();
+                let path = dir.join(id);
+                tokio::task::spawn_blocking(move || {
+                    verify_and_decrypt(&set_dir, &artifact, &identity, &path)
+                })
+                .await
+                .map_err(|e| BackupError::Io(e.to_string()))??;
+                continue;
+            }
             let entry = manifest
                 .bots
                 .iter()
@@ -501,6 +582,7 @@ async fn restore_computers(
                     .unwrap_or_default(),
                 files: Vec::new(),
             };
+            attempted.push(spec.name.clone());
             let result = target.runtime.restore_disk(&plain, &spec).await;
             let _ = std::fs::remove_file(&plain);
             result.map_err(|e| {
@@ -516,6 +598,14 @@ async fn restore_computers(
             restored.push(bot);
         }
     }
+    Ok(())
+}
+
+async fn reconcile(
+    request: &RestoreRequest<'_>,
+    manifest: &Manifest,
+    restored: &[uuid::Uuid],
+) -> Result<(), BackupError> {
     let target = request.server.with_database(request.target_database);
     let mut conn = PgConnection::connect_with(&options(&target)).await?;
     let mut tx = conn.begin().await?;
@@ -523,7 +613,7 @@ async fn restore_computers(
         "UPDATE bot_computers SET observed_state = 'stopped', updated_at = now()
          WHERE bot_id = ANY($1)",
     )
-    .bind(&restored)
+    .bind(restored)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -531,12 +621,19 @@ async fn restore_computers(
              last_error = 'not included in the restored backup', updated_at = now()
          WHERE observed_state <> 'absent' AND NOT (bot_id = ANY($1))",
     )
-    .bind(&restored)
+    .bind(restored)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
         "UPDATE computer_leases SET released_at = now(), end_reason = 'restored'
          WHERE released_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    // No memory worker of the old installation survives: leases end.
+    sqlx::query(
+        "UPDATE memory_job SET lease_token = NULL, lease_until = NULL
+         WHERE lease_token IS NOT NULL",
     )
     .execute(&mut *tx)
     .await?;

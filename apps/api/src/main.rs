@@ -115,10 +115,14 @@ fn run_backup() -> anyhow::Result<()> {
     let config = load_config()?;
     let (params, key) = backup_parts(&config)?;
     runtime()?.block_on(async {
-        let pool = database(&config).await?;
+        // Lock before migrating: a running (possibly older) API's database
+        // is never changed by this command.
+        let url = config.require_database().context("invalid configuration")?;
+        let pool = db::connect(url).await?;
         let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool)
             .await
             .context("the API is running; it backs up on its schedule (or stop it first)")?;
+        db::migrate(&pool).await?;
         let computers = match else_api::computers::runtime::Msb::detect(
             &config.data_dir,
             config.msb_bin.clone(),
@@ -165,12 +169,25 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
             dir.is_absolute(),
             "the new installation directory must be absolute"
         );
-        anyhow::ensure!(
-            std::fs::symlink_metadata(dir).is_err(),
-            "{} already exists; nothing was changed",
-            dir.display()
-        );
-        credentials::ensure_private_dir(dir)?;
+        // An exclusive create: a second restore to the same path fails here
+        // and never touches this one's files.
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| {
+                format!(
+                    "{} cannot be created as new; nothing was changed",
+                    dir.display()
+                )
+            })?;
+        // Credentials first, so a failure here leaves no restored database.
+        let written = credentials::write_secret_key(&dir.join("secret-key"), &key)
+            .and_then(|_| credentials::provision_owner_token(&dir.join("owner-token")).map(|_| ()));
+        if let Err(err) = written {
+            let _ = std::fs::remove_dir_all(dir);
+            return Err(err.into());
+        }
     }
     let result = runtime()?.block_on(async {
         let runtime: Option<Arc<dyn else_api::computers::ComputerRuntime>> = match &new_dir {
@@ -198,12 +215,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
                 },
             })
             .await?;
-        if let Some(dir) = &new_dir {
-            // The new installation keeps the key its data was encrypted
-            // with, and gets its own owner token.
-            credentials::write_secret_key(&dir.join("secret-key"), &key)?;
-            credentials::provision_owner_token(&dir.join("owner-token"))?;
-        }
         println!("restored set {} into database {target}", report.set_id);
         if let Some(dir) = &new_dir {
             println!("new installation directory: {}", dir.display());
@@ -212,9 +223,13 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
         println!("coverage: {}", report.manifest.coverage.note);
         anyhow::Ok(())
     });
-    if result.is_err() {
-        if let Some(dir) = &new_dir {
-            // Only the directory this restore created.
+    if let Err(err) = &result {
+        let leftover = err
+            .downcast_ref::<else_api::backup::BackupError>()
+            .is_some_and(|e| matches!(e, else_api::backup::BackupError::Leftover(_)));
+        if let Some(dir) = new_dir.as_ref().filter(|_| !leftover) {
+            // Only the directory this restore created, and only when
+            // nothing it started may still run.
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -340,7 +355,11 @@ fn run_serve() -> anyhow::Result<()> {
             ),
             None => else_api::memory_worker::Compactor::deterministic(pool.clone()),
         };
-        let compactor = tokio::spawn(compactor.run(stop_scheduler.clone()));
+        let compactor = tokio::spawn(
+            compactor
+                .with_gate(scheduler.gate().clone())
+                .run(stop_scheduler.clone()),
+        );
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         // Bot computers: inspect the runtime (never waking or recreating
         // anything), then maintain leases and idle computers.

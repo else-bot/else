@@ -50,6 +50,8 @@ struct Slots {
 /// A provider slot held by one memory summary. Released on drop.
 pub struct SummaryPermit {
     scheduler: Arc<Scheduler>,
+    /// A summary is admitted work: a backup waits for it.
+    _admission: crate::maintenance::Admission,
 }
 
 impl Drop for SummaryPermit {
@@ -131,6 +133,7 @@ impl Scheduler {
     /// are low priority: the caller checks first that no turn is waiting,
     /// and at most `limit` run at once.
     pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
+        let admission = self.gate.enter()?;
         let mut slots = self.slots();
         if slots.summaries >= limit || slots.used >= self.max_active {
             return None;
@@ -139,6 +142,7 @@ impl Scheduler {
         slots.summaries += 1;
         Some(SummaryPermit {
             scheduler: self.clone(),
+            _admission: admission,
         })
     }
 
@@ -222,13 +226,17 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        // While a backup holds the gate nothing new starts.
-        if self.gate.is_closed() {
-            return Ok(());
-        }
         // The slot is reserved before the claim, so a summary cannot take
-        // it while the claim is in flight.
-        while self.reserve_turn() {
+        // it while the claim is in flight. Each claim is admitted through
+        // the maintenance gate until its turn is registered as running, so
+        // a backup either sees it in the drain or it is never claimed.
+        loop {
+            let Some(_admission) = self.gate.enter() else {
+                break;
+            };
+            if !self.reserve_turn() {
+                break;
+            }
             let claimed = turns::claim_next(&self.pool, &[]).await;
             let turn_id = match claimed {
                 Ok(Some(turn_id)) => turn_id,

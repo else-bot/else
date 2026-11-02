@@ -498,9 +498,22 @@ impl ComputerRuntime for Msb {
         args.extend(restore_network_args(&spec.network)?);
         args.push(group);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.run_checked("snapshot restore", &args).await?;
-        // Restoring boots it; a restored computer stays stopped until use.
-        self.control("stop", &["stop", &spec.name]).await
+        let restored = self.run_checked("snapshot restore", &args).await;
+        // Restoring boots it; a restored computer stays stopped until use,
+        // and a failed restore must not leave one running either.
+        let stopped = match self.state(&spec.name).await? {
+            None | Some(RuntimeState::Stopped) => Ok(()),
+            Some(_) => self.control("stop", &["stop", &spec.name]).await,
+        };
+        restored?;
+        stopped?;
+        match self.state(&spec.name).await? {
+            Some(RuntimeState::Stopped) => Ok(()),
+            other => Err(RuntimeError::Failed {
+                operation: "snapshot restore".into(),
+                message: format!("the restored computer is {other:?}, not stopped"),
+            }),
+        }
     }
 
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError> {

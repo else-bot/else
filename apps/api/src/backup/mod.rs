@@ -65,6 +65,10 @@ pub enum BackupError {
     /// Live work prevents a consistent capture now; retried later.
     #[error("deferred: {0}")]
     Deferred(String),
+    /// A failed restore left something that may still run; the caller must
+    /// not delete the new installation's state.
+    #[error("{0}")]
+    Leftover(String),
 }
 
 impl BackupError {
@@ -102,12 +106,17 @@ pub struct Completion {
     pub set_id: String,
     pub encryption: Encryption,
     pub manifest: ObjectRef,
+    /// A hint for retention only (the manifest is authoritative): the set
+    /// recovers the whole assistant.
+    #[serde(default)]
+    pub whole_assistant: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    /// `postgres`, or `vm` (one bot's standalone disk archive with image).
+    /// `postgres`, `vm` (one bot's standalone disk archive with image), or
+    /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`).
     pub kind: String,
     pub object: String,
     /// For a `vm` artifact, its bot.
@@ -182,6 +191,9 @@ pub struct ComputerEntry {
     pub desktop_password: Option<String>,
     /// It was running before the backup stopped it for capture.
     pub was_running: bool,
+    /// For a desktop: `ok` when its browser was closed cleanly before the
+    /// disk was captured.
+    pub browser_checkpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,13 +628,24 @@ pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
     Ok(removed)
 }
 
-/// Keep the newest `keep` completed sets (at least one) and always
-/// `protect`, the set just published. The completion record goes first, so
+/// Keep the newest `keep` completed sets (at least one), always `protect`
+/// (the set just published), and always the newest whole-assistant set. The completion record goes first, so
 /// a half-removed set is never taken for a backup. The caller holds the
 /// backup lock.
 pub fn apply_retention(dir: &Path, keep: usize, protect: &str) -> Result<Vec<String>, BackupError> {
     let mut sets = completed_sets(dir)?;
-    sets.retain(|s| s != protect);
+    // The newest whole-assistant set is never replaced by lower coverage.
+    let newest_whole = sets
+        .iter()
+        .rev()
+        .find(|name| {
+            read_regular(&dir.join(name).join(COMPLETE), MAX_COMPLETE_BYTES)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Completion>(&b).ok())
+                .is_some_and(|c| c.whole_assistant)
+        })
+        .cloned();
+    sets.retain(|s| s != protect && Some(s) != newest_whole.as_ref());
     let keep = keep.max(1) - 1;
     let mut removed = Vec::new();
     if sets.len() <= keep {

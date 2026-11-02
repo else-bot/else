@@ -929,6 +929,38 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     .await;
     app.wait_turn(&stalled, &["uncertain"]).await;
     let alpha_password = std::fs::read_to_string(manager.desktop_password_file(alpha)).unwrap();
+    // Saved state beyond chats: a deleted bot, a changed default bot, a
+    // customized profile, and memory built into its tree and views.
+    let gamma = app.create_bot("Gamma", "temporary").await;
+    assert!(
+        app.owner("DELETE", &format!("/v1/bots/{gamma}"), None)
+            .await
+            .status
+            .is_success()
+    );
+    sqlx::query("UPDATE installation SET default_bot_id = $1")
+        .bind(alpha)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE provider_profiles SET reasoning_effort = 'high', revision = revision + 1
+         WHERE provider_id = 'codex'",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let compactor = else_api::memory_worker::Compactor::deterministic(db.pool.clone());
+    for _ in 0..5000 {
+        if compactor.step().await.unwrap() == else_api::memory_worker::Step::Idle {
+            break;
+        }
+    }
+    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_node")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(nodes > 0, "memory has a tree");
 
     let key = else_api::credentials::SecretKey::parse(&{
         use base64::Engine;
@@ -999,6 +1031,8 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             "SELECT id, status, error_code, effect_uncertain FROM turns",
             "SELECT provider_id, model, reasoning_effort, service_tier, revision FROM provider_profiles",
             "SELECT bot_id, seq, kind, body FROM memory_entry",
+            "SELECT * FROM memory_generation",
+            "SELECT * FROM memory_node",
         ] {
             let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT t::text FROM ({sql}) t ORDER BY 1"
@@ -1117,21 +1151,59 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let desktop = recovered.desktop(alpha).await.unwrap().unwrap();
     assert_eq!(desktop.password, alpha_password.trim());
     recovered.close_desktop(alpha).await.unwrap();
-    let inspect = std::process::Command::new(&msb_bin)
-        .env("MSB_HOME", &new_home)
-        .args([
-            "inspect",
-            &ComputerManager::runtime_name(alpha),
-            "--format",
-            "json",
-        ])
+    // The restored network policy: public egress works, internal and
+    // metadata destinations get the runtime's denial, and the desktop's
+    // published port accepts only password-authenticated VNC.
+    let (lease, _) = ready(&recovered, alpha, "test:net").await;
+    recovered
+        .write_file(lease, "/home/elsebot/work/probe.py", PROBE)
+        .await
+        .unwrap();
+    let probe = recovered
+        .run_command(
+            alpha,
+            "test:net",
+            "python3 probe.py",
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    eprintln!("network after restore:\n{}", probe.stdout);
+    let lines: Vec<&str> = probe.stdout.lines().collect();
+    assert!(
+        lines[0].to_lowercase().contains("cloudflare"),
+        "public egress: {lines:?}"
+    );
+    for line in &lines[1..3] {
+        assert!(
+            line.contains("403") && line.contains("application/json"),
+            "denied: {line}"
+        );
+    }
+    let desktop = recovered.desktop(alpha).await.unwrap().unwrap();
+    let port: u16 = desktop
+        .url
+        .split(':')
+        .nth(2)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let rfb = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(RFB.replace("PORT", &port.to_string()))
         .output()
         .unwrap();
-    let inspect: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
-    assert_eq!(
-        inspect["config"]["network"]["policy"]["default_egress"],
-        "deny"
+    let rfb = String::from_utf8_lossy(&rfb.stdout).trim().to_owned();
+    assert!(
+        rfb.starts_with("RFB 003.008") && rfb.ends_with("[2]"),
+        "desktop ingress: {rfb}"
     );
+    recovered.close_desktop(alpha).await.unwrap();
+    recovered.release(lease).await.unwrap();
     for bot in [alpha, beta] {
         recovered.owner_stop(bot).await.unwrap();
     }
@@ -1193,3 +1265,31 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     pool.close().await;
     drop_target().await;
 }
+
+/// Network probe run inside a restored computer.
+const PROBE: &str = r#"import urllib.request, urllib.error
+for u in ['http://1.1.1.1/', 'http://10.0.0.1/', 'http://169.254.169.254/']:
+    try:
+        r = urllib.request.urlopen(u, timeout=10); print(u, r.status, r.headers.get('Server'))
+    except urllib.error.HTTPError as e:
+        print(u, e.code, e.headers.get('Content-Type'), e.headers.get('Server'))
+    except Exception as e:
+        print(u, 'ERR', type(e).__name__)
+"#;
+
+/// A noVNC/RFB handshake that reports the offered security types.
+const RFB: &str = r#"import socket,base64,os
+s=socket.create_connection(('127.0.0.1',PORT),timeout=10)
+k=base64.b64encode(os.urandom(16)).decode()
+s.send(('GET /websockify HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: '+k+'\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n').encode())
+h=b''
+while b'\r\n\r\n' not in h: h+=s.recv(1)
+def frame():
+    b=s.recv(2); n=b[1]&127
+    return s.recv(n)
+v=frame()
+m=os.urandom(4); d=v
+s.send(bytes([0x82,0x80|len(d)])+m+bytes(c^m[i%4] for i,c in enumerate(d)))
+t=frame()
+print(v.decode().strip(), list(t[1:1+t[0]]))
+"#;

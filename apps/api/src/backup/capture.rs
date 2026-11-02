@@ -340,6 +340,7 @@ async fn capture_computers(
                 desired_state,
                 desktop_port,
                 was_running,
+                browser_checkpoint,
             } => {
                 let sealed =
                     seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
@@ -348,6 +349,13 @@ async fn capture_computers(
                     .ok()
                     .map(|p| p.trim().to_owned())
                     .filter(|p| !p.is_empty() && p.len() <= 64);
+                // A desktop's password is required to use it after restore.
+                if desktop_port.is_some() && desktop_password.is_none() {
+                    return Err(BackupError::Producer(format!(
+                        "bot {name}'s desktop password ({}) is missing or invalid",
+                        password_file.display()
+                    )));
+                }
                 artifacts.push(Artifact {
                     kind: "vm".into(),
                     object: object.clone(),
@@ -373,6 +381,7 @@ async fn capture_computers(
                             desktop_port,
                             desktop_password,
                             was_running,
+                            browser_checkpoint,
                         }),
                     ),
                 );
@@ -380,6 +389,61 @@ async fn capture_computers(
         }
     }
     Ok((artifacts, entries))
+}
+
+/// Seal every host artifact (files bots fetched from their computers) whose
+/// file matches its recorded size and hash. Returns the artifacts and the
+/// IDs that could not be included.
+async fn capture_files(
+    pool: &PgPool,
+    state_dir: &Path,
+    staging: &Path,
+    identity: &age::x25519::Identity,
+    limit: u64,
+) -> Result<(Vec<Artifact>, Vec<uuid::Uuid>), BackupError> {
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, i64, Vec<u8>)> =
+        sqlx::query_as("SELECT id, bot_id, size_bytes, sha256 FROM artifacts ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+    let mut artifacts = Vec::new();
+    let mut missing = Vec::new();
+    for (id, bot, size, sha) in rows {
+        let source = state_dir
+            .join("artifacts")
+            .join(bot.to_string())
+            .join(id.to_string());
+        let regular =
+            std::fs::symlink_metadata(&source).is_ok_and(|m| m.is_file() && m.len() == size as u64);
+        if !regular {
+            missing.push(id);
+            continue;
+        }
+        let object = format!("file-{id}.age");
+        let target = staging.join(&object);
+        let identity = identity.clone();
+        let sealed = tokio::task::spawn_blocking(move || {
+            let mut file =
+                std::fs::File::open(&source).map_err(|e| BackupError::io(source.display(), e))?;
+            super::seal(&target, &identity, &mut file, limit)
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))??;
+        if sealed.plaintext_sha256 != hex::encode(&sha) {
+            let _ = std::fs::remove_file(staging.join(&object));
+            missing.push(id);
+            continue;
+        }
+        artifacts.push(Artifact {
+            kind: "file".into(),
+            object,
+            bot_id: Some(bot),
+            ciphertext_bytes: sealed.ciphertext_bytes,
+            ciphertext_sha256: sealed.ciphertext_sha256,
+            plaintext_bytes: sealed.plaintext_bytes,
+            plaintext_sha256: sealed.plaintext_sha256,
+        });
+    }
+    Ok((artifacts, missing))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -417,11 +481,23 @@ async fn capture_into(
     }
     let gate = match &coordinator.scheduler {
         Some(scheduler) => {
-            let closed = scheduler
-                .gate()
-                .close()
-                .ok_or_else(|| BackupError::Refused("another backup holds the gate".into()))?;
-            if !scheduler.drain(coordinator.drain).await? {
+            // Closing waits for admitted claims, requests, tool calls, and
+            // memory work; then the turns themselves drain.
+            let deadline = tokio::time::Instant::now() + coordinator.drain;
+            let closed = match scheduler.gate().close(coordinator.drain).await {
+                Ok(Some(closed)) => closed,
+                Ok(None) => {
+                    return Err(BackupError::Refused("another backup holds the gate".into()));
+                }
+                Err(admitted) => {
+                    return Err(BackupError::Deferred(format!(
+                        "{admitted} requests or tasks did not finish within {} s",
+                        coordinator.drain.as_secs()
+                    )));
+                }
+            };
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !scheduler.drain(left).await? {
                 return Err(BackupError::Deferred(format!(
                     "active turns did not finish within {} s",
                     coordinator.drain.as_secs()
@@ -438,6 +514,19 @@ async fn capture_into(
     let (mut vm_artifacts, mut vm_entries) = match &coordinator.computers {
         Some(computers) => {
             capture_computers(computers, &bot_rows, staging, &identity, config.max_bytes).await?
+        }
+        None => Default::default(),
+    };
+    let (mut file_artifacts, missing_files) = match &coordinator.computers {
+        Some(computers) => {
+            capture_files(
+                pool,
+                &computers.config().state_dir,
+                staging,
+                &identity,
+                config.max_bytes,
+            )
+            .await?
         }
         None => Default::default(),
     };
@@ -532,6 +621,13 @@ async fn capture_into(
             if vm == "missing" || (vm == "omitted" && status == "active") {
                 complete = false;
             }
+            // A desktop whose browser was not checkpointed may carry a
+            // stale profile lock.
+            if computer.as_ref().is_some_and(|c| {
+                c.desktop_port.is_some() && c.browser_checkpoint.as_deref() != Some("ok")
+            }) {
+                complete = false;
+            }
             BotEntry {
                 id,
                 provider_sessions: sessions
@@ -561,6 +657,10 @@ async fn capture_into(
         plaintext_sha256: sealed.plaintext_sha256,
     }];
     artifacts.append(&mut vm_artifacts);
+    artifacts.append(&mut file_artifacts);
+    if !missing_files.is_empty() {
+        complete = false;
+    }
     let coverage = if coordinated {
         super::Coverage {
             database: "included".into(),
@@ -577,9 +677,12 @@ async fn capture_into(
                  conversations are rebuilt from PostgreSQL and providers may need a fresh login."
                     .into()
             } else {
-                "Partial: a bot's computer is missing from the runtime, so this set does not \
-                 recover the whole assistant."
-                    .into()
+                format!(
+                    "Partial: a bot's computer is missing from the runtime, a desktop browser was \
+                     not checkpointed, or host artifacts are missing ({}), so this set does not \
+                     recover the whole assistant.",
+                    missing_files.len()
+                )
             },
         }
     } else {
@@ -625,6 +728,7 @@ async fn capture_into(
             ciphertext_bytes: sealed_manifest.ciphertext_bytes,
             ciphertext_sha256: sealed_manifest.ciphertext_sha256,
         },
+        whole_assistant: manifest.coverage.whole_assistant,
     };
     Ok((manifest, completion))
 }

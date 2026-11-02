@@ -33,6 +33,10 @@ struct Fake {
     execs: Mutex<Vec<String>>,
     fail_export: AtomicBool,
     restored: Mutex<Vec<Spec>>,
+    checkpoint_fails: AtomicBool,
+    /// Restore boots the computer, then fails.
+    restore_fails_running: AtomicBool,
+    stop_fails: AtomicBool,
 }
 
 impl Fake {
@@ -92,6 +96,9 @@ impl ComputerRuntime for Fake {
         self.set(name, RuntimeState::Running)
     }
     async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
+        if self.stop_fails.load(SeqCst) {
+            return Err(RuntimeError::Unavailable("stop timed out".into()));
+        }
         self.set(name, RuntimeState::Stopped)
     }
     async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
@@ -108,6 +115,13 @@ impl ComputerRuntime for Fake {
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
         self.execs.lock().unwrap().push(program.to_owned());
+        if program.ends_with("else-checkpoint") && self.checkpoint_fails.load(SeqCst) {
+            return Ok(ExecOutput {
+                status: Some(1),
+                stderr: "chromium did not exit".into(),
+                ..ok()
+            });
+        }
         Ok(ok())
     }
     async fn copy_out(&self, _: &str, _: &str, _: &Path) -> Result<(), RuntimeError> {
@@ -130,6 +144,16 @@ impl ComputerRuntime for Fake {
         Ok(())
     }
     async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
+        if self.restore_fails_running.load(SeqCst) {
+            self.computers
+                .lock()
+                .unwrap()
+                .insert(spec.name.clone(), (RuntimeState::Running, String::new()));
+            return Err(RuntimeError::Failed {
+                operation: "snapshot restore".into(),
+                message: "agent did not answer".into(),
+            });
+        }
         let bytes = std::fs::read_to_string(archive).unwrap();
         let disk = bytes.strip_prefix("MSB:").unwrap().to_owned();
         self.computers
@@ -317,7 +341,11 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         "no start for the backup"
     );
     let execs = s.fake.execs.lock().unwrap()[checkpoints_before..].to_vec();
-    assert_eq!(execs, ["/usr/local/bin/else-checkpoint"], "{execs:?}");
+    // A verified checkpoint, then the one the normal stop runs.
+    assert!(
+        !execs.is_empty() && execs.iter().all(|e| e == "/usr/local/bin/else-checkpoint"),
+        "{execs:?}"
+    );
     let observed: Vec<String> =
         sqlx::query_scalar("SELECT observed_state FROM bot_computers ORDER BY bot_id")
             .fetch_all(&s.app.db.pool)
@@ -472,7 +500,14 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
 async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
     let s = setup().await;
     let bot = s.app.main_bot().await;
-    let closed = s.app.scheduler.gate().close().unwrap();
+    let closed = s
+        .app
+        .scheduler
+        .gate()
+        .close(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
     let send = s
         .app
         .send(&bot, Uuid::new_v4(), "during backup", Some("synthetic"))
@@ -563,4 +598,207 @@ async fn retention_keeps_every_artifact_a_kept_set_needs() {
         assert_eq!(meta.len(), artifact.ciphertext_bytes, "{}", artifact.object);
     }
     assert_eq!(manifest.artifacts.len(), 2);
+}
+
+async fn used(s: &Setup, bot: Uuid) -> String {
+    let Acquire::Ready {
+        lease_id,
+        runtime_name,
+        ..
+    } = s.manager.acquire(bot, "test:use").await.unwrap()
+    else {
+        panic!()
+    };
+    s.manager.release(lease_id).await.unwrap();
+    runtime_name
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_checkpoints_and_desktop_secrets_are_required() {
+    let s = setup().await;
+    let a: Uuid = s
+        .app
+        .create_bot("Alpha", "keeps notes")
+        .await
+        .parse()
+        .unwrap();
+    let name = used(&s, a).await;
+    // A failed checkpoint defers the set: the computer keeps running.
+    s.fake.checkpoint_fails.store(true, SeqCst);
+    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    assert!(
+        matches!(result, Err(BackupError::Deferred(ref m)) if m.contains("checkpoint")),
+        "{result:?}"
+    );
+    assert_eq!(
+        s.manager.runtime_state(&name).await.unwrap(),
+        Some(RuntimeState::Running)
+    );
+    s.fake.checkpoint_fails.store(false, SeqCst);
+    // A paused desktop is resumed for its checkpoint, then captured.
+    s.fake.set(&name, RuntimeState::Paused).unwrap();
+    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = $1")
+        .bind(a)
+        .execute(&s.app.db.pool)
+        .await
+        .unwrap();
+    let before = s.fake.execs.lock().unwrap().len();
+    let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    assert!(
+        s.fake.execs.lock().unwrap()[before..]
+            .iter()
+            .any(|e| e.ends_with("else-checkpoint"))
+    );
+    let entry = set.manifest.bots.iter().find(|b| b.id == a).unwrap();
+    assert_eq!(
+        entry
+            .computer
+            .as_ref()
+            .unwrap()
+            .browser_checkpoint
+            .as_deref(),
+        Some("ok")
+    );
+    assert!(set.manifest.coverage.whole_assistant);
+    // A missing desktop password fails the capture.
+    std::fs::remove_file(s.manager.desktop_password_file(a)).unwrap();
+    let result = worker(&s, Duration::from_secs(2)).run_once().await;
+    assert!(
+        matches!(result, Err(BackupError::Producer(ref m)) if m.contains("password")),
+        "{result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_one() {
+    let s = setup().await;
+    let a: Uuid = s
+        .app
+        .create_bot("Alpha", "keeps notes")
+        .await
+        .parse()
+        .unwrap();
+    used(&s, a).await;
+    // A file the bot fetched to the host, registered with its hash.
+    let id = Uuid::new_v4();
+    let store = s.dir.path().join("state/artifacts").join(a.to_string());
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(id.to_string()), b"REPORT-BYTES").unwrap();
+    use sha2::Digest;
+    sqlx::query(
+        "INSERT INTO artifacts (id, bot_id, guest_path, size_bytes, sha256) VALUES ($1, $2, '/r.txt', 12, $3)",
+    )
+    .bind(id)
+    .bind(a)
+    .bind(sha2::Sha256::digest(b"REPORT-BYTES").to_vec())
+    .execute(&s.app.db.pool)
+    .await
+    .unwrap();
+    let mut w = worker(&s, Duration::from_secs(2));
+    w.config.keep = 1;
+    let whole = w.run_once().await.unwrap();
+    assert!(whole.manifest.coverage.whole_assistant);
+    assert!(
+        whole
+            .manifest
+            .artifacts
+            .iter()
+            .any(|x| x.object == format!("file-{id}.age"))
+    );
+    // Restored into the new installation's artifact store.
+    let fresh = Arc::new(Fake::default());
+    let new_dir = s.dir.path().join("new");
+    std::fs::create_dir(&new_dir).unwrap();
+    let target = Target::new(&s.app);
+    restore(RestoreRequest {
+        set_dir: &whole.path,
+        key: &key(),
+        server: &target.params,
+        target_database: &target.name,
+        pg_restore: Path::new("pg_restore"),
+        staging_parent: &s.dir.path().join("staging"),
+        max_bytes: 1 << 30,
+        computers: Some(ComputerTarget {
+            runtime: fresh,
+            data_dir: &new_dir,
+        }),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(new_dir.join(format!("artifacts/{a}/{id}"))).unwrap(),
+        b"REPORT-BYTES"
+    );
+    // The file disappears from the host: the next set is partial, and with
+    // keep 1 it does not delete the whole-assistant set.
+    std::fs::remove_file(store.join(id.to_string())).unwrap();
+    let partial = w.run_once().await.unwrap();
+    assert!(!partial.manifest.coverage.whole_assistant);
+    assert!(
+        whole.path.join("complete.json").exists(),
+        "the last whole set is kept"
+    );
+    assert!(partial.path.join("complete.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
+    let s = setup().await;
+    let a: Uuid = s
+        .app
+        .create_bot("Alpha", "keeps notes")
+        .await
+        .parse()
+        .unwrap();
+    let name = used(&s, a).await;
+    let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
+    for stop_fails in [false, true] {
+        let fresh = Arc::new(Fake::default());
+        fresh.restore_fails_running.store(true, SeqCst);
+        fresh.stop_fails.store(stop_fails, SeqCst);
+        let new_dir = s.dir.path().join(format!("new-{stop_fails}"));
+        std::fs::create_dir(&new_dir).unwrap();
+        let target = Target::new(&s.app);
+        let result = restore(RestoreRequest {
+            set_dir: &set.path,
+            key: &key(),
+            server: &target.params,
+            target_database: &target.name,
+            pg_restore: Path::new("pg_restore"),
+            staging_parent: &s.dir.path().join("staging"),
+            max_bytes: 1 << 30,
+            computers: Some(ComputerTarget {
+                runtime: fresh.clone(),
+                data_dir: &new_dir,
+            }),
+        })
+        .await;
+        let state = fresh.computers.lock().unwrap().get(&name).map(|c| c.0);
+        if stop_fails {
+            assert!(
+                matches!(result, Err(BackupError::Leftover(_))),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(BackupError::Producer(_))),
+                "{result:?}"
+            );
+            assert_eq!(
+                state,
+                Some(RuntimeState::Stopped),
+                "what it started was stopped"
+            );
+        }
+        let mut conn = sqlx::PgConnection::connect(&target.url("postgres"))
+            .await
+            .unwrap();
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                .bind(&target.name)
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+        assert!(!exists, "the new database was dropped");
+    }
 }

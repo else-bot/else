@@ -135,6 +135,9 @@ pub enum DiskCapture {
         desktop_port: Option<u16>,
         /// Whether the computer was running before the backup stopped it.
         was_running: bool,
+        /// For a desktop: whether its browser was checkpointed (`ok`) when
+        /// it stopped; `None` when unknown.
+        browser_checkpoint: Option<String>,
     },
     /// The bot never used a computer.
     NoComputer,
@@ -414,6 +417,11 @@ impl ComputerManager {
         let row = Self::row(&mut tx, bot_id).await?.expect("exists");
         self.set_state(&mut tx, bot_id, "running", None, None)
             .await?;
+        // Running again: the last checkpoint no longer describes its disk.
+        sqlx::query("UPDATE bot_computers SET browser_checkpoint = NULL WHERE bot_id = $1")
+            .bind(bot_id)
+            .execute(&mut *tx)
+            .await?;
         if active != Some(true) || row.desired_state == "stopped" {
             // Deleted or stopped by the owner while starting: it does not
             // stay up, and no lease is granted.
@@ -536,6 +544,41 @@ impl ComputerManager {
             "missing" => return Ok(DiskCapture::Missing),
             "stopped" => {}
             "running" | "paused" => {
+                let held: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM computer_leases
+                                    WHERE bot_id = $1 AND released_at IS NULL)",
+                )
+                .bind(bot_id)
+                .fetch_one(&self.pool)
+                .await?;
+                if held {
+                    return Err(ComputerError::Busy("in use".into()));
+                }
+                if self.config.desktop {
+                    // The browser must close cleanly before its profile is
+                    // captured; a paused desktop is resumed to do so.
+                    if row.observed_state == "paused" {
+                        self.runtime.resume(&row.runtime_name).await?;
+                        let mut conn = self.pool.acquire().await?;
+                        self.set_state(&mut conn, bot_id, "running", None, None)
+                            .await?;
+                    }
+                    let out = self
+                        .runtime
+                        .exec(
+                            &row.runtime_name,
+                            GUEST_CHECKPOINT,
+                            &[],
+                            Duration::from_secs(60),
+                        )
+                        .await?;
+                    if out.status != Some(0) {
+                        return Err(ComputerError::Busy(format!(
+                            "its browser checkpoint failed: {}",
+                            out.stderr.trim().chars().take(200).collect::<String>()
+                        )));
+                    }
+                }
                 if !self.stop_held(bot_id, Reason::Backup).await? {
                     return Err(ComputerError::Busy("in use".into()));
                 }
@@ -549,11 +592,12 @@ impl ComputerManager {
             ));
         }
         self.runtime.export_disk(&row.runtime_name, archive).await?;
-        let port: Option<i32> =
-            sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = $1")
-                .bind(bot_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let (port, browser_checkpoint): (Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = $1",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(DiskCapture::Exported {
             runtime_name: row.runtime_name,
             image: row.image,
@@ -562,6 +606,7 @@ impl ComputerManager {
             desired_state: row.desired_state,
             desktop_port: port.map(|p| p as u16),
             was_running,
+            browser_checkpoint,
         })
     }
 
@@ -1042,7 +1087,7 @@ impl ComputerManager {
         // A desktop closes its browser cleanly first, so the profile is
         // flushed and keeps no lock (pausing keeps processes as they are).
         if self.config.desktop && action == IdleAction::Stop && row.observed_state == "running" {
-            let _ = self
+            let checkpointed = self
                 .runtime
                 .exec(
                     &row.runtime_name,
@@ -1050,7 +1095,15 @@ impl ComputerManager {
                     &[],
                     Duration::from_secs(30),
                 )
-                .await;
+                .await
+                .is_ok_and(|out| out.status == Some(0));
+            // Recorded so a backup of the stopped computer knows whether
+            // its browser profile was left consistent.
+            sqlx::query("UPDATE bot_computers SET browser_checkpoint = $2 WHERE bot_id = $1")
+                .bind(bot_id)
+                .bind(if checkpointed { "ok" } else { "failed" })
+                .execute(&self.pool)
+                .await?;
         }
         let result = match action {
             IdleAction::Stop => self.runtime.stop(&row.runtime_name).await,

@@ -104,6 +104,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
             "/tools/v1",
             tools::routes()
                 .fallback(|| async { ApiError::not_found() })
+                .layer(middleware::from_fn_with_state(state.clone(), tools_gate))
                 .layer(middleware::from_fn_with_state(
                     state.clone(),
                     auth::require_task_grant,
@@ -144,15 +145,29 @@ async fn maintenance_gate(
     request: Request,
     next: Next,
 ) -> Response {
-    if state.scheduler.gate().is_closed()
-        && !crate::maintenance::allowed(request.method(), request.uri().path())
-    {
-        return ApiError::unavailable(
-            "maintenance",
-            "A backup is capturing the assistant; try again in a moment.",
-        )
-        .into_response();
+    if crate::maintenance::allowed(request.method(), request.uri().path()) {
+        return next.run(request).await;
     }
+    // Admitted until the handler has finished, so a backup waits for it.
+    let Some(_admission) = state.scheduler.gate().enter() else {
+        return maintenance_response();
+    };
+    next.run(request).await
+}
+
+fn maintenance_response() -> Response {
+    ApiError::unavailable(
+        "maintenance",
+        "A backup is capturing the assistant; try again in a moment.",
+    )
+    .into_response()
+}
+
+/// Task-scoped tool calls are admitted work too.
+async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
+    let Some(_admission) = state.scheduler.gate().enter() else {
+        return maintenance_response();
+    };
     next.run(request).await
 }
 
