@@ -196,7 +196,7 @@ Use these event kinds. Each JSON payload includes `bot_id` and `conversation_id`
 | --- | --- |
 | `item.upsert` | Complete item. Insert or replace by stable ID. Used for the initial user item and assistant item. |
 | `item.delta` | `{item_id, offset_utf8, text}`. Append only when the current UTF-8 byte length equals the offset. |
-| `turn.updated` | Complete public turn projection, including terminal outcome. |
+| `turn.updated` | Complete public turn projection, including terminal outcome. A turn whose main bot delegated part of the request is `waiting` (not finished) until it continues. |
 | `bot.updated` | Current provider selection and activity projection. |
 
 Each event is one WebSocket message, shaped like the `item.delta` example above.

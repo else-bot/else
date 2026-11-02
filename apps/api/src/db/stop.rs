@@ -60,7 +60,7 @@ pub async fn halt_accepted(
     let queued: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = $3,
              finished_at = now(), updated_at = now()
-         WHERE bot_id = $1 AND status = 'queued' AND turn_no <= $2
+         WHERE bot_id = $1 AND status IN ('queued', 'waiting') AND turn_no <= $2
          RETURNING id",
     )
     .bind(bot_id)
@@ -68,9 +68,11 @@ pub async fn halt_accepted(
     .bind(message)
     .fetch_all(&mut *conn)
     .await?;
-    for turn_id in queued {
-        events::turn_changed(conn, bot_id, turn_id).await?;
+    for turn_id in &queued {
+        events::turn_changed(conn, bot_id, *turn_id).await?;
     }
+    // Work delegated by those roots, and by the active one, ends too.
+    crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
     let active: Option<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = now()
          WHERE bot_id = $1 AND turn_no <= $2 AND status IN ('preparing', 'sending', 'running')
@@ -147,11 +149,12 @@ pub async fn stop_work(
     let Some(status) = status else {
         return Err(BotError::NotFound.into());
     };
-    let last_turn_no: i64 =
-        sqlx::query_scalar("SELECT last_turn_no FROM conversations WHERE bot_id = $1")
-            .bind(bot_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let last_turn_no: i64 = sqlx::query_scalar(
+        "SELECT last_turn_no FROM conversations WHERE bot_id = $1 AND kind = 'owner'",
+    )
+    .bind(bot_id)
+    .fetch_one(&mut *tx)
+    .await?;
     let receipt: Option<(String, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
         "SELECT operation, bot_id, payload_hash, state FROM request_receipts WHERE request_id = $1",
     )

@@ -1687,6 +1687,8 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working…".into(), false),
         "cancelling" => ("Stopping…".into(), false),
+        // The main bot handed part of the request to another bot.
+        "waiting" => ("Waiting for another bot…".into(), false),
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
                 "Stopped before it ran".into()

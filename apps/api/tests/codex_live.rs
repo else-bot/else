@@ -896,3 +896,105 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
         "the session recorded the memory it received"
     );
 }
+
+/// POC-016: with one provider slot, the real main bot routes a subtask to a
+/// newly created bot by role, parks, the child runs through its own
+/// API-managed attempt, and the parent continues with the recorded result.
+#[tokio::test(flavor = "multi_thread")]
+async fn main_bot_delegates_by_role_with_one_provider_slot() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sandbox = HostSandbox::detect(&data).unwrap();
+    let (codex, auth) = codex_and_auth();
+    let codex = Arc::new(
+        Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
+    );
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let app = TestApp::with_registry(db, 1, Registry::new(vec![codex]));
+    let router = app.router.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let main = app.main_bot().await;
+    app.create_bot("Work", "Help with my work projects").await;
+    let garden = app
+        .create_bot(
+            "Garden",
+            "Garden care: plants, watering schedules, pests, and soil",
+        )
+        .await;
+
+    let (turn, status, text) = ask(
+        &app,
+        &main,
+        "Synthetic test: ask the bot best suited for it how often to water potted tomato \
+         plants during a heatwave, then give me its answer in one sentence.",
+    )
+    .await;
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    eprintln!("first attempt status {status} {error:?}: {text}");
+    // The ask helper returns at the first terminal or parked state.
+    let final_status = app
+        .wait_turn_for(
+            &turn,
+            &["completed", "failed", "interrupted", "uncertain"],
+            Duration::from_secs(400),
+        )
+        .await;
+    let delegations: Vec<(Uuid, String, Option<String>, Option<i32>)> = sqlx::query_as(
+        "SELECT target_bot_id, status, result, delivered_attempt FROM delegations WHERE root_turn_id = $1",
+    )
+    .bind(turn.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    let answer: String = sqlx::query_scalar(
+        "SELECT string_agg(text, ' | ' ORDER BY seq) FROM items WHERE turn_id = $1 AND kind = 'assistant'",
+    )
+    .bind(turn.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    let (attempt, final_error): (i32, Option<String>) =
+        sqlx::query_as("SELECT attempt, error_message FROM turns WHERE id = $1")
+            .bind(turn.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    eprintln!(
+        "final {final_status} attempt {attempt} {final_error:?}\ndelegations {delegations:?}\nanswer: {answer}"
+    );
+    assert_eq!(final_status, "completed");
+    assert_eq!(delegations.len(), 1, "one child");
+    assert_eq!(
+        delegations[0].0,
+        garden.parse::<Uuid>().unwrap(),
+        "routed by role to the new bot"
+    );
+    assert_eq!(delegations[0].1, "completed");
+    assert_eq!(
+        delegations[0].3,
+        Some(2),
+        "the continuation received the result"
+    );
+    assert_eq!(attempt, 2, "the parent resumed once");
+    // No provider attempt reported a policy violation (native agents etc.).
+    let violations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turns WHERE error_code = 'policy_violation'")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(violations, 0);
+}

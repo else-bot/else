@@ -56,6 +56,13 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
         state.scheduler.grants().revoke_turn(grant.turn_id);
         return Err(revoked());
     }
+    if state.scheduler.grants().is_parked(grant.turn_id) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "attempt_parked",
+            "This attempt delegated work; end it now. The result arrives in a continuation.",
+        ));
+    }
     Ok(())
 }
 

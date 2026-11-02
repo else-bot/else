@@ -629,14 +629,16 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, else_api::http::mcp::TOOL_NAMES);
-    assert!(
-        listed.body["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| t["annotations"]["readOnlyHint"] == true)
-    );
+    let mut sorted = names.clone();
+    sorted.sort();
+    let mut expected = else_api::http::mcp::TOOL_NAMES.to_vec();
+    expected.sort();
+    assert_eq!(sorted, expected);
+    // Memory tools only read; delegation creates work and says so.
+    for tool in listed.body["result"]["tools"].as_array().unwrap() {
+        let read_only = tool["name"] != "delegate";
+        assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
+    }
 
     // Own memory, with provenance outside the text.
     let hits = tool(&app, &token, "memory_search", json!({ "query": "pickup" })).await;

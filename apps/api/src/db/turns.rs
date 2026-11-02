@@ -43,11 +43,12 @@ pub struct TurnRecord {
     pub effect_uncertain: bool,
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub attempt: i32,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
     t.owner_item_id, t.provider_id, t.profile_revision, t.profile, t.status, t.error_code,
-    t.error_message, t.effect_uncertain, t.created_at, t.finished_at";
+    t.error_message, t.effect_uncertain, t.created_at, t.finished_at, t.attempt";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ItemRecord {
@@ -118,7 +119,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     let mut tx = pool.begin().await?;
     let bot: Option<(String, Uuid, i64, i64, bool)> = sqlx::query_as(
         "SELECT b.status, c.id, c.last_turn_no, c.last_item_seq, b.cancel_pending
-         FROM bots b JOIN conversations c ON c.bot_id = b.id
+         FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
          WHERE b.id = $1 FOR UPDATE OF b, c",
     )
     .bind(req.bot_id)
@@ -329,6 +330,9 @@ pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sq
               AND NOT (t.bot_id = ANY($1))
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
+              -- A root task waiting for delegated work holds the bot's queue.
+              AND NOT EXISTS (SELECT 1 FROM turns w
+                              WHERE w.bot_id = t.bot_id AND w.status = 'waiting')
             ORDER BY t.bot_id, t.turn_no
          ) oldest ORDER BY created_at, id LIMIT 8"
     )))
@@ -347,7 +351,8 @@ pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sq
             continue;
         }
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = 'preparing', started_at = now(), updated_at = now()
+            "UPDATE turns SET status = 'preparing', started_at = now(), updated_at = now(),
+                 attempt = attempt + 1
              WHERE id = $1 AND status = 'queued'
                AND NOT EXISTS (SELECT 1 FROM turns a
                                WHERE a.bot_id = $2 AND a.status IN {ACTIVE_STATUSES})"
@@ -461,6 +466,8 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         session,
         tool_grant: None,
         memory: None,
+        attempt: turn.attempt,
+        delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
     };
     // Return this connection before memory loading checks out others.
     drop(conn);
@@ -488,6 +495,9 @@ pub struct PgSink {
     pending: Mutex<String>,
     flush_wanted: tokio::sync::Notify,
     fenced: Mutex<bool>,
+    attempt: i32,
+    /// Child outcomes this attempt's input carried.
+    delivered: Vec<Uuid>,
 }
 
 impl PgSink {
@@ -504,6 +514,8 @@ impl PgSink {
             pending: Mutex::new(String::new()),
             flush_wanted: tokio::sync::Notify::new(),
             fenced: Mutex::new(false),
+            attempt: input.attempt,
+            delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
         }
     }
 
@@ -533,10 +545,11 @@ impl PgSink {
         allowed: &str,
     ) -> Result<Option<i64>, sqlx::Error> {
         let row: Option<(String, i64)> = sqlx::query_as(
-            "SELECT b.status, c.last_item_seq FROM bots b JOIN conversations c ON c.bot_id = b.id
-             WHERE b.id = $1 FOR UPDATE OF b, c",
+            "SELECT b.status, c.last_item_seq FROM bots b JOIN conversations c ON c.id = $2
+             WHERE b.id = $1 AND c.bot_id = b.id FOR UPDATE OF b, c",
         )
         .bind(self.bot_id)
+        .bind(self.conversation_id)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((status, last_seq)) = row.filter(|(status, _)| status == "active") else {
@@ -716,9 +729,46 @@ impl PgSink {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Outcomes this attempt carried were given to the provider.
+        crate::db::delegations::mark_delivered(
+            &mut tx,
+            self.turn_id,
+            self.attempt,
+            &self.delivered,
+        )
+        .await?;
+        // A root that delegated parks instead of finishing: `waiting` while a
+        // child works, or `queued` again (a continuation) when every child
+        // has an outcome this attempt did not see. A Stop (`cancelling`)
+        // ends it normally.
+        let (current, pending, unseen): (String, i64, i64) = sqlx::query_as(
+            "SELECT t.status,
+                    (SELECT count(*) FROM delegations d
+                     WHERE d.root_turn_id = t.id AND d.status IN ('queued', 'running')),
+                    (SELECT count(*) FROM delegations d
+                     WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
+                       AND d.status IN ('completed', 'failed', 'cancelled'))
+             FROM turns t WHERE t.id = $1",
+        )
+        .bind(self.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let parks = current != "cancelling" && matches!(status, "completed" | "interrupted");
+        let status = if parks && pending > 0 {
+            "waiting"
+        } else if parks && unseen > 0 {
+            "queued"
+        } else {
+            if pending > 0 {
+                crate::db::delegations::cancel_for_root(&mut tx, self.turn_id).await?;
+            }
+            status
+        };
+        let finished = !matches!(status, "waiting" | "queued");
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = $2, error_code = $3, error_message = $4,
-                 effect_uncertain = effect_uncertain OR $5, finished_at = now(), updated_at = now()
+                 effect_uncertain = effect_uncertain OR $5,
+                 finished_at = CASE WHEN $6 THEN now() END, updated_at = now()
              WHERE id = $1 AND status IN {ACTIVE_STATUSES}"
         )))
         .bind(self.turn_id)
@@ -726,6 +776,7 @@ impl PgSink {
         .bind(code)
         .bind(message)
         .bind(uncertain)
+        .bind(finished)
         .execute(&mut *tx)
         .await?
         .rows_affected();

@@ -60,6 +60,9 @@ pub struct TurnInput {
     pub tool_grant: Option<String>,
     /// The bot's saved memory, bounded, for a new session.
     pub memory: Option<MemoryContext>,
+    /// Provider attempt number of this turn (continuations count up).
+    pub attempt: i32,
+    pub delegation: DelegationContext,
 }
 
 /// A provider's native session for one conversation.
@@ -71,6 +74,33 @@ pub struct SessionState {
     pub considered_through_turn: i64,
     /// The memory view revision given to the session, if any.
     pub memory_revision: Option<i64>,
+}
+
+/// The recorded outcome of a delegated child, given to the parent's
+/// continuation as data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationOutcome {
+    pub id: Uuid,
+    pub target_bot_id: Uuid,
+    pub target_name: String,
+    pub task: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
+/// What an attempt knows about delegation, all derived by the server.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DelegationContext {
+    /// This attempt may delegate (main bot, owner conversation).
+    pub can_delegate: bool,
+    /// This turn is a delegated task (a leaf).
+    pub delegated_task: bool,
+    /// Other active bots: ID, name, role.
+    pub registry: Vec<(Uuid, String, String)>,
+    pub remaining: i64,
+    /// Child outcomes not yet given to an attempt of this turn.
+    pub outcomes: Vec<DelegationOutcome>,
 }
 
 /// Bounded saved memory for a session that has not received it.

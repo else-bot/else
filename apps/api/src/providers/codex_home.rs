@@ -84,6 +84,7 @@ pub fn config_toml(tool_url: Option<&str>) -> String {
              bearer_token_env_var = \"{GRANT_ENV}\"\n\
              enabled_tools = [{tools}]\n\
              required = true\n\
+             default_tools_approval_mode = \"approve\"\n\
              startup_timeout_sec = 15\n\
              tool_timeout_sec = 30\n",
             name = crate::http::mcp::SERVER_NAME,

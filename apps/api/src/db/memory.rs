@@ -28,6 +28,8 @@ pub enum Kind {
     AssistantMessage,
     OwnerCorrection,
     ToolActivity,
+    /// A task another bot delegated: model-authored, never owner text.
+    DelegatedTask,
 }
 
 impl Kind {
@@ -37,6 +39,7 @@ impl Kind {
             Kind::AssistantMessage => "assistant_message",
             Kind::OwnerCorrection => "owner_correction",
             Kind::ToolActivity => "tool_activity",
+            Kind::DelegatedTask => "delegated_task",
         }
     }
 
@@ -45,7 +48,7 @@ impl Kind {
     pub fn authority(self) -> &'static str {
         match self {
             Kind::OwnerMessage | Kind::OwnerCorrection => "owner",
-            Kind::AssistantMessage => "assistant",
+            Kind::AssistantMessage | Kind::DelegatedTask => "assistant",
             Kind::ToolActivity => "tool",
         }
     }
@@ -225,17 +228,20 @@ pub async fn append(
 /// Log a conversation item's final text, once. Missing or empty items and
 /// inactive bots are skipped: memory follows visible history.
 pub async fn log_item(conn: &mut PgConnection, item_id: Uuid) -> Result<(), sqlx::Error> {
-    let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id
+    let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind
          FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = $1",
     )
     .bind(item_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((bot_id, conversation_id, turn_id, kind, text, provider_id)) = row else {
+    let Some((bot_id, conversation_id, turn_id, kind, text, provider_id, conversation_kind)) = row
+    else {
         return Ok(());
     };
     let kind = match kind.as_str() {
+        // The first message of a task conversation is the delegated task.
+        "user" if conversation_kind == "task" => Kind::DelegatedTask,
         "user" => Kind::OwnerMessage,
         "assistant" => Kind::AssistantMessage,
         _ => return Ok(()),

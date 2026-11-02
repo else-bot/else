@@ -260,7 +260,11 @@ impl Scheduler {
             input.bot_id,
             input.conversation_id,
             turn_id,
-            vec![Tool::ReadHistory, Tool::ReadMemory],
+            if input.delegation.can_delegate {
+                vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Delegate]
+            } else {
+                vec![Tool::ReadHistory, Tool::ReadMemory]
+            },
             TOOL_GRANT_TTL,
         ));
         let sink = PgSink::new(self.pool.clone(), &input, &provider_id);

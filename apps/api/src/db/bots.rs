@@ -44,9 +44,12 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, b.role, c.id AS conversation_id, 
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending,
         a.id AS active_turn_id, a.status AS active_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
-    FROM bots b JOIN conversations c ON c.bot_id = b.id
+    FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
     LEFT JOIN turns a ON a.bot_id = b.id
-        AND a.status IN ('preparing', 'sending', 'running', 'cancelling')";
+        AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
+        AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id
+                    AND w.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
+                    ORDER BY w.status = 'waiting', w.created_at LIMIT 1)";
 
 #[derive(Debug)]
 pub enum Created {

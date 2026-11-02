@@ -3,6 +3,7 @@
 
 pub mod bots;
 pub mod conversation;
+pub mod delegations;
 pub mod events;
 pub mod installation;
 pub mod memory;

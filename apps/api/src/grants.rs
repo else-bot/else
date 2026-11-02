@@ -26,6 +26,8 @@ pub enum Tool {
     ReadHistory,
     /// Read the bot's memory and memory the owner shared with it.
     ReadMemory,
+    /// Hand a task to another registered bot (main bot only).
+    Delegate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +48,9 @@ impl Grant {
 #[derive(Default)]
 pub struct Grants {
     by_digest: Mutex<HashMap<[u8; 32], Grant>>,
+    /// Turns whose current attempt delegated: every further tool call of
+    /// that attempt is refused (it must end). A new attempt's grant clears it.
+    parked: Mutex<std::collections::HashSet<Uuid>>,
 }
 
 fn digest(token: &str) -> [u8; 32] {
@@ -70,6 +75,7 @@ impl Grants {
         getrandom::fill(&mut bytes).expect("system random source");
         // A distinct prefix keeps grants and owner tokens visibly different.
         let token = format!("tg_{}", URL_SAFE_NO_PAD.encode(bytes));
+        self.parked().remove(&turn_id);
         self.map().insert(
             digest(&token),
             Grant {
@@ -95,6 +101,19 @@ impl Grants {
             }
             None => None,
         }
+    }
+
+    fn parked(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<Uuid>> {
+        self.parked.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The attempt of `turn_id` delegated and must end.
+    pub fn park(&self, turn_id: Uuid) {
+        self.parked().insert(turn_id);
+    }
+
+    pub fn is_parked(&self, turn_id: Uuid) -> bool {
+        self.parked().contains(&turn_id)
     }
 
     pub fn revoke_turn(&self, turn_id: Uuid) {

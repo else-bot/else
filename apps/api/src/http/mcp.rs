@@ -35,6 +35,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_view",
     "memory_zoom",
     "memory_date",
+    "delegate",
 ];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
@@ -86,7 +87,12 @@ pub async fn endpoint(
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_list() })),
         "tools/call" => {
-            if let Err(err) = check(&state, &grant, Tool::ReadMemory).await {
+            let needs = if params["name"] == "delegate" {
+                Tool::Delegate
+            } else {
+                Tool::ReadMemory
+            };
+            if let Err(err) = check(&state, &grant, needs).await {
                 return err.into_response();
             }
             match (params["name"].as_str(), &params["arguments"]) {
@@ -188,6 +194,27 @@ fn tool_list() -> Value {
                 "additionalProperties": false,
             },
             "annotations": read_only,
+        },
+        {
+            "name": "delegate",
+            "description": "Main bot only: hand one subtask to another registered bot from your \
+                registry, by its exact bot_id. Returns status pending with a task_id at once; it \
+                does not wait. After a pending result, tell the owner briefly and end this attempt; \
+                the result arrives later in a continuation. At most one per attempt and two per \
+                owner request.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_bot_id": { "type": "string", "format": "uuid" },
+                    "task": { "type": "string", "minLength": 1, "maxLength": 4000,
+                              "description": "What the other bot should do, self-contained." },
+                },
+                "required": ["target_bot_id", "task"],
+                "additionalProperties": false,
+            },
+            // It creates work, so it is not read-only; retries are safe.
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
         },
         {
             "name": "memory_date",
@@ -327,6 +354,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_view" => view(state, grant, args).await,
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
+        "delegate" => delegate(state, grant, args).await,
         _ => return tool_error("Unknown tool."),
     };
     if let Some(log) = log {
@@ -714,4 +742,53 @@ async fn date(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         tool_result(json!({ "bot_id": bot_id, "dates": dates })),
         Some(log),
     )
+}
+
+async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::delegations::{self, DelegateError};
+    let Some(target) = args["target_bot_id"]
+        .as_str()
+        .and_then(|s| s.parse::<Uuid>().ok())
+    else {
+        return (
+            tool_error("target_bot_id must be a bot ID from your registry."),
+            None,
+        );
+    };
+    let Some(task) = args["task"].as_str() else {
+        return (tool_error("task is required."), None);
+    };
+    match delegations::create(&state.db, grant.turn_id, target, task).await {
+        Ok(accepted) => {
+            // This attempt must now end; the API refuses its further calls.
+            state.scheduler.grants().park(grant.turn_id);
+            state.scheduler.wake();
+            let log = format!(
+                "pending {} to {} ({})",
+                accepted.delegation_id, accepted.target_name, accepted.target_bot_id
+            );
+            let result = json!({
+                "status": "pending",
+                "task_id": accepted.delegation_id,
+                "target": { "bot_id": accepted.target_bot_id, "name": accepted.target_name },
+                "next": "Tell the owner it is in progress and end this attempt now. Do not wait, \
+                         poll, or call more tools; the result arrives in a continuation.",
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => {
+            let code = match err {
+                DelegateError::NotAllowed => "NOT_ALLOWED",
+                DelegateError::SelfTarget => "SELF_DELEGATION",
+                DelegateError::BotUnavailable => "BOT_UNAVAILABLE",
+                DelegateError::BudgetExhausted => "BUDGET_EXHAUSTED",
+                DelegateError::AttemptParked => "ATTEMPT_PARKED",
+                DelegateError::InvalidTask => "INVALID_TASK",
+                DelegateError::NotRunning => "NOT_RUNNING",
+                DelegateError::Db => "UNAVAILABLE",
+            };
+            let log = format!("rejected {code}");
+            (tool_error(&format!("{code}: {err}")), Some(log))
+        }
+    }
 }

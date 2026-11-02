@@ -68,6 +68,9 @@ pub async fn item_upsert(
     item_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let item = turns::load_item(conn, item_id).await?;
+    if is_task(conn, item.conversation_id).await? {
+        return Ok(());
+    }
     let data = json!({
         "bot_id": bot_id,
         "conversation_id": item.conversation_id,
@@ -85,6 +88,9 @@ pub async fn item_delta(
     offset: i64,
     text: &str,
 ) -> Result<(), sqlx::Error> {
+    if is_task(conn, conversation_id).await? {
+        return Ok(());
+    }
     let data = json!({
         "bot_id": bot_id,
         "conversation_id": conversation_id,
@@ -96,6 +102,15 @@ pub async fn item_delta(
     Ok(())
 }
 
+/// Whether a conversation holds delegated task work.
+async fn is_task(conn: &mut PgConnection, conversation_id: Uuid) -> Result<bool, sqlx::Error> {
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = $1")
+        .bind(conversation_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(kind.as_deref() == Some("task"))
+}
+
 /// A turn's status or outcome changed; the bot's activity changes with it.
 pub async fn turn_changed(
     conn: &mut PgConnection,
@@ -103,12 +118,16 @@ pub async fn turn_changed(
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let turn = turns::load_turn(conn, turn_id).await?;
-    let data = json!({
-        "bot_id": bot_id,
-        "conversation_id": turn.conversation_id,
-        "turn": turn_json(&turn),
-    });
-    append(conn, bot_id, "turn.updated", data).await?;
+    // Delegated work is not part of the owner's conversation; only the
+    // bot's activity changes visibly.
+    if !is_task(conn, turn.conversation_id).await? {
+        let data = json!({
+            "bot_id": bot_id,
+            "conversation_id": turn.conversation_id,
+            "turn": turn_json(&turn),
+        });
+        append(conn, bot_id, "turn.updated", data).await?;
+    }
     bot_updated(conn, bot_id).await
 }
 
