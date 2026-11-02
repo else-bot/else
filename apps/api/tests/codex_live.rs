@@ -716,7 +716,14 @@ async fn summary_attempts_cannot_run_tools() {
         400,
         None,
     );
-    let result = codex.summarize_once(bot, &profile, &prompt).await;
+    let result = codex
+        .summarize_once(
+            bot,
+            &profile,
+            &prompt,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
     eprintln!("summary result: {result:?}");
     let hostname = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
     if let Ok(text) = &result {

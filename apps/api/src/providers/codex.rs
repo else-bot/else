@@ -589,9 +589,8 @@ impl Codex {
             native_id: thread_id.clone(),
             fingerprint,
             considered_through_turn: considered,
-            memory_revision: inject
-                .map(|m| m.revision)
-                .or(resumed_session.and_then(|s| s.memory_revision)),
+            // Recorded as received only once Codex accepts the turn below.
+            memory_revision: resumed_session.and_then(|s| s.memory_revision),
         };
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
@@ -640,6 +639,9 @@ impl Codex {
             cancel.cancel();
         }
         state.considered_through_turn = input.turn_no;
+        if let Some(memory) = inject {
+            state.memory_revision = Some(memory.revision);
+        }
         let _ = sink.session(&state).await;
         let _ = sink.reported(&reported.to_json(), &native_turn).await;
         self.drain(server, &thread_id, &native_turn, profile, sink, cancel)
@@ -950,6 +952,7 @@ impl Codex {
         bot_id: uuid::Uuid,
         profile: &Profile,
         prompt: &str,
+        cancel: &CancellationToken,
     ) -> Result<String, String> {
         if let Some(reason) = &self.unavailable {
             return Err(reason.clone());
@@ -974,12 +977,15 @@ impl Codex {
         let mut server = AppServer::start(sandbox, &spec)
             .await
             .map_err(|e| e.to_string())?;
-        let result = tokio::time::timeout(
-            SUMMARY_DEADLINE,
-            self.summary_exchange(&mut server, profile, prompt),
-        )
-        .await
-        .unwrap_or_else(|_| Err("the summary exceeded its deadline".into()));
+        // The deadline and cancellation cover the whole exchange; either
+        // way the sandbox is shut down and reaped before returning.
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Err("cancelled".to_owned()),
+            outcome = tokio::time::timeout(
+                SUMMARY_DEADLINE,
+                self.summary_exchange(&mut server, profile, prompt),
+            ) => outcome.unwrap_or_else(|_| Err("the summary exceeded its deadline".into())),
+        };
         server.shutdown(SHUTDOWN_GRACE).await;
         result
     }
@@ -1069,6 +1075,14 @@ impl Codex {
                 "model/rerouted" if params["toModel"].as_str() != Some(&profile.model) => {
                     violation.get_or_insert("Codex rerouted the model".into());
                 }
+                // Settings changed mid-thread must still be the saved ones.
+                "thread/settings/updated" => {
+                    if let Some(mismatch) =
+                        Reported::from_response(&params["threadSettings"]).mismatch(profile)
+                    {
+                        violation.get_or_insert(format!("profile_mismatch: {mismatch}"));
+                    }
+                }
                 "turn/completed"
                     if params["turn"]["id"]
                         .as_str()
@@ -1104,7 +1118,8 @@ impl crate::memory_worker::Summarizer for Codex {
         bot_id: uuid::Uuid,
         profile: &Profile,
         prompt: &str,
+        cancel: &CancellationToken,
     ) -> Result<String, String> {
-        self.summarize_once(bot_id, profile, prompt).await
+        self.summarize_once(bot_id, profile, prompt, cancel).await
     }
 }

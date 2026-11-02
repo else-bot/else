@@ -448,7 +448,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
             memory_revision,
         },
     );
-    Ok(TurnInput {
+    let mut input = TurnInput {
         bot_id: turn.bot_id,
         conversation_id: turn.conversation_id,
         turn_id,
@@ -460,8 +460,12 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         history,
         session,
         tool_grant: None,
-        memory: crate::db::memory_tree::session_context(pool, turn.bot_id).await?,
-    })
+        memory: None,
+    };
+    // Return this connection before memory loading checks out others.
+    drop(conn);
+    input.memory = crate::db::memory_tree::session_context(pool, input.bot_id).await?;
+    Ok(input)
 }
 
 /// State owned by whoever holds the flush lock.
