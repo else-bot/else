@@ -12,7 +12,7 @@
 //! them, and nothing here replaces an existing file.
 
 use std::fmt;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -254,25 +254,35 @@ fn read_private_file(path: &Path, what: &'static str) -> Result<String, Credenti
         path: path.to_owned(),
         reason: reason.to_owned(),
     };
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) => meta,
+    let io = |error| CredentialError::Io {
+        what,
+        path: path.to_owned(),
+        error,
+    };
+    // A replaceable parent directory would let another user swap the file.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        check_dir(parent, "credential directory")?;
+    }
+    // Open once without following a final symlink, then validate the opened
+    // descriptor itself, so the checked file is the file that is read.
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(CredentialError::Missing {
                 what,
                 path: path.to_owned(),
             });
         }
-        Err(error) => {
-            return Err(CredentialError::Io {
-                what,
-                path: path.to_owned(),
-                error,
-            });
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(unsafe_file("is a symbolic link"));
         }
+        Err(error) => return Err(io(error)),
     };
-    if meta.file_type().is_symlink() {
-        return Err(unsafe_file("is a symbolic link"));
-    }
+    let meta = file.metadata().map_err(io)?;
     if !meta.is_file() {
         return Err(unsafe_file("not a regular file"));
     }
@@ -288,13 +298,9 @@ fn read_private_file(path: &Path, what: &'static str) -> Result<String, Credenti
         return Err(unsafe_file("too large to be a credential file"));
     }
     let mut text = String::new();
-    File::open(path)
-        .and_then(|file| file.take(MAX_FILE_BYTES).read_to_string(&mut text))
-        .map_err(|error| CredentialError::Io {
-            what,
-            path: path.to_owned(),
-            error,
-        })?;
+    file.take(MAX_FILE_BYTES)
+        .read_to_string(&mut text)
+        .map_err(io)?;
     Ok(text)
 }
 
@@ -393,6 +399,16 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(matches!(
             load_owner_token(&link).unwrap_err(),
+            CredentialError::Unsafe { .. }
+        ));
+        // A symlinked parent directory that others can write is refused.
+        let shared = tempfile::tempdir().unwrap();
+        fs::set_permissions(shared.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let moved = shared.path().join("owner-token");
+        fs::copy(&path, &moved).unwrap();
+        fs::set_permissions(&moved, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            load_owner_token(&moved).unwrap_err(),
             CredentialError::Unsafe { .. }
         ));
         // Setup refuses to write through a dangling symlink as well.

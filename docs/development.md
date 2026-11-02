@@ -70,13 +70,13 @@ docker compose up -d --wait
 cargo run -p else-api -- setup
 cargo run -p else-api -- serve
 curl -s http://127.0.0.1:7878/healthz
-curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
-	http://127.0.0.1:7878/v1/capabilities
+printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)" |
+	curl -s -H @- http://127.0.0.1:7878/v1/capabilities
 ```
 
 `serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. A `.env` that exists but cannot be parsed fails startup without printing its contents. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
 
-`setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`, applies migrations, seeds any missing provider profile, and creates the main bot `Assistant` with its conversation the first time. Running it again reports `kept existing` and changes nothing: saved profiles keep their values, and a deleted main bot or cleared default stays as it is. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed values, symbolic links, files owned by another user, and files readable by group or others.
+`setup` is the explicit installation step. It creates the data directory with mode `0700` and each missing credential file with mode `0600`, applies migrations, seeds any missing provider profile, and creates the main bot `Assistant` with its conversation the first time. Running it again reports `kept existing` and changes nothing: saved profiles keep their values, and a deleted main bot or cleared default stays as it is. It never replaces an existing or malformed file and prints paths, never values. `serve` never creates credentials. It exits with an error naming `else-api setup` when a file is missing, and rejects malformed or empty values, symbolic links, files owned by another user, files readable by group or others, and credential directories writable by others. The file is opened without following symlinks and validated through the opened descriptor.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -105,8 +105,8 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 Unknown or malformed IDs return `404 not_found`, always after authentication. Try it with a synthetic bot:
 
 ```sh
-TOKEN="$(cat ~/.local/share/else-bot/owner-token)"
-curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)" |
+	curl -s -H @- -H 'Content-Type: application/json' \
 	-d "{\"request_id\":\"$(uuidgen)\",\"name\":\"Work\",\"role\":\"Help with my work\"}" \
 	http://127.0.0.1:7878/v1/bots
 ```
@@ -132,6 +132,8 @@ The API has three independent kinds of credential. Do not substitute one for ano
 | Owner token | The desktop and trusted owner tooling | Every `/v1` route, sent as exactly one `Authorization: Bearer <token>` header. The API keeps only its SHA-256 digest and compares in constant time. |
 | `SECRET_KEY` | The API process only | Encrypts recoverable secrets and backups in later tasks. It authenticates no request. |
 | Task grant | One restricted provider session, in a later task | Its own bot, conversation, and tool allowlist. It cannot use owner routes. Not implemented yet. |
+
+The examples pipe the header through `printf`, a shell builtin, so the token never appears in a process argument list. Avoid `curl -H "Authorization: Bearer $TOKEN"`.
 
 Missing, malformed, duplicated, or wrong bearer headers receive `401` with `WWW-Authenticate: Bearer`, including on unknown `/v1` paths. Tokens in query strings are ignored. After 30 failed attempts in a minute, further failures receive `429` with `Retry-After`; the valid token still works. Requests carrying an `Origin` header receive `403`, and a `Host` that is not a loopback name receives `400`. The Host port is not checked, so a tunnel's local port works. Provider processes will never inherit either credential.
 

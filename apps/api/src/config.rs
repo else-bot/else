@@ -72,8 +72,10 @@ pub trait Source {
 pub struct ProcessEnv;
 
 impl Source for ProcessEnv {
+    /// An empty variable is returned as supplied, so an explicitly empty
+    /// override (for example `SECRET_KEY=`) is rejected rather than ignored.
     fn get(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
+        std::env::var(name).ok()
     }
 }
 
@@ -175,10 +177,11 @@ fn absolute_path(name: &'static str, value: String) -> Result<PathBuf, ConfigErr
 }
 
 fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
-    if let Some(xdg) = source.get("XDG_DATA_HOME") {
+    // The XDG specification treats an empty value as unset.
+    if let Some(xdg) = source.get("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return Ok(absolute_path("XDG_DATA_HOME", xdg)?.join("else-bot"));
     }
-    match source.get("HOME") {
+    match source.get("HOME").filter(|v| !v.is_empty()) {
         Some(home) => Ok(absolute_path("HOME", home)?.join(".local/share/else-bot")),
         None => Err(invalid(
             "ELSE_DATA_DIR",
@@ -287,6 +290,21 @@ pub mod tests {
                 .to_string()
                 .starts_with("DATABASE_URL")
         );
+    }
+
+    #[test]
+    fn empty_overrides_are_not_ignored() {
+        let config = Config::load(&MapSource::new(&[("HOME", "/h"), ("SECRET_KEY", "")])).unwrap();
+        let err = crate::credentials::load_secret_key(&config.secret_key).unwrap_err();
+        assert!(
+            err.to_string().contains("SECRET_KEY environment variable"),
+            "{err}"
+        );
+        assert!(Config::load(&MapSource::new(&[("HOME", "/h"), ("ELSE_API_BIND", "")])).is_err());
+        assert!(Config::load(&MapSource::new(&[("HOME", "/h"), ("ELSE_DATA_DIR", "")])).is_err());
+        let config =
+            Config::load(&MapSource::new(&[("HOME", "/h"), ("XDG_DATA_HOME", "")])).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("/h/.local/share/else-bot"));
     }
 
     #[test]
