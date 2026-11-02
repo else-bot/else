@@ -174,3 +174,349 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         .output();
     }
 }
+
+/// POC-018: the desktop image, guest tools, jobs, artifacts, the browser,
+/// desktop access, isolation, and persistence across stop and start. Needs
+/// the image built: `docker build -t else-guest:1 infra/guest`.
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_tools_desktop_and_isolation() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let msb_bin = format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap());
+    let home = dir.path().join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let tar = dir.path().join("guest.tar");
+    assert!(
+        std::process::Command::new("docker")
+            .args(["save", "else-guest:1", "-o"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new(&msb_bin)
+            .env("MSB_HOME", &home)
+            .args(["load", "-q", "-t", "else-guest:1", "-i"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let app = TestApp::installed().await;
+    let _cleanup = Cleanup {
+        msb: msb_bin.clone(),
+        home: home.clone(),
+        names: std::sync::Mutex::default(),
+    };
+    let config = ComputerConfig {
+        image: "else-guest:1".into(),
+        desktop: true,
+        idle_after: Duration::ZERO,
+        state_dir: dir.path().to_owned(),
+        ..ComputerConfig::default()
+    };
+    let manager = ComputerManager::new(
+        app.db.pool.clone(),
+        Arc::new(Msb::detect(dir.path(), None).unwrap()),
+        config,
+    );
+    manager.reconcile_startup().await.unwrap();
+    let bot: Uuid = app.create_bot("Desk", "desktop").await.parse().unwrap();
+    _cleanup
+        .names
+        .lock()
+        .unwrap()
+        .push(ComputerManager::runtime_name(bot));
+    let run = |command: &'static str| {
+        manager.run_command(bot, "test:turn", command, Duration::from_secs(60))
+    };
+
+    // Commands run as the unprivileged guest user in its work directory.
+    let out = run("whoami; pwd; echo GUEST-OK > made.txt; cat made.txt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        out.stdout.trim(),
+        "elsebot\n/home/elsebot/work\nGUEST-OK",
+        "{}",
+        out.stderr
+    );
+    // Services came up (supervised, after the boot).
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let services = run("ps -eo comm | sort -u | tr '\\n' ' '")
+        .await
+        .unwrap()
+        .unwrap()
+        .stdout;
+    for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
+        assert!(services.contains(service), "{service} missing: {services}");
+    }
+
+    // Isolation: no host credentials or runtime tools; metadata, private,
+    // and host networks are denied; the public internet works.
+    let checks = run(
+        "ls /root/.codex /home/elsebot/.codex /run/secrets 2>&1 | grep -cE 'No such|Permission denied'; \
+         command -v msb codex claude docker || echo none; \
+         for u in http://169.254.169.254/ http://10.0.0.1/ http://172.16.0.1/ http://192.168.1.1/; do \
+           curl -s -m 4 \"$u\" | grep -q network_policy_denied && echo denied || echo REACHED; done; \
+         curl -s -o /dev/null -m 8 -w '%{http_code}' https://example.com",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    eprintln!("isolation checks:\n{}", checks.stdout);
+    let lines: Vec<&str> = checks.stdout.lines().collect();
+    assert_eq!(lines[0], "3", "no credential directory is readable");
+    assert_eq!(lines[1], "none", "no runtime or provider tools");
+    assert!(lines[2..6].iter().all(|l| *l == "denied"), "{lines:?}");
+    // A host canary listening on every interface sees nothing.
+    let canary = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    canary.set_nonblocking(true).unwrap();
+    let port = canary.local_addr().unwrap().port();
+    let host_ip = std::process::Command::new("sh")
+        .args(["-c", "ip -4 route get 1.1.1.1 | grep -oP 'src \\K[0-9.]+'"])
+        .output()
+        .unwrap();
+    let host_ip = String::from_utf8_lossy(&host_ip.stdout).trim().to_owned();
+    let probe = format!("curl -s -m 4 http://{host_ip}:{port}/ || echo unreachable");
+    let out = manager
+        .run_command(bot, "test:turn", &probe, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        canary.accept().is_err(),
+        "the host canary was reached: {}",
+        out.stdout
+    );
+
+    // A background job outlives the turn's lease, then releases the computer.
+    let started = manager
+        .start_job(
+            bot,
+            None,
+            "sleep 4; echo JOB-DONE > job.txt",
+            Duration::from_secs(120),
+        )
+        .await
+        .unwrap();
+    let else_api::computers::jobs::Started::Job(job) = started else {
+        panic!("{started:?}")
+    };
+    let turn_lease: Uuid = sqlx::query_scalar(
+        "SELECT id FROM computer_leases WHERE bot_id = $1 AND holder = 'test:turn' AND released_at IS NULL",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    manager.release(turn_lease).await.unwrap();
+    let never = tokio_util::sync::CancellationToken::new();
+    manager.tick(&never).await.unwrap();
+    assert_eq!(
+        manager
+            .runtime_state(&ComputerManager::runtime_name(bot))
+            .await
+            .unwrap(),
+        Some(RuntimeState::Running),
+        "the job keeps the computer"
+    );
+    let mut done = None;
+    for _ in 0..30 {
+        let state = manager.job(bot, job).await.unwrap().unwrap();
+        if state.status != "running" {
+            done = Some(state);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let done = done.expect("the job finished");
+    assert_eq!(
+        (done.status.as_str(), done.exit_code),
+        ("completed", Some(0))
+    );
+
+    // Artifact transfer to the host store.
+    let (lease, _) = ready(&manager, bot, "test:turn2").await;
+    let (artifact, size, sha, preview) = manager
+        .fetch_artifact(lease, bot, None, "/home/elsebot/work/job.txt", 1 << 20)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((size, preview.trim()), (9, "JOB-DONE"));
+    let stored = std::fs::read(
+        dir.path()
+            .join("artifacts")
+            .join(bot.to_string())
+            .join(artifact.to_string()),
+    )
+    .unwrap();
+    use sha2::Digest;
+    let hex: String = sha2::Sha256::digest(&stored)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(hex, sha);
+
+    // The browser operates a local page; its storage persists across a stop.
+    let page = "<html><head><title>Probe Page</title></head><body>\
+        <input id='q'><button id='b' onclick=\"localStorage.setItem('kept', document.getElementById('q').value); \
+        document.body.insertAdjacentHTML('beforeend', '<p>CLICKED-' + document.getElementById('q').value + '</p>')\">go</button>\
+        </body></html>";
+    manager
+        .write_file(lease, "/home/elsebot/work/site/page.html", page)
+        .await
+        .unwrap();
+    let reader = "<html><body><script>document.write('KEPT=' + localStorage.getItem('kept'))</script></body></html>";
+    manager
+        .write_file(lease, "/home/elsebot/work/site/read.html", reader)
+        .await
+        .unwrap();
+    // A local site gives the pages one stable origin.
+    manager
+        .run_command(
+            bot,
+            "test:turn2",
+            "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let opened = manager
+        .browser(lease, &["open", "http://127.0.0.1:8765/page.html"])
+        .await
+        .unwrap();
+    assert!(
+        opened.stdout.contains("Probe Page"),
+        "{} {}",
+        opened.stdout,
+        opened.stderr
+    );
+    manager
+        .browser(lease, &["type", "#q", "hello"])
+        .await
+        .unwrap();
+    let clicked = manager.browser(lease, &["click", "#b"]).await.unwrap();
+    assert!(
+        clicked.stdout.contains("CLICKED-hello"),
+        "{}",
+        clicked.stdout
+    );
+
+    // Desktop: loopback noVNC; VNC requires the password.
+    let desktop = manager.desktop(bot).await.unwrap().unwrap();
+    assert!(desktop.url.starts_with("http://127.0.0.1:"));
+    let port: u16 = desktop
+        .url
+        .split(':')
+        .nth(2)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let rfb = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(format!(
+            "import socket,base64,os\n\
+s=socket.create_connection(('127.0.0.1',{port}),timeout=5)\n\
+k=base64.b64encode(os.urandom(16)).decode()\n\
+s.send(('GET /websockify HTTP/1.1\\r\\nHost: x\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Key: '+k+'\\r\\nSec-WebSocket-Version: 13\\r\\nSec-WebSocket-Protocol: binary\\r\\n\\r\\n').encode())\n\
+h=b''\n\
+while b'\\r\\n\\r\\n' not in h: h+=s.recv(1)\n\
+def frame():\n    b=s.recv(2); n=b[1]&127\n    return s.recv(n)\n\
+v=frame()\n\
+m=os.urandom(4); d=v\n\
+s.send(bytes([0x82,0x80|len(d)])+m+bytes(c^m[i%4] for i,c in enumerate(d)))\n\
+t=frame()\n\
+print(v.decode().strip(), list(t[1:1+t[0]]))"
+        ))
+        .output()
+        .unwrap();
+    let rfb = String::from_utf8_lossy(&rfb.stdout).trim().to_owned();
+    eprintln!("RFB: {rfb}");
+    assert!(rfb.starts_with("RFB 003.008"), "{rfb}");
+    assert!(
+        rfb.ends_with("[2]"),
+        "only VNC password authentication is offered: {rfb}"
+    );
+    assert_eq!(desktop.password.len(), 8);
+    manager.close_desktop(bot).await.unwrap();
+
+    // Stop and start: files and browser storage survive.
+    manager.release(lease).await.unwrap();
+    manager.owner_stop(bot).await.unwrap();
+    manager.owner_resume(bot).await.unwrap();
+    let (lease, _) = ready(&manager, bot, "test:turn3").await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let kept = manager
+        .run_command(
+            bot,
+            "test:turn3",
+            "cat made.txt job.txt",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.stdout.trim(), "GUEST-OK\nJOB-DONE");
+    manager
+        .run_command(
+            bot,
+            "test:turn3",
+            "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let read = manager
+        .browser(lease, &["open", "http://127.0.0.1:8765/read.html"])
+        .await
+        .unwrap();
+    assert!(
+        read.stdout.contains("KEPT=hello"),
+        "browser state survived: {} {}",
+        read.stdout,
+        read.stderr
+    );
+    manager.release(lease).await.unwrap();
+
+    // Cleanup of this test's own runtime home only.
+    let name = ComputerManager::runtime_name(bot);
+    for args in [["stop", name.as_str()], ["rm", name.as_str()]] {
+        let _ = std::process::Command::new(&msb_bin)
+            .env("MSB_HOME", &home)
+            .args(args)
+            .output();
+    }
+}
+
+/// Stops and removes this test's computers from its own runtime home, even
+/// when the test fails (before the temporary home is deleted).
+struct Cleanup {
+    msb: String,
+    home: std::path::PathBuf,
+    names: std::sync::Mutex<Vec<String>>,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for name in self.names.lock().unwrap().iter() {
+            for args in [["stop", "--force"].as_slice(), ["rm"].as_slice()] {
+                let _ = std::process::Command::new(&self.msb)
+                    .env("MSB_HOME", &self.home)
+                    .args(args)
+                    .arg(name)
+                    .output();
+            }
+        }
+    }
+}

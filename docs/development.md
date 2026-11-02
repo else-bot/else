@@ -187,7 +187,20 @@ Each bot gets one persistent micro-VM, created on its first permitted use (POC-0
 | `POST /v1/bots/{id}/computer/stop` | Owner stop: revokes leases, stops the computer, and blocks implicit wake. |
 | `POST /v1/bots/{id}/computer/resume` | Clears an owner stop; the computer starts again only on next use. |
 
-Live checks boot real VMs and run only on request: `ELSE_LIVE_VM=1 cargo test -p else-api --test computers_live -- --nocapture`.
+New computers use Microsandbox's `public` network profile (`ELSE_VM_NETWORK`): the internet is reachable, while the host, private ranges (including other bots' computers), and link-local metadata addresses are refused by the runtime's network policy.
+
+#### Desktop image and guest tools
+
+`infra/guest` defines the desktop image (POC-018): Debian trixie (pinned by digest) with Chromium, Xvfb, Openbox, xterm, x11vnc, noVNC/websockify, and supervisord. `scripts/build-guest-image.sh [DATA_DIR]` builds it with Docker and loads it into the API's runtime home; then set `ELSE_VM_IMAGE=else-guest:1` and `ELSE_VM_DESKTOP=1`. For a desktop computer the API picks a free host loopback port for noVNC and writes a random VNC password to a private host file (`$ELSE_DATA_DIR/computers/<bot>/vnc.pass`, 0600) that is copied into the guest at creation. After each create or start (not a resume) it runs `else-init`, which starts supervisord as a daemon (the runtime's agent stays PID 1, so its graceful stop works) and is a no-op while the services run. Before stopping a running desktop it runs `else-checkpoint`, which closes Chromium cleanly so its profile is flushed and unlocked. VNC listens on guest loopback only and requires the password; Chromium's DevTools listens on guest loopback only and is never published; noVNC is published on host loopback only.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /v1/bots/{id}/desktop` | Holds the computer with a renewable `desktop:` lease (call again to renew) and returns `{url, password, lease_seconds}`: `http://127.0.0.1:<port>/vnc.html?autoconnect=1&resize=scale`. `409 computer_stopped` after an owner stop. |
+| `DELETE /v1/bots/{id}/desktop` | Ends the desktop lease. |
+
+Every turn's grant includes the computer tools, always for its own bot's computer: `computer_run` (a shell command in `/home/elsebot/work` as the unprivileged `elsebot` user, up to 300 s, stdout and stderr each cut to their last 6 KB and marked), `computer_job_start` / `computer_job` / `computer_job_cancel` (background jobs with IDs, at most 4 per bot, a deadline of up to 6 hours, files under `/var/lib/elsebot/jobs/<id>`, run in their own session and cancelled as a process group), `computer_write_file` (64 KB text) and `computer_read_file` (12 KB slices), `computer_fetch` (up to 10 MB into the host artifact store `$ELSE_DATA_DIR/artifacts/<bot>/<id>`, registered in `artifacts` with its SHA-256), and `computer_browser` (open, text, title, click, type through DevTools inside the guest). Tool calls hold the turn's `turn:<id>` lease; a background job holds its own `job:<id>` lease, so it keeps the computer running after the turn ends, and maintenance polls it, records its exit code and output tail, enforces its deadline, and releases the lease. A job whose computer was stopped is `lost`. Codex sees these tools in its instructions (prompt `else-codex-v4`); the server's tools are pre-approved in Codex's configuration because the API authorizes each call.
+
+Live checks boot real VMs and run only on request: `ELSE_LIVE_VM=1 cargo test -p else-api --test computers_live -- --nocapture` (the guest test needs `docker build -t else-guest:1 infra/guest` first).
 
 ### Events and reconnecting
 

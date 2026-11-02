@@ -28,6 +28,8 @@ pub enum Tool {
     ReadMemory,
     /// Hand a task to another registered bot (main bot only).
     Delegate,
+    /// Use the bot's own computer (commands, jobs, files, browser).
+    Computer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

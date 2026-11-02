@@ -19,6 +19,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bots/{bot_id}/computer", get(show))
         .route("/bots/{bot_id}/computer/stop", post(stop))
         .route("/bots/{bot_id}/computer/resume", post(resume))
+        .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
 }
 
 fn manager(state: &AppState) -> Result<&Arc<crate::computers::ComputerManager>, ApiError> {
@@ -122,4 +123,47 @@ fn computer_error(err: crate::computers::ComputerError) -> ApiError {
             )
         }
     }
+}
+
+/// Owner access to a bot's desktop: holds the computer with a renewable
+/// lease (call again to renew) and returns the loopback noVNC address and
+/// the computer's VNC password. Nothing is reachable without the password,
+/// and nothing listens beyond host loopback.
+async fn desktop(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    require_bot(&state, bot_id, true).await?;
+    match manager(&state)?
+        .desktop(bot_id)
+        .await
+        .map_err(computer_error)?
+    {
+        Ok(desktop) => Ok(Json(json!({
+            "url": desktop.url,
+            "password": desktop.password,
+            "lease_seconds": desktop.lease_seconds,
+        }))),
+        Err(crate::computers::Acquire::OwnerStopped) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "computer_stopped",
+            "The owner stopped this computer; resume it first.",
+        )),
+        Err(other) => Err(ApiError::unavailable(
+            "computer_unavailable",
+            format!("The desktop is not available now: {other:?}"),
+        )),
+    }
+}
+
+async fn close_desktop(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    require_bot(&state, bot_id, false).await?;
+    manager(&state)?
+        .close_desktop(bot_id)
+        .await
+        .map_err(computer_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }

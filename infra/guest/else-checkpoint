@@ -1,0 +1,9 @@
+#!/bin/sh
+# Before the computer stops: close Chromium cleanly so its profile (cookies,
+# storage, session) is flushed and no profile lock is left, then sync disks.
+# The else.bot API runs this before every stop of a desktop computer.
+if [ -S /run/elsebot/supervisor.sock ]; then
+    supervisorctl -c /etc/elsebot/supervisord.conf stop chromium >/dev/null 2>&1 || true
+fi
+sync
+echo checkpointed

@@ -17,6 +17,7 @@
 //! that inspection has succeeded. Provider CLIs and credentials stay on the
 //! host.
 
+pub mod jobs;
 pub mod runtime;
 
 use std::collections::HashMap;
@@ -49,7 +50,22 @@ pub struct ComputerConfig {
     pub idle_after: Duration,
     pub idle_action: IdleAction,
     pub lease_ttl: Duration,
+    /// Microsandbox network profile for new computers.
+    pub network: String,
+    /// The image runs the else.bot desktop (noVNC published to host
+    /// loopback, VNC password, services started after each boot).
+    pub desktop: bool,
+    /// Host directory for per-computer secrets (VNC passwords) and the
+    /// artifact store, private to the API.
+    pub state_dir: std::path::PathBuf,
 }
+
+/// Guest port of the desktop's noVNC (see infra/guest).
+pub const DESKTOP_GUEST_PORT: u16 = 6080;
+/// Starts the supervised desktop services; idempotent.
+pub const GUEST_INIT: &str = "/usr/local/bin/else-init";
+/// Closes the browser cleanly before a stop.
+pub const GUEST_CHECKPOINT: &str = "/usr/local/bin/else-checkpoint";
 
 impl Default for ComputerConfig {
     fn default() -> Self {
@@ -63,6 +79,9 @@ impl Default for ComputerConfig {
             idle_after: Duration::from_secs(600),
             idle_action: IdleAction::Stop,
             lease_ttl: Duration::from_secs(300),
+            network: "public".into(),
+            desktop: false,
+            state_dir: std::env::temp_dir().join("else-computers"),
         }
     }
 }
@@ -140,6 +159,15 @@ fn bounded(text: &str, max: usize) -> String {
         end -= 1;
     }
     text[..end].to_owned()
+}
+
+/// How the owner reaches a bot's desktop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Desktop {
+    pub lease_id: Uuid,
+    pub url: String,
+    pub password: String,
+    pub lease_seconds: u64,
 }
 
 pub struct ComputerManager {
@@ -298,19 +326,41 @@ impl ComputerManager {
 
         // The runtime call happens outside the database locks.
         let result = match wake {
-            Wake::Create => {
-                self.runtime
-                    .create(&Spec {
-                        name: row.runtime_name.clone(),
-                        image: row.image.clone(),
-                        cpus: row.cpus as u32,
-                        memory_mib: row.memory_mib as u32,
-                    })
-                    .await
-            }
+            Wake::Create => match self.desktop_resources(bot_id).await {
+                Ok((ports, files)) => {
+                    self.runtime
+                        .create(&Spec {
+                            name: row.runtime_name.clone(),
+                            image: row.image.clone(),
+                            cpus: row.cpus as u32,
+                            memory_mib: row.memory_mib as u32,
+                            network: self.config.network.clone(),
+                            ports,
+                            files,
+                        })
+                        .await
+                }
+                Err(err) => Err(err),
+            },
             Wake::Start => self.runtime.start(&row.runtime_name).await,
             Wake::Resume => self.runtime.resume(&row.runtime_name).await,
         };
+        // A fresh boot (not a resume) starts the desktop services.
+        if result.is_ok() && wake != Wake::Resume && self.config.desktop {
+            match self
+                .runtime
+                .exec(&row.runtime_name, GUEST_INIT, &[], Duration::from_secs(60))
+                .await
+            {
+                Ok(out) if out.status == Some(0) => {}
+                Ok(out) => {
+                    tracing::warn!(bot = %bot_id, stderr = %out.stderr, "guest services did not start")
+                }
+                Err(err) => {
+                    tracing::warn!(bot = %bot_id, error = %err, "guest services did not start")
+                }
+            }
+        }
         if let Err(err) = result {
             // What is actually there now? Record it; unknown keeps the
             // reservation until maintenance can tell.
@@ -350,6 +400,125 @@ impl ComputerManager {
             runtime_name: row.runtime_name,
             generation: next,
         })
+    }
+
+    /// For a desktop computer: a free host loopback port for noVNC (saved
+    /// with the computer) and a fresh VNC password in a private host file
+    /// that is copied into the guest.
+    async fn desktop_resources(
+        &self,
+        bot_id: Uuid,
+    ) -> Result<(Vec<(u16, u16)>, Vec<(std::path::PathBuf, String)>), RuntimeError> {
+        if !self.config.desktop {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let unavailable = |e: String| RuntimeError::Unavailable(e);
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map_err(|e| unavailable(e.to_string()))?
+            .port();
+        sqlx::query("UPDATE bot_computers SET desktop_port = $2 WHERE bot_id = $1")
+            .bind(bot_id)
+            .bind(port as i32)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
+        let password = self
+            .write_vnc_password(bot_id)
+            .map_err(|e| unavailable(e.to_string()))?;
+        Ok((
+            vec![(port, DESKTOP_GUEST_PORT)],
+            vec![(password, "/etc/elsebot/vnc.pass".into())],
+        ))
+    }
+
+    fn secret_dir(&self, bot_id: Uuid) -> std::path::PathBuf {
+        self.config
+            .state_dir
+            .join("computers")
+            .join(bot_id.to_string())
+    }
+
+    fn write_vnc_password(&self, bot_id: Uuid) -> std::io::Result<std::path::PathBuf> {
+        use base64::Engine;
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let dir = self.secret_dir(bot_id);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
+        let mut bytes = [0u8; 12];
+        getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        // VNC uses at most 8 characters of a password.
+        let password: String = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(bytes)
+            .chars()
+            .take(8)
+            .collect();
+        let path = dir.join("vnc.pass");
+        let temp = dir.join(format!(".vnc.pass.{}", Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        writeln!(file, "{password}")?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &path)?;
+        Ok(path)
+    }
+
+    /// Owner access to a desktop: hold the computer with a renewable
+    /// `desktop:` lease (an open VNC session counts as use) and return its
+    /// loopback address and VNC password. Calling again renews it.
+    pub async fn desktop(&self, bot_id: Uuid) -> Result<Result<Desktop, Acquire>, ComputerError> {
+        if !self.config.desktop {
+            return Ok(Err(Acquire::Unavailable {
+                reason: "this installation's computers have no desktop".into(),
+            }));
+        }
+        let acquired = self.acquire(bot_id, &format!("desktop:{bot_id}")).await?;
+        let Acquire::Ready { lease_id, .. } = acquired else {
+            return Ok(Err(acquired));
+        };
+        let port: Option<i32> =
+            sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = $1")
+                .bind(bot_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let password = std::fs::read_to_string(self.secret_dir(bot_id).join("vnc.pass"))
+            .map(|p| p.trim().to_owned())
+            .ok();
+        match (port, password) {
+            (Some(port), Some(password)) => Ok(Ok(Desktop {
+                lease_id,
+                url: format!("http://127.0.0.1:{port}/vnc.html?autoconnect=1&resize=scale"),
+                password,
+                lease_seconds: self.config.lease_ttl.as_secs(),
+            })),
+            _ => {
+                self.release(lease_id).await?;
+                Ok(Err(Acquire::Unavailable {
+                    reason: "this computer was created without a desktop".into(),
+                }))
+            }
+        }
+    }
+
+    /// End the owner's desktop session.
+    pub async fn close_desktop(&self, bot_id: Uuid) -> Result<(), ComputerError> {
+        let lease: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM computer_leases WHERE bot_id = $1 AND holder = $2 AND released_at IS NULL",
+        )
+        .bind(bot_id)
+        .bind(format!("desktop:{bot_id}"))
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(lease) = lease {
+            self.release(lease).await?;
+        }
+        Ok(())
     }
 
     async fn set_state(
@@ -685,6 +854,19 @@ impl ComputerManager {
             .await?;
         tx.commit().await?;
         tracing::info!(bot = %bot_id, ?reason, "computer transition");
+        // A desktop closes its browser cleanly first, so the profile is
+        // flushed and keeps no lock (pausing keeps processes as they are).
+        if self.config.desktop && action == IdleAction::Stop && row.observed_state == "running" {
+            let _ = self
+                .runtime
+                .exec(
+                    &row.runtime_name,
+                    GUEST_CHECKPOINT,
+                    &[],
+                    Duration::from_secs(30),
+                )
+                .await;
+        }
         let result = match action {
             IdleAction::Stop => self.runtime.stop(&row.runtime_name).await,
             IdleAction::Pause => self.runtime.pause(&row.runtime_name).await,
@@ -759,6 +941,9 @@ impl ComputerManager {
             let _op = self.op(bot).await;
             self.observe(bot).await?;
         }
+        if let Err(err) = self.poll_jobs(cancel).await {
+            tracing::warn!(error = %err, "polling guest jobs failed");
+        }
         let must_stop: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.bot_id FROM bot_computers c JOIN bots b ON b.id = c.bot_id
              WHERE c.observed_state IN ('running', 'paused', 'error')
@@ -813,6 +998,15 @@ impl ComputerManager {
                 sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1
                                 AND status IN ('preparing', 'sending', 'running', 'cancelling'))",
+                )
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await
+            }
+            "job" => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM guest_jobs WHERE id = $1
+                                    AND status IN ('starting', 'running'))",
                 )
                 .bind(id)
                 .fetch_one(&self.pool)

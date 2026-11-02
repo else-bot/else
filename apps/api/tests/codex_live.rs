@@ -998,3 +998,126 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
             .unwrap();
     assert_eq!(violations, 0);
 }
+
+/// POC-018: a host Codex session uses its own guest computer through
+/// else.bot tools: runs a synthetic command, retrieves an artifact, and
+/// operates a local browser page. Needs ELSE_LIVE_CODEX=1, ELSE_LIVE_VM=1,
+/// and the guest image (`docker build -t else-guest:1 infra/guest`).
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_uses_its_guest_computer_through_tools() {
+    if !live() || std::env::var("ELSE_LIVE_VM").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 and ELSE_LIVE_VM=1");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let msb_bin = format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap());
+    let home = data.join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let tar = dir.path().join("guest.tar");
+    assert!(
+        std::process::Command::new("docker")
+            .args(["save", "else-guest:1", "-o"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new(&msb_bin)
+            .env("MSB_HOME", &home)
+            .args(["load", "-q", "-t", "else-guest:1", "-i"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sandbox = HostSandbox::detect(&data).unwrap();
+    let (codex, auth) = codex_and_auth();
+    let codex = Arc::new(
+        Codex::detect(Some(sandbox), Some(codex), Some(auth))
+            .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
+    );
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let computers = Arc::new(else_api::computers::ComputerManager::new(
+        db.pool.clone(),
+        Arc::new(else_api::computers::runtime::Msb::detect(&data, None).unwrap()),
+        else_api::computers::ComputerConfig {
+            image: "else-guest:1".into(),
+            desktop: true,
+            state_dir: data.clone(),
+            ..Default::default()
+        },
+    ));
+    computers.reconcile_startup().await.unwrap();
+    let app = TestApp::with_parts(db, 2, Registry::new(vec![codex]), Some(computers.clone()));
+    let router = app.router.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let bot = app
+        .create_bot("Builder", "Runs small tasks on its computer")
+        .await;
+    let bot_id: Uuid = bot.parse().unwrap();
+
+    let (turn, status, text) = ask(
+        &app,
+        &bot,
+        "Synthetic test. On your computer: (1) run `echo GUEST-$((6*7)) > answer.txt && cat \
+         answer.txt`; (2) fetch answer.txt as an artifact and tell me its SHA-256; (3) write \
+         page.html containing an input with id q and a button with id b whose onclick appends \
+         a paragraph with the text BROWSER-OK plus the input value, open it in your browser, \
+         type 42 into #q, click #b, and tell me the visible page text. Reply briefly.",
+    )
+    .await;
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let activity: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+    )
+    .bind(bot_id)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    eprintln!("status {status} {error:?}\nreply: {text}\ntool activity: {activity:#?}");
+    let artifacts: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT guest_path, sha256 FROM artifacts WHERE bot_id = $1")
+            .bind(bot_id)
+            .fetch_all(&app.db.pool)
+            .await
+            .unwrap();
+    // Cleanup before asserting.
+    let name = else_api::computers::ComputerManager::runtime_name(bot_id);
+    for args in [
+        ["stop", "--force", name.as_str()].as_slice(),
+        ["rm", name.as_str()].as_slice(),
+    ] {
+        let _ = std::process::Command::new(&msb_bin)
+            .env("MSB_HOME", &home)
+            .args(args)
+            .output();
+    }
+    assert_eq!(status, "completed", "{error:?}");
+    assert!(text.contains("GUEST-42"), "{text}");
+    assert_eq!(artifacts.len(), 1, "one artifact fetched");
+    let sha: String = artifacts[0].1.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        text.contains(&sha[..12]),
+        "the reply reports the artifact hash {sha}: {text}"
+    );
+    assert!(
+        text.contains("BROWSER-OK42") || text.contains("BROWSER-OK 42"),
+        "{text}"
+    );
+    assert!(
+        activity.iter().any(|a| a.starts_with("computer_browser")),
+        "{activity:?}"
+    );
+}

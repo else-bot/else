@@ -38,7 +38,7 @@ Use the first usable POC as the default target. If the implementation request in
 - [x] [POC-015: Model compaction and memory quality](docs/implementation/03-assistant.md#poc-015-model-compaction-and-memory-quality)
 - [x] [POC-016: Asynchronous bot delegation](docs/implementation/03-assistant.md#poc-016-asynchronous-bot-delegation)
 - [x] [POC-017: On-demand VM lifecycle](docs/implementation/03-assistant.md#poc-017-on-demand-vm-lifecycle)
-- [ ] [POC-018: Guest tools and desktop environment](docs/implementation/03-assistant.md#poc-018-guest-tools-and-desktop-environment)
+- [x] [POC-018: Guest tools and desktop environment](docs/implementation/03-assistant.md#poc-018-guest-tools-and-desktop-environment)
 - [ ] [POC-019: Execution recovery and resource admission](docs/implementation/03-assistant.md#poc-019-execution-recovery-and-resource-admission)
 - [ ] [POC-020: Claude adapter and provider switching](docs/implementation/03-assistant.md#poc-020-claude-adapter-and-provider-switching)
 - [ ] [POC-021: Encrypted database backup and restore](docs/implementation/04-recovery.md#poc-021-encrypted-database-backup-and-restore)

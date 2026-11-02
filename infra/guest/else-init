@@ -1,0 +1,22 @@
+#!/bin/sh
+# Start the supervised desktop services, once per boot. The else.bot API runs
+# this after creating or starting the computer; running it again while the
+# services are up does nothing. The Microsandbox agent stays PID 1, so the
+# runtime's graceful stop works.
+set -e
+mkdir -p /run/elsebot /var/log/elsebot
+# /run is on the persistent disk: a pid file from an earlier boot may name a
+# reused pid, so the process must really be supervisord.
+pid="$(cat /run/elsebot/supervisord.pid 2>/dev/null || true)"
+if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = supervisord ]; then
+    echo already-running
+    exit 0
+fi
+rm -f /run/elsebot/supervisord.pid /run/elsebot/supervisor.sock /tmp/.X99-lock /tmp/.X11-unix/X99
+# Only the desktop user may read the VNC password.
+if [ -f /etc/elsebot/vnc.pass ]; then
+    chown elsebot:elsebot /etc/elsebot/vnc.pass
+    chmod 0600 /etc/elsebot/vnc.pass
+fi
+/usr/bin/supervisord -c /etc/elsebot/supervisord.conf
+echo started

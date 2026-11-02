@@ -634,9 +634,11 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     let mut expected = else_api::http::mcp::TOOL_NAMES.to_vec();
     expected.sort();
     assert_eq!(sorted, expected);
-    // Memory tools only read; delegation creates work and says so.
+    // Memory tools only read; delegation and guest actions say they act.
     for tool in listed.body["result"]["tools"].as_array().unwrap() {
-        let read_only = tool["name"] != "delegate";
+        let name = tool["name"].as_str().unwrap();
+        let read_only =
+            name.starts_with("memory_") || matches!(name, "computer_job" | "computer_read_file");
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }
 

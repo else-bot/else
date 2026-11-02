@@ -226,6 +226,16 @@ impl TestApp {
         max_active: usize,
         registry: else_api::providers::Registry,
     ) -> Self {
+        Self::with_parts(db, max_active, registry, None)
+    }
+
+    /// With bot computers attached to the API state.
+    pub fn with_parts(
+        db: std::sync::Arc<TestDb>,
+        max_active: usize,
+        registry: else_api::providers::Registry,
+        computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
+    ) -> Self {
         use std::sync::Arc;
         // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
         let _ = tracing_subscriber::fmt()
@@ -245,12 +255,16 @@ impl TestApp {
                 .clone()
                 .run(stop.clone(), std::time::Duration::from_secs(2)),
         );
-        let state = Arc::new(else_api::http::AppState::new(
+        let mut state = else_api::http::AppState::new(
             else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
             db.pool.clone(),
             scheduler.clone(),
             else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
-        ));
+        );
+        if let Some(computers) = computers {
+            state = state.with_computers(computers);
+        }
+        let state = Arc::new(state);
         let router = else_api::http::router(&config, state.clone());
         Self {
             router,

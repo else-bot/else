@@ -82,6 +82,20 @@ impl ComputerRuntime for Fake {
         computers.insert(spec.name.clone(), (RuntimeState::Running, HashMap::new()));
         Ok(())
     }
+    async fn copy_out(
+        &self,
+        name: &str,
+        guest: &str,
+        host: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        let computers = self.computers.lock().unwrap();
+        let content = computers
+            .get(name)
+            .and_then(|(_, f)| f.get(guest))
+            .cloned()
+            .unwrap_or_default();
+        std::fs::write(host, content).map_err(|e| RuntimeError::Unavailable(e.to_string()))
+    }
     async fn start(&self, name: &str) -> Result<(), RuntimeError> {
         self.log(format!("start {name}"));
         self.set(name, RuntimeState::Running)

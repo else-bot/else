@@ -277,9 +277,14 @@ impl Scheduler {
             input.conversation_id,
             turn_id,
             if input.delegation.can_delegate {
-                vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Delegate]
+                vec![
+                    Tool::ReadHistory,
+                    Tool::ReadMemory,
+                    Tool::Computer,
+                    Tool::Delegate,
+                ]
             } else {
-                vec![Tool::ReadHistory, Tool::ReadMemory]
+                vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]
             },
             memory_scope,
             TOOL_GRANT_TTL,

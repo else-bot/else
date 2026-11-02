@@ -36,6 +36,14 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_zoom",
     "memory_date",
     "delegate",
+    "computer_run",
+    "computer_job_start",
+    "computer_job",
+    "computer_job_cancel",
+    "computer_write_file",
+    "computer_read_file",
+    "computer_fetch",
+    "computer_browser",
 ];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
@@ -85,12 +93,16 @@ pub async fn endpoint(
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_list() })),
+        "tools/list" => {
+            let mut tools = tool_list().as_array().cloned().unwrap_or_default();
+            tools.extend(super::guest_tools::tool_list());
+            Ok(json!({ "tools": tools }))
+        }
         "tools/call" => {
-            let needs = if params["name"] == "delegate" {
-                Tool::Delegate
-            } else {
-                Tool::ReadMemory
+            let needs = match params["name"].as_str() {
+                Some("delegate") => Tool::Delegate,
+                Some(name) if name.starts_with("computer_") => Tool::Computer,
+                _ => Tool::ReadMemory,
             };
             if let Err(err) = check(&state, &grant, needs).await {
                 return err.into_response();
@@ -235,11 +247,11 @@ fn tool_list() -> Value {
 }
 
 /// A tool-level failure the model can read and act on.
-fn tool_error(message: &str) -> Value {
+pub(crate) fn tool_error(message: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": message }], "isError": true })
 }
 
-fn tool_result(value: Value) -> Value {
+pub(crate) fn tool_result(value: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": value.to_string() }] })
 }
 
@@ -316,7 +328,7 @@ async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, V
 
 /// The text from `start` (moved back to a character boundary) of at most
 /// `max` bytes, ending on a character boundary, with its normalized start.
-fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
+pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
     let mut from = start.min(text.len());
     while !text.is_char_boundary(from) {
         from -= 1;
@@ -364,6 +376,9 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
         "delegate" => delegate(state, grant, args).await,
+        name if name.starts_with("computer_") => {
+            super::guest_tools::call(state, grant, name, args).await
+        }
         _ => return tool_error("Unknown tool."),
     };
     if let Some(log) = log {
@@ -373,7 +388,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
 }
 
 /// Each tool returns its result and, when it ran, a short log line.
-type Outcome = (Value, Option<String>);
+pub(crate) type Outcome = (Value, Option<String>);
 
 async fn bots(state: &AppState, grant: &Grant) -> Outcome {
     match memory::readable_bots(&state.db, grant.bot_id).await {

@@ -177,6 +177,13 @@ impl Config {
                 Some(_) => return Err(invalid("ELSE_VM_IDLE_ACTION", "use stop or pause")),
             },
             lease_ttl: defaults.lease_ttl,
+            network: match source.get("ELSE_VM_NETWORK").as_deref() {
+                None | Some("public") => "public".into(),
+                Some("none") => "none".into(),
+                Some(_) => return Err(invalid("ELSE_VM_NETWORK", "use public or none")),
+            },
+            desktop: parse_bool(source, "ELSE_VM_DESKTOP")?,
+            state_dir: data_dir.clone(),
         };
         Ok(Self {
             msb_bin,

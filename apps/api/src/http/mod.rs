@@ -5,6 +5,7 @@ pub mod bots;
 pub mod computers;
 pub mod conversation;
 pub mod error;
+pub mod guest_tools;
 pub mod mcp;
 pub mod memory;
 pub mod settings;

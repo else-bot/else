@@ -66,6 +66,13 @@ pub struct Spec {
     pub image: String,
     pub cpus: u32,
     pub memory_mib: u32,
+    /// Microsandbox network profile (`public`: internet only, no host,
+    /// private, or link-local networks).
+    pub network: String,
+    /// Published ports as `127.0.0.1:HOST:GUEST` (host loopback only).
+    pub ports: Vec<(u16, u16)>,
+    /// Host files copied into the guest at creation: (host path, guest path).
+    pub files: Vec<(PathBuf, String)>,
 }
 
 #[async_trait]
@@ -86,6 +93,9 @@ pub trait ComputerRuntime: Send + Sync {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError>;
+
+    /// Copy a guest file to a host path.
+    async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
     async fn state(&self, name: &str) -> Result<Option<RuntimeState>, RuntimeError> {
         Ok(self
@@ -312,23 +322,34 @@ impl ComputerRuntime for Msb {
         }
         let cpus = spec.cpus.to_string();
         let memory = format!("{}M", spec.memory_mib);
-        // `--` keeps the image a positional argument, never an option.
-        self.control(
+        let mut args: Vec<String> = [
             "create",
-            &[
-                "create",
-                "--name",
-                &spec.name,
-                "--cpus",
-                &cpus,
-                "--memory",
-                &memory,
-                "--quiet",
-                "--",
-                &spec.image,
-            ],
-        )
-        .await
+            "--name",
+            &spec.name,
+            "--cpus",
+            &cpus,
+            "--memory",
+            &memory,
+            "--quiet",
+            "--net",
+            &spec.network,
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+        for (host, guest) in &spec.ports {
+            args.push("--port".into());
+            args.push(format!("127.0.0.1:{host}:{guest}"));
+        }
+        for (host, guest) in &spec.files {
+            args.push("--copy-file".into());
+            args.push(format!("{}:{guest}", host.display()));
+        }
+        // `--` keeps the image a positional argument, never an option.
+        args.push("--".into());
+        args.push(spec.image.clone());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.control("create", &args).await
     }
 
     async fn start(&self, name: &str) -> Result<(), RuntimeError> {
@@ -345,6 +366,13 @@ impl ComputerRuntime for Msb {
 
     async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
         self.control("resume", &["resume", name]).await
+    }
+
+    async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError> {
+        let source = format!("{name}:{guest}");
+        let host = host.display().to_string();
+        self.control("copy", &["copy", "--quiet", &source, &host])
+            .await
     }
 
     async fn exec(
