@@ -303,7 +303,7 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, up
 
 ### PostgreSQL tests
 
-`cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests. The replication tests (`--test replication`) likewise require the Compose S3 emulator and fail with a message naming it when it is not reachable; each uses its own bucket, and some stop or restart the `seaweedfs` container.
+`cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests. The whole-assistant acceptance run (`ELSE_LIVE_ACCEPTANCE=1`, `--test acceptance_live`) is described in [acceptance.md](implementation/acceptance.md). The replication tests (`--test replication`) likewise require the Compose S3 emulator and fail with a message naming it when it is not reachable; each uses its own bucket, and some stop or restart the `seaweedfs` container.
 
 ## Run the desktop
 
