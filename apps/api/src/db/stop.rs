@@ -75,6 +75,15 @@ pub async fn halt_accepted(
     }
     // Work delegated by those roots, and by the active one, ends too.
     crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
+    // So do the bot's background guest jobs: computer maintenance kills
+    // them and completes the stop once none remains.
+    sqlx::query(
+        "UPDATE guest_jobs SET status = 'cancelling'
+         WHERE bot_id = $1 AND status IN ('starting', 'running')",
+    )
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?;
     let active: Option<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = now()
          WHERE bot_id = $1 AND turn_no <= $2 AND status IN ('preparing', 'sending', 'running')
@@ -100,7 +109,8 @@ pub async fn halt_accepted(
 /// anything.
 pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status IN {ACTIVE_STATUSES})"
+        "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status IN {ACTIVE_STATUSES})
+             OR EXISTS (SELECT 1 FROM guest_jobs WHERE bot_id = $1 AND status = 'cancelling')"
     )))
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -203,12 +213,9 @@ pub async fn stop_work(
     Ok(StopReceipt {
         request_id,
         bot_id,
-        state: if interrupt.is_some() {
-            "pending"
-        } else {
-            "done"
-        }
-        .to_owned(),
+        // Done only if nothing remains to stop (no provider turn, no guest
+        // job still being cancelled).
+        state: if settled { "done" } else { "pending" }.to_owned(),
         interrupt,
         created: true,
     })

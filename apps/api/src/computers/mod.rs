@@ -114,6 +114,9 @@ pub enum ComputerError {
     NotRunning,
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
+    /// A test fault point stopped the operation (a simulated crash).
+    #[error("interrupted at a fault point")]
+    Interrupted,
 }
 
 /// States that hold a budget reservation: anything that is or may be live.
@@ -326,6 +329,9 @@ impl ComputerManager {
         self.set_state(&mut tx, bot_id, transient, Some(next), None)
             .await?;
         tx.commit().await?;
+        if crate::faults::hit("computer.after_start_decision") {
+            return Err(ComputerError::Interrupted);
+        }
 
         // The runtime call happens outside the database locks.
         let result = match wake {
@@ -722,6 +728,9 @@ impl ComputerManager {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        if crate::faults::hit("lease.after_renew") {
+            return Err(ComputerError::Interrupted);
+        }
         Ok(renewed == 1)
     }
 
@@ -919,6 +928,9 @@ impl ComputerManager {
         self.set_state(&mut tx, bot_id, transient, Some(row.generation + 1), None)
             .await?;
         tx.commit().await?;
+        if crate::faults::hit("computer.after_stop_decision") {
+            return Err(ComputerError::Interrupted);
+        }
         tracing::info!(bot = %bot_id, ?reason, "computer transition");
         // A desktop closes its browser cleanly first, so the profile is
         // flushed and keeps no lock (pausing keeps processes as they are).

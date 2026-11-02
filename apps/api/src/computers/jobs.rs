@@ -225,6 +225,9 @@ impl ComputerManager {
             .await?;
             tx.commit().await?;
         }
+        if crate::faults::hit("job.after_insert") {
+            return Err(ComputerError::Interrupted);
+        }
         let acquired = self.acquire(bot_id, &format!("job:{id}")).await?;
         let Acquire::Ready { lease_id, .. } = acquired else {
             self.fail_start(id, "the computer was not available")
@@ -240,6 +243,9 @@ impl ComputerManager {
         let launched = self
             .guest(lease_id, LAUNCH, &[&dir, command], Duration::from_secs(30))
             .await;
+        if crate::faults::hit("job.after_launch") {
+            return Err(ComputerError::Interrupted);
+        }
         match launched {
             Ok(out) if out.stdout.contains("launched") => {
                 sqlx::query("UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'")
@@ -357,7 +363,7 @@ impl ComputerManager {
     ) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE guest_jobs SET status = $2, exit_code = $3, output_tail = $4, finished_at = now()
-             WHERE id = $1 AND status IN ('starting', 'running')",
+             WHERE id = $1 AND status IN ('starting', 'running', 'cancelling')",
         )
         .bind(job_id)
         .bind(status)
@@ -385,7 +391,8 @@ impl ComputerManager {
         let Some((status, lease)) = found else {
             return Ok(None);
         };
-        if let (true, Some(lease)) = (matches!(status.as_str(), "starting" | "running"), lease) {
+        let live = matches!(status.as_str(), "starting" | "running" | "cancelling");
+        if let (true, Some(lease)) = (live, lease) {
             let dir = format!("{JOBS_DIR}/{job_id}");
             match self
                 .guest(lease, KILL, &[&dir], Duration::from_secs(30))
@@ -398,6 +405,7 @@ impl ComputerManager {
                 Err(ComputerError::LeaseEnded | ComputerError::NotRunning) => {
                     self.finish_job(job_id, "lost", None, "", lease).await?;
                 }
+                Ok(out) if status == "cancelling" && out.stdout.trim().is_empty() => {}
                 Ok(out) => {
                     sqlx::query("UPDATE guest_jobs SET error = $2 WHERE id = $1")
                         .bind(job_id)
@@ -420,7 +428,7 @@ impl ComputerManager {
     pub(super) async fn poll_jobs(&self, cancel: &CancellationToken) -> Result<(), ComputerError> {
         let jobs: Vec<(Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as(
             "SELECT id, bot_id, lease_id, status, deadline < now() FROM guest_jobs
-             WHERE status = 'running'
+             WHERE status IN ('running', 'cancelling')
                 OR (status = 'starting' AND started_at < now() - make_interval(secs => $1))",
         )
         .bind(STALE_START.as_secs_f64())
@@ -435,7 +443,19 @@ impl ComputerManager {
                     // Interrupted before it had a lease: nothing launched.
                     return self.fail_start(job, "interrupted before launch").await;
                 };
-                if overdue {
+                if status == "cancelling" {
+                    // A bot-wide Stop work or deletion: kill it, then let
+                    // the stop complete if nothing else remains.
+                    self.cancel_job(bot, job).await?;
+                    let mut tx = self.pool.begin().await?;
+                    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+                        .bind(bot)
+                        .execute(&mut *tx)
+                        .await?;
+                    crate::db::stop::settle(&mut tx, bot).await?;
+                    tx.commit().await?;
+                    Ok(())
+                } else if overdue {
                     sqlx::query("UPDATE guest_jobs SET error = 'deadline exceeded' WHERE id = $1")
                         .bind(job)
                         .execute(&self.pool)
