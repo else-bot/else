@@ -186,6 +186,19 @@ cargo run -p else-desktop
 | `ELSE_OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The owner token written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
 | `ELSE_OWNER_TOKEN` | unset | Token value for a development launcher. Takes precedence over the file. Prefer the file. |
 
+The window lists bots on the left and the selected conversation on the right. New bot opens a dialog for the name and role; deleting asks for confirmation, keeps history, and shows the bot as Deleting until its work has stopped. The header shows a provider choice for the next message, Stop work while the bot is busy, and Delete. Replies stream into the transcript as the API commits them; per-turn notes show Queued, Working, Stopped, Failed, or Outcome unknown. Drafts are kept per bot while the desktop runs. A message whose send outcome is unknown stays visible as Not confirmed with Retry; after reconnecting the desktop asks the API whether it arrived and resends it under the same request ID only if it did not. The view follows new output only while it is at the bottom.
+
+| Keys | Action |
+| --- | --- |
+| Up/Down, Ctrl+N/Ctrl+P | Select the next or previous bot while the sidebar has focus |
+| Enter (sidebar) / Escape (composer) | Move focus to the composer / back to the sidebar |
+| Enter / Shift+Enter | Send / insert a new line |
+| Ctrl+Shift+N | New bot |
+| Ctrl+Shift+X | Stop work |
+| Ctrl+Shift+D | Delete the selected bot |
+| Ctrl+Shift+P | Cycle the provider for the next message |
+| Ctrl+Shift+Up | Load older messages |
+
 The token is sent only as an `Authorization` header to the configured origin. Redirects are never followed, and the token never appears in URLs, logs, or messages. A missing or invalid configuration, a rejected token, or an unreachable API is shown in the sidebar; loaded bots stay visible while the desktop retries. The sidebar refreshes every three seconds. Up/Down (or Ctrl+N/Ctrl+P) move the selection while the sidebar has focus. Closing the window quits the desktop; work already accepted by the API keeps running.
 
 `scripts/demo.sh` runs a disposable installation for manual checks, with its own `else_demo` database and `/tmp/else-demo` data directory and the synthetic provider enabled: `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop` in separate terminals. `scripts/demo.sh drop` removes it.

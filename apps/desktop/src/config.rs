@@ -108,6 +108,7 @@ pub enum TokenSource {
 }
 
 impl TokenSource {
+    #[cfg(test)]
     pub fn describe(&self) -> String {
         match self {
             Self::Env => "ELSE_OWNER_TOKEN".into(),

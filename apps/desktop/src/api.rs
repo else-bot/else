@@ -13,7 +13,12 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use futures_util::StreamExt as _;
+use serde_json::json;
+
 use crate::config::{Origin, OwnerToken};
+use crate::model::{Item, Snapshot, Turn};
+use crate::sse::{Frame, Parser};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderInfo {
@@ -26,15 +31,10 @@ pub struct ProviderInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Limits {
     pub max_text_bytes: usize,
-    pub max_queued_turns: usize,
-    pub max_bot_name_chars: usize,
-    pub max_bot_role_bytes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Capabilities {
-    pub api_version: String,
-    pub server_instance_id: Uuid,
     pub default_provider_id: Option<String>,
     pub providers: Vec<ProviderInfo>,
     pub limits: Limits,
@@ -83,6 +83,32 @@ pub struct BotList {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct BotEnvelope {
+    bot: Bot,
+}
+
+/// The server's canonical owner item and turn for an accepted message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Sent {
+    pub item: Item,
+    pub turn: Turn,
+}
+
+/// Messages from a bot's event-stream subscription.
+#[derive(Debug, Clone)]
+pub enum StreamMessage {
+    Connected,
+    Frame(Frame),
+    /// Retrying after this problem; loaded history stays visible.
+    Disconnected(String),
+    /// The cursor is no longer valid: load a fresh snapshot.
+    Reset,
+    /// The bot was deleted.
+    Deleted,
+    Unauthorized,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ErrorBody {
     error: ErrorDetail,
 }
@@ -114,6 +140,7 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    #[cfg(test)]
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api { code, .. } => Some(code),
@@ -156,10 +183,6 @@ impl Client {
             auth,
             runtime,
         }
-    }
-
-    pub fn origin(&self) -> &Origin {
-        &self.origin
     }
 
     /// Run a future on the client's runtime and await it from any executor.
@@ -227,6 +250,189 @@ impl Client {
             this.send_json(request).await.map(|(_, caps)| caps)
         })
         .await
+    }
+
+    async fn call<T: DeserializeOwned + Send + 'static>(
+        self: Arc<Self>,
+        method: Method,
+        path: String,
+        body: Option<serde_json::Value>,
+    ) -> Result<(StatusCode, T), ClientError> {
+        let this = self.clone();
+        self.run(async move {
+            let mut request = this.request(method, &path);
+            if let Some(body) = body {
+                request = request.json(&body);
+            }
+            this.send_json(request).await
+        })
+        .await
+    }
+
+    pub async fn snapshot(
+        self: Arc<Self>,
+        bot: Uuid,
+        before_seq: Option<i64>,
+    ) -> Result<Snapshot, ClientError> {
+        let path = match before_seq {
+            Some(seq) => format!("/v1/bots/{bot}/conversation?limit=50&before_seq={seq}"),
+            None => format!("/v1/bots/{bot}/conversation?limit=50"),
+        };
+        self.call(Method::GET, path, None).await.map(|(_, s)| s)
+    }
+
+    pub async fn send(
+        self: Arc<Self>,
+        bot: Uuid,
+        request_id: Uuid,
+        text: String,
+        provider_id: Option<String>,
+    ) -> Result<Sent, ClientError> {
+        let body = json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
+        self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
+            .await
+            .map(|(_, sent)| sent)
+    }
+
+    /// Resolve a send whose response was lost. `Ok(None)` means the server
+    /// has no record of it, so it was not accepted.
+    pub async fn by_request(
+        self: Arc<Self>,
+        bot: Uuid,
+        request_id: Uuid,
+    ) -> Result<Option<Sent>, ClientError> {
+        let path = format!("/v1/bots/{bot}/turns/by-request/{request_id}");
+        match self.call(Method::GET, path, None).await {
+            Ok((_, sent)) => Ok(Some(sent)),
+            Err(ClientError::Api { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn cancel(
+        self: Arc<Self>,
+        bot: Uuid,
+        request_id: Uuid,
+    ) -> Result<String, ClientError> {
+        let body = json!({ "request_id": request_id });
+        self.call::<serde_json::Value>(Method::POST, format!("/v1/bots/{bot}/cancel"), Some(body))
+            .await
+            .map(|(_, v)| v["state"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub async fn create_bot(
+        self: Arc<Self>,
+        request_id: Uuid,
+        name: String,
+        role: String,
+    ) -> Result<Bot, ClientError> {
+        let body = json!({ "request_id": request_id, "name": name, "role": role });
+        self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(body))
+            .await
+            .map(|(_, v)| v.bot)
+    }
+
+    pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {
+        self.call::<BotEnvelope>(Method::DELETE, format!("/v1/bots/{bot}"), None)
+            .await
+            .map(|(_, v)| v.bot)
+    }
+
+    /// Follow the bot's event stream from `cursor`, reconnecting with
+    /// backoff, until `messages` is dropped or the stream cannot continue.
+    pub fn subscribe(
+        self: Arc<Self>,
+        bot: Uuid,
+        cursor: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<StreamMessage> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let this = self.clone();
+        self.runtime
+            .spawn(async move { this.follow(bot, cursor, tx).await });
+        rx
+    }
+
+    async fn follow(
+        &self,
+        bot: Uuid,
+        mut cursor: String,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamMessage>,
+    ) {
+        let mut backoff = Duration::from_millis(500);
+        loop {
+            let request = self
+                .request(Method::GET, &format!("/v1/bots/{bot}/events"))
+                .header("last-event-id", &cursor);
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    backoff = Duration::from_millis(500);
+                    if tx.send(StreamMessage::Connected).is_err() {
+                        return;
+                    }
+                    let mut parser = Parser::default();
+                    let mut body = response.bytes_stream();
+                    loop {
+                        let chunk = tokio::select! {
+                            _ = tx.closed() => return,
+                            chunk = body.next() => chunk,
+                        };
+                        let Some(Ok(bytes)) = chunk else { break };
+                        let Ok(frames) = parser.push(&bytes) else {
+                            let _ = tx.send(StreamMessage::Reset);
+                            return;
+                        };
+                        for frame in frames {
+                            if let Some(id) = &frame.id {
+                                cursor = id.clone();
+                            }
+                            if tx.send(StreamMessage::Frame(frame)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    // EOF: deletion or a server restart. The next attempt
+                    // reports which.
+                    let _ = tx.send(StreamMessage::Disconnected(
+                        "The event stream ended.".into(),
+                    ));
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let code = response
+                        .json::<ErrorBody>()
+                        .await
+                        .map(|b| b.error.code)
+                        .unwrap_or_default();
+                    let terminal = match (status.as_u16(), code.as_str()) {
+                        (401, _) => Some(StreamMessage::Unauthorized),
+                        (410, _) => Some(StreamMessage::Deleted),
+                        (409, "cursor_reset_required") | (400, _) => Some(StreamMessage::Reset),
+                        _ => None,
+                    };
+                    if let Some(message) = terminal {
+                        let _ = tx.send(message);
+                        return;
+                    }
+                    let _ = tx.send(StreamMessage::Disconnected(format!("HTTP {status}")));
+                }
+                Err(_) => {
+                    let _ = tx.send(StreamMessage::Disconnected(format!(
+                        "Cannot reach the API at {}.",
+                        self.origin.as_str()
+                    )));
+                }
+            }
+            if tx.is_closed() {
+                return;
+            }
+            // Exponential backoff with jitter, capped at 15 seconds.
+            let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) * 2);
+            tokio::select! {
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(backoff + jitter) => {}
+            }
+            backoff = (backoff * 2).min(Duration::from_secs(15));
+        }
     }
 
     pub async fn bots(self: Arc<Self>) -> Result<BotList, ClientError> {

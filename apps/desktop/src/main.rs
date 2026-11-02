@@ -1,10 +1,10 @@
 //! else.bot desktop: a native GPUI messaging client for the else.bot API.
 
-#[allow(dead_code)] // Messaging fields arrive with POC-009.
 mod api;
 mod app;
-#[allow(dead_code)]
 mod config;
+mod model;
+mod sse;
 
 use std::sync::Arc;
 
