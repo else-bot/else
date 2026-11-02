@@ -437,6 +437,8 @@ impl Client {
         /// Longer than the server's 15-second ping.
         const INACTIVITY: Duration = Duration::from_secs(45);
         const HANDSHAKE: Duration = Duration::from_secs(10);
+        /// A connection that lasted this long resets the reconnect backoff.
+        const STABLE: Duration = Duration::from_secs(30);
         // Wanted `bot:<id>` channels and the cursor to resume from.
         let mut wanted: HashMap<Uuid, String> = HashMap::new();
         let mut backoff = Duration::from_millis(500);
@@ -446,6 +448,17 @@ impl Client {
                     _ = events.closed() => return,
                     sent = events.send($event) => if sent.is_err() { return },
                 }
+            };
+        }
+        // Wait with jittered exponential backoff (500 ms to 15 s).
+        macro_rules! pause {
+            () => {
+                let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_bytes()[0]) * 2);
+                tokio::select! {
+                    _ = events.closed() => return,
+                    _ = tokio::time::sleep(backoff + jitter) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(15));
             };
         }
         loop {
@@ -474,16 +487,11 @@ impl Client {
                         "Cannot reach the API at {}.",
                         self.origin.as_str()
                     )));
-                    let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_bytes()[0]) * 2);
-                    tokio::select! {
-                        _ = events.closed() => return,
-                        _ = tokio::time::sleep(backoff + jitter) => {}
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(15));
+                    pause!();
                     continue;
                 }
             };
-            backoff = Duration::from_millis(500);
+            let connected_at = tokio::time::Instant::now();
             let subscribe = |channel: String, cursor: Option<&String>| {
                 Message::Text(
                     json!({ "op": "subscribe", "channel": channel, "cursor": cursor })
@@ -547,6 +555,12 @@ impl Client {
                 }
             };
             deliver!(LiveEvent::Disconnected(reason.into()));
+            // A server that accepts and then drops connections must not be
+            // hammered: only a connection that stayed up resets the backoff.
+            if connected_at.elapsed() >= STABLE {
+                backoff = Duration::from_millis(500);
+            }
+            pause!();
         }
     }
 
@@ -755,10 +769,13 @@ mod tests {
             live.events.recv().await,
             Some(LiveEvent::Disconnected(_))
         ));
+        let dropped = tokio::time::Instant::now();
         assert!(matches!(
             live.events.recv().await,
             Some(LiveEvent::Connected)
         ));
+        // A connection that dropped quickly is retried after a backoff.
+        assert!(dropped.elapsed() >= Duration::from_millis(500));
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut log = Vec::new();
         while let Ok(line) = seen.try_recv() {
