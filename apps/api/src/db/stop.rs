@@ -104,7 +104,8 @@ pub async fn halt_accepted(
         .await
 }
 
-/// Complete pending stops and deletion once no turn is active. Runs in the
+/// Complete pending stops and deletion once no turn and no cancelling guest
+/// job remains (and, for deletion, the computer is shut down). Runs in the
 /// caller's transaction under the bot row lock. Returns true if it changed
 /// anything.
 pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
@@ -126,10 +127,16 @@ pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     .execute(&mut *conn)
     .await?
     .rows_affected();
+    // A deletion completes only once the bot's computer is confirmed shut
+    // down; maintenance stops it and settles again.
     let bot = sqlx::query(
-        "UPDATE bots SET cancel_pending = false,
-             status = CASE WHEN status = 'deleting' THEN 'deleted' ELSE status END
-         WHERE id = $1 AND (cancel_pending OR status = 'deleting')",
+        "WITH down AS (SELECT NOT EXISTS (
+                 SELECT 1 FROM bot_computers WHERE bot_id = $1
+                   AND observed_state NOT IN ('absent', 'stopped', 'missing')) AS ok)
+         UPDATE bots SET cancel_pending = false,
+             status = CASE WHEN status = 'deleting' AND (SELECT ok FROM down)
+                 THEN 'deleted' ELSE status END
+         WHERE id = $1 AND (cancel_pending OR (status = 'deleting' AND (SELECT ok FROM down)))",
     )
     .bind(bot_id)
     .execute(&mut *conn)

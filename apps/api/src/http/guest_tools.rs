@@ -286,6 +286,10 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                     None,
                 ),
                 Ok(Started::NotReady(acquired)) => (not_ready(&acquired), None),
+                Ok(Started::Stopped) => (
+                    tool_error("STOPPED: this turn was stopped; no job was started."),
+                    None,
+                ),
                 Err(err) => failure(err),
             }
         }

@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use common::TestApp;
 use else_api::computers::runtime::Msb;
-use else_api::computers::{Acquire, ComputerConfig, ComputerManager, IdleAction, RuntimeState};
+use else_api::computers::{
+    Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, IdleAction,
+    RuntimeError, RuntimeState, Spec,
+};
 use uuid::Uuid;
 
 fn live() -> bool {
@@ -575,9 +578,67 @@ impl Drop for Cleanup {
     }
 }
 
+/// The real runtime with a gate in front of `create` and `start`, so a test
+/// can stop or delete a bot while its computer is booting.
+struct Gated {
+    inner: Msb,
+    entered: tokio::sync::Notify,
+    open: tokio::sync::Semaphore,
+}
+
+impl Gated {
+    async fn gate(&self) {
+        self.entered.notify_one();
+        self.open.acquire().await.unwrap().forget();
+    }
+}
+
+#[async_trait::async_trait]
+impl ComputerRuntime for Gated {
+    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
+        self.inner.list().await
+    }
+    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
+        self.gate().await;
+        self.inner.create(spec).await
+    }
+    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
+        self.gate().await;
+        self.inner.start(name).await
+    }
+    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
+        self.inner.stop(name).await
+    }
+    async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
+        self.inner.pause(name).await
+    }
+    async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
+        self.inner.resume(name).await
+    }
+    async fn exec(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        self.inner.exec(name, program, args, timeout).await
+    }
+    async fn copy_out(
+        &self,
+        name: &str,
+        guest: &str,
+        host: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        self.inner.copy_out(name, guest, host).await
+    }
+}
+
 /// POC-019: acquisition racing owner stop and deletion against the real
-/// runtime never leaves a stopped or deleted bot's computer running or
-/// held; admission queues beyond the budget. Also reports VM worker memory.
+/// runtime and PostgreSQL. The stop or deletion commits while the VM is
+/// booting (held at the gate); the late start must not be granted, and the
+/// computer must already be stopped, before maintenance runs. Admission
+/// queues beyond the budget. Also reports VM worker memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     if !live() {
@@ -588,7 +649,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     let msb_bin = format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap());
     let home = dir.path().join("microsandbox");
     let app = TestApp::installed().await;
-    let _cleanup = Cleanup {
+    let cleanup = Cleanup {
         msb: msb_bin.clone(),
         home: home.clone(),
         names: std::sync::Mutex::default(),
@@ -600,9 +661,14 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         state_dir: dir.path().to_owned(),
         ..ComputerConfig::default()
     };
+    let gated = Arc::new(Gated {
+        inner: Msb::detect(dir.path(), None).unwrap(),
+        entered: tokio::sync::Notify::new(),
+        open: tokio::sync::Semaphore::new(0),
+    });
     let manager = Arc::new(ComputerManager::new(
         app.db.pool.clone(),
-        Arc::new(Msb::detect(dir.path(), None).unwrap()),
+        gated.clone(),
         config,
     ));
     manager.reconcile_startup().await.unwrap();
@@ -611,7 +677,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     let b = app.create_bot("RaceB", "b").await;
     let b_id: Uuid = b.parse().unwrap();
     for id in [a_id, b_id] {
-        _cleanup
+        cleanup
             .names
             .lock()
             .unwrap()
@@ -629,7 +695,11 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
             .unwrap()
         }
     };
+    let name_a = ComputerManager::runtime_name(a_id);
+    let name_b = ComputerManager::runtime_name(b_id);
+
     // Measure the worker while A runs; B queues behind the one-VM budget.
+    gated.open.add_permits(1);
     let Acquire::Ready { lease_id, .. } = manager.acquire(a_id, "test:m").await.unwrap() else {
         panic!()
     };
@@ -641,8 +711,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         .args([
             "-c",
             &format!(
-                "for p in $(pgrep -f 'msb machine --name {}'); do grep VmRSS /proc/$p/status; done",
-                ComputerManager::runtime_name(a_id)
+                "for p in $(pgrep -f 'msb machine --name {name_a}'); do grep VmRSS /proc/$p/status; done"
             ),
         ])
         .output()
@@ -652,50 +721,59 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         String::from_utf8_lossy(&rss.stdout).trim()
     );
     manager.release(lease_id).await.unwrap();
+    manager.owner_stop(a_id).await.unwrap();
+    manager.owner_resume(a_id).await.unwrap();
 
-    // Owner stop racing acquisition, several rounds.
-    for round in 0..3 {
-        let m = manager.clone();
-        let acquiring =
-            tokio::spawn(async move { m.acquire(a_id, &format!("test:r{round}")).await.unwrap() });
-        tokio::time::sleep(Duration::from_millis(50 * round)).await;
-        manager.owner_stop(a_id).await.unwrap();
-        let _ = acquiring.await.unwrap();
-        manager
-            .tick(&tokio_util::sync::CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            manager
-                .runtime_state(&ComputerManager::runtime_name(a_id))
+    // Owner stop commits while the start is in flight.
+    let m = manager.clone();
+    let acquiring = tokio::spawn(async move { m.acquire(a_id, "test:r").await.unwrap() });
+    gated.entered.notified().await;
+    let m = manager.clone();
+    // Its intent commits at once; it then waits for the start to finish.
+    let stopping = tokio::spawn(async move { m.owner_stop(a_id).await.unwrap() });
+    loop {
+        let desired: String =
+            sqlx::query_scalar("SELECT desired_state FROM bot_computers WHERE bot_id = $1")
+                .bind(a_id)
+                .fetch_one(&app.db.pool)
                 .await
-                .unwrap(),
-            Some(RuntimeState::Stopped),
-            "round {round}: a stopped computer does not run"
-        );
-        assert_eq!(held(a_id).await, 0, "round {round}: nothing holds it");
-        manager.owner_resume(a_id).await.unwrap();
+                .unwrap();
+        if desired == "stopped" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    gated.open.add_permits(1);
+    assert_eq!(acquiring.await.unwrap(), Acquire::OwnerStopped);
+    assert_eq!(held(a_id).await, 0, "the late start granted nothing");
+    assert_eq!(
+        manager.runtime_state(&name_a).await.unwrap(),
+        Some(RuntimeState::Stopped),
+        "and did not stay up"
+    );
+    stopping.await.unwrap();
 
-    // Deletion racing acquisition.
+    // Deletion commits while B's first boot is in flight.
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(b_id, "test:d").await.unwrap() });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    app.owner("DELETE", &format!("/v1/bots/{b}"), None).await;
-    let _ = acquiring.await.unwrap();
+    gated.entered.notified().await;
+    let deleted = app.owner("DELETE", &format!("/v1/bots/{b}"), None).await;
+    assert!(deleted.status.is_success());
+    gated.open.add_permits(1);
+    assert_eq!(acquiring.await.unwrap(), Acquire::BotInactive);
+    assert_eq!(held(b_id).await, 0);
+    let state = manager.runtime_state(&name_b).await.unwrap();
+    assert!(matches!(state, Some(RuntimeState::Stopped)), "{state:?}");
     manager
         .tick(&tokio_util::sync::CancellationToken::new())
         .await
         .unwrap();
-    let state = manager
-        .runtime_state(&ComputerManager::runtime_name(b_id))
+    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+        .bind(b_id)
+        .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    assert!(
-        matches!(state, None | Some(RuntimeState::Stopped)),
-        "{state:?}"
-    );
-    assert_eq!(held(b_id).await, 0);
+    assert_eq!(status, "deleted");
     assert_eq!(
         manager.acquire(b_id, "test:late").await.unwrap(),
         Acquire::BotInactive

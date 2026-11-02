@@ -31,7 +31,15 @@ struct Guest {
     kills: Mutex<Vec<String>>,
     fail_list: std::sync::atomic::AtomicBool,
     create_delay: Mutex<Duration>,
+    /// The launch is accepted but its reply is lost.
+    lose_launch_reply: AtomicBool,
+    /// Kills do not take effect.
+    kills_fail: AtomicBool,
+    /// Stopping fails (the runtime still reports the computer running).
+    stops_fail: AtomicBool,
 }
+
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 impl Guest {
     fn finish(&self, id: Uuid, code: i32) {
@@ -96,6 +104,9 @@ impl ComputerRuntime for Guest {
         self.set(name, RuntimeState::Running)
     }
     async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
+        if self.stops_fail.load(SeqCst) {
+            return Err(RuntimeError::Unavailable("stop timed out".into()));
+        }
         // Stopping kills every guest process.
         for state in self.jobs.lock().unwrap().values_mut() {
             state.get_or_insert(137);
@@ -129,9 +140,15 @@ impl ComputerRuntime for Guest {
         if script.contains("setsid") {
             self.launches.lock().unwrap().push(rest[0].to_owned());
             self.jobs.lock().unwrap().insert(rest[0].to_owned(), None);
+            if self.lose_launch_reply.load(SeqCst) {
+                return Err(RuntimeError::Unavailable("exec timed out".into()));
+            }
             Ok(out("launched\n"))
         } else if script.contains("pgrep -g") {
             self.kills.lock().unwrap().push(rest[0].to_owned());
+            if self.kills_fail.load(SeqCst) {
+                return Ok(out("alive\n"));
+            }
             if let Some(state) = self.jobs.lock().unwrap().get_mut(rest[0]) {
                 state.get_or_insert(130);
             }
@@ -191,6 +208,44 @@ async fn age_jobs(app: &TestApp) {
         .execute(&app.db.pool)
         .await
         .unwrap();
+}
+
+async fn bot_status(app: &TestApp, bot: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+        .bind(bot)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn receipt(app: &TestApp, request: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM request_receipts WHERE request_id = $1")
+        .bind(request)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn stop_work(app: &TestApp, bot: Uuid) -> Uuid {
+    let request = Uuid::new_v4();
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": request })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    request
+}
+
+async fn job_leases(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM computer_leases WHERE holder LIKE 'job:%' AND released_at IS NULL",
+    )
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap()
 }
 
 /// Fault points are process-wide: run these tests one at a time.
@@ -439,17 +494,182 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     else {
         panic!()
     };
+    // The VM refuses to stop at first: the job is killed (not assumed
+    // lost), and deletion waits for the computer to be confirmed down.
+    guest.stops_fail.store(true, SeqCst);
     let deleted = app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     assert!(deleted.status.is_success());
     manager.tick(&never()).await.unwrap();
-    assert!(matches!(
-        job_status(&app, other).await.0.as_str(),
-        "cancelled" | "lost"
-    ));
-    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
-        .bind(bot_id)
+    assert_eq!(job_status(&app, other).await.0, "cancelled");
+    assert_eq!(
+        guest.kills.lock().unwrap().len(),
+        2,
+        "killed, not assumed gone"
+    );
+    assert_eq!(bot_status(&app, bot_id).await, "deleting");
+    guest.stops_fail.store(false, SeqCst);
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(observed(&app, bot_id).await, "stopped");
+    assert_eq!(bot_status(&app, bot_id).await, "deleted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_whose_reply_is_lost_is_recovered_not_failed() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    guest.lose_launch_reply.store(true, SeqCst);
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let (status, error) = job_status(&app, job).await;
+    assert_eq!(status, "starting", "not recorded as a failure");
+    assert!(error.unwrap().contains("unconfirmed"));
+    assert_eq!(job_leases(&app).await, 1, "it keeps its reservation");
+    age_jobs(&app).await;
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(
+        job_status(&app, job).await.0,
+        "running",
+        "found in the guest"
+    );
+    guest.finish(job, 0);
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "completed");
+    assert_eq!(guest.launches(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    // Something else also holds the computer (a desktop), so it would not
+    // stop on its own.
+    let Acquire::Ready { .. } = manager.acquire(bot, "desktop:x").await.unwrap() else {
+        panic!()
+    };
+    guest.kills_fail.store(true, SeqCst);
+    let request = stop_work(&app, bot).await;
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "cancelling");
+    // Its lease expires: the job is still live work, so it is renewed.
+    sqlx::query("UPDATE computer_leases SET expires_at = now() - interval '1 minute'")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "cancelling");
+    assert_eq!(
+        job_leases(&app).await,
+        1,
+        "not released before the kill is confirmed"
+    );
+    assert_eq!(receipt(&app, request).await, "pending");
+    // No job can be admitted while the stop is pending.
+    assert_eq!(
+        manager
+            .start_job(bot, None, "late", Duration::from_secs(600))
+            .await
+            .unwrap(),
+        Started::Stopped
+    );
+    assert_eq!(guest.launches(), 1);
+    guest.kills_fail.store(false, SeqCst);
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(job_status(&app, job).await.0, "cancelled");
+    assert_eq!(job_leases(&app).await, 0);
+    assert_eq!(receipt(&app, request).await, "done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_for_a_stopped_turn_is_refused() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    // A turn that has already been stopped (or never ran).
+    let ended = Uuid::new_v4();
+    assert_eq!(
+        manager
+            .start_job(bot, Some(ended), "late", Duration::from_secs(600))
+            .await
+            .unwrap(),
+        Started::Stopped
+    );
+    assert_eq!(guest.launches(), 0);
+    let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM guest_jobs")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    assert_eq!(status, "deleted");
+    assert_eq!(jobs, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_before_the_job_had_a_lease_completes() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let first = api(&app, &guest, 2).await;
+    faults::arm("job.after_insert");
+    assert!(matches!(
+        first
+            .start_job(bot, None, "work", Duration::from_secs(600))
+            .await,
+        Err(ComputerError::Interrupted)
+    ));
+    drop(first);
+    let request = stop_work(&app, bot).await;
+    assert_eq!(receipt(&app, request).await, "pending");
+    let restarted = api(&app, &guest, 2).await;
+    restarted.tick(&never()).await.unwrap();
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM guest_jobs")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    assert_eq!(receipt(&app, request).await, "done");
+    assert_eq!(guest.launches(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
+    let _serial = SERIAL.lock().await;
+    let app = TestApp::installed().await;
+    let guest = Arc::new(Guest::default());
+    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let manager = api(&app, &guest, 2).await;
+    let Started::Job(job) = manager
+        .start_job(bot, None, "work", Duration::from_secs(600))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let request = stop_work(&app, bot).await;
+    // A poll that read it as running records its completion meanwhile.
+    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = now() WHERE id = $1")
+        .bind(job)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(receipt(&app, request).await, "done");
 }

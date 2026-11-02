@@ -153,6 +153,9 @@ enum Reason {
     MustStop,
     /// No lease and unused since the idle timeout.
     Idle(IdleAction),
+    /// A paused computer holds jobs a bot-wide stop is cancelling: stopping
+    /// it ends them. Leases stay; their generation no longer matches.
+    ForJobs,
 }
 
 /// Text cut to at most `max` bytes on a character boundary.
@@ -894,6 +897,12 @@ impl ComputerManager {
                 .await?;
                 IdleAction::Stop
             }
+            Reason::ForJobs => {
+                if row.observed_state != "paused" {
+                    return Ok(false);
+                }
+                IdleAction::Stop
+            }
             Reason::Idle(action) => {
                 let idle: bool = sqlx::query_scalar(
                     "SELECT NOT EXISTS (SELECT 1 FROM computer_leases
@@ -1059,6 +1068,9 @@ impl ComputerManager {
             self.stop_held(bot, Reason::Idle(self.config.idle_action))
                 .await?;
         }
+        // Complete stops and deletions whose last job ended or whose
+        // computer is now confirmed down, whichever path ended it.
+        crate::db::stop::settle_all(&self.pool).await?;
         Ok(())
     }
 
@@ -1084,7 +1096,7 @@ impl ComputerManager {
             "job" => {
                 sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM guest_jobs WHERE id = $1
-                                    AND status IN ('starting', 'running'))",
+                                    AND status IN ('starting', 'running', 'cancelling'))",
                 )
                 .bind(id)
                 .fetch_one(&self.pool)

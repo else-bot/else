@@ -75,6 +75,26 @@ pub enum Started {
     NotReady(Acquire),
     /// Too many jobs already run on this computer.
     TooMany,
+    /// The turn that asked was stopped (or a bot-wide stop is pending).
+    Stopped,
+}
+
+enum Launch {
+    Launched,
+    /// Proven not started.
+    NotLaunched(String),
+    /// The guest may have started it.
+    Uncertain(String),
+    Interrupted,
+}
+
+/// What the guest says, if it can.
+enum Inspect {
+    Out(ExecOutput),
+    /// The computer is confirmed not running.
+    Gone,
+    Paused,
+    Unknown,
 }
 
 /// A foreground command's result with bounded output.
@@ -173,7 +193,13 @@ impl ComputerManager {
         })))
     }
 
-    /// Start a background job with its own lease and deadline.
+    /// Start a background job with its own lease and deadline. Admission
+    /// is fenced against bot-wide Stop work and deletion: the slot is
+    /// reserved under the bot row lock (which they hold exclusively) only
+    /// while the bot is active and the originating turn still runs, and the
+    /// launch happens under the bot's operation lock only while the job is
+    /// still `starting`, so a stop either sees the job or the job sees the
+    /// stop.
     pub async fn start_job(
         &self,
         bot_id: Uuid,
@@ -186,12 +212,38 @@ impl ComputerManager {
         // Reserve a slot atomically before anything else.
         {
             let mut tx = self.pool.begin().await?;
+            let bot: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT status = 'active', cancel_pending FROM bots WHERE id = $1 FOR SHARE",
+            )
+            .bind(bot_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((true, cancel_pending)) = bot else {
+                return Ok(Started::NotReady(Acquire::BotInactive));
+            };
+            let current = match turn_id {
+                Some(turn) => {
+                    sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1 AND bot_id = $2
+                                    AND status IN ('preparing', 'sending', 'running'))",
+                    )
+                    .bind(turn)
+                    .bind(bot_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                }
+                None => !cancel_pending,
+            };
+            if !current {
+                return Ok(Started::Stopped);
+            }
             sqlx::query("SELECT pg_advisory_xact_lock(hashtext('else_jobs:' || $1::text))")
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;
             let running: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM guest_jobs WHERE bot_id = $1 AND status IN ('starting', 'running')",
+                "SELECT count(*) FROM guest_jobs
+                 WHERE bot_id = $1 AND status IN ('starting', 'running', 'cancelling')",
             )
             .bind(bot_id)
             .fetch_one(&mut *tx)
@@ -234,37 +286,94 @@ impl ComputerManager {
                 .await?;
             return Ok(Started::NotReady(acquired));
         };
-        sqlx::query("UPDATE guest_jobs SET lease_id = $2 WHERE id = $1")
-            .bind(id)
-            .bind(lease_id)
-            .execute(&self.pool)
-            .await?;
-        let dir = format!("{JOBS_DIR}/{id}");
-        let launched = self
-            .guest(lease_id, LAUNCH, &[&dir, command], Duration::from_secs(30))
-            .await;
-        if crate::faults::hit("job.after_launch") {
-            return Err(ComputerError::Interrupted);
+        // Only while still starting: a stop meanwhile already ended it.
+        let attached = sqlx::query(
+            "UPDATE guest_jobs SET lease_id = $2 WHERE id = $1 AND status = 'starting'",
+        )
+        .bind(id)
+        .bind(lease_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if attached == 0 {
+            self.release(lease_id).await?;
+            return Ok(Started::Stopped);
         }
-        match launched {
-            Ok(out) if out.stdout.contains("launched") => {
-                sqlx::query("UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'")
+        match self.launch(lease_id, id, command).await {
+            Launch::Launched => {
+                sqlx::query(
+                    "UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'",
+                )
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            Launch::NotLaunched(error) => {
+                self.fail_start(id, &error).await?;
+                self.release(lease_id).await?;
+            }
+            Launch::Uncertain(error) => {
+                // The guest may have accepted it. It keeps its lease and
+                // stays `starting`; maintenance looks at its directory.
+                sqlx::query("UPDATE guest_jobs SET error = $2 WHERE id = $1")
                     .bind(id)
+                    .bind(super::bounded(
+                        &format!("launch unconfirmed: {error}"),
+                        2000,
+                    ))
                     .execute(&self.pool)
                     .await?;
             }
-            Ok(out) => {
-                self.fail_start(id, &out.stderr).await?;
-                self.release(lease_id).await?;
-            }
-            Err(err) => {
-                self.fail_start(id, &err.to_string()).await?;
-                self.release(lease_id).await?;
-            }
+            Launch::Interrupted => return Err(ComputerError::Interrupted),
         }
         Ok(Started::Job(id))
     }
 
+    /// Launch a job under its lease and the bot's operation lock, only
+    /// while it is still `starting` (a kill holds the same lock).
+    async fn launch(&self, lease: Uuid, id: Uuid, command: &str) -> Launch {
+        let checked = match self.checked(lease).await {
+            Ok(checked) => checked,
+            Err(err @ (ComputerError::LeaseEnded | ComputerError::NotRunning)) => {
+                return Launch::NotLaunched(err.to_string());
+            }
+            Err(err) => return Launch::Uncertain(err.to_string()),
+        };
+        let (_, name, _op) = checked;
+        let starting: Result<bool, sqlx::Error> = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM guest_jobs WHERE id = $1 AND status = 'starting')",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await;
+        match starting {
+            Ok(true) => {}
+            Ok(false) => return Launch::NotLaunched("stopped before launch".into()),
+            Err(err) => return Launch::Uncertain(err.to_string()),
+        }
+        let dir = format!("{JOBS_DIR}/{id}");
+        let (program, mut all) = self.as_guest_user(LAUNCH);
+        all.push(dir);
+        all.push(command.to_owned());
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        let launched = self
+            .runtime
+            .exec(&name, &program, &all, Duration::from_secs(30))
+            .await;
+        if crate::faults::hit("job.after_launch") {
+            return Launch::Interrupted;
+        }
+        match launched {
+            Ok(out) if out.stdout.contains("launched") => Launch::Launched,
+            // The script may have started the job before failing or being
+            // cut off, or the reply may have been lost: not proof either way.
+            Ok(out) => Launch::Uncertain(out.stderr),
+            Err(err) => Launch::Uncertain(err.to_string()),
+        }
+    }
+
+    /// End a job that never got a lease (so never launched) or failed to
+    /// launch.
     async fn fail_start(&self, id: Uuid, error: &str) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE guest_jobs SET status = 'failed', error = $2, finished_at = now()
@@ -289,7 +398,7 @@ impl ComputerManager {
             return Ok(None);
         };
         if let (true, Some(lease)) = (status == "running", lease) {
-            self.probe_job(job_id, lease).await?;
+            self.probe_job(bot_id, job_id, lease).await?;
         }
         self.load_job(job_id).await
     }
@@ -311,21 +420,68 @@ impl ComputerManager {
         }))
     }
 
-    /// Ask the guest about a job and record what it reports.
-    async fn probe_job(&self, job_id: Uuid, lease: Uuid) -> Result<(), ComputerError> {
-        let dir = format!("{JOBS_DIR}/{job_id}");
-        let out = match self
-            .guest(lease, PROBE, &[&dir], Duration::from_secs(30))
+    /// Run a job script in the bot's computer, under its operation lock,
+    /// if the computer is running. This asks the guest for evidence about
+    /// work already started, so it needs no lease and works for a stopped
+    /// or deleted bot; it never wakes a computer. The caller holds the
+    /// operation lock.
+    async fn inspect_held(
+        &self,
+        bot_id: Uuid,
+        script: &str,
+        args: &[&str],
+    ) -> Result<Inspect, ComputerError> {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = $1",
+        )
+        .bind(bot_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((name, state)) = row else {
+            return Ok(Inspect::Gone);
+        };
+        match state.as_str() {
+            "running" => {}
+            // A stopped VM runs nothing; its jobs died with it.
+            "absent" | "stopped" | "missing" => return Ok(Inspect::Gone),
+            "paused" => return Ok(Inspect::Paused),
+            _ => return Ok(Inspect::Unknown),
+        }
+        let (program, mut all) = self.as_guest_user(script);
+        all.extend(args.iter().map(|a| (*a).to_owned()));
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        match self
+            .runtime
+            .exec(&name, &program, &all, Duration::from_secs(30))
             .await
         {
-            Ok(out) => out,
-            // The lease ended (owner stop, deletion) or the computer is
-            // not running: the job did not survive.
-            Err(ComputerError::LeaseEnded | ComputerError::NotRunning) => {
-                return self.finish_job(job_id, "lost", None, "", lease).await;
+            Ok(out) => Ok(Inspect::Out(out)),
+            Err(err) => {
+                tracing::warn!(bot = %bot_id, error = %err, "inspecting a guest job failed");
+                Ok(Inspect::Unknown)
             }
-            Err(err) => return Err(err),
+        }
+    }
+
+    /// Ask the guest about a job and record what it reports. Without an
+    /// answer (paused, uncertain) the job keeps its status and lease.
+    async fn probe_job(
+        &self,
+        bot_id: Uuid,
+        job_id: Uuid,
+        lease: Uuid,
+    ) -> Result<(), ComputerError> {
+        let dir = format!("{JOBS_DIR}/{job_id}");
+        let op = self.op(bot_id).await;
+        let out = match self.inspect_held(bot_id, PROBE, &[&dir]).await? {
+            Inspect::Out(out) => out,
+            Inspect::Gone => {
+                drop(op);
+                return self.finish_job(job_id, "lost", None, "", Some(lease)).await;
+            }
+            Inspect::Paused | Inspect::Unknown => return Ok(()),
         };
+        drop(op);
         let (first, rest) = out
             .stdout
             .split_once('\n')
@@ -338,9 +494,11 @@ impl ComputerManager {
             } else {
                 "failed"
             };
-            self.finish_job(job_id, status, code, &output, lease).await
+            self.finish_job(job_id, status, code, &output, Some(lease))
+                .await
         } else if first == "lost" {
-            self.finish_job(job_id, "lost", None, &output, lease).await
+            self.finish_job(job_id, "lost", None, &output, Some(lease))
+                .await
         } else {
             sqlx::query(
                 "UPDATE guest_jobs SET output_tail = $2 WHERE id = $1 AND status = 'running'",
@@ -359,7 +517,7 @@ impl ComputerManager {
         status: &str,
         code: Option<i32>,
         output: &str,
-        lease: Uuid,
+        lease: Option<Uuid>,
     ) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE guest_jobs SET status = $2, exit_code = $3, output_tail = $4, finished_at = now()
@@ -371,12 +529,16 @@ impl ComputerManager {
         .bind(output)
         .execute(&self.pool)
         .await?;
-        self.release(lease).await
+        match lease {
+            Some(lease) => self.release(lease).await,
+            None => Ok(()),
+        }
     }
 
     /// Stop a job (its whole process group). Recorded as cancelled only
-    /// once the guest confirms nothing of it runs; otherwise it stays
-    /// running with its lease, and the error says so.
+    /// once the guest confirms nothing of it runs, or `lost` once its
+    /// computer is confirmed stopped; otherwise it keeps its status and
+    /// lease, and the error says so. A revoked lease is not evidence.
     pub async fn cancel_job(
         &self,
         bot_id: Uuid,
@@ -391,40 +553,66 @@ impl ComputerManager {
         let Some((status, lease)) = found else {
             return Ok(None);
         };
-        let live = matches!(status.as_str(), "starting" | "running" | "cancelling");
-        if let (true, Some(lease)) = (live, lease) {
-            let dir = format!("{JOBS_DIR}/{job_id}");
-            match self
-                .guest(lease, KILL, &[&dir], Duration::from_secs(30))
-                .await
-            {
-                Ok(out) if out.stdout.trim_end().ends_with("stopped") => {
-                    self.finish_job(job_id, "cancelled", Some(130), "", lease)
-                        .await?;
-                }
-                Err(ComputerError::LeaseEnded | ComputerError::NotRunning) => {
-                    self.finish_job(job_id, "lost", None, "", lease).await?;
-                }
-                Ok(out) if status == "cancelling" && out.stdout.trim().is_empty() => {}
-                Ok(out) => {
-                    sqlx::query("UPDATE guest_jobs SET error = $2 WHERE id = $1")
-                        .bind(job_id)
-                        .bind(super::bounded(
-                            &format!("cancellation not confirmed: {}", out.stdout.trim()),
-                            2000,
-                        ))
-                        .execute(&self.pool)
-                        .await?;
-                }
-                Err(err) => return Err(err),
-            }
+        if matches!(status.as_str(), "starting" | "running" | "cancelling") {
+            self.kill_job(bot_id, job_id, lease, false).await?;
         }
         self.load_job(job_id).await
     }
 
-    /// Maintenance: refresh running jobs, enforce deadlines, resolve jobs
-    /// interrupted while starting, release the leases of jobs that ended.
-    /// A failure on one job does not stop the others.
+    /// Kill a job under the bot's operation lock (which a launch also
+    /// holds). A job without a lease never launched and no longer can.
+    /// With `stop_paused`, a paused computer holding the job is stopped.
+    async fn kill_job(
+        &self,
+        bot_id: Uuid,
+        job_id: Uuid,
+        lease: Option<Uuid>,
+        stop_paused: bool,
+    ) -> Result<(), ComputerError> {
+        let op = self.op(bot_id).await;
+        let Some(lease) = lease else {
+            sqlx::query(
+                "UPDATE guest_jobs SET status = 'cancelled', finished_at = now()
+                 WHERE id = $1 AND lease_id IS NULL AND status IN ('starting', 'cancelling')",
+            )
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(());
+        };
+        let dir = format!("{JOBS_DIR}/{job_id}");
+        let note = match self.inspect_held(bot_id, KILL, &[&dir]).await? {
+            Inspect::Out(out) if out.stdout.trim_end().ends_with("stopped") => {
+                drop(op);
+                return self
+                    .finish_job(job_id, "cancelled", Some(130), "", Some(lease))
+                    .await;
+            }
+            Inspect::Out(out) => format!("cancellation not confirmed: {}", out.stdout.trim()),
+            Inspect::Gone => {
+                drop(op);
+                return self.finish_job(job_id, "lost", None, "", Some(lease)).await;
+            }
+            Inspect::Paused if stop_paused => {
+                // Stopping the computer ends the job; the next pass sees it.
+                self.stop_held(bot_id, super::Reason::ForJobs).await?;
+                "the computer was paused; stopping it".into()
+            }
+            Inspect::Paused => "the computer is paused".into(),
+            Inspect::Unknown => "the computer did not answer".into(),
+        };
+        sqlx::query("UPDATE guest_jobs SET error = $2 WHERE id = $1")
+            .bind(job_id)
+            .bind(super::bounded(&note, 2000))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Maintenance: refresh running jobs, kill jobs a bot-wide stop or
+    /// deletion is cancelling, enforce deadlines, resolve jobs interrupted
+    /// while starting, release the leases of jobs that ended. A failure on
+    /// one job does not stop the others.
     pub(super) async fn poll_jobs(&self, cancel: &CancellationToken) -> Result<(), ComputerError> {
         let jobs: Vec<(Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as(
             "SELECT id, bot_id, lease_id, status, deadline < now() FROM guest_jobs
@@ -439,37 +627,40 @@ impl ComputerManager {
                 return Ok(());
             }
             let result = async {
-                let Some(lease) = lease else {
-                    // Interrupted before it had a lease: nothing launched.
-                    return self.fail_start(job, "interrupted before launch").await;
-                };
                 if status == "cancelling" {
-                    // A bot-wide Stop work or deletion: kill it, then let
-                    // the stop complete if nothing else remains.
-                    self.cancel_job(bot, job).await?;
-                    let mut tx = self.pool.begin().await?;
-                    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
-                        .bind(bot)
-                        .execute(&mut *tx)
-                        .await?;
-                    crate::db::stop::settle(&mut tx, bot).await?;
-                    tx.commit().await?;
-                    Ok(())
-                } else if overdue {
+                    return self.kill_job(bot, job, lease, true).await;
+                }
+                let Some(lease) = lease else {
+                    // Interrupted before it had a lease: nothing launched
+                    // (a launch needs the lease).
+                    sqlx::query(
+                        "UPDATE guest_jobs SET status = 'failed', finished_at = now(),
+                             error = 'interrupted before launch'
+                         WHERE id = $1 AND status = 'starting' AND lease_id IS NULL",
+                    )
+                    .bind(job)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                };
+                if overdue {
                     sqlx::query("UPDATE guest_jobs SET error = 'deadline exceeded' WHERE id = $1")
                         .bind(job)
                         .execute(&self.pool)
                         .await?;
-                    self.cancel_job(bot, job).await.map(|_| ())
-                } else if status == "starting" {
-                    // Interrupted mid-launch: look at what the guest has.
-                    sqlx::query("UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'")
+                    self.kill_job(bot, job, Some(lease), false).await
+                } else {
+                    if status == "starting" {
+                        // Interrupted or unconfirmed launch: look at what
+                        // the guest has (`lost` if it never started).
+                        sqlx::query(
+                            "UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'",
+                        )
                         .bind(job)
                         .execute(&self.pool)
                         .await?;
-                    self.probe_job(job, lease).await
-                } else {
-                    self.probe_job(job, lease).await
+                    }
+                    self.probe_job(bot, job, lease).await
                 }
             }
             .await;
