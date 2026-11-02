@@ -28,6 +28,15 @@ pub struct SetupReport {
 pub enum InstallError {
     #[error("installation setup has not completed; run `else-api setup`")]
     NotInstalled,
+    #[error(
+        "the database contains bots but no installation record; it may be a partial \
+         restore. Refusing to modify it; recover the installation record first"
+    )]
+    MissingInstallationRecord,
+    #[error(
+        "the saved default bot {0} is not active; refusing to start on an inconsistent installation"
+    )]
+    InactiveDefault(Uuid),
     #[error(transparent)]
     Db(#[from] DbError),
 }
@@ -94,6 +103,13 @@ pub async fn setup(pool: &PgPool) -> Result<SetupReport, InstallError> {
     let main_bot = match existing {
         Some(default) => MainBot::AlreadyInstalled(default),
         None => {
+            // Never treat saved bots as a fresh database.
+            let bots: i64 = sqlx::query_scalar("SELECT count(*) FROM bots")
+                .fetch_one(&mut *tx)
+                .await?;
+            if bots > 0 {
+                return Err(InstallError::MissingInstallationRecord);
+            }
             let bot_id = Uuid::new_v4();
             let name = BotName::parse(MAIN_BOT_NAME).expect("valid constant");
             let role = BotRole::parse(MAIN_BOT_ROLE).expect("valid constant");
@@ -115,9 +131,26 @@ pub async fn setup(pool: &PgPool) -> Result<SetupReport, InstallError> {
 /// Startup check. Reads only; an empty installation is an error that points
 /// at explicit setup rather than something startup repairs.
 pub async fn check_installed(pool: &PgPool) -> Result<Option<Uuid>, InstallError> {
-    // The foreign key guarantees a non-null default names an existing bot.
-    sqlx::query_scalar("SELECT default_bot_id FROM installation")
-        .fetch_optional(pool)
-        .await?
-        .ok_or(InstallError::NotInstalled)
+    let row: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT i.default_bot_id, b.status
+         FROM installation i LEFT JOIN bots b ON b.id = i.default_bot_id",
+    )
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        None => {
+            let bots: i64 = sqlx::query_scalar("SELECT count(*) FROM bots")
+                .fetch_one(pool)
+                .await?;
+            Err(if bots > 0 {
+                InstallError::MissingInstallationRecord
+            } else {
+                InstallError::NotInstalled
+            })
+        }
+        Some((Some(id), status)) if status.as_deref() != Some("active") => {
+            Err(InstallError::InactiveDefault(id))
+        }
+        Some((default, _)) => Ok(default),
+    }
 }

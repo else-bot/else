@@ -102,6 +102,11 @@ fn run_migrate() -> anyhow::Result<()> {
 fn run_setup() -> anyhow::Result<()> {
     use credentials::Provisioned;
     let config = load_config()?;
+    // Validate everything setup will need before writing any file.
+    let url = config.require_database().context("invalid configuration")?;
+    url.expose()
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .map_err(|_| db::DbError::InvalidUrl)?;
     credentials::ensure_private_dir(&config.data_dir)?;
     let describe = |what: &str, result: Provisioned, location: String| {
         let state = match result {

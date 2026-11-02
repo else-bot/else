@@ -147,13 +147,53 @@ async fn cleared_default_is_preserved_by_setup_and_startup() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn partial_or_inconsistent_installations_are_refused() {
+    let db = TestDb::migrated().await;
+    installation::setup(&db.pool).await.unwrap();
+    // A restore that lost the installation record but kept bots.
+    sqlx::query("DELETE FROM installation")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        installation::setup(&db.pool).await,
+        Err(InstallError::MissingInstallationRecord)
+    ));
+    assert!(matches!(
+        installation::check_installed(&db.pool).await,
+        Err(InstallError::MissingInstallationRecord)
+    ));
+    assert_eq!(counts(&db.pool).await, (1, 1, 0, 1), "nothing was created");
+
+    // A default pointing at a tombstoned bot.
+    let db = TestDb::migrated().await;
+    installation::setup(&db.pool).await.unwrap();
+    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        installation::check_installed(&db.pool).await,
+        Err(InstallError::InactiveDefault(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_setups_create_one_main_bot() {
     let db = TestDb::migrated().await;
-    let runs = (0..4).map(|_| {
-        let pool = db.pool.clone();
-        tokio::spawn(async move { installation::setup(&pool).await.unwrap() })
-    });
-    let created = futures_count(runs).await;
+    // Spawn every task before awaiting any, released together.
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+    let runs: Vec<_> = (0..4)
+        .map(|_| {
+            let pool = db.pool.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                installation::setup(&pool).await.unwrap()
+            })
+        })
+        .collect();
+    let created = futures_count(runs.into_iter()).await;
     assert_eq!(created, 1);
     assert_eq!(counts(&db.pool).await, (1, 1, 1, 1));
 }
