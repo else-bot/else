@@ -136,7 +136,8 @@ pub struct Postgres {
 pub struct TableDigest {
     pub table: String,
     pub rows: i64,
-    pub md5: String,
+    /// SHA-256 over the table's sorted row hashes.
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,22 +207,35 @@ pub fn key_id(key: &SecretKey) -> String {
 }
 
 /// The age identity of one set: HKDF-SHA-256(SECRET_KEY, salt, purpose)
-/// encoded as a standard X25519 identity.
+/// encoded as a standard X25519 identity. Every intermediate copy of the
+/// derived key is cleared.
 pub fn identity(key: &SecretKey, salt: &[u8; 32]) -> Result<age::x25519::Identity, BackupError> {
-    let mut seed = [0u8; 32];
+    use zeroize::{Zeroize, Zeroizing};
+    let mut seed = Zeroizing::new([0u8; 32]);
     hkdf::Hkdf::<sha2_010::Sha256>::new(Some(salt), key.bytes())
-        .expand(PURPOSE.as_bytes(), &mut seed)
+        .expand(PURPOSE.as_bytes(), seed.as_mut())
         .map_err(|_| BackupError::Crypto("HKDF output length rejected".into()))?;
-    let encoded = bech32::encode("age-secret-key-", seed.to_base32(), bech32::Variant::Bech32);
-    seed.fill(0);
-    let mut encoded = encoded.map_err(|e| BackupError::Crypto(e.to_string()))?;
-    let mut upper = encoded.to_uppercase();
-    let parsed = upper.parse::<age::x25519::Identity>();
-    // The encodings are the key; clear them (NUL bytes keep them valid UTF-8).
-    for text in [&mut encoded, &mut upper] {
-        // SAFETY: overwriting with ASCII NUL keeps the string valid UTF-8.
-        unsafe { text.as_bytes_mut().fill(0) };
+    let mut groups = seed.to_base32();
+    let mut encoded = Zeroizing::new(String::new());
+    let written = bech32::encode_to_fmt(
+        &mut *encoded,
+        "age-secret-key-",
+        &groups,
+        bech32::Variant::Bech32,
+    );
+    let zero = bech32::u5::try_from_u8(0).expect("0 is a valid u5");
+    for group in groups.iter_mut() {
+        // SAFETY: a valid, aligned element of the vector.
+        unsafe { std::ptr::write_volatile(group, zero) };
     }
+    groups.clear();
+    match written {
+        Ok(Ok(())) => {}
+        _ => return Err(BackupError::Crypto("encoding the identity failed".into())),
+    }
+    let mut upper = Zeroizing::new(encoded.to_uppercase());
+    let parsed = upper.parse::<age::x25519::Identity>();
+    upper.zeroize();
     parsed.map_err(|e| BackupError::Crypto(e.to_string()))
 }
 
@@ -484,38 +498,64 @@ pub fn valid_set_id(id: &str) -> bool {
 }
 
 pub fn new_set_id() -> String {
-    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
     let mut suffix = [0u8; 4];
     getrandom::fill(&mut suffix).expect("random source");
     format!("{now}-{}", hex::encode(suffix))
 }
 
-/// Completed sets under `dir`, oldest first (set IDs sort by time).
+/// Created first in every set and restore staging directory: only
+/// directories carrying it are ever removed.
+pub const MARKER: &str = ".else-backup";
+
+/// A real directory (not a symlink) under `dir` that this application made.
+fn owned_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+        && fs::symlink_metadata(path.join(MARKER)).is_ok_and(|m| m.is_file())
+}
+
+pub fn mark_owned(dir: &Path) -> Result<(), BackupError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join(MARKER))
+        .map(|_| ())
+        .map_err(|e| BackupError::io(dir.display(), e))
+}
+
+/// Completed sets under `dir`, oldest first by completion time (then name).
+/// Only real, owned directories with a regular `complete.json` count.
 pub fn completed_sets(dir: &Path) -> Result<Vec<String>, BackupError> {
     let mut sets = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(sets),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(BackupError::io(dir.display(), err)),
     };
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !valid_set_id(&name) {
+        let path = dir.join(&name);
+        if !valid_set_id(&name) || !owned_dir(&path) {
             continue;
         }
-        let complete = dir.join(&name).join(COMPLETE);
-        if fs::symlink_metadata(&complete).is_ok_and(|m| m.is_file()) {
-            sets.push(name);
+        if let Ok(meta) = fs::symlink_metadata(path.join(COMPLETE))
+            && meta.is_file()
+        {
+            let at = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            sets.push((at, name));
         }
     }
     sets.sort();
-    Ok(sets)
+    Ok(sets.into_iter().map(|(_, name)| name).collect())
 }
 
 /// Remove staging directories and sets that never completed (an earlier
-/// run was interrupted). Completed sets are never touched.
+/// run was interrupted). Only directories this application created are
+/// touched, never completed sets or anything else in the directory. The
+/// caller holds the backup lock.
 pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
     let mut removed = 0;
     let Ok(entries) = fs::read_dir(dir) else {
@@ -524,10 +564,12 @@ pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        let is_dir = fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+        if !owned_dir(&path) {
+            continue;
+        }
         let staging = name.starts_with(STAGING_PREFIX);
-        let unfinished = valid_set_id(&name) && !path.join(COMPLETE).exists();
-        if is_dir && (staging || unfinished) {
+        let unfinished = valid_set_id(&name) && fs::symlink_metadata(path.join(COMPLETE)).is_err();
+        if staging || unfinished {
             fs::remove_dir_all(&path).map_err(|e| BackupError::io(path.display(), e))?;
             removed += 1;
         }
@@ -535,17 +577,24 @@ pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
     Ok(removed)
 }
 
-/// Keep the newest `keep` completed sets (at least one). The completion
-/// record goes first, so a half-removed set is never taken for a backup.
-pub fn apply_retention(dir: &Path, keep: usize) -> Result<Vec<String>, BackupError> {
-    let sets = completed_sets(dir)?;
-    let keep = keep.max(1);
+/// Keep the newest `keep` completed sets (at least one) and always
+/// `protect`, the set just published. The completion record goes first, so
+/// a half-removed set is never taken for a backup. The caller holds the
+/// backup lock.
+pub fn apply_retention(dir: &Path, keep: usize, protect: &str) -> Result<Vec<String>, BackupError> {
+    let mut sets = completed_sets(dir)?;
+    sets.retain(|s| s != protect);
+    let keep = keep.max(1) - 1;
     let mut removed = Vec::new();
     if sets.len() <= keep {
         return Ok(removed);
     }
-    for name in &sets[..sets.len() - keep] {
+    let excess = sets.len() - keep;
+    for name in &sets[..excess] {
         let path = dir.join(name);
+        if !owned_dir(&path) {
+            continue;
+        }
         fs::remove_file(path.join(COMPLETE)).map_err(|e| BackupError::io(path.display(), e))?;
         sync_dir(&path)?;
         fs::remove_dir_all(&path).map_err(|e| BackupError::io(path.display(), e))?;
@@ -555,20 +604,95 @@ pub fn apply_retention(dir: &Path, keep: usize) -> Result<Vec<String>, BackupErr
     Ok(removed)
 }
 
+/// An exclusive, non-blocking lock on `<dir>/.lock`, released when dropped
+/// or when the process dies (so neither a crash nor a cancelled future can
+/// leave it held). `None` when another holder has it.
+pub struct DirLock(#[allow(dead_code)] File);
+
+pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
+    use std::os::fd::AsRawFd;
+    ensure_private_dir(dir)?;
+    let path = dir.join(".lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|e| BackupError::io(path.display(), e))?;
+    // SAFETY: a valid descriptor owned by `file`.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(None)
+        } else {
+            Err(BackupError::io(path.display(), err))
+        };
+    }
+    Ok(Some(DirLock(file)))
+}
+
+/// Run a tool with its output drained continuously and only bounded tails
+/// kept, so large diagnostics cannot exhaust memory.
+pub fn run_bounded(
+    mut command: std::process::Command,
+) -> Result<(std::process::ExitStatus, String, String), BackupError> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| BackupError::Producer(e.to_string()))?;
+    let out = drain_tail(child.stdout.take().expect("piped"));
+    let err = drain_tail(child.stderr.take().expect("piped"));
+    let status = child
+        .wait()
+        .map_err(|e| BackupError::Producer(e.to_string()))?;
+    Ok((
+        status,
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    ))
+}
+
+/// Read a stream to its end on a thread, keeping the last 8 KiB.
+pub fn drain_tail(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stream.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > 16 * 1024 {
+                tail.drain(..tail.len() - 8 * 1024);
+            }
+        }
+        String::from_utf8_lossy(&tail).trim().to_owned()
+    })
+}
+
 pub fn staging_path(dir: &Path, set_id: &str) -> PathBuf {
     dir.join(format!("{STAGING_PREFIX}{set_id}"))
 }
 
-/// libpq connection settings for `pg_dump` and `pg_restore`, passed in the
-/// environment so the password is never on a command line.
-#[derive(Clone, PartialEq, Eq)]
+/// Connection settings for the backup tools. The connection itself is
+/// SQLx's own parse of `DATABASE_URL` (host, port, user, database, query
+/// overrides, sockets, TLS mode and certificates), so backups reach exactly
+/// the database the API uses; libpq's environment for `pg_dump` and
+/// `pg_restore` is derived from it. The password goes only into that
+/// environment, never onto a command line.
+#[derive(Clone)]
 pub struct PgParams {
-    pub host: String,
-    pub port: String,
-    pub user: String,
-    pub password: Option<String>,
-    pub database: String,
-    pub sslmode: Option<String>,
+    pub options: sqlx::postgres::PgConnectOptions,
+    password: Option<String>,
+    /// TLS files named in the URL (`sslrootcert`, `sslcert`, `sslkey`).
+    tls_files: Vec<(&'static str, String)>,
 }
 
 impl std::fmt::Debug for PgParams {
@@ -576,7 +700,10 @@ impl std::fmt::Debug for PgParams {
         write!(
             f,
             "PgParams({}@{}:{}/{})",
-            self.user, self.host, self.port, self.database
+            self.user(),
+            self.host(),
+            self.port(),
+            self.database()
         )
     }
 }
@@ -594,74 +721,109 @@ fn percent_decode(text: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
 
 impl PgParams {
-    /// Parse a `postgres://` or `postgresql://` URL.
     pub fn parse(url: &str) -> Result<Self, BackupError> {
+        let options: sqlx::postgres::PgConnectOptions = url.parse().map_err(|_| {
+            BackupError::Invalid("DATABASE_URL is not a valid PostgreSQL URL".into())
+        })?;
         let rest = url
             .strip_prefix("postgresql://")
             .or_else(|| url.strip_prefix("postgres://"))
-            .ok_or_else(|| BackupError::Invalid("DATABASE_URL is not a postgres URL".into()))?;
+            .unwrap_or_default();
         let (main, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let (authority, database) = main.split_once('/').unwrap_or((main, ""));
-        let (userinfo, hostport) = match authority.rsplit_once('@') {
-            Some((u, h)) => (Some(u), h),
-            None => (None, authority),
-        };
-        let (user, password) = match userinfo {
-            Some(u) => match u.split_once(':') {
-                Some((u, p)) => (percent_decode(u), Some(percent_decode(p))),
-                None => (percent_decode(u), None),
-            },
-            None => (String::new(), None),
-        };
-        let (host, port) = match hostport.rsplit_once(':') {
-            Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => (h.to_owned(), p.to_owned()),
-            _ => (hostport.to_owned(), "5432".to_owned()),
-        };
-        let sslmode = query
-            .split('&')
-            .find_map(|kv| kv.strip_prefix("sslmode=").map(str::to_owned));
+        let authority = main.split('/').next().unwrap_or_default();
+        let mut password = authority
+            .rsplit_once('@')
+            .and_then(|(userinfo, _)| userinfo.split_once(':'))
+            .map(|(_, p)| percent_decode(p));
+        let mut tls_files = Vec::new();
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let value = percent_decode(v);
+            match k {
+                "password" => password = Some(value),
+                "sslrootcert" => tls_files.push(("PGSSLROOTCERT", value)),
+                "sslcert" => tls_files.push(("PGSSLCERT", value)),
+                "sslkey" => tls_files.push(("PGSSLKEY", value)),
+                _ => {}
+            }
+        }
         Ok(Self {
-            host: host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .to_owned(),
-            port,
-            user,
+            options,
             password,
-            database: percent_decode(database),
-            sslmode,
+            tls_files,
         })
+    }
+
+    pub fn host(&self) -> String {
+        match self.options.get_socket() {
+            Some(socket) => socket.display().to_string(),
+            // libpq takes an IPv6 address without the URL's brackets.
+            None => {
+                let host = self.options.get_host();
+                host.strip_prefix('[')
+                    .and_then(|h| h.strip_suffix(']'))
+                    .unwrap_or(host)
+                    .to_owned()
+            }
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.options.get_port()
+    }
+
+    pub fn user(&self) -> &str {
+        self.options.get_username()
+    }
+
+    pub fn database(&self) -> &str {
+        self.options.get_database().unwrap_or_default()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
     }
 
     pub fn with_database(&self, database: &str) -> Self {
         Self {
-            database: database.to_owned(),
+            options: self.options.clone().database(database),
             ..self.clone()
+        }
+    }
+
+    fn sslmode(&self) -> &'static str {
+        use sqlx::postgres::PgSslMode;
+        match self.options.get_ssl_mode() {
+            PgSslMode::Disable => "disable",
+            PgSslMode::Allow => "allow",
+            PgSslMode::Prefer => "prefer",
+            PgSslMode::Require => "require",
+            PgSslMode::VerifyCa => "verify-ca",
+            PgSslMode::VerifyFull => "verify-full",
         }
     }
 
     /// Environment for libpq tools (the inherited environment is cleared).
     pub fn env(&self) -> Vec<(&'static str, String)> {
         let mut env = vec![
-            ("PGHOST", self.host.clone()),
-            ("PGPORT", self.port.clone()),
-            ("PGUSER", self.user.clone()),
-            ("PGDATABASE", self.database.clone()),
+            ("PGHOST", self.host()),
+            ("PGPORT", self.port().to_string()),
+            ("PGUSER", self.user().to_owned()),
+            ("PGDATABASE", self.database().to_owned()),
+            ("PGSSLMODE", self.sslmode().to_owned()),
             ("PGCONNECT_TIMEOUT", "10".into()),
         ];
         if let Some(password) = &self.password {
             env.push(("PGPASSWORD", password.clone()));
         }
-        if let Some(mode) = &self.sslmode {
-            env.push(("PGSSLMODE", mode.clone()));
-        }
+        env.extend(self.tls_files.iter().cloned());
         env
     }
 }
@@ -725,22 +887,41 @@ mod tests {
 
     #[test]
     fn urls_become_libpq_settings_without_the_password_on_argv() {
-        let p = PgParams::parse("postgresql://else:p%40ss@127.0.0.1:5433/else_db?sslmode=disable")
-            .unwrap();
+        let env = |url: &str| -> std::collections::HashMap<&'static str, String> {
+            PgParams::parse(url).unwrap().env().into_iter().collect()
+        };
+        let e = env(
+            "postgresql://else:p%40ss@127.0.0.1:5433/else_db?sslmode=verify-full&sslrootcert=/ca.pem",
+        );
+        assert_eq!(e["PGUSER"], "else");
+        assert_eq!(e["PGPASSWORD"], "p@ss");
+        assert_eq!(e["PGHOST"], "127.0.0.1");
+        assert_eq!(e["PGPORT"], "5433");
+        assert_eq!(e["PGDATABASE"], "else_db");
+        assert_eq!(e["PGSSLMODE"], "verify-full");
+        assert_eq!(e["PGSSLROOTCERT"], "/ca.pem");
+        assert!(
+            !format!("{:?}", PgParams::parse("postgres://u:secret@h/db").unwrap())
+                .contains("secret")
+        );
+        let v6 = env("postgres://u@[::1]/db");
+        assert_eq!(
+            (v6["PGHOST"].as_str(), v6["PGPORT"].as_str()),
+            ("::1", "5432")
+        );
+        assert!(!v6.contains_key("PGPASSWORD"));
+        // Query overrides win, as they do for the API's own connection.
+        let q = env("postgres://u@h/db?host=other&port=6000&user=v&dbname=x&password=pw");
         assert_eq!(
             (
-                p.user.as_str(),
-                p.password.as_deref(),
-                p.host.as_str(),
-                p.port.as_str(),
-                p.database.as_str()
+                q["PGHOST"].as_str(),
+                q["PGPORT"].as_str(),
+                q["PGUSER"].as_str(),
+                q["PGDATABASE"].as_str()
             ),
-            ("else", Some("p@ss"), "127.0.0.1", "5433", "else_db")
+            ("other", "6000", "v", "x")
         );
-        assert_eq!(p.sslmode.as_deref(), Some("disable"));
-        assert!(!format!("{p:?}").contains("p@ss"));
-        let q = PgParams::parse("postgres://u@localhost/db").unwrap();
-        assert_eq!((q.port.as_str(), q.password.as_deref()), ("5432", None));
+        assert_eq!(q["PGPASSWORD"], "pw");
     }
 
     #[test]

@@ -15,7 +15,7 @@
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sqlx::Connection;
 use sqlx::postgres::{PgConnectOptions, PgConnection};
@@ -34,6 +34,8 @@ pub struct RestoreRequest<'a> {
     pub pg_restore: &'a Path,
     /// A private directory for decrypted staging files.
     pub staging_parent: &'a Path,
+    /// Largest decrypted dump accepted (bounds staging space).
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -54,15 +56,27 @@ fn valid_database_name(name: &str) -> bool {
 }
 
 fn options(params: &PgParams) -> PgConnectOptions {
-    let mut options = PgConnectOptions::new()
-        .host(&params.host)
-        .port(params.port.parse().unwrap_or(5432))
-        .username(&params.user)
-        .database(&params.database);
-    if let Some(password) = &params.password {
-        options = options.password(password);
+    // SQLx's own parse of the URL: TLS mode, certificates, and overrides
+    // apply to every connection the restore makes.
+    params.options.clone()
+}
+
+/// Remove decrypted staging left by a restore that was killed (the caller
+/// holds the staging lock, so no live restore's files are touched).
+fn clean_stale(parent: &Path) -> Result<(), BackupError> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = entry.file_name().to_string_lossy().starts_with(".restore-")
+            && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir())
+            && std::fs::symlink_metadata(path.join(super::MARKER)).is_ok_and(|m| m.is_file());
+        if ours {
+            std::fs::remove_dir_all(&path).map_err(|e| BackupError::io(path.display(), e))?;
+        }
     }
-    options
+    Ok(())
 }
 
 /// Read and validate the bootstrap and the encrypted manifest.
@@ -214,13 +228,21 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         ));
     }
     let (_, manifest, identity) = open_set(request.set_dir, request.key)?;
-    super::ensure_private_dir(request.staging_parent)?;
+    if manifest.artifacts[0].plaintext_bytes > request.max_bytes {
+        return Err(BackupError::TooLarge(request.max_bytes));
+    }
+    // One restore at a time per staging directory; stale staging from a
+    // killed restore is removed under the same lock.
+    let _lock = super::try_lock(request.staging_parent)?
+        .ok_or_else(|| BackupError::Refused("another restore is running".into()))?;
+    clean_stale(request.staging_parent)?;
     let staging = Staging(
         request
             .staging_parent
             .join(format!(".restore-{}", uuid::Uuid::new_v4())),
     );
     super::private_dir(&staging.0)?;
+    super::mark_owned(&staging.0)?;
     let dump = staging.0.join("database.dump");
     {
         let set_dir = request.set_dir.to_owned();
@@ -282,8 +304,9 @@ async fn load_and_check(
     let env = target.env();
     let dump = dump.to_owned();
     let database = request.target_database.to_owned();
-    let output = tokio::task::spawn_blocking(move || {
-        Command::new(&pg_restore)
+    let (status, _, stderr) = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(&pg_restore);
+        command
             .args([
                 "--single-transaction",
                 "--exit-on-error",
@@ -294,18 +317,14 @@ async fn load_and_check(
             .arg(format!("--dbname={database}"))
             .arg(&dump)
             .env_clear()
-            .envs(env)
-            .stdin(Stdio::null())
-            .output()
+            .envs(env);
+        super::run_bounded(command)
     })
     .await
-    .map_err(|e| BackupError::Io(e.to_string()))?
-    .map_err(|e| BackupError::Io(format!("{}: {e}", request.pg_restore.display())))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    .map_err(|e| BackupError::Io(e.to_string()))??;
+    if !status.success() {
         return Err(BackupError::Producer(format!(
-            "pg_restore exited with {}: {}",
-            output.status,
+            "pg_restore exited with {status}: {}",
             stderr.lines().last().unwrap_or_default()
         )));
     }

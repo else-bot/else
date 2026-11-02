@@ -1,8 +1,9 @@
 //! The one serialized backup worker. It runs inside the API on a schedule
 //! (a missed set runs once at startup, not once per missed interval),
 //! retries failures with a bounded backoff, keeps the newest completed
-//! local sets, and records every run. A session advisory lock serializes it
-//! with a manual `else-api backup` run.
+//! local sets, and records every run. A file lock on the backup directory
+//! (released by the kernel if the process dies) serializes capture,
+//! retention, and cleanup with a manual `else-api backup` run.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +16,6 @@ use super::capture::{BackupConfig, SetSummary, create_set};
 use super::{BackupError, PgParams};
 use crate::credentials::SecretKey;
 
-const LOCK: &str = "SELECT pg_try_advisory_lock(hashtext('else.bot/backup'))";
-const UNLOCK: &str = "SELECT pg_advisory_unlock(hashtext('else.bot/backup'))";
 const FIRST_RETRY: Duration = Duration::from_secs(60);
 const MAX_RETRY: Duration = Duration::from_secs(3600);
 
@@ -37,21 +36,24 @@ impl BackupWorker {
         }
     }
 
-    /// Capture one set now, record the run, then apply retention.
+    /// Capture one set now, record the run, then apply retention. Leftovers
+    /// of interrupted runs are cleaned first, under the same lock.
     pub async fn run_once(&self) -> Result<SetSummary, BackupError> {
-        let mut lock = self.pool.acquire().await?;
-        let locked: bool = sqlx::query_scalar(LOCK).fetch_one(&mut *lock).await?;
-        if !locked {
-            return Err(BackupError::Refused("another backup is running".into()));
-        }
-        let result = self.locked_run().await;
-        let _ = sqlx::query_scalar::<_, bool>(UNLOCK)
-            .fetch_one(&mut *lock)
-            .await;
-        result
+        self.run_once_until(&CancellationToken::new()).await
     }
 
-    async fn locked_run(&self) -> Result<SetSummary, BackupError> {
+    /// As [`Self::run_once`]; cancellation kills and reaps the dump.
+    pub async fn run_once_until(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<SetSummary, BackupError> {
+        let _lock = super::try_lock(&self.config.dir)?
+            .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
+        self.recover_locked().await?;
+        self.locked_run(cancel).await
+    }
+
+    async fn locked_run(&self, cancel: &CancellationToken) -> Result<SetSummary, BackupError> {
         let run = uuid::Uuid::new_v4();
         let set_id = super::new_set_id();
         sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES ($1, $2)")
@@ -59,7 +61,15 @@ impl BackupWorker {
             .bind(&set_id)
             .execute(&self.pool)
             .await?;
-        let result = create_set(&self.pool, &self.params, &self.key, &self.config, &set_id).await;
+        let result = create_set(
+            &self.pool,
+            &self.params,
+            &self.key,
+            &self.config,
+            &set_id,
+            cancel,
+        )
+        .await;
         match &result {
             Ok(summary) => {
                 let bytes: u64 = summary
@@ -79,10 +89,12 @@ impl BackupWorker {
                 .await?;
                 let dir = self.config.dir.clone();
                 let keep = self.config.keep;
-                let removed =
-                    tokio::task::spawn_blocking(move || super::apply_retention(&dir, keep))
-                        .await
-                        .map_err(|e| BackupError::Io(e.to_string()))??;
+                let protect = summary.set_id.clone();
+                let removed = tokio::task::spawn_blocking(move || {
+                    super::apply_retention(&dir, keep, &protect)
+                })
+                .await
+                .map_err(|e| BackupError::Io(e.to_string()))??;
                 tracing::info!(set = %summary.set_id, bytes, removed = removed.len(), "backup set completed");
             }
             Err(err) => {
@@ -116,12 +128,20 @@ impl BackupWorker {
         Ok(self.config.interval.saturating_sub(age))
     }
 
-    /// Startup housekeeping: runs left `running` by an earlier process are
-    /// failed, and staging or unfinished sets are removed.
+    /// Startup housekeeping under the backup lock: runs left `running` by
+    /// an earlier process are failed, and staging or unfinished sets this
+    /// application made are removed. Skipped while a backup is running.
     pub async fn recover(&self) -> Result<usize, BackupError> {
+        match super::try_lock(&self.config.dir)? {
+            Some(_lock) => self.recover_locked().await,
+            None => Ok(0),
+        }
+    }
+
+    async fn recover_locked(&self) -> Result<usize, BackupError> {
         sqlx::query(
             "UPDATE backup_runs SET local_status = 'failed', finished_at = now(),
-                 error = 'interrupted by an API restart'
+                 error = 'interrupted before it finished'
              WHERE local_status = 'running'",
         )
         .execute(&self.pool)
@@ -146,11 +166,11 @@ impl BackupWorker {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(wait) => {}
             }
-            let result = tokio::select! {
-                // Shutdown drops the capture; staging is cleaned next start.
-                _ = cancel.cancelled() => return,
-                result = self.run_once() => result,
-            };
+            // Shutdown kills the dump and waits for it to be reaped.
+            let result = self.run_once_until(&cancel).await;
+            if cancel.is_cancelled() {
+                return;
+            }
             match result {
                 Ok(_) => retry = FIRST_RETRY,
                 Err(_) => {

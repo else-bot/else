@@ -137,6 +137,7 @@ fn run_restore(set_dir: &str, target: &str) -> anyhow::Result<()> {
                 target_database: target,
                 pg_restore: &config.backup.pg_restore,
                 staging_parent: &config.data_dir.join("restore-staging"),
+                max_bytes: config.backup.max_bytes,
             })
             .await?;
         println!("restored set {} into database {target}", report.set_id);

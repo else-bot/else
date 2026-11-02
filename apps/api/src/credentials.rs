@@ -92,7 +92,7 @@ pub struct SecretKey {
 
 impl Drop for SecretKey {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        zeroize::Zeroize::zeroize(&mut self.bytes);
     }
 }
 
@@ -110,10 +110,9 @@ impl SecretKey {
 
     /// Parse standard base64 encoding 32 bytes.
     pub fn parse(text: &str) -> Option<Self> {
-        let bytes = STANDARD.decode(text).ok()?;
-        Some(Self {
-            bytes: bytes.try_into().ok()?,
-        })
+        let bytes = zeroize::Zeroizing::new(STANDARD.decode(text).ok()?);
+        let bytes: [u8; KEY_BYTES] = bytes.as_slice().try_into().ok()?;
+        Some(Self { bytes })
     }
 }
 

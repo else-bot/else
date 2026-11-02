@@ -18,6 +18,14 @@ use serde_json::json;
 use sqlx::Connection;
 use uuid::Uuid;
 
+/// Entries in a backup directory other than its lock file.
+fn entries(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name() != ".lock")
+        .count()
+}
+
 /// Fault points are process-wide: one test at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -70,10 +78,10 @@ impl Target {
         let p = &self.admin;
         format!(
             "postgresql://{}:{}@{}:{}/{}",
-            p.user,
-            p.password.clone().unwrap_or_default(),
-            p.host,
-            p.port,
+            p.user(),
+            p.password().unwrap_or_default(),
+            p.host(),
+            p.port(),
             self.name
         )
     }
@@ -93,10 +101,10 @@ impl Target {
         let p = &self.admin;
         format!(
             "postgresql://{}:{}@{}:{}/postgres",
-            p.user,
-            p.password.clone().unwrap_or_default(),
-            p.host,
-            p.port
+            p.user(),
+            p.password().unwrap_or_default(),
+            p.host(),
+            p.port()
         )
     }
 }
@@ -137,6 +145,7 @@ async fn restore_into(
         target_database: &target.name,
         pg_restore: Path::new("pg_restore"),
         staging_parent: staging,
+        max_bytes: 1 << 30,
     })
     .await
 }
@@ -206,7 +215,12 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
     names.sort();
     assert_eq!(
         names,
-        ["complete.json", "database.dump.age", "manifest.json.age"]
+        [
+            ".else-backup",
+            "complete.json",
+            "database.dump.age",
+            "manifest.json.age"
+        ]
     );
     use std::os::unix::fs::PermissionsExt;
     for name in &names {
@@ -269,8 +283,7 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         std::fs::read_to_string(staging.join("keep.txt")).unwrap(),
         "untouched"
     );
-    let left: Vec<_> = std::fs::read_dir(&staging).unwrap().collect();
-    assert_eq!(left.len(), 1, "decrypted staging files are removed");
+    assert_eq!(entries(&staging), 1, "decrypted staging files are removed");
     // The same target again: refused, and the restored data is unchanged.
     let again = restore_into(&app, &summary.path, &key(1), &target, &staging).await;
     assert!(matches!(again, Err(BackupError::Refused(_))), "{again:?}");
@@ -415,11 +428,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     );
     let backups = dir.path().join("backups");
     assert!(backup::completed_sets(&backups).unwrap().is_empty());
-    assert_eq!(
-        std::fs::read_dir(&backups).unwrap().count(),
-        0,
-        "staging removed"
-    );
+    assert_eq!(entries(&backups), 0, "staging removed");
     let (status, error): (String, Option<String>) = sqlx::query_as(
         "SELECT local_status, error FROM backup_runs ORDER BY started_at DESC LIMIT 1",
     )
@@ -437,7 +446,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
         matches!(result, Err(BackupError::TooLarge(1000))),
         "{result:?}"
     );
-    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+    assert_eq!(entries(&backups), 0);
 
     // Interrupted publication: the set exists but is not complete, is not
     // listed, cannot be restored, and is cleaned on the next start.
@@ -450,6 +459,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     let unfinished: Vec<PathBuf> = std::fs::read_dir(&backups)
         .unwrap()
         .map(|e| e.unwrap().path())
+        .filter(|p| !p.ends_with(".lock"))
         .collect();
     assert_eq!(unfinished.len(), 1);
     assert!(!unfinished[0].join("complete.json").exists());
@@ -472,7 +482,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
         .await
         .unwrap();
     assert_eq!(worker.recover().await.unwrap(), 1);
-    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+    assert_eq!(entries(&backups), 0);
     let running: i64 =
         sqlx::query_scalar("SELECT count(*) FROM backup_runs WHERE local_status = 'running'")
             .fetch_one(&app.db.pool)
@@ -654,4 +664,154 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
             .trim(),
         key
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanup_and_retention_touch_only_owned_real_set_directories() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    // Unrelated directories in the backup directory, and a symlink to an
+    // outside directory that looks like a completed set.
+    std::fs::create_dir(backups.join("archive")).unwrap();
+    std::fs::write(backups.join("archive/photo.jpg"), "keep").unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("complete.json"), "{}").unwrap();
+    std::fs::write(outside.join(backup::MARKER), "").unwrap();
+    std::os::unix::fs::symlink(&outside, backups.join("20000101T000000000Z-00000000")).unwrap();
+    let mut cfg = config(dir.path());
+    cfg.keep = 1;
+    let worker = worker(&app, key(1), cfg);
+    // Two sets in quick succession with keep 1: the newest survives.
+    worker.run_once().await.unwrap();
+    let newest = worker.run_once().await.unwrap();
+    assert!(
+        newest.path.join("complete.json").exists(),
+        "the set just made is kept"
+    );
+    assert_eq!(
+        backup::completed_sets(&backups).unwrap(),
+        std::slice::from_ref(&newest.set_id)
+    );
+    assert_eq!(
+        std::fs::read_to_string(backups.join("archive/photo.jpg")).unwrap(),
+        "keep"
+    );
+    assert!(
+        outside.join("complete.json").exists(),
+        "nothing deleted through a symlink"
+    );
+    assert_eq!(worker.recover().await.unwrap(), 0);
+    assert!(backups.join("archive").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_waits_for_a_running_backup_and_cancellation_kills_the_dump() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let worker = Arc::new(worker(&app, key(1), config(dir.path())));
+    // While the backup lock is held (a run in progress), recovery leaves
+    // its staging alone.
+    let backups = dir.path().join("backups");
+    let held = backup::try_lock(&backups).unwrap().unwrap();
+    let staging = backups.join(".staging-20990101T000000000Z-aaaaaaaa");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join(backup::MARKER), "").unwrap();
+    assert_eq!(worker.recover().await.unwrap(), 0);
+    assert!(staging.exists());
+    assert!(matches!(
+        worker.run_once().await,
+        Err(BackupError::Refused(_))
+    ));
+    drop(held);
+    assert_eq!(worker.recover().await.unwrap(), 1);
+
+    // A pg_dump that stalls forever: cancellation kills and reaps it.
+    let fake = dir.path().join("stalling-dump");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (fake) 0'; exit 0; fi\n\
+         printf 'PGDMP'\nexec sleep 3600\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cfg = config(dir.path());
+    cfg.pg_dump = fake;
+    let stalling = Arc::new(BackupWorker::new(
+        app.db.pool.clone(),
+        PgParams::parse(app.db.url.expose()).unwrap(),
+        Arc::new(key(1)),
+        cfg,
+    ));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = {
+        let (w, c) = (stalling.clone(), cancel.clone());
+        tokio::spawn(async move { w.run_once_until(&c).await })
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let started = std::time::Instant::now();
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(result, Err(BackupError::Interrupted)),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let left = std::process::Command::new("pgrep")
+        .args(["-f", "stalling-dump"])
+        .output()
+        .unwrap();
+    assert!(left.stdout.is_empty(), "the dump was reaped");
+    assert!(backup::completed_sets(&backups).unwrap().is_empty());
+    // The lock was released: a normal run works.
+    worker.run_once().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let staging = dir.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    // A killed restore's plaintext, and a directory that is not ours.
+    let stale = staging.join(".restore-stale");
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(stale.join(backup::MARKER), "").unwrap();
+    std::fs::write(stale.join("database.dump"), "PGDMP old plaintext").unwrap();
+    std::fs::create_dir(staging.join(".restore-foreign")).unwrap();
+    let server = PgParams::parse(app.db.url.expose()).unwrap();
+    let target = Target::new(&app);
+    let small = restore(RestoreRequest {
+        set_dir: &summary.path,
+        key: &key(1),
+        server: &server,
+        target_database: &target.name,
+        pg_restore: Path::new("pg_restore"),
+        staging_parent: &staging,
+        max_bytes: 100,
+    })
+    .await;
+    assert!(
+        matches!(small, Err(BackupError::TooLarge(100))),
+        "{small:?}"
+    );
+    assert!(!target.exists().await);
+    restore_into(&app, &summary.path, &key(1), &target, &staging)
+        .await
+        .unwrap();
+    assert!(!stale.exists(), "stale plaintext removed");
+    assert!(staging.join(".restore-foreign").exists(), "not ours, kept");
 }

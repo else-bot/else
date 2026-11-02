@@ -9,7 +9,6 @@
 //! replacing one). A failed producer, encryption error, size overrun, or
 //! interruption leaves no completed set.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -46,8 +45,11 @@ fn now() -> String {
 }
 
 /// Row counts and content digests of every application table, in the
-/// connection's current snapshot.
+/// connection's current snapshot. Row hashes are streamed in sorted order
+/// into one incremental SHA-256, so no table is aggregated in memory.
 pub async fn table_digests(conn: &mut sqlx::PgConnection) -> Result<Vec<TableDigest>, sqlx::Error> {
+    use futures_util::TryStreamExt;
+    use sha2::Digest;
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename::text FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
     )
@@ -57,24 +59,55 @@ pub async fn table_digests(conn: &mut sqlx::PgConnection) -> Result<Vec<TableDig
     for table in tables {
         // The name comes from the catalog; quote it as an identifier.
         let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let (rows, md5): (i64, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT count(*), coalesce(md5(string_agg(h, '' ORDER BY h)), '')
-             FROM (SELECT md5(t::text) AS h FROM public.{quoted} t) rows"
-        )))
-        .fetch_one(&mut *conn)
-        .await?;
-        digests.push(TableDigest { table, rows, md5 });
+        let sql = format!("SELECT md5(t::text) AS h FROM public.{quoted} t ORDER BY 1");
+        let mut rows = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+        let mut hasher = sha2::Sha256::new();
+        let mut count = 0i64;
+        while let Some(hash) = rows.try_next().await? {
+            hasher.update(hash.as_bytes());
+            count += 1;
+        }
+        drop(rows);
+        digests.push(TableDigest {
+            table,
+            rows: count,
+            sha256: hex::encode(hasher.finalize()),
+        });
     }
     Ok(digests)
 }
 
 fn dump_version(pg_dump: &Path) -> Result<String, BackupError> {
-    let out = Command::new(pg_dump)
-        .arg("--version")
-        .env_clear()
-        .output()
+    let mut command = Command::new(pg_dump);
+    command.arg("--version").env_clear();
+    let (_, out, _) = super::run_bounded(command)
         .map_err(|e| BackupError::Producer(format!("{}: {e}", pg_dump.display())))?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(out
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect())
+}
+
+/// The running `pg_dump`, so a cancelled capture can kill it.
+#[derive(Default)]
+struct Producer {
+    pid: std::sync::atomic::AtomicI32,
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl Producer {
+    fn kill(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.cancelled.store(true, SeqCst);
+        let pid = self.pid.load(SeqCst);
+        if pid > 0 {
+            // SAFETY: signals our own child, which is reaped by its thread.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
 }
 
 /// Run `pg_dump` in the exported snapshot and seal its output. The child is
@@ -86,7 +119,9 @@ fn dump_and_seal(
     target: &Path,
     identity: &age::x25519::Identity,
     limit: u64,
+    producer: &Producer,
 ) -> Result<super::Sealed, BackupError> {
+    use std::sync::atomic::Ordering::SeqCst;
     let mut child = Command::new(pg_dump)
         .args(["--format=custom", "--no-owner", "--no-acl"])
         .arg(format!("--snapshot={snapshot}"))
@@ -97,22 +132,12 @@ fn dump_and_seal(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| BackupError::Producer(format!("{}: {e}", pg_dump.display())))?;
+    producer.pid.store(child.id() as i32, SeqCst);
+    if producer.cancelled.load(SeqCst) {
+        let _ = child.kill();
+    }
     let mut stdout = child.stdout.take().expect("piped");
-    let mut stderr = child.stderr.take().expect("piped");
-    let errors = std::thread::spawn(move || {
-        let mut tail = Vec::new();
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = stderr.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            tail.extend_from_slice(&buf[..n]);
-            if tail.len() > 16 * 1024 {
-                tail.drain(..tail.len() - 8 * 1024);
-            }
-        }
-        String::from_utf8_lossy(&tail).trim().to_owned()
-    });
+    let errors = super::drain_tail(child.stderr.take().expect("piped"));
     let sealed = super::seal(target, identity, &mut stdout, limit);
     if sealed.is_err() {
         let _ = child.kill();
@@ -121,7 +146,12 @@ fn dump_and_seal(
     let status = child
         .wait()
         .map_err(|e| BackupError::Producer(e.to_string()))?;
+    producer.pid.store(0, SeqCst);
     let errors = errors.join().unwrap_or_default();
+    if producer.cancelled.load(SeqCst) {
+        let _ = std::fs::remove_file(target);
+        return Err(BackupError::Interrupted);
+    }
     match sealed {
         Err(err) => Err(err),
         Ok(_) if !status.success() => {
@@ -165,6 +195,7 @@ pub async fn create_set(
     key: &SecretKey,
     config: &BackupConfig,
     set_id: &str,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<SetSummary, BackupError> {
     if !super::valid_set_id(set_id) {
         return Err(BackupError::Invalid("not a set ID".into()));
@@ -173,7 +204,10 @@ pub async fn create_set(
     let set_id = set_id.to_owned();
     let staging = super::staging_path(&config.dir, &set_id);
     super::private_dir(&staging)?;
-    let result = capture_into(pool, params, key, config, &set_id, &staging).await;
+    let result = match super::mark_owned(&staging) {
+        Ok(()) => capture_into(pool, params, key, config, &set_id, &staging, cancel).await,
+        Err(err) => Err(err),
+    };
     match result {
         Ok((manifest, completion)) => {
             let final_dir = config.dir.join(&set_id);
@@ -186,7 +220,11 @@ pub async fn create_set(
                 publish_completion(&final_dir, &completion)
             })();
             if let Err(err) = published {
+                // Never leave a set this run made behind half-published.
                 let _ = std::fs::remove_dir_all(&staging);
+                if !matches!(err, BackupError::Interrupted) {
+                    let _ = std::fs::remove_dir_all(&final_dir);
+                }
                 return Err(err);
             }
             Ok(SetSummary {
@@ -209,6 +247,7 @@ async fn capture_into(
     config: &BackupConfig,
     set_id: &str,
     staging: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(Manifest, Completion), BackupError> {
     let capture_started_at = now();
     let mut salt = [0u8; 32];
@@ -248,7 +287,9 @@ async fn capture_into(
     let target = staging.join(DATABASE);
     let limit = config.max_bytes;
     let dump_identity = identity.clone();
-    let sealed = tokio::task::spawn_blocking(move || {
+    let producer = std::sync::Arc::new(Producer::default());
+    let running = producer.clone();
+    let mut handle = tokio::task::spawn_blocking(move || {
         let version = dump_version(&pg_dump)?;
         dump_and_seal(
             &pg_dump,
@@ -257,11 +298,19 @@ async fn capture_into(
             &target,
             &dump_identity,
             limit,
+            &running,
         )
         .map(|sealed| (sealed, version))
-    })
-    .await
-    .map_err(|e| BackupError::Producer(e.to_string()))?;
+    });
+    // A shutdown kills and reaps the dump rather than abandoning it.
+    let joined = tokio::select! {
+        joined = &mut handle => joined,
+        _ = cancel.cancelled() => {
+            producer.kill();
+            (&mut handle).await
+        }
+    };
+    let sealed = joined.map_err(|e| BackupError::Producer(e.to_string()))?;
     tx.commit().await?;
     let (sealed, dump_version) = sealed?;
 
