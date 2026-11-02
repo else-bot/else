@@ -1,0 +1,33 @@
+{
+  "status": "PASS",
+  "date": "2026-11-02",
+  "synthetic_only": true,
+  "encryption_library": "age 0.12.1",
+  "format": "age-encryption.org/v1",
+  "plaintext_bytes": 2097172,
+  "ciphertext_bytes": 2097926,
+  "plaintext_sha256": "bb043fe4eb8661e9be4392436ad9c51d61cb01934a5fd34c4de1a419f09d5a16",
+  "checks": [
+    "HKDF repeatability, distinct purposes, and distinct salts",
+    "multi-chunk encrypted roundtrip, exact plaintext hash",
+    "same plaintext produces distinct ciphertext",
+    "repeat publication refuses to replace completed record",
+    "complete manifest published last, verified restore to new destination",
+    "existing restore destination refused, all file hashes unchanged",
+    "crypto output creation refuses to replace an existing file",
+    "RENAME_NOREPLACE refuses an existing empty destination directory",
+    "wrong master rejected, no restore destination created",
+    "late-bit-flip rejected by age, partial plaintext removed",
+    "truncated rejected by age, partial plaintext removed",
+    "missing producer artifact prevents complete publish",
+    "set without complete record refused",
+    "unknown-schema refused before destination publish",
+    "path-traversal refused before destination publish",
+    "plaintext-hash-mismatch refused before destination publish",
+    "corrupt artifact rejected against authenticated manifest"
+  ],
+  "check_count": 17,
+  "postgres_dump_integration": "separate disposable integration check; see postgres-results.json",
+  "vm_roundtrip": "not rerun; reuse docs/experiments/bot-vm-verification.md",
+  "remote_upload": "UNVERIFIED: no credentials accessed and no storage calls made"
+}

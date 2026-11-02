@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "date": "2026-11-02",
+  "synthetic_only": true,
+  "image": "postgres@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8",
+  "container_name": "elsebot-research-backups-1d24c6c6597a4794",
+  "encryption_library": "age 0.12.1",
+  "format": "age-encryption.org/v1",
+  "postgres_version": "postgres (PostgreSQL) 18.6 (Debian 18.6-1.pgdg12+2)",
+  "pg_dump_version": "pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg12+2)",
+  "pg_restore_version": "pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg12+2)",
+  "archive_bytes": 5177,
+  "encrypted_bytes": 5455,
+  "archive_sha256": "becc6fdb9e353189b418b1c5058506d35da511dc1d4c436f9767c3550ec761bd",
+  "canonical_source_rows_sha256": "314f5fd986c352f2cb8d9597c340febde12f7dfb7a9ce7b50e9a49c807b3f018",
+  "canonical_restored_rows_sha256": "314f5fd986c352f2cb8d9597c340febde12f7dfb7a9ce7b50e9a49c807b3f018",
+  "row_counts": {
+    "bots": 2,
+    "messages": 37,
+    "settings": 1
+  },
+  "existing_destination_restore_exit": 1,
+  "existing_destination_unchanged": true,
+  "checks": [
+    "unique isolated container, no network, no published ports, tmpfs data only",
+    "real pg_dump custom archive produced from two bots and 37 messages",
+    "real custom dump encrypted and fully decrypted by current age fixture, exact SHA-256",
+    "pg_restore into fresh template0 database preserves all rows, Unicode, JSON, and sequence state",
+    "restored foreign key rejects invalid bot reference, original 37 messages remain",
+    "single-transaction restore over existing schema fails and preserves all existing rows and sequences"
+  ],
+  "check_count": 6,
+  "remote_upload": "not attempted",
+  "full_application_restore": "UNVERIFIED",
+  "cleanup": "own container removed and absence verified; tmpfs data discarded; no volumes or bind mounts created"
+}
