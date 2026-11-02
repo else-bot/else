@@ -212,18 +212,27 @@ impl TestApp {
     /// (5 ms per chunk) and the profile-bearing test double.
     pub fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
         use std::sync::Arc;
-        // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_test_writer()
-            .try_init();
-        let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
         let registry = else_api::providers::Registry::new(vec![
             Arc::new(else_api::providers::synthetic::Synthetic::new(
                 std::time::Duration::from_millis(5),
             )),
             Arc::new(ProfiledFake),
         ]);
+        Self::with_registry(db, max_active, registry)
+    }
+
+    pub fn with_registry(
+        db: std::sync::Arc<TestDb>,
+        max_active: usize,
+        registry: else_api::providers::Registry,
+    ) -> Self {
+        use std::sync::Arc;
+        // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
+        let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
         let scheduler = else_api::scheduler::Scheduler::new(db.pool.clone(), registry, max_active);
         let stop = tokio_util::sync::CancellationToken::new();
         tokio::spawn(

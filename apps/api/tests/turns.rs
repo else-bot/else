@@ -569,3 +569,107 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .unwrap();
     assert_eq!(owner_messages, 2, "nothing was replayed or duplicated");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transient_text_write_failure_keeps_the_text() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    // Fail the first assistant insert once, as a transient database error.
+    sqlx::raw_sql(
+        "CREATE SEQUENCE fail_once;
+         CREATE FUNCTION fail_assistant_once() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           -- Sequences are not rolled back, so this fails exactly once.
+           IF NEW.kind = 'assistant' AND nextval('fail_once') = 1 THEN
+             RAISE EXCEPTION 'transient';
+           END IF;
+           RETURN NEW;
+         END $$;
+         CREATE TRIGGER fail_assistant_once BEFORE INSERT ON items
+           FOR EACH ROW EXECUTE FUNCTION fail_assistant_once();",
+    )
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let sent = app
+        .send(&bot, Uuid::new_v4(), "keep me", Some("synthetic"))
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    assert_eq!(
+        app.wait_turn(turn, &["completed", "failed", "interrupted"])
+            .await,
+        "completed"
+    );
+    let history = items(&app, &bot).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[1].2,
+        "Synthetic reply ✓ from Assistant (turn 1): keep me"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_partial_profile_updates_both_apply() {
+    let app = Arc::new(TestApp::installed().await);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let calls: Vec<_> = [
+        json!({ "reasoning_effort": "high" }),
+        json!({ "service_tier": "default" }),
+    ]
+    .into_iter()
+    .map(|body| {
+        let (app, barrier) = (app.clone(), barrier.clone());
+        tokio::spawn(async move {
+            barrier.wait().await;
+            app.owner("PATCH", "/v1/settings/providers/codex", Some(body))
+                .await
+                .status
+        })
+    })
+    .collect();
+    for call in calls {
+        assert_eq!(call.await.unwrap(), StatusCode::OK);
+    }
+    let profile = app.owner("GET", "/v1/settings/providers/codex", None).await;
+    assert_eq!(profile.body["profile"]["reasoning_effort"], "high");
+    assert_eq!(profile.body["profile"]["service_tier"], "default");
+    assert_eq!(profile.body["profile"]["revision"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_succeeds_after_provider_removed_and_patch_needs_adapter() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let request = Uuid::new_v4();
+    let first = app
+        .send(&bot, request, "before removal", Some("synthetic"))
+        .await;
+    app.wait_turn(first.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let db = app.db.clone();
+    drop(app);
+    // Restart with no providers enabled, like the production default.
+    let app = TestApp::with_registry(db, 4, else_api::providers::Registry::new(vec![]));
+    let retry = app
+        .send(&bot, request, "before removal", Some("synthetic"))
+        .await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body["turn"]["id"], first.body["turn"]["id"]);
+    let fresh = app
+        .send(&bot, Uuid::new_v4(), "new", Some("synthetic"))
+        .await;
+    assert_eq!(fresh.status, StatusCode::BAD_REQUEST);
+    let none = app.send(&bot, Uuid::new_v4(), "new", None).await;
+    assert_eq!(none.status, StatusCode::SERVICE_UNAVAILABLE);
+    let patch = app
+        .owner(
+            "PATCH",
+            "/v1/settings/providers/codex",
+            Some(json!({ "reasoning_effort": "high" })),
+        )
+        .await;
+    assert_eq!(patch.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(patch.body["error"]["code"], "provider_unavailable");
+    let get = app.owner("GET", "/v1/settings/providers/codex", None).await;
+    assert_eq!(get.body["profile"]["reasoning_effort"], "medium");
+}

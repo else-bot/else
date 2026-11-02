@@ -156,6 +156,11 @@ fn run_serve() -> anyhow::Result<()> {
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
+        // Bind before touching runtime state: a second instance that cannot
+        // serve must not reconcile or dispatch the running instance's work.
+        let listener = TcpListener::bind(config.bind)
+            .await
+            .with_context(|| format!("binding {}", config.bind))?;
         let registry = else_api::providers::registry(&config);
         // Reconcile interrupted work before the scheduler admits anything.
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
@@ -171,7 +176,7 @@ fn run_serve() -> anyhow::Result<()> {
         );
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
-        let result = serve(&config, state).await;
+        let result = serve(&config, listener, state).await;
         // Stop provider work after HTTP so no new message is accepted.
         stop_scheduler.cancel();
         let _ = scheduler_task.await;
@@ -180,10 +185,11 @@ fn run_serve() -> anyhow::Result<()> {
     })
 }
 
-async fn serve(config: &Config, state: Arc<http::AppState>) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(config.bind)
-        .await
-        .with_context(|| format!("binding {}", config.bind))?;
+async fn serve(
+    config: &Config,
+    listener: TcpListener,
+    state: Arc<http::AppState>,
+) -> anyhow::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
     let app = http::router(config, state);

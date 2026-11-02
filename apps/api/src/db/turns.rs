@@ -102,7 +102,7 @@ pub struct SendRequest<'a> {
     pub max_queued: i64,
 }
 
-fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
+pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(b"turn\0");
     hasher.update(req.requested_provider.unwrap_or("").as_bytes());
@@ -260,6 +260,38 @@ async fn load_turn_and_item(
     Ok((turn, item))
 }
 
+/// A previously accepted send with this request ID, if any. `Err` when the
+/// ID was used with a different payload. Lets a matching retry succeed even
+/// if its provider has since become unavailable.
+pub async fn existing_send(
+    pool: &PgPool,
+    req: &SendRequest<'_>,
+) -> Result<Option<Accepted>, AcceptError> {
+    let hash = request_hash(req);
+    let mut conn = pool.acquire().await?;
+    let row: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
+        "SELECT t.id, t.request_hash, b.status FROM turns t JOIN bots b ON b.id = t.bot_id
+         WHERE t.bot_id = $1 AND t.request_id = $2",
+    )
+    .bind(req.bot_id)
+    .bind(req.request_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match row {
+        None => Ok(None),
+        Some((_, _, status)) if status != "active" => Err(AcceptError::Deleted),
+        Some((_, saved, _)) if saved != hash => Err(AcceptError::RequestConflict),
+        Some((turn_id, _, _)) => {
+            let (turn, item) = load_turn_and_item(&mut conn, turn_id).await?;
+            Ok(Some(Accepted {
+                created: false,
+                turn,
+                item,
+            }))
+        }
+    }
+}
+
 /// Resolve a lost send response by its request ID.
 pub async fn find_by_request(
     pool: &PgPool,
@@ -279,27 +311,26 @@ pub async fn find_by_request(
     }
 }
 
-/// Claim the oldest queued turn of each eligible bot, up to `limit` new
-/// claims. A bot is eligible when it is active, not stopping work, and has no
-/// turn in an active status. Claimed turns move to `preparing`.
-pub async fn claim(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
-    if limit <= 0 {
-        return Ok(Vec::new());
-    }
+/// Claim the oldest queued turn of the next eligible bot, oldest first
+/// across bots. A bot is eligible when it is active, not stopping work, and
+/// has no turn in an active status. The claimed turn moves to `preparing`
+/// and is returned; the caller must start it before claiming again, so a
+/// later failure never strands an already committed claim.
+pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (
             SELECT DISTINCT ON (t.bot_id) t.id, t.bot_id, t.created_at
             FROM turns t JOIN bots b ON b.id = t.bot_id
             WHERE t.status = 'queued' AND b.status = 'active' AND NOT b.cancel_pending
+              AND NOT (t.bot_id = ANY($1))
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
             ORDER BY t.bot_id, t.turn_no
-         ) oldest ORDER BY created_at, id LIMIT $1"
+         ) oldest ORDER BY created_at, id LIMIT 8"
     )))
-    .bind(limit)
+    .bind(skip)
     .fetch_all(pool)
     .await?;
-    let mut claimed = Vec::new();
     for (turn_id, bot_id) in candidates {
         let mut tx = pool.begin().await?;
         let eligible: Option<bool> = sqlx::query_scalar(
@@ -325,10 +356,43 @@ pub async fn claim(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> 
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
             tx.commit().await?;
-            claimed.push(turn_id);
+            return Ok(Some(turn_id));
         }
     }
-    Ok(claimed)
+    Ok(None)
+}
+
+/// Fail a claimed turn that could not be started (for example, its input
+/// could not be loaded). Nothing was sent to a provider.
+pub async fn fail_unstarted(
+    pool: &PgPool,
+    turn_id: Uuid,
+    message: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let bot_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT b.id FROM bots b JOIN turns t ON t.bot_id = b.id WHERE t.id = $1 FOR UPDATE OF b",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(bot_id) = bot_id else {
+        return Ok(());
+    };
+    let updated = sqlx::query(
+        "UPDATE turns SET status = 'failed', error_code = 'start_failed', error_message = $2,
+             finished_at = now(), updated_at = now()
+         WHERE id = $1 AND status = 'preparing'",
+    )
+    .bind(turn_id)
+    .bind(message)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated == 1 {
+        crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
+    }
+    tx.commit().await
 }
 
 /// Build the adapter input for a claimed turn.
@@ -474,91 +538,109 @@ impl PgSink {
         }
     }
 
+    /// Write `chunk` to the assistant item inside `tx`, creating the item
+    /// on first use. Returns the item ID.
+    async fn write_text(
+        &self,
+        tx: &mut PgConnection,
+        assistant_item: Option<Uuid>,
+        last_seq: i64,
+        chunk: &str,
+    ) -> Result<Uuid, sqlx::Error> {
+        if let Some(item_id) = assistant_item {
+            let offset: i64 = sqlx::query_scalar(
+                "UPDATE items SET text = text || $2::text WHERE id = $1
+                 RETURNING (octet_length(text) - octet_length($2::text))::bigint",
+            )
+            .bind(item_id)
+            .bind(chunk)
+            .fetch_one(&mut *tx)
+            .await?;
+            crate::db::events::item_delta(
+                tx,
+                self.bot_id,
+                self.conversation_id,
+                item_id,
+                offset,
+                chunk,
+            )
+            .await?;
+            return Ok(item_id);
+        }
+        let item_id = Uuid::new_v4();
+        let seq = last_seq + 1;
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id)
+             VALUES ($1, $2, $3, $4, 'assistant', $5, $6)",
+        )
+        .bind(item_id)
+        .bind(self.conversation_id)
+        .bind(seq)
+        .bind(self.turn_id)
+        .bind(chunk)
+        .bind(&self.provider_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE conversations SET last_item_seq = $2 WHERE id = $1")
+            .bind(self.conversation_id)
+            .bind(seq)
+            .execute(&mut *tx)
+            .await?;
+        crate::db::events::item_upsert(tx, self.bot_id, item_id).await?;
+        Ok(item_id)
+    }
+
     /// Persist buffered text. Called by the adapter path, a periodic timer,
-    /// and before the terminal outcome. Not cancellation safe: callers must
-    /// await it to completion.
+    /// and before the terminal outcome. Buffered text is removed only after
+    /// its transaction commits, so a rolled-back write keeps it for the next
+    /// attempt. Not cancellation safe: callers must await it to completion.
     pub async fn flush(&self) -> Result<(), Fenced> {
         let mut buffer = self.buffer.lock().await;
-        if buffer.pending.is_empty() {
-            return if self.is_fenced() {
-                Err(Fenced)
-            } else {
-                Ok(())
-            };
-        }
         if self.is_fenced() {
             return Err(Fenced);
         }
-        let chunk = std::mem::take(&mut buffer.pending);
+        if buffer.pending.is_empty() {
+            return Ok(());
+        }
         let result: Result<Option<Uuid>, sqlx::Error> = async {
             let mut tx = self.pool.begin().await?;
             // Text may still arrive while a stop is being confirmed; it is
             // real output and is preserved.
-            let Some(last_seq) = self.guard(&mut tx, "('sending', 'running', 'cancelling')").await?
+            let Some(last_seq) = self
+                .guard(&mut tx, "('sending', 'running', 'cancelling')")
+                .await?
             else {
                 return Ok(None);
             };
-            let item_id = match buffer.assistant_item {
-                Some(item_id) => {
-                    let offset: i64 = sqlx::query_scalar(
-                        "UPDATE items SET text = text || $2::text WHERE id = $1
-                         RETURNING (octet_length(text) - octet_length($2::text))::bigint",
-                    )
-                    .bind(item_id)
-                    .bind(&chunk)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    crate::db::events::item_delta(&mut tx, self.bot_id, self.conversation_id, item_id, offset, &chunk)
-                        .await?;
-                    item_id
-                }
-                None => {
-                    let item_id = Uuid::new_v4();
-                    let seq = last_seq + 1;
-                    sqlx::query(
-                        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id)
-                         VALUES ($1, $2, $3, $4, 'assistant', $5, $6)",
-                    )
-                    .bind(item_id)
-                    .bind(self.conversation_id)
-                    .bind(seq)
-                    .bind(self.turn_id)
-                    .bind(&chunk)
-                    .bind(&self.provider_id)
-                    .execute(&mut *tx)
-                    .await?;
-                    sqlx::query("UPDATE conversations SET last_item_seq = $2 WHERE id = $1")
-                        .bind(self.conversation_id)
-                        .bind(seq)
-                        .execute(&mut *tx)
-                        .await?;
-                    crate::db::events::item_upsert(&mut tx, self.bot_id, item_id).await?;
-                    item_id
-                }
-            };
+            let item = self
+                .write_text(&mut tx, buffer.assistant_item, last_seq, &buffer.pending)
+                .await?;
             tx.commit().await?;
-            Ok(Some(item_id))
+            Ok(Some(item))
         }
         .await;
         buffer.last_flush = Instant::now();
         match result {
             Ok(Some(item_id)) => {
                 buffer.assistant_item = Some(item_id);
+                buffer.pending.clear();
                 Ok(())
             }
             Ok(None) => Err(self.fence()),
             Err(err) => {
-                tracing::error!(turn = %self.turn_id, error = %err, "persisting assistant text failed");
-                Err(self.fence())
+                // Transient: keep the text and let the next flush retry.
+                tracing::warn!(turn = %self.turn_id, error = %err, "persisting assistant text failed");
+                Ok(())
             }
         }
     }
 
-    /// Record the terminal outcome after flushing remaining text. The turn
-    /// status is internal state and is recorded even if the bot was deleted;
-    /// visible history is not appended in that case.
+    /// Record the terminal outcome and any remaining text in one
+    /// transaction, so a turn is never reported finished without its text.
+    /// The turn status is internal state and is recorded even if the bot was
+    /// deleted; visible history is not appended in that case. On error
+    /// nothing is lost and the call can be retried.
     pub async fn finish(&self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
-        let _ = self.flush().await;
         let (status, code, message, uncertain) = match outcome {
             TurnOutcome::Completed => ("completed", None, None, false),
             TurnOutcome::Interrupted => ("interrupted", None, None, false),
@@ -572,11 +654,22 @@ impl PgSink {
                 true,
             ),
         };
+        let mut buffer = self.buffer.lock().await;
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
-            .bind(self.bot_id)
-            .execute(&mut *tx)
-            .await?;
+        let mut wrote_item = None;
+        if !buffer.pending.is_empty() && !self.is_fenced() {
+            if let Some(last_seq) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
+                wrote_item = Some(
+                    self.write_text(&mut tx, buffer.assistant_item, last_seq, &buffer.pending)
+                        .await?,
+                );
+            }
+        } else {
+            sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+                .bind(self.bot_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE turns SET status = $2, error_code = $3, error_message = $4,
                  effect_uncertain = effect_uncertain OR $5, finished_at = now(), updated_at = now()
@@ -593,7 +686,12 @@ impl PgSink {
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
         }
-        tx.commit().await
+        tx.commit().await?;
+        if let Some(item_id) = wrote_item {
+            buffer.assistant_item = Some(item_id);
+        }
+        buffer.pending.clear();
+        Ok(())
     }
 }
 

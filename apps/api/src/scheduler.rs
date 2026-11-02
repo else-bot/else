@@ -95,8 +95,12 @@ impl Scheduler {
     }
 
     async fn dispatch(self: &Arc<Self>) -> Result<(), sqlx::Error> {
-        let free = self.max_active.saturating_sub(self.running().len());
-        for turn_id in turns::claim(&self.pool, free as i64).await? {
+        while self.running().len() < self.max_active {
+            let Some(turn_id) = turns::claim_next(&self.pool, &[]).await? else {
+                break;
+            };
+            // Start each claim before the next query, so an error in a later
+            // claim cannot strand this one.
             let token = CancellationToken::new();
             self.running().insert(turn_id, token.clone());
             let this = self.clone();

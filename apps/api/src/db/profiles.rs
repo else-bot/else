@@ -31,6 +31,8 @@ pub enum ProfileError {
     NotFound,
     #[error("the profile changed since revision {0}")]
     RevisionMismatch(i64),
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -45,14 +47,25 @@ pub async fn get(pool: &PgPool, provider_id: &str) -> Result<Option<ProfileRecor
     .await
 }
 
-/// Replace the profile and bump its revision. Already accepted turns keep
-/// their snapshots; only later acceptances see the new revision. An unchanged
+/// Fields to change; `None` keeps the saved value.
+#[derive(Debug, Default)]
+pub struct ProfilePatch {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+}
+
+/// Merge `patch` into the saved profile under its row lock, validate the
+/// result, and bump the revision. Concurrent partial updates therefore never
+/// overwrite each other's fields. Already accepted turns keep their
+/// snapshots; only later acceptances see the new revision. An unchanged
 /// profile keeps its revision.
 pub async fn update(
     pool: &PgPool,
     provider_id: &str,
-    profile: &Profile,
+    patch: ProfilePatch,
     expected_revision: Option<i64>,
+    validate: impl FnOnce(&Profile) -> Result<(), String>,
 ) -> Result<ProfileRecord, ProfileError> {
     let mut tx = pool.begin().await?;
     let current: Option<ProfileRecord> = sqlx::query_as(
@@ -66,7 +79,18 @@ pub async fn update(
     if let Some(expected) = expected_revision.filter(|r| *r != current.revision) {
         return Err(ProfileError::RevisionMismatch(expected));
     }
-    if current.profile() == *profile {
+    let mut profile = current.profile();
+    if let Some(model) = patch.model {
+        profile.model = model;
+    }
+    if let Some(effort) = patch.reasoning_effort {
+        profile.reasoning_effort = effort;
+    }
+    if let Some(tier) = patch.service_tier {
+        profile.service_tier = tier;
+    }
+    validate(&profile).map_err(ProfileError::Invalid)?;
+    if current.profile() == profile {
         return Ok(current);
     }
     let updated = sqlx::query_as(

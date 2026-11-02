@@ -91,41 +91,50 @@ async fn send(
         })
     })?;
     let registry = state.scheduler.registry();
-    let provider_id = match body.provider_id.as_deref() {
-        Some(id) => id,
-        None => registry.default_id().ok_or_else(|| {
-            with_id(ApiError::unavailable(
-                "provider_unavailable",
-                "No provider is available.",
-            ))
-        })?,
+    let default_id = registry.default_id();
+    let requested = body.provider_id.as_deref();
+    let mut request = SendRequest {
+        bot_id,
+        request_id,
+        text: &body.text,
+        requested_provider: requested,
+        provider_id: requested.or(default_id).unwrap_or(""),
+        uses_profile: false,
+        max_queued: MAX_QUEUED_TURNS,
     };
-    let provider = registry.get(provider_id).ok_or_else(|| {
-        with_id(ApiError::bad_request(
-            "unknown_provider",
-            "Unknown provider.",
-        ))
-    })?;
-    if let Availability::Unavailable(reason) = provider.availability() {
-        return Err(with_id(ApiError::unavailable(
-            "provider_unavailable",
-            reason,
-        )));
-    }
-    let accepted = turns::accept(
-        &state.db,
-        SendRequest {
-            bot_id,
-            request_id,
-            text: &body.text,
-            requested_provider: body.provider_id.as_deref(),
-            provider_id: provider.id(),
-            uses_profile: provider.uses_profile(),
-            max_queued: MAX_QUEUED_TURNS,
-        },
-    )
-    .await
-    .map_err(|err| with_id(err.into()))?;
+    // A matching retry returns its saved result even if the provider has
+    // since become unavailable; provider checks apply to new messages only.
+    let accepted = match turns::existing_send(&state.db, &request)
+        .await
+        .map_err(|err| with_id(err.into()))?
+    {
+        Some(existing) => existing,
+        None => {
+            if request.provider_id.is_empty() {
+                return Err(with_id(ApiError::unavailable(
+                    "provider_unavailable",
+                    "No provider is available.",
+                )));
+            }
+            let provider = registry.get(request.provider_id).ok_or_else(|| {
+                with_id(ApiError::bad_request(
+                    "unknown_provider",
+                    "Unknown provider.",
+                ))
+            })?;
+            if let Availability::Unavailable(reason) = provider.availability() {
+                return Err(with_id(ApiError::unavailable(
+                    "provider_unavailable",
+                    reason,
+                )));
+            }
+            request.provider_id = provider.id();
+            request.uses_profile = provider.uses_profile();
+            turns::accept(&state.db, request)
+                .await
+                .map_err(|err| with_id(err.into()))?
+        }
+    };
     if accepted.created {
         state.scheduler.wake();
     }
