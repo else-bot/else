@@ -34,8 +34,25 @@ pub struct RestoreRequest<'a> {
     pub pg_restore: &'a Path,
     /// A private directory for decrypted staging files.
     pub staging_parent: &'a Path,
-    /// Largest decrypted dump accepted (bounds staging space).
+    /// Largest decrypted artifact accepted (bounds staging space).
     pub max_bytes: u64,
+    /// Where bot computers are restored: required when the set has them.
+    pub computers: Option<ComputerTarget<'a>>,
+}
+
+/// A new runtime home and installation directory for restored computers.
+pub struct ComputerTarget<'a> {
+    pub runtime: std::sync::Arc<dyn crate::computers::ComputerRuntime>,
+    /// The new installation's data directory (desktop passwords go here).
+    pub data_dir: &'a Path,
+}
+
+impl std::fmt::Debug for ComputerTarget<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputerTarget")
+            .field("data_dir", &self.data_dir)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,22 +152,57 @@ pub fn open_set(
             "the manifest does not match its completion record".into(),
         ));
     }
-    match manifest.artifacts.as_slice() {
-        [artifact] if artifact.kind == "postgres" && artifact.object == DATABASE => {}
-        _ => return Err(BackupError::Invalid("unexpected artifacts".into())),
-    }
+    validate_artifacts(&manifest)?;
     Ok((completion, manifest, identity))
+}
+
+/// Exactly one database dump first, then one disk archive per bot whose
+/// entry names it, at the expected object name; nothing else.
+fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
+    let invalid = |why: &str| Err(BackupError::Invalid(format!("unexpected artifacts: {why}")));
+    let Some((first, rest)) = manifest.artifacts.split_first() else {
+        return invalid("none");
+    };
+    if first.kind != "postgres" || first.object != DATABASE || first.bot_id.is_some() {
+        return invalid("the database dump must come first");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for artifact in rest {
+        let Some(bot) = artifact.bot_id else {
+            return invalid("a disk archive without its bot");
+        };
+        if artifact.kind != "vm" || artifact.object != format!("vm-{bot}.msb.age") {
+            return invalid(&artifact.object);
+        }
+        if !seen.insert(bot) {
+            return invalid("two archives for one bot");
+        }
+        let named = manifest.bots.iter().any(|b| {
+            b.id == bot
+                && b.vm == "included"
+                && b.computer
+                    .as_ref()
+                    .is_some_and(|c| c.object == artifact.object)
+        });
+        if !named {
+            return invalid("an archive no bot entry names");
+        }
+    }
+    let included = manifest.bots.iter().filter(|b| b.vm == "included").count();
+    if included != seen.len() {
+        return invalid("a bot entry names a missing archive");
+    }
+    Ok(())
 }
 
 /// Check the encrypted dump and decrypt it into `target` (created new),
 /// verifying length and hash of both forms.
 fn verify_and_decrypt(
     set_dir: &Path,
-    manifest: &Manifest,
+    artifact: &super::Artifact,
     identity: &age::x25519::Identity,
     target: &Path,
 ) -> Result<(), BackupError> {
-    let artifact = &manifest.artifacts[0];
     let source = set_dir.join(&artifact.object);
     let meta =
         std::fs::symlink_metadata(&source).map_err(|e| BackupError::io(source.display(), e))?;
@@ -228,8 +280,18 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         ));
     }
     let (_, manifest, identity) = open_set(request.set_dir, request.key)?;
-    if manifest.artifacts[0].plaintext_bytes > request.max_bytes {
+    if manifest
+        .artifacts
+        .iter()
+        .any(|a| a.plaintext_bytes > request.max_bytes)
+    {
         return Err(BackupError::TooLarge(request.max_bytes));
+    }
+    let has_computers = manifest.artifacts.len() > 1;
+    if has_computers && request.computers.is_none() {
+        return Err(BackupError::Refused(
+            "this set includes bot computers; restore it into a new installation directory".into(),
+        ));
     }
     // One restore at a time per staging directory; stale staging from a
     // killed restore is removed under the same lock.
@@ -250,7 +312,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         let identity = identity.clone();
         let dump = dump.clone();
         tokio::task::spawn_blocking(move || {
-            verify_and_decrypt(&set_dir, &manifest, &identity, &dump)
+            verify_and_decrypt(&set_dir, &manifest.artifacts[0], &identity, &dump)
         })
         .await
         .map_err(|e| BackupError::Io(e.to_string()))??;
@@ -276,7 +338,13 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     )))
     .execute(&mut conn)
     .await?;
-    let restored = load_and_check(&request, &manifest, &dump).await;
+    let mut restored = load_and_check(&request, &manifest, &dump).await;
+    let _ = std::fs::remove_file(&dump);
+    if restored.is_ok()
+        && let Err(err) = restore_computers(&request, &manifest, &identity, &staging.0).await
+    {
+        restored = Err(err);
+    }
     if restored.is_err() {
         // Only the database created above is dropped.
         let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -385,4 +453,128 @@ async fn load_and_check(
             .await?;
     conn.close().await?;
     Ok(version)
+}
+
+/// Restore every included computer into the new runtime (left stopped),
+/// write its desktop password into the new installation, then record in the
+/// restored database what the new installation actually has: restored
+/// computers stopped, computers not in the set `missing` (never recreated),
+/// every native provider session retired (not included, so context is
+/// rebuilt from PostgreSQL), and the run that made this set completed.
+async fn restore_computers(
+    request: &RestoreRequest<'_>,
+    manifest: &Manifest,
+    identity: &age::x25519::Identity,
+    staging: &Path,
+) -> Result<(), BackupError> {
+    let mut restored = Vec::new();
+    if let Some(target) = &request.computers {
+        for artifact in &manifest.artifacts[1..] {
+            let bot = artifact.bot_id.expect("validated");
+            let entry = manifest
+                .bots
+                .iter()
+                .find(|b| b.id == bot)
+                .and_then(|b| b.computer.clone())
+                .expect("validated");
+            let plain = staging.join(format!("vm-{bot}.msb"));
+            {
+                let set_dir = request.set_dir.to_owned();
+                let artifact = artifact.clone();
+                let identity = identity.clone();
+                let plain = plain.clone();
+                tokio::task::spawn_blocking(move || {
+                    verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
+                })
+                .await
+                .map_err(|e| BackupError::Io(e.to_string()))??;
+            }
+            let spec = crate::computers::Spec {
+                name: entry.runtime_name.clone(),
+                image: entry.image.clone(),
+                cpus: entry.cpus,
+                memory_mib: entry.memory_mib,
+                network: entry.network.clone(),
+                ports: entry
+                    .desktop_port
+                    .map(|p| vec![(p, crate::computers::DESKTOP_GUEST_PORT)])
+                    .unwrap_or_default(),
+                files: Vec::new(),
+            };
+            let result = target.runtime.restore_disk(&plain, &spec).await;
+            let _ = std::fs::remove_file(&plain);
+            result.map_err(|e| {
+                BackupError::Producer(format!("restoring {}: {e}", entry.runtime_name))
+            })?;
+            if let Some(password) = &entry.desktop_password {
+                write_private(
+                    &target.data_dir.join("computers").join(bot.to_string()),
+                    "vnc.pass",
+                    &format!("{password}\n"),
+                )?;
+            }
+            restored.push(bot);
+        }
+    }
+    let target = request.server.with_database(request.target_database);
+    let mut conn = PgConnection::connect_with(&options(&target)).await?;
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        "UPDATE bot_computers SET observed_state = 'stopped', updated_at = now()
+         WHERE bot_id = ANY($1)",
+    )
+    .bind(&restored)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE bot_computers SET observed_state = 'missing',
+             last_error = 'not included in the restored backup', updated_at = now()
+         WHERE observed_state <> 'absent' AND NOT (bot_id = ANY($1))",
+    )
+    .bind(&restored)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE computer_leases SET released_at = now(), end_reason = 'restored'
+         WHERE released_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE provider_sessions SET status = 'retired', updated_at = now()
+         WHERE status = 'active'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE backup_runs SET local_status = 'completed', finished_at = coalesce(finished_at, now()),
+             error = NULL
+         WHERE set_id = $1",
+    )
+    .bind(&manifest.set_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    conn.close().await?;
+    Ok(())
+}
+
+fn write_private(dir: &Path, name: &str, contents: &str) -> Result<(), BackupError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| BackupError::io(dir.display(), e))?;
+    let path = dir.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|e| BackupError::io(path.display(), e))?;
+    file.write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| BackupError::io(path.display(), e))
 }

@@ -86,6 +86,10 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            maintenance_gate,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             auth::require_owner,
         ));
 
@@ -131,6 +135,25 @@ fn method_not_allowed() -> ApiError {
         "method_not_allowed",
         "This method is not allowed for this path.",
     )
+}
+
+/// While a coordinated backup holds the gate, refuse requests that would
+/// change state or wake a computer.
+async fn maintenance_gate(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.scheduler.gate().is_closed()
+        && !crate::maintenance::allowed(request.method(), request.uri().path())
+    {
+        return ApiError::unavailable(
+            "maintenance",
+            "A backup is capturing the assistant; try again in a moment.",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 async fn fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {

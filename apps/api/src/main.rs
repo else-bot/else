@@ -13,7 +13,7 @@ use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
-else-api restore <set-dir> <new-database>\n\n\
+else-api restore <set-dir> <new-database> [<new-data-dir>]\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
@@ -49,7 +49,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("serve");
     let arity_ok = match command {
-        "restore" => args.len() == 3,
+        "restore" => args.len() == 3 || args.len() == 4,
         _ => args.len() <= 1,
     };
     if !arity_ok {
@@ -59,7 +59,7 @@ fn main() -> ExitCode {
     let result = match command {
         "serve" => run_serve(),
         "backup" => run_backup(),
-        "restore" => run_restore(&args[1], &args[2]),
+        "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
         "setup" => run_setup(),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
@@ -108,14 +108,43 @@ fn backup_parts(
     Ok((params, Arc::new(key)))
 }
 
-/// Capture one set now (serialized with the running API's worker).
+/// Capture one set now. The API must be stopped (its singleton lock is
+/// taken here), so the set covers the database and every bot computer at one
+/// checkpoint; a running API backs up on its own schedule.
 fn run_backup() -> anyhow::Result<()> {
     let config = load_config()?;
     let (params, key) = backup_parts(&config)?;
     runtime()?.block_on(async {
         let pool = database(&config).await?;
+        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool)
+            .await
+            .context("the API is running; it backs up on its schedule (or stop it first)")?;
+        let computers = match else_api::computers::runtime::Msb::detect(
+            &config.data_dir,
+            config.msb_bin.clone(),
+        ) {
+            Ok(msb) => {
+                let manager = Arc::new(else_api::computers::ComputerManager::new(
+                    pool.clone(),
+                    Arc::new(msb),
+                    config.computers.clone(),
+                ));
+                manager.reconcile_startup().await?;
+                Some(manager)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "bot computers unavailable; database-only set");
+                None
+            }
+        };
         let worker =
-            else_api::backup::worker::BackupWorker::new(pool, params, key, config.backup.clone());
+            else_api::backup::worker::BackupWorker::new(pool, params, key, config.backup.clone())
+                .with_coordinator(else_api::backup::capture::Coordinator {
+                    scheduler: None,
+                    computers,
+                    drain: std::time::Duration::from_secs(0),
+                    exclusive: true,
+                });
         let summary = worker.run_once().await?;
         println!("backup set: {}", summary.path.display());
         println!("coverage: {}", summary.manifest.coverage.note);
@@ -123,12 +152,34 @@ fn run_backup() -> anyhow::Result<()> {
     })
 }
 
-/// Restore a verified set into a new database. The API is not started and
-/// nothing existing is changed; switch to the new database explicitly.
-fn run_restore(set_dir: &str, target: &str) -> anyhow::Result<()> {
+/// Restore a verified set into a new database (and, for bot computers, a
+/// new installation directory with its own runtime home). The API is not
+/// started and nothing existing is changed; point the API at the new
+/// database and directory explicitly.
+fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyhow::Result<()> {
     let config = load_config()?;
     let (params, key) = backup_parts(&config)?;
-    runtime()?.block_on(async {
+    let new_dir = new_data_dir.map(std::path::PathBuf::from);
+    if let Some(dir) = &new_dir {
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "the new installation directory must be absolute"
+        );
+        anyhow::ensure!(
+            std::fs::symlink_metadata(dir).is_err(),
+            "{} already exists; nothing was changed",
+            dir.display()
+        );
+        credentials::ensure_private_dir(dir)?;
+    }
+    let result = runtime()?.block_on(async {
+        let runtime: Option<Arc<dyn else_api::computers::ComputerRuntime>> = match &new_dir {
+            Some(dir) => Some(Arc::new(else_api::computers::runtime::Msb::detect(
+                dir,
+                config.msb_bin.clone(),
+            )?)),
+            None => None,
+        };
         let report =
             else_api::backup::restore::restore(else_api::backup::restore::RestoreRequest {
                 set_dir: std::path::Path::new(set_dir),
@@ -138,13 +189,36 @@ fn run_restore(set_dir: &str, target: &str) -> anyhow::Result<()> {
                 pg_restore: &config.backup.pg_restore,
                 staging_parent: &config.data_dir.join("restore-staging"),
                 max_bytes: config.backup.max_bytes,
+                computers: match (&runtime, &new_dir) {
+                    (Some(runtime), Some(dir)) => Some(else_api::backup::restore::ComputerTarget {
+                        runtime: runtime.clone(),
+                        data_dir: dir,
+                    }),
+                    _ => None,
+                },
             })
             .await?;
+        if let Some(dir) = &new_dir {
+            // The new installation keeps the key its data was encrypted
+            // with, and gets its own owner token.
+            credentials::write_secret_key(&dir.join("secret-key"), &key)?;
+            credentials::provision_owner_token(&dir.join("owner-token"))?;
+        }
         println!("restored set {} into database {target}", report.set_id);
+        if let Some(dir) = &new_dir {
+            println!("new installation directory: {}", dir.display());
+        }
         println!("migration version: {}", report.migration_version);
         println!("coverage: {}", report.manifest.coverage.note);
-        Ok(())
-    })
+        anyhow::Ok(())
+    });
+    if result.is_err() {
+        if let Some(dir) = &new_dir {
+            // Only the directory this restore created.
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    result
 }
 
 fn run_migrate() -> anyhow::Result<()> {
@@ -292,12 +366,20 @@ fn run_serve() -> anyhow::Result<()> {
             .map(|url| else_api::backup::PgParams::parse(url.expose()))
         {
             Some(Ok(params)) if !config.backup.interval.is_zero() => {
-                let worker = Arc::new(else_api::backup::worker::BackupWorker::new(
-                    pool.clone(),
-                    params,
-                    secret_key.clone(),
-                    config.backup.clone(),
-                ));
+                let worker = Arc::new(
+                    else_api::backup::worker::BackupWorker::new(
+                        pool.clone(),
+                        params,
+                        secret_key.clone(),
+                        config.backup.clone(),
+                    )
+                    .with_coordinator(else_api::backup::capture::Coordinator {
+                        scheduler: Some(state.scheduler.clone()),
+                        computers: state.computers.clone(),
+                        drain: std::time::Duration::from_secs(300),
+                        exclusive: false,
+                    }),
+                );
                 Some(tokio::spawn(worker.run(stop_scheduler.clone())))
             }
             Some(Err(err)) => {

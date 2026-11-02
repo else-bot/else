@@ -779,3 +779,417 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         Acquire::BotInactive
     );
 }
+
+/// POC-022 against the real runtime: one coordinated set captures two bots'
+/// computers (guest files and browser storage), chats, memory, and the
+/// database; the original runtime is destroyed; the set restores into a new
+/// installation directory, runtime home, and database; the recovered API
+/// starts twice without changing saved state or replaying anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
+        return;
+    }
+    use else_api::backup::{self, PgParams};
+    use sqlx::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let msb_bin = format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap());
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let home = data.join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let tar = dir.path().join("guest.tar");
+    assert!(
+        std::process::Command::new("docker")
+            .args(["save", "else-guest:1", "-o"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new(&msb_bin)
+            .env("MSB_HOME", &home)
+            .args(["load", "-q", "-t", "else-guest:1", "-i"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let new_dir = dir.path().join("restored");
+    let new_home = new_dir.join("microsandbox");
+    let cleanup_old = Cleanup {
+        msb: msb_bin.clone(),
+        home: home.clone(),
+        names: std::sync::Mutex::default(),
+    };
+    let cleanup_new = Cleanup {
+        msb: msb_bin.clone(),
+        home: new_home.clone(),
+        names: std::sync::Mutex::default(),
+    };
+    let db = Arc::new(common::TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let config = |state: &std::path::Path| ComputerConfig {
+        image: "else-guest:1".into(),
+        desktop: true,
+        idle_after: Duration::from_secs(3600),
+        state_dir: state.to_owned(),
+        ..ComputerConfig::default()
+    };
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        Arc::new(Msb::detect(&data, None).unwrap()),
+        config(&data),
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
+    let site = "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1";
+    let mut bots = Vec::new();
+    for name in ["Alpha", "Beta"] {
+        let bot: Uuid = app.create_bot(name, "keeps things").await.parse().unwrap();
+        for list in [&cleanup_old.names, &cleanup_new.names] {
+            list.lock()
+                .unwrap()
+                .push(ComputerManager::runtime_name(bot));
+        }
+        let (lease, _) = ready(&manager, bot, "test:prep").await;
+        manager
+            .write_file(
+                lease,
+                "/home/elsebot/work/note.txt",
+                &format!("FILE-{name}"),
+            )
+            .await
+            .unwrap();
+        let page = format!(
+            "<html><head><title>Set</title></head><body><script>localStorage.setItem('kept', '{name}')</script></body></html>"
+        );
+        manager
+            .write_file(lease, "/home/elsebot/work/site/set.html", &page)
+            .await
+            .unwrap();
+        let reader = "<html><body><script>document.write('KEPT=' + localStorage.getItem('kept'))</script></body></html>";
+        manager
+            .write_file(lease, "/home/elsebot/work/site/read.html", reader)
+            .await
+            .unwrap();
+        manager
+            .run_command(bot, "test:prep", site, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let opened = manager
+            .browser(lease, &["open", "http://127.0.0.1:8765/set.html"])
+            .await
+            .unwrap();
+        assert!(
+            opened.stdout.contains("Set"),
+            "{} {}",
+            opened.stdout,
+            opened.stderr
+        );
+        manager.release(lease).await.unwrap();
+        let reply = app
+            .send(
+                &bot.to_string(),
+                Uuid::new_v4(),
+                &format!("{name} remembers ORCHID-4"),
+                Some("synthetic"),
+            )
+            .await;
+        app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
+            .await;
+        bots.push(bot);
+    }
+    let (alpha, beta) = (bots[0], bots[1]);
+    // Beta's owner stops its computer; Alpha's stays up, idle.
+    manager.owner_stop(beta).await.unwrap();
+    // An action whose delivery is unknown must never be replayed.
+    let main = app.main_bot().await;
+    let reply = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Pay the invoice [synthetic:stall-send]",
+            Some("synthetic"),
+        )
+        .await;
+    let stalled = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&stalled, &["sending"]).await;
+    app.owner(
+        "POST",
+        &format!("/v1/bots/{main}/cancel"),
+        Some(serde_json::json!({ "request_id": Uuid::new_v4() })),
+    )
+    .await;
+    app.wait_turn(&stalled, &["uncertain"]).await;
+    let alpha_password = std::fs::read_to_string(manager.desktop_password_file(alpha)).unwrap();
+
+    let key = else_api::credentials::SecretKey::parse(&{
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode([3u8; 32])
+    })
+    .unwrap();
+    let params = PgParams::parse(db.url.expose()).unwrap();
+    let worker = else_api::backup::worker::BackupWorker::new(
+        db.pool.clone(),
+        params.clone(),
+        Arc::new(
+            else_api::credentials::SecretKey::parse(&{
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
+            })
+            .unwrap(),
+        ),
+        else_api::backup::capture::BackupConfig {
+            dir: dir.path().join("backups"),
+            pg_dump: "pg_dump".into(),
+            pg_restore: "pg_restore".into(),
+            keep: 7,
+            max_bytes: 8 << 30,
+            interval: Duration::from_secs(3600),
+        },
+    )
+    .with_coordinator(else_api::backup::capture::Coordinator {
+        scheduler: Some(app.scheduler.clone()),
+        computers: Some(manager.clone()),
+        drain: Duration::from_secs(30),
+        exclusive: false,
+    });
+    let started = std::time::Instant::now();
+    let summary = worker.run_once().await.unwrap();
+    let sizes: Vec<(String, u64)> = summary
+        .manifest
+        .artifacts
+        .iter()
+        .map(|a| (a.object.clone(), a.ciphertext_bytes))
+        .collect();
+    eprintln!(
+        "set {} in {:?}: {sizes:?}",
+        summary.set_id,
+        started.elapsed()
+    );
+    assert!(
+        summary.manifest.coverage.whole_assistant,
+        "{:?}",
+        summary.manifest.coverage
+    );
+    assert_eq!(summary.manifest.artifacts.len(), 3);
+    assert_eq!(
+        manager
+            .runtime_state(&ComputerManager::runtime_name(beta))
+            .await
+            .unwrap(),
+        Some(RuntimeState::Stopped)
+    );
+    // What the restored installation must show.
+    let saved = |url: String| async move {
+        let mut conn = sqlx::PgConnection::connect(&url).await.unwrap();
+        let mut out = Vec::new();
+        for sql in [
+            "SELECT id, name, role, status FROM bots",
+            "SELECT default_bot_id FROM installation",
+            "SELECT id, bot_id, kind, last_turn_no FROM conversations",
+            "SELECT id, conversation_id, seq, kind, text FROM items",
+            "SELECT id, status, error_code, effect_uncertain FROM turns",
+            "SELECT provider_id, model, reasoning_effort, service_tier, revision FROM provider_profiles",
+            "SELECT bot_id, seq, kind, body FROM memory_entry",
+        ] {
+            let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT t::text FROM ({sql}) t ORDER BY 1"
+            )))
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+            out.push(rows);
+        }
+        out
+    };
+    let source = saved(db.url.expose().to_owned()).await;
+    drop(app);
+
+    // The original runtime is gone.
+    for name in cleanup_old.names.lock().unwrap().iter() {
+        for args in [["stop", name.as_str()], ["rm", name.as_str()]] {
+            let _ = std::process::Command::new(&msb_bin)
+                .env("MSB_HOME", &home)
+                .args(args)
+                .output();
+        }
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+
+    // Restore into a new installation directory, runtime home, and database.
+    std::fs::create_dir(&new_dir).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let target = format!("else_restore_{}", Uuid::new_v4().simple());
+    let restored_runtime = Arc::new(Msb::detect(&new_dir, None).unwrap());
+    let started = std::time::Instant::now();
+    let report = backup::restore::restore(backup::restore::RestoreRequest {
+        set_dir: &summary.path,
+        key: &key,
+        server: &params,
+        target_database: &target,
+        pg_restore: std::path::Path::new("pg_restore"),
+        staging_parent: &dir.path().join("staging"),
+        max_bytes: 8 << 30,
+        computers: Some(backup::restore::ComputerTarget {
+            runtime: restored_runtime.clone(),
+            data_dir: &new_dir,
+        }),
+    })
+    .await;
+    eprintln!("restore took {:?}", started.elapsed());
+    let target_params = params.with_database(&target);
+    let target_url = format!(
+        "postgresql://{}:{}@{}:{}/{target}",
+        target_params.user(),
+        target_params.password().unwrap_or_default(),
+        target_params.host(),
+        target_params.port()
+    );
+    let drop_target = || {
+        let admin = params.with_database("postgres");
+        let target = target.clone();
+        async move {
+            let mut conn = sqlx::PgConnection::connect_with(&admin.options)
+                .await
+                .unwrap();
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{target}\" WITH (FORCE)"
+            )))
+            .execute(&mut conn)
+            .await;
+        }
+    };
+    if let Err(err) = &report {
+        drop_target().await;
+        panic!("restore failed: {err}");
+    }
+    let restored = saved(target_url.clone()).await;
+    assert_eq!(
+        source, restored,
+        "bots, default, chats, turns, profiles, memory"
+    );
+
+    // The restored computers: files, browser storage, desktop password,
+    // the owner's stop, and the network policy.
+    let pool = sqlx::PgPool::connect(&target_url).await.unwrap();
+    let recovered = ComputerManager::new(pool.clone(), restored_runtime.clone(), config(&new_dir));
+    recovered.reconcile_startup().await.unwrap();
+    assert_eq!(
+        recovered.acquire(beta, "test:after").await.unwrap(),
+        Acquire::OwnerStopped
+    );
+    recovered.owner_resume(beta).await.unwrap();
+    for (bot, name) in [(alpha, "Alpha"), (beta, "Beta")] {
+        let (lease, _) = ready(&recovered, bot, "test:after").await;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let note = recovered
+            .run_command(bot, "test:after", "cat note.txt", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(note.stdout.trim(), format!("FILE-{name}"));
+        recovered
+            .run_command(bot, "test:after", site, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let read = recovered
+            .browser(lease, &["open", "http://127.0.0.1:8765/read.html"])
+            .await
+            .unwrap();
+        assert!(
+            read.stdout.contains(&format!("KEPT={name}")),
+            "{} {}",
+            read.stdout,
+            read.stderr
+        );
+        recovered.release(lease).await.unwrap();
+    }
+    let desktop = recovered.desktop(alpha).await.unwrap().unwrap();
+    assert_eq!(desktop.password, alpha_password.trim());
+    recovered.close_desktop(alpha).await.unwrap();
+    let inspect = std::process::Command::new(&msb_bin)
+        .env("MSB_HOME", &new_home)
+        .args([
+            "inspect",
+            &ComputerManager::runtime_name(alpha),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let inspect: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(
+        inspect["config"]["network"]["policy"]["default_egress"],
+        "deny"
+    );
+    for bot in [alpha, beta] {
+        recovered.owner_stop(bot).await.unwrap();
+    }
+    drop(recovered);
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM provider_sessions WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(sessions, 0, "context is rebuilt from PostgreSQL");
+
+    // Start the recovered API twice: nothing saved changes, nothing replays.
+    else_api::credentials::write_secret_key(&new_dir.join("secret-key"), &key).unwrap();
+    else_api::credentials::provision_owner_token(&new_dir.join("owner-token")).unwrap();
+    let before = saved(target_url.clone()).await;
+    for start in 1..=2 {
+        let port = common::free_port();
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &new_dir)
+            .env("DATABASE_URL", &target_url)
+            .env("ELSE_DATA_DIR", &new_dir)
+            .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
+            .env("ELSE_SYNTHETIC_PROVIDER", "1")
+            .env("ELSE_BACKUP_INTERVAL_SECS", "0")
+            .env("ELSE_MSB_BIN", &msb_bin)
+            .env("ELSE_VM_IMAGE", "else-guest:1")
+            .env("ELSE_VM_DESKTOP", "1")
+            .env("RUST_LOG", "warn")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let mut up = false;
+        for _ in 0..400 {
+            if client
+                .get(format!("http://127.0.0.1:{port}/readyz"))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let status = child.wait().unwrap();
+        assert!(up, "start {start} did not become ready");
+        assert!(status.success(), "start {start}: {status}");
+        assert_eq!(
+            saved(target_url.clone()).await,
+            before,
+            "start {start} changed saved state"
+        );
+    }
+    pool.close().await;
+    drop_target().await;
+}

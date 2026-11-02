@@ -12,7 +12,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use super::capture::{BackupConfig, SetSummary, create_set};
+use super::capture::{BackupConfig, Coordinator, SetSummary, create_set};
 use super::{BackupError, PgParams};
 use crate::credentials::SecretKey;
 
@@ -24,6 +24,7 @@ pub struct BackupWorker {
     params: PgParams,
     key: Arc<SecretKey>,
     pub config: BackupConfig,
+    coordinator: Coordinator,
 }
 
 impl BackupWorker {
@@ -33,7 +34,15 @@ impl BackupWorker {
             params,
             key,
             config,
+            coordinator: Coordinator::default(),
         }
+    }
+
+    /// Coordinate with the scheduler and the bot computers: whole-assistant
+    /// sets (POC-022). Without this a set is database only.
+    pub fn with_coordinator(mut self, coordinator: Coordinator) -> Self {
+        self.coordinator = coordinator;
+        self
     }
 
     /// Capture one set now, record the run, then apply retention. Leftovers
@@ -68,6 +77,7 @@ impl BackupWorker {
             &self.config,
             &set_id,
             cancel,
+            &self.coordinator,
         )
         .await;
         match &result {

@@ -227,6 +227,14 @@ pub fn provision_secret_key(source: &SecretKeySource) -> Result<Provisioned, Cre
     }
 }
 
+/// Write an existing master key into a new installation's key file (a
+/// restored installation keeps the key its data was encrypted with). Never
+/// replaces a file.
+pub fn write_secret_key(path: &Path, key: &SecretKey) -> Result<(), CredentialError> {
+    let text = zeroize::Zeroizing::new(STANDARD.encode(key.bytes()));
+    create_private_file(path, "SECRET_KEY", text.as_bytes())
+}
+
 fn create_private_file(
     path: &Path,
     what: &'static str,

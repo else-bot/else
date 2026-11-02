@@ -12,6 +12,7 @@ pub mod faults;
 pub mod grants;
 pub mod handoff;
 pub mod http;
+pub mod maintenance;
 pub mod memory_worker;
 pub mod providers;
 pub mod runtime_lock;

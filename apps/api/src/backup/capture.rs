@@ -196,6 +196,7 @@ pub async fn create_set(
     config: &BackupConfig,
     set_id: &str,
     cancel: &tokio_util::sync::CancellationToken,
+    coordinator: &Coordinator,
 ) -> Result<SetSummary, BackupError> {
     if !super::valid_set_id(set_id) {
         return Err(BackupError::Invalid("not a set ID".into()));
@@ -205,7 +206,19 @@ pub async fn create_set(
     let staging = super::staging_path(&config.dir, &set_id);
     super::private_dir(&staging)?;
     let result = match super::mark_owned(&staging) {
-        Ok(()) => capture_into(pool, params, key, config, &set_id, &staging, cancel).await,
+        Ok(()) => {
+            capture_into(
+                pool,
+                params,
+                key,
+                config,
+                &set_id,
+                &staging,
+                cancel,
+                coordinator,
+            )
+            .await
+        }
         Err(err) => Err(err),
     };
     match result {
@@ -240,6 +253,136 @@ pub async fn create_set(
     }
 }
 
+/// What a coordinated capture may use: the scheduler's gate and drain, and
+/// the bot computers. Without them a set is database only, and says so.
+#[derive(Clone, Default)]
+pub struct Coordinator {
+    pub scheduler: Option<std::sync::Arc<crate::scheduler::Scheduler>>,
+    pub computers: Option<std::sync::Arc<crate::computers::ComputerManager>>,
+    /// How long active turns may take to finish before the set is deferred.
+    pub drain: std::time::Duration,
+    /// No API runs (its singleton lock is held by this process), so nothing
+    /// else can change state during the capture.
+    pub exclusive: bool,
+}
+
+/// Seal a plaintext file into an artifact and remove the plaintext.
+async fn seal_file(
+    plain: PathBuf,
+    target: PathBuf,
+    identity: age::x25519::Identity,
+    limit: u64,
+) -> Result<super::Sealed, BackupError> {
+    tokio::task::spawn_blocking(move || {
+        let result = std::fs::File::open(&plain)
+            .map_err(|e| BackupError::io(plain.display(), e))
+            .and_then(|mut file| super::seal(&target, &identity, &mut file, limit));
+        let _ = std::fs::remove_file(&plain);
+        result
+    })
+    .await
+    .map_err(|e| BackupError::Io(e.to_string()))?
+}
+
+/// Capture every active bot's computer disk into sealed artifacts. Live
+/// work defers the whole set; nothing is captured half-way.
+async fn capture_computers(
+    computers: &crate::computers::ComputerManager,
+    bots: &[(uuid::Uuid, String, String)],
+    staging: &Path,
+    identity: &age::x25519::Identity,
+    limit: u64,
+) -> Result<
+    (
+        Vec<Artifact>,
+        std::collections::HashMap<uuid::Uuid, (String, Option<super::ComputerEntry>)>,
+    ),
+    BackupError,
+> {
+    use crate::computers::{ComputerError, DiskCapture};
+    let mut artifacts = Vec::new();
+    let mut entries = std::collections::HashMap::new();
+    for (bot, name, status) in bots {
+        if status != "active" {
+            entries.insert(*bot, ("omitted-deleted-bot".to_owned(), None));
+            continue;
+        }
+        let object = format!("vm-{bot}.msb.age");
+        let plain = staging.join(format!("vm-{bot}.msb"));
+        let captured = computers.capture_disk(*bot, &plain).await;
+        let captured = match captured {
+            Ok(captured) => captured,
+            Err(ComputerError::Busy(why)) => {
+                let _ = std::fs::remove_file(&plain);
+                return Err(BackupError::Deferred(format!(
+                    "bot {name}'s computer is {why}"
+                )));
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&plain);
+                return Err(BackupError::Producer(format!(
+                    "bot {name}'s computer: {err}"
+                )));
+            }
+        };
+        match captured {
+            DiskCapture::NoComputer => {
+                entries.insert(*bot, ("none".to_owned(), None));
+            }
+            DiskCapture::Missing => {
+                entries.insert(*bot, ("missing".to_owned(), None));
+            }
+            DiskCapture::Exported {
+                runtime_name,
+                image,
+                cpus,
+                memory_mib,
+                desired_state,
+                desktop_port,
+                was_running,
+            } => {
+                let sealed =
+                    seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
+                let password_file = computers.desktop_password_file(*bot);
+                let desktop_password = std::fs::read_to_string(&password_file)
+                    .ok()
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty() && p.len() <= 64);
+                artifacts.push(Artifact {
+                    kind: "vm".into(),
+                    object: object.clone(),
+                    bot_id: Some(*bot),
+                    ciphertext_bytes: sealed.ciphertext_bytes,
+                    ciphertext_sha256: sealed.ciphertext_sha256,
+                    plaintext_bytes: sealed.plaintext_bytes,
+                    plaintext_sha256: sealed.plaintext_sha256,
+                });
+                entries.insert(
+                    *bot,
+                    (
+                        "included".to_owned(),
+                        Some(super::ComputerEntry {
+                            object,
+                            runtime_name,
+                            runtime_version: crate::computers::runtime::VERIFIED_VERSION.into(),
+                            image,
+                            cpus,
+                            memory_mib,
+                            desired_state,
+                            network: computers.config().network.clone(),
+                            desktop_port,
+                            desktop_password,
+                            was_running,
+                        }),
+                    ),
+                );
+            }
+        }
+    }
+    Ok((artifacts, entries))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn capture_into(
     pool: &PgPool,
     params: &PgParams,
@@ -248,6 +391,7 @@ async fn capture_into(
     set_id: &str,
     staging: &Path,
     cancel: &tokio_util::sync::CancellationToken,
+    coordinator: &Coordinator,
 ) -> Result<(Manifest, Completion), BackupError> {
     let capture_started_at = now();
     let mut salt = [0u8; 32];
@@ -255,8 +399,54 @@ async fn capture_into(
     let encryption = super::encryption_for(key, &salt);
     let identity = super::identity(key, &salt)?;
 
+    // The application checkpoint: no new turn, mutation, or desktop wake
+    // while the computers and the database are captured; current turns
+    // finish first or the set is deferred.
+    if coordinator.exclusive {
+        let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
+            crate::db::turns::ACTIVE_STATUSES
+        )))
+        .fetch_one(pool)
+        .await?;
+        if active {
+            return Err(BackupError::Deferred(
+                "turns are still active; start the API once so it reconciles them".into(),
+            ));
+        }
+    }
+    let gate = match &coordinator.scheduler {
+        Some(scheduler) => {
+            let closed = scheduler
+                .gate()
+                .close()
+                .ok_or_else(|| BackupError::Refused("another backup holds the gate".into()))?;
+            if !scheduler.drain(coordinator.drain).await? {
+                return Err(BackupError::Deferred(format!(
+                    "active turns did not finish within {} s",
+                    coordinator.drain.as_secs()
+                )));
+            }
+            Some(closed)
+        }
+        None => None,
+    };
+    let bot_rows: Vec<(uuid::Uuid, String, String)> =
+        sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
+            .fetch_all(pool)
+            .await?;
+    let (mut vm_artifacts, mut vm_entries) = match &coordinator.computers {
+        Some(computers) => {
+            capture_computers(computers, &bot_rows, staging, &identity, config.max_bytes).await?
+        }
+        None => Default::default(),
+    };
+    if cancel.is_cancelled() {
+        return Err(BackupError::Interrupted);
+    }
+
     // One snapshot for the digests and the dump; held open until the dump
-    // has finished.
+    // has finished. Computers are already stopped and recorded so.
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
@@ -279,6 +469,16 @@ async fn capture_into(
     .await?;
     let bots: Vec<(uuid::Uuid, String, String)> =
         sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
+            .fetch_all(&mut *tx)
+            .await?;
+    let sessions: Vec<(uuid::Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT bot_id, provider_id, native_session_id, status FROM provider_sessions
+         ORDER BY bot_id, created_at",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_computer: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT bot_id FROM bot_computers WHERE observed_state <> 'absent'")
             .fetch_all(&mut *tx)
             .await?;
 
@@ -313,6 +513,78 @@ async fn capture_into(
     let sealed = joined.map_err(|e| BackupError::Producer(e.to_string()))?;
     tx.commit().await?;
     let (sealed, dump_version) = sealed?;
+    // The sources are fixed: work may resume while the set is published.
+    drop(gate);
+
+    let coordinated = coordinator.computers.is_some()
+        && (coordinator.scheduler.is_some() || coordinator.exclusive);
+    let mut complete = coordinated;
+    let entries: Vec<BotEntry> = bots
+        .into_iter()
+        .map(|(id, name, status)| {
+            let (vm, computer) = vm_entries.remove(&id).unwrap_or_else(|| {
+                if has_computer.contains(&id) {
+                    ("omitted".to_owned(), None)
+                } else {
+                    ("none".to_owned(), None)
+                }
+            });
+            if vm == "missing" || (vm == "omitted" && status == "active") {
+                complete = false;
+            }
+            BotEntry {
+                id,
+                provider_sessions: sessions
+                    .iter()
+                    .filter(|(bot, ..)| *bot == id)
+                    .map(|(_, provider, native, status)| super::SessionEntry {
+                        provider: provider.clone(),
+                        native_session_id: native.clone(),
+                        status: status.clone(),
+                    })
+                    .collect(),
+                name,
+                status,
+                vm,
+                computer,
+                provider_state: "omitted-reauth-required".into(),
+            }
+        })
+        .collect();
+    let mut artifacts = vec![Artifact {
+        kind: "postgres".into(),
+        object: DATABASE.into(),
+        bot_id: None,
+        ciphertext_bytes: sealed.ciphertext_bytes,
+        ciphertext_sha256: sealed.ciphertext_sha256,
+        plaintext_bytes: sealed.plaintext_bytes,
+        plaintext_sha256: sealed.plaintext_sha256,
+    }];
+    artifacts.append(&mut vm_artifacts);
+    let coverage = if coordinated {
+        super::Coverage {
+            database: "included".into(),
+            vm: if complete {
+                "included".into()
+            } else {
+                "partial".into()
+            },
+            provider_state: "omitted-reauth-required".into(),
+            whole_assistant: complete,
+            note: if complete {
+                "Whole assistant: the database and every active bot's computer (standalone disk \
+                 archives with their images). Native provider sessions are not included: \
+                 conversations are rebuilt from PostgreSQL and providers may need a fresh login."
+                    .into()
+            } else {
+                "Partial: a bot's computer is missing from the runtime, so this set does not \
+                 recover the whole assistant."
+                    .into()
+            },
+        }
+    } else {
+        super::database_only_coverage()
+    };
 
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
@@ -331,26 +603,10 @@ async fn capture_into(
             format: "custom".into(),
             extensions,
         },
-        artifacts: vec![Artifact {
-            kind: "postgres".into(),
-            object: DATABASE.into(),
-            ciphertext_bytes: sealed.ciphertext_bytes,
-            ciphertext_sha256: sealed.ciphertext_sha256,
-            plaintext_bytes: sealed.plaintext_bytes,
-            plaintext_sha256: sealed.plaintext_sha256,
-        }],
+        artifacts,
         tables,
-        bots: bots
-            .into_iter()
-            .map(|(id, name, status)| BotEntry {
-                id,
-                name,
-                status,
-                vm: "omitted".into(),
-                provider_state: "omitted-reauth-required".into(),
-            })
-            .collect(),
-        coverage: super::database_only_coverage(),
+        bots: entries,
+        coverage,
     };
     let json = serde_json::to_vec(&manifest).expect("serializable");
     let sealed_manifest = super::seal(

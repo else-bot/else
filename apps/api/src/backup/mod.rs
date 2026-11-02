@@ -62,6 +62,9 @@ pub enum BackupError {
     Refused(String),
     #[error("interrupted")]
     Interrupted,
+    /// Live work prevents a consistent capture now; retried later.
+    #[error("deferred: {0}")]
+    Deferred(String),
 }
 
 impl BackupError {
@@ -104,8 +107,11 @@ pub struct Completion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
+    /// `postgres`, or `vm` (one bot's standalone disk archive with image).
     pub kind: String,
     pub object: String,
+    /// For a `vm` artifact, its bot.
+    pub bot_id: Option<uuid::Uuid>,
     pub ciphertext_bytes: u64,
     pub ciphertext_sha256: String,
     pub plaintext_bytes: u64,
@@ -146,11 +152,44 @@ pub struct BotEntry {
     pub id: uuid::Uuid,
     pub name: String,
     pub status: String,
-    /// The bot's computer is not in this set.
+    /// `included`, `none` (never used a computer), `missing` (gone from the
+    /// runtime), `omitted-deleted-bot`, or `omitted` (a database-only set).
     pub vm: String,
+    pub computer: Option<ComputerEntry>,
     /// Native provider sessions are not in this set; conversation context
-    /// is rebuilt from PostgreSQL and providers may need a fresh login.
+    /// is rebuilt from PostgreSQL and providers need a fresh login check.
     pub provider_state: String,
+    /// The native sessions the bot had (not included), for the record.
+    pub provider_sessions: Vec<SessionEntry>,
+}
+
+/// A bot computer captured as a standalone disk archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerEntry {
+    pub object: String,
+    pub runtime_name: String,
+    pub runtime_version: String,
+    pub image: String,
+    pub cpus: u32,
+    pub memory_mib: u32,
+    /// The owner's intent (`auto` or `stopped`), restored as recorded.
+    pub desired_state: String,
+    /// Network profile; restore applies its policy explicitly.
+    pub network: String,
+    pub desktop_port: Option<u16>,
+    /// The desktop's VNC password (the guest holds the same in its disk).
+    pub desktop_password: Option<String>,
+    /// It was running before the backup stopped it for capture.
+    pub was_running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionEntry {
+    pub provider: String,
+    pub native_session_id: String,
+    pub status: String,
 }
 
 /// What a set contains, stated explicitly.

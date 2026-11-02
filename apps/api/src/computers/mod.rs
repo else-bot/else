@@ -117,6 +117,29 @@ pub enum ComputerError {
     /// A test fault point stopped the operation (a simulated crash).
     #[error("interrupted at a fault point")]
     Interrupted,
+    /// The computer holds live work or is mid-transition (a backup defers).
+    #[error("the computer is busy: {0}")]
+    Busy(String),
+}
+
+/// What a backup found for one bot's computer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskCapture {
+    /// Exported, from a stopped computer (stopped first if it was idle).
+    Exported {
+        runtime_name: String,
+        image: String,
+        cpus: u32,
+        memory_mib: u32,
+        desired_state: String,
+        desktop_port: Option<u16>,
+        /// Whether the computer was running before the backup stopped it.
+        was_running: bool,
+    },
+    /// The bot never used a computer.
+    NoComputer,
+    /// Recorded, but gone from the runtime (it is not recreated).
+    Missing,
 }
 
 /// States that hold a budget reservation: anything that is or may be live.
@@ -153,6 +176,9 @@ enum Reason {
     MustStop,
     /// No lease and unused since the idle timeout.
     Idle(IdleAction),
+    /// A backup stops an idle running or paused computer for a consistent
+    /// disk capture (only while no lease holds it).
+    Backup,
     /// A paused computer holds jobs a bot-wide stop is cancelling: stopping
     /// it ends them. Leases stay; their generation no longer matches.
     ForJobs,
@@ -478,6 +504,65 @@ impl ComputerManager {
         file.sync_all()?;
         std::fs::rename(&temp, &path)?;
         Ok(path)
+    }
+
+    /// The host file holding a desktop computer's VNC password.
+    pub fn desktop_password_file(&self, bot_id: Uuid) -> std::path::PathBuf {
+        self.secret_dir(bot_id).join("vnc.pass")
+    }
+
+    /// Export a bot's computer disk for a backup (POC-022), under its
+    /// operation lock. An idle running or paused computer is stopped first
+    /// through the normal stop (a desktop checkpoints Chromium); a stopped
+    /// one, including an owner-stopped one, is exported without being
+    /// started. A held or transitioning computer is `Busy`: the backup
+    /// defers rather than capturing live work.
+    pub async fn capture_disk(
+        &self,
+        bot_id: Uuid,
+        archive: &std::path::Path,
+    ) -> Result<DiskCapture, ComputerError> {
+        let _op = self.op(bot_id).await;
+        let row = {
+            let mut conn = self.pool.acquire().await?;
+            Self::row(&mut conn, bot_id).await?
+        };
+        let Some(row) = row else {
+            return Ok(DiskCapture::NoComputer);
+        };
+        let was_running = matches!(row.observed_state.as_str(), "running" | "paused");
+        match row.observed_state.as_str() {
+            "absent" => return Ok(DiskCapture::NoComputer),
+            "missing" => return Ok(DiskCapture::Missing),
+            "stopped" => {}
+            "running" | "paused" => {
+                if !self.stop_held(bot_id, Reason::Backup).await? {
+                    return Err(ComputerError::Busy("in use".into()));
+                }
+            }
+            other => return Err(ComputerError::Busy(format!("state {other}"))),
+        }
+        // The runtime must agree it is stopped before its disk is read.
+        if self.runtime.state(&row.runtime_name).await? != Some(RuntimeState::Stopped) {
+            return Err(ComputerError::Busy(
+                "the runtime does not report it stopped".into(),
+            ));
+        }
+        self.runtime.export_disk(&row.runtime_name, archive).await?;
+        let port: Option<i32> =
+            sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = $1")
+                .bind(bot_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(DiskCapture::Exported {
+            runtime_name: row.runtime_name,
+            image: row.image,
+            cpus: row.cpus as u32,
+            memory_mib: row.memory_mib as u32,
+            desired_state: row.desired_state,
+            desktop_port: port.map(|p| p as u16),
+            was_running,
+        })
     }
 
     /// Owner access to a desktop: hold the computer with a renewable
@@ -895,6 +980,19 @@ impl ComputerManager {
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;
+                IdleAction::Stop
+            }
+            Reason::Backup => {
+                let held: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM computer_leases
+                                    WHERE bot_id = $1 AND released_at IS NULL)",
+                )
+                .bind(bot_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if held {
+                    return Ok(false);
+                }
                 IdleAction::Stop
             }
             Reason::ForJobs => {

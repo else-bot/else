@@ -3,8 +3,9 @@
 //! else.bot keeps its own runtime home (`MSB_HOME` under the API data
 //! directory), so the owner's own Microsandbox state is never touched. The
 //! adapter only creates, starts, stops, pauses, resumes, inspects, and runs
-//! commands in named computers. It never replaces, prunes, or removes one:
-//! those destroy saved disks and belong to an explicit future operation.
+//! commands in named computers, and exports and restores their disks for
+//! backups. It never replaces, prunes, or removes a computer: those destroy
+//! saved disks and belong to an explicit future operation.
 //! `msb exec` starts a stopped computer as a side effect, so callers run
 //! commands only after the manager has established the computer is running.
 
@@ -97,6 +98,24 @@ pub trait ComputerRuntime: Send + Sync {
     /// Copy a guest file to a host path.
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
+    /// Export a stopped computer's disk, with its image, to a standalone
+    /// archive at `archive` (POC-022). The computer is not started.
+    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
+        let _ = (name, archive);
+        Err(RuntimeError::Unavailable(
+            "disk export is not supported".into(),
+        ))
+    }
+
+    /// Create computer `spec.name` from a standalone disk archive, with the
+    /// spec's resources, ports, and network policy, and leave it stopped.
+    async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
+        let _ = (archive, spec);
+        Err(RuntimeError::Unavailable(
+            "disk restore is not supported".into(),
+        ))
+    }
+
     async fn state(&self, name: &str) -> Result<Option<RuntimeState>, RuntimeError> {
         Ok(self
             .list()
@@ -115,6 +134,36 @@ pub struct Msb {
 }
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Snapshot capture, export, import, and restore of large disks.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// The network policy for a restored computer. `msb snapshot restore` does
+/// not carry the source's policy (verified with v0.7.13: a restored sandbox
+/// had none), so it is stated explicitly. `public` is the same policy
+/// `create --net public` records: egress denied except DNS and public
+/// destinations, ingress (published host-loopback ports) allowed.
+pub fn restore_network_args(network: &str) -> Result<Vec<String>, RuntimeError> {
+    let rules: &[&str] = match network {
+        "public" => &[
+            "--net-default",
+            "deny",
+            "--net-rule",
+            "allow@dns",
+            "--net-rule",
+            "allow@public",
+            "--net-rule",
+            "allow:ingress@any",
+        ],
+        "none" => &["--no-net"],
+        other => {
+            return Err(RuntimeError::Failed {
+                operation: "restore".into(),
+                message: format!("no restore policy for network profile {other}"),
+            });
+        }
+    };
+    Ok(rules.iter().map(|r| (*r).to_owned()).collect())
+}
 
 impl Msb {
     /// Locate `msb` (explicit path, `PATH`, or `~/.microsandbox/bin`) and its
@@ -252,6 +301,18 @@ impl Msb {
         })
     }
 
+    async fn run_checked(&self, operation: &str, args: &[&str]) -> Result<(), RuntimeError> {
+        let out = self.run(operation, args, SNAPSHOT_TIMEOUT).await?;
+        if out.status == Some(0) {
+            Ok(())
+        } else {
+            Err(RuntimeError::Failed {
+                operation: operation.into(),
+                message: last_line(&out.stderr, &out.stdout),
+            })
+        }
+    }
+
     async fn control(&self, operation: &str, args: &[&str]) -> Result<(), RuntimeError> {
         let out = self.run(operation, args, CONTROL_TIMEOUT).await?;
         if out.status == Some(0) {
@@ -366,6 +427,80 @@ impl ComputerRuntime for Msb {
 
     async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
         self.control("resume", &["resume", name]).await
+    }
+
+    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
+        // A disk snapshot of the stopped computer, verified, exported with
+        // its image so it boots without this runtime, then removed here.
+        let snapshot = format!("backup-{}", uuid::Uuid::new_v4().simple());
+        let member = format!("{name}:{snapshot}");
+        self.run_checked(
+            "snapshot",
+            &[
+                "snapshot",
+                "create",
+                &snapshot,
+                "--sandbox",
+                name,
+                "--integrity",
+                "--quiet",
+            ],
+        )
+        .await?;
+        let archive_arg = archive.display().to_string();
+        let exported = async {
+            self.run_checked("snapshot verify", &["snapshot", "verify", &member])
+                .await?;
+            self.run_checked(
+                "snapshot export",
+                &[
+                    "snapshot",
+                    "export",
+                    &member,
+                    "--with-image",
+                    "--output",
+                    &archive_arg,
+                ],
+            )
+            .await
+        }
+        .await;
+        let removed = self
+            .run_checked(
+                "snapshot remove",
+                &["snapshot", "remove", "--quiet", &member],
+            )
+            .await;
+        exported?;
+        removed
+    }
+
+    async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
+        let group = format!("{}-restored", spec.name);
+        let archive_arg = archive.display().to_string();
+        self.run_checked(
+            "snapshot import",
+            &["snapshot", "import", &archive_arg, "--group", &group],
+        )
+        .await?;
+        let cpus = spec.cpus.to_string();
+        let memory = format!("{}M", spec.memory_mib);
+        let mut args: Vec<String> = [
+            "snapshot", "restore", "--name", &spec.name, "--cpus", &cpus, "--memory", &memory,
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+        for (host, guest) in &spec.ports {
+            args.push("--port".into());
+            args.push(format!("127.0.0.1:{host}:{guest}"));
+        }
+        args.extend(restore_network_args(&spec.network)?);
+        args.push(group);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run_checked("snapshot restore", &args).await?;
+        // Restoring boots it; a restored computer stays stopped until use.
+        self.control("stop", &["stop", &spec.name]).await
     }
 
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError> {

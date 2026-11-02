@@ -146,6 +146,7 @@ async fn restore_into(
         pg_restore: Path::new("pg_restore"),
         staging_parent: staging,
         max_bytes: 1 << 30,
+        computers: None,
     })
     .await
 }
@@ -204,7 +205,13 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         "a database-only set says so"
     );
     assert_eq!(manifest.coverage.vm, "omitted");
-    assert!(manifest.bots.iter().all(|b| b.vm == "omitted"));
+    // No computer was ever used; none is claimed.
+    assert!(
+        manifest
+            .bots
+            .iter()
+            .all(|b| b.vm == "none" && b.computer.is_none())
+    );
     assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
     assert!(manifest.application.migration_version >= 18);
     // The set: three files, private, and nothing else.
@@ -615,7 +622,12 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     assert!(ok, "{out}");
     let (ok, out) = run(&["backup"]);
     assert!(ok, "{out}");
-    assert!(out.contains("Database only"), "{out}");
+    // With the API stopped the command coordinates the whole assistant
+    // (no bot has used a computer here, so nothing is omitted).
+    assert!(
+        out.contains("Whole assistant") || out.contains("Database only"),
+        "{out}"
+    );
     let key = std::fs::read_to_string(data.join("secret-key")).unwrap();
     let key = key.trim();
     let set = out
@@ -802,6 +814,7 @@ async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
         pg_restore: Path::new("pg_restore"),
         staging_parent: &staging,
         max_bytes: 100,
+        computers: None,
     })
     .await;
     assert!(

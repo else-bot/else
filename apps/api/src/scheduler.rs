@@ -37,6 +37,8 @@ pub struct Scheduler {
     /// memory summaries share one count, so together they never exceed
     /// `max_active`.
     slots: Mutex<Slots>,
+    /// Closed while a coordinated backup runs: no turn is claimed.
+    gate: Arc<crate::maintenance::Gate>,
 }
 
 #[derive(Default)]
@@ -85,7 +87,35 @@ impl Scheduler {
             grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
             slots: Mutex::new(Slots::default()),
+            gate: Arc::default(),
         })
+    }
+
+    /// The maintenance gate shared with the HTTP layer.
+    pub fn gate(&self) -> &Arc<crate::maintenance::Gate> {
+        &self.gate
+    }
+
+    /// Wait until no turn runs in this process or remains active in the
+    /// database. False on timeout (the caller defers its work).
+    pub async fn drain(&self, timeout: Duration) -> Result<bool, sqlx::Error> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let local = self.running().is_empty();
+            let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
+                crate::db::turns::ACTIVE_STATUSES
+            )))
+            .fetch_one(&self.pool)
+            .await?;
+            if local && !active {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     pub fn registry(&self) -> &Registry {
@@ -191,6 +221,10 @@ impl Scheduler {
         let orphaned = turns::settle_orphans(&self.pool, &live).await?;
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
+        }
+        // While a backup holds the gate nothing new starts.
+        if self.gate.is_closed() {
+            return Ok(());
         }
         // The slot is reserved before the claim, so a summary cannot take
         // it while the claim is in flight.
