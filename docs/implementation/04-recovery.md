@@ -39,17 +39,26 @@ References: [Coordinated capture](../research/backup-and-recovery.md), [planned 
 
 Depends on: POC-022.
 
-Add configured bucket replication to the same worker. Upload encrypted artifacts and the encrypted manifest before publishing the remote completion record. Track local and remote success separately. Use an owner-authorized test bucket or isolated prefix for verification.
+Add configured bucket replication to the same worker. Upload encrypted artifacts and the encrypted manifest before publishing the remote completion record. Track local and remote success separately.
 
-Acceptance:
+Test end to end against a local S3 emulator rather than a real bucket. Add a `seaweedfs` service to `infra/compose.yaml` using the pinned image `chrislusf/seaweedfs:4.50` (`server -dir=/data -s3 -s3.port=8333`) and a named volume. Bind it to `127.0.0.1`, take synthetic access keys from `.env` (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the container), and add a health check. Add matching `ELSE_TEST_S3_*` endpoint, region, and key entries to `.env.example`. The replication tests require the emulator the way the API tests require Compose PostgreSQL: a missing emulator fails with a clear message instead of skipping. Each test uses its own bucket or prefix. MinIO and LocalStack are not used; see the [emulator comparison](../experiments/s3-emulators/README.md). RustFS `1.0.4` passed the same probe and is the fallback if SeaweedFS regresses.
 
-- Run scheduled capture and upload, then verify remote payload hashes with a supported integrity check.
-- Inject an interrupted upload and restart. Retry completes the same set without replacing a valid set or marking partial data complete.
-- Exercise retention with several synthetic sets. Keep the last complete remote recovery point and any local set awaiting replication.
-- Fetch and restore a completed set from remote storage without the local artifacts or original runtime.
-- Record endpoint, format, and test prefix without secrets. If bucket access is unavailable, leave this task unchecked and report the missing access; a local storage mock cannot prove remote recovery.
+Use only the S3 operations the probe verified, so behavior on R2 stays predictable: `PutObject` (with `If-None-Match: *` for the completion record), multipart create, upload, complete, list, and abort, `HeadObject`, ranged `GetObject`, `ListObjectsV2`, `DeleteObject`, and `DeleteObjects`. Configure the endpoint, region, bucket, prefix, and path-style addressing; never hard-code AWS endpoints.
 
-References: [Remote replication and retention](../research/backup-and-recovery.md#automatic-remote-replication-remains-required), [automatic backup requirement](../backups.md).
+Acceptance, all automated against the emulator:
+
+- Run scheduled capture and upload, then verify remote payloads by streamed readback and ciphertext SHA-256. A remote object altered after upload (overwritten through the API) is detected and the set is not marked remotely complete.
+- Publish the completion record with `If-None-Match: *`; a second publication of the same set is refused and leaves the first record unchanged.
+- Interrupt an upload (stop the worker or the API mid-transfer) and restart. Retry completes the same set, aborts the abandoned multipart upload, skips objects whose hashes already match, and never replaces a valid set or marks partial data complete.
+- Stop the emulator during replication: the local set stays complete, the remote state reports the failure, and the next run after the emulator returns finishes the upload.
+- Exercise retention with several synthetic sets. Keep the last complete remote recovery point and any local set awaiting replication; remove an old completion record before its artifacts.
+- Fetch and restore a completed set from the emulator into a fresh installation, with the local artifacts deleted and the original runtime unavailable.
+- Restart the emulator container between upload and restore; the completed set is still listed and restorable.
+- Record the emulator image, endpoint, and test prefixes without secrets in the handoff.
+
+Optional live check: with `ELSE_LIVE_S3=1` and an owner-authorized R2 or S3 bucket and isolated prefix in the environment, the same upload, verification, conditional publication, and remote restore run against the real endpoint. Routine `cargo test` never contacts a real bucket. Run it once before relying on R2 for host-loss recovery and record the outcome; until then, report R2-specific compatibility as unverified, while the task itself is complete once the emulator suite passes.
+
+References: [Remote replication and retention](../research/backup-and-recovery.md#automatic-remote-replication-remains-required), [automatic backup requirement](../backups.md), [S3 emulator comparison](../experiments/s3-emulators/README.md).
 
 ## POC-024: Assistant POC acceptance
 
