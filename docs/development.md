@@ -1,6 +1,6 @@
 # Set up local development
 
-The repository contains the Rust API, a desktop starter, and a PostgreSQL Compose service. The API stores installation state in PostgreSQL and serves authenticated loopback HTTP. The desktop has no GPUI dependency or window yet.
+The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL Compose service. The API stores installation state in PostgreSQL and serves authenticated loopback HTTP. The desktop connects to it as the owner. The desktop has no GPUI dependency or window yet.
 
 ## Prerequisites
 
@@ -170,11 +170,25 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, up
 
 `cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests.
 
-The desktop starter still prints `Hello, world!`:
+## Run the desktop
+
+The desktop is a native GPUI window built with [GPUI Kit](https://gpui-kit.com) `gpui-kit = "=0.8.1"`, which pins GPUI as `gpui-pre 0.3.10`. The pin is exact because GPUI is pre-1.0. It was built and run on Arch Linux (Omarchy) with Hyprland 0.56.2 on Wayland and Rust 1.98.0. Linux needs `libxkbcommon`, `libxcb`, `fontconfig`, and `freetype2`, plus a Vulkan-capable graphics driver; Wayland and X11 sessions are both supported by GPUI. The first build compiles GPUI and takes a few minutes.
+
+Start the API, then the desktop:
 
 ```sh
 cargo run -p else-desktop
 ```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ELSE_API_URL` | `http://127.0.0.1:7878` | API origin. Only `http://` loopback origins without a path, query, or credentials are accepted; this build has no TLS. For a remote server use `ssh -L 7878:127.0.0.1:7878 <server>`. |
+| `ELSE_OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The owner token written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
+| `ELSE_OWNER_TOKEN` | unset | Token value for a development launcher. Takes precedence over the file. Prefer the file. |
+
+The token is sent only as an `Authorization` header to the configured origin. Redirects are never followed, and the token never appears in URLs, logs, or messages. A missing or invalid configuration, a rejected token, or an unreachable API is shown in the sidebar; loaded bots stay visible while the desktop retries. The sidebar refreshes every three seconds. Up/Down (or Ctrl+N/Ctrl+P) move the selection while the sidebar has focus. Closing the window quits the desktop; work already accepted by the API keeps running.
+
+`scripts/demo.sh` runs a disposable installation for manual checks, with its own `else_demo` database and `/tmp/else-demo` data directory and the synthetic provider enabled: `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop` in separate terminals. `scripts/demo.sh drop` removes it.
 
 The workspace shares its root `Cargo.lock` and `target` directory. The backup research crate remains excluded so its documented standalone commands still work. See [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html).
 
