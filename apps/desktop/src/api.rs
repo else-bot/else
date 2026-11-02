@@ -148,11 +148,17 @@ impl ClientError {
         }
     }
 
+    pub fn is_request_conflict(&self) -> bool {
+        matches!(self, Self::Api { code, .. } if code == "request_conflict")
+    }
+
     /// Whether the outcome of a mutation is unknown (the request may or may
     /// not have been applied), as opposed to definitely rejected.
     pub fn outcome_unknown(&self) -> bool {
         match self {
             Self::Unreachable(_) | Self::Protocol(_) => true,
+            // Refused before acceptance, so nothing was accepted.
+            Self::Api { code, .. } if code == "provider_unavailable" => false,
             Self::Api { status, .. } => *status >= 500,
             Self::Unauthorized => false,
         }
@@ -346,8 +352,10 @@ impl Client {
         self: Arc<Self>,
         bot: Uuid,
         cursor: String,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<StreamMessage> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    ) -> tokio::sync::mpsc::Receiver<StreamMessage> {
+        // Bounded: a slow UI applies backpressure to the socket instead of
+        // buffering an unbounded backlog in memory.
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         let this = self.clone();
         self.runtime
             .spawn(async move { this.follow(bot, cursor, tx).await });
@@ -358,53 +366,68 @@ impl Client {
         &self,
         bot: Uuid,
         mut cursor: String,
-        tx: tokio::sync::mpsc::UnboundedSender<StreamMessage>,
+        tx: tokio::sync::mpsc::Sender<StreamMessage>,
     ) {
+        /// Longer than the server's 15-second heartbeat.
+        const INACTIVITY: Duration = Duration::from_secs(45);
+        const HEADERS: Duration = Duration::from_secs(10);
+        // Every wait also ends when the subscriber goes away.
+        macro_rules! deliver {
+            ($message:expr) => {
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    sent = tx.send($message) => if sent.is_err() { return },
+                }
+            };
+        }
         let mut backoff = Duration::from_millis(500);
         loop {
             let request = self
                 .request(Method::GET, &format!("/v1/bots/{bot}/events"))
                 .header("last-event-id", &cursor);
-            match request.send().await {
-                Ok(response) if response.status().is_success() => {
+            let response = tokio::select! {
+                _ = tx.closed() => return,
+                response = tokio::time::timeout(HEADERS, request.send()) => response,
+            };
+            match response {
+                Ok(Ok(response)) if response.status().is_success() => {
                     backoff = Duration::from_millis(500);
-                    if tx.send(StreamMessage::Connected).is_err() {
-                        return;
-                    }
+                    deliver!(StreamMessage::Connected);
                     let mut parser = Parser::default();
                     let mut body = response.bytes_stream();
-                    loop {
+                    let reason = loop {
                         let chunk = tokio::select! {
                             _ = tx.closed() => return,
-                            chunk = body.next() => chunk,
+                            chunk = tokio::time::timeout(INACTIVITY, body.next()) => chunk,
                         };
-                        let Some(Ok(bytes)) = chunk else { break };
+                        let bytes = match chunk {
+                            Err(_) => break "The event stream went silent.",
+                            Ok(Some(Ok(bytes))) => bytes,
+                            Ok(_) => break "The event stream ended.",
+                        };
                         let Ok(frames) = parser.push(&bytes) else {
-                            let _ = tx.send(StreamMessage::Reset);
+                            deliver!(StreamMessage::Reset);
                             return;
                         };
                         for frame in frames {
                             if let Some(id) = &frame.id {
                                 cursor = id.clone();
                             }
-                            if tx.send(StreamMessage::Frame(frame)).is_err() {
-                                return;
-                            }
+                            deliver!(StreamMessage::Frame(frame));
                         }
-                    }
-                    // EOF: deletion or a server restart. The next attempt
-                    // reports which.
-                    let _ = tx.send(StreamMessage::Disconnected(
-                        "The event stream ended.".into(),
-                    ));
+                    };
+                    // EOF or silence: deletion, a restart, or a dead link. The
+                    // next attempt reports which.
+                    deliver!(StreamMessage::Disconnected(reason.into()));
                 }
-                Ok(response) => {
+                Ok(Ok(response)) => {
                     let status = response.status();
-                    let code = response
-                        .json::<ErrorBody>()
-                        .await
-                        .map(|b| b.error.code)
-                        .unwrap_or_default();
+                    let code = tokio::select! {
+                        _ = tx.closed() => return,
+                        body = tokio::time::timeout(HEADERS, response.json::<ErrorBody>()) => {
+                            body.ok().and_then(Result::ok).map(|b| b.error.code).unwrap_or_default()
+                        }
+                    };
                     let terminal = match (status.as_u16(), code.as_str()) {
                         (401, _) => Some(StreamMessage::Unauthorized),
                         (410, _) => Some(StreamMessage::Deleted),
@@ -412,20 +435,17 @@ impl Client {
                         _ => None,
                     };
                     if let Some(message) = terminal {
-                        let _ = tx.send(message);
+                        deliver!(message);
                         return;
                     }
-                    let _ = tx.send(StreamMessage::Disconnected(format!("HTTP {status}")));
+                    deliver!(StreamMessage::Disconnected(format!("HTTP {status}")));
                 }
-                Err(_) => {
-                    let _ = tx.send(StreamMessage::Disconnected(format!(
+                Ok(Err(_)) | Err(_) => {
+                    deliver!(StreamMessage::Disconnected(format!(
                         "Cannot reach the API at {}.",
                         self.origin.as_str()
                     )));
                 }
-            }
-            if tx.is_closed() {
-                return;
             }
             // Exponential backoff with jitter, capped at 15 seconds.
             let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) * 2);

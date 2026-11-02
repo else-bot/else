@@ -78,11 +78,13 @@ struct PendingSend {
     provider_id: Option<String>,
     /// `None` while sending; otherwise why the outcome is unknown.
     unknown: Option<String>,
+    /// Set when the server definitely refused it. The text stays here until
+    /// the owner restores or dismisses it, so it is never lost.
+    rejected: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RowKey {
-    Older,
     Item(Uuid),
     Pending(Uuid),
 }
@@ -120,6 +122,10 @@ impl ConversationView {
 
 struct CreateForm {
     request_id: Uuid,
+    /// The exact payload of a request whose outcome is unknown. Retries
+    /// resend it unchanged under the same request ID, whatever the fields
+    /// now say, until the server gives a definite answer.
+    in_doubt: Option<(String, String)>,
     name: Entity<InputState>,
     role: Entity<TextareaState>,
     error: Option<String>,
@@ -529,9 +535,6 @@ impl ElseApp {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
         let mut rows = Vec::new();
-        if conversation.older_before_seq.is_some() {
-            rows.push(RowKey::Older);
-        }
         let mut texts: Vec<(RowKey, String)> = Vec::new();
         for item in conversation.items() {
             rows.push(RowKey::Item(item.id));
@@ -612,11 +615,6 @@ impl ElseApp {
                     .and_then(|v| v.conversation.as_ref())
                     .and_then(|c| c.selected_provider_id.clone())
             })
-            .filter(|id| {
-                self.caps
-                    .as_ref()
-                    .is_some_and(|caps| caps.providers.iter().any(|p| p.id == *id && p.available))
-            })
             .or_else(|| {
                 self.caps
                     .as_ref()
@@ -664,11 +662,31 @@ impl ElseApp {
             cx.notify();
             return;
         }
+        // Never substitute another provider for the one chosen.
+        let provider = self.provider_for(bot);
+        if let Some(id) = &provider {
+            let info = self
+                .caps
+                .as_ref()
+                .and_then(|caps| caps.providers.iter().find(|p| p.id == *id));
+            if !info.is_some_and(|p| p.available) {
+                let reason = info
+                    .and_then(|p| p.unavailable_reason.clone())
+                    .unwrap_or_else(|| "it is not offered by this API".into());
+                self.notice = Some(format!(
+                    "{} is unavailable ({reason}). Choose another provider.",
+                    self.provider_label(id)
+                ));
+                cx.notify();
+                return;
+            }
+        }
         let pending = PendingSend {
             request_id: Uuid::new_v4(),
             text,
-            provider_id: self.provider_for(bot),
+            provider_id: provider,
             unknown: None,
+            rejected: None,
         };
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -728,18 +746,16 @@ impl ElseApp {
                 cx.notify();
             }
             Err(err) => {
-                // Definitely rejected: nothing was accepted. Give the text back.
-                if let Some(list) = self.pending.get_mut(&bot) {
-                    list.retain(|p| p.request_id != pending.request_id);
+                // Definitely rejected: nothing was accepted. Keep the text as a
+                // recoverable entry instead of touching the composer or drafts.
+                if let Some(p) = self
+                    .pending
+                    .get_mut(&bot)
+                    .and_then(|list| list.iter_mut().find(|p| p.request_id == pending.request_id))
+                {
+                    p.unknown = None;
+                    p.rejected = Some(err.to_string());
                 }
-                if self.selected == Some(bot) && self.composer.read(cx).value().is_empty() {
-                    self.composer.update(cx, |state, cx| {
-                        state.set_value(pending.text.clone(), window, cx)
-                    });
-                } else if self.drafts.get(&bot).is_none_or(|d| d.is_empty()) {
-                    self.drafts.insert(bot, pending.text.clone());
-                }
-                self.notice = Some(err.to_string());
                 self.sync_rows(window, cx);
             }
         }
@@ -811,6 +827,40 @@ impl ElseApp {
         self.submit(bot, pending, window, cx);
     }
 
+    /// Remove a refused send; optionally put its text back in the composer,
+    /// after whatever is already there.
+    fn take_rejected(
+        &mut self,
+        request_id: Uuid,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bot) = self.selected else { return };
+        let Some(list) = self.pending.get_mut(&bot) else {
+            return;
+        };
+        let Some(ix) = list
+            .iter()
+            .position(|p| p.request_id == request_id && p.rejected.is_some())
+        else {
+            return;
+        };
+        let pending = list.remove(ix);
+        if restore {
+            let current = self.composer.read(cx).value().to_string();
+            let text = if current.trim().is_empty() {
+                pending.text
+            } else {
+                format!("{current}\n\n{}", pending.text)
+            };
+            self.composer
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+            self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        self.sync_rows(window, cx);
+    }
+
     // ----- Stop, create, delete ---------------------------------------------
 
     fn stop_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -853,6 +903,7 @@ impl ElseApp {
         let holder = cx.new(|_| CreateFormHolder {
             form: CreateForm {
                 request_id: Uuid::new_v4(),
+                in_doubt: None,
                 name: name.clone(),
                 role,
                 error: None,
@@ -932,11 +983,13 @@ impl ElseApp {
         }
         let (request_id, name, role) = {
             let form = &holder.read(cx).form;
-            (
-                form.request_id,
-                form.name.read(cx).value().to_string(),
-                form.role.read(cx).value().to_string(),
-            )
+            let (name, role) = form.in_doubt.clone().unwrap_or_else(|| {
+                (
+                    form.name.read(cx).value().to_string(),
+                    form.role.read(cx).value().to_string(),
+                )
+            });
+            (form.request_id, name, role)
         };
         holder.update(cx, |h, cx| {
             h.form.busy = true;
@@ -944,12 +997,19 @@ impl ElseApp {
             cx.notify();
         });
         window.refresh();
+        let payload = (name.clone(), role.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = client.create_bot(request_id, name, role).await;
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(bot) => {
-                    app.create = None;
-                    window.close_dialog(cx);
+                    // Close only the dialog this request came from.
+                    if app.create.as_ref() == Some(&holder) {
+                        app.create = None;
+                        window.close_dialog(cx);
+                    }
+                    if app.bots.iter().any(|b| b.id == bot.id) {
+                        return;
+                    }
                     app.bots.push(bot.clone());
                     app.select(Some(bot.id), window, cx);
                     app.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -958,13 +1018,20 @@ impl ElseApp {
                 Err(err) => {
                     holder.update(cx, |h, cx| {
                         h.form.busy = false;
-                        // A definite rejection lets the owner edit and retry
-                        // as a new request; an unknown outcome keeps the same
-                        // request ID so a retry cannot create a duplicate.
-                        if !err.outcome_unknown() {
+                        // A definite rejection lets the owner edit and send a
+                        // new request. An unknown outcome (or a conflict,
+                        // which proves nothing about the original) keeps the
+                        // same ID and payload so a retry cannot duplicate.
+                        if err.outcome_unknown() || err.is_request_conflict() {
+                            h.form.in_doubt = Some(payload.clone());
+                            h.form.error = Some(format!(
+                                "{err} Create will retry the original request unchanged."
+                            ));
+                        } else {
                             h.form.request_id = Uuid::new_v4();
+                            h.form.in_doubt = None;
+                            h.form.error = Some(err.to_string());
                         }
-                        h.form.error = Some(err.to_string());
                         cx.notify();
                     });
                     window.refresh();
@@ -1326,26 +1393,6 @@ impl ElseApp {
                 .child(text)
         };
         match key {
-            RowKey::Older => {
-                let loading = view.loading_older;
-                div()
-                    .flex()
-                    .justify_center()
-                    .py_2()
-                    .child(
-                        Button::new("load-older")
-                            .label(if loading {
-                                "Loading…"
-                            } else {
-                                "Load older messages"
-                            })
-                            .xsmall()
-                            .ghost()
-                            .disabled(loading)
-                            .on_click(cx.listener(|app, _, window, cx| app.load_older(window, cx))),
-                    )
-                    .into_any_element()
-            }
             RowKey::Item(id) => {
                 let Some(conversation) = view.conversation.as_ref() else {
                     return div().into_any_element();
@@ -1402,6 +1449,38 @@ impl ElseApp {
                     .px_4()
                     .py_1()
                     .child(bubble(state, true));
+                if let Some(reason) = &pending.rejected {
+                    return column
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(note(format!("Not sent. {reason}"), true))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "restore-{request_id}"
+                                    )))
+                                    .label("Restore to composer")
+                                    .xsmall()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.take_rejected(request_id, true, window, cx)
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "dismiss-{request_id}"
+                                    )))
+                                    .label("Dismiss")
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.take_rejected(request_id, false, window, cx)
+                                    })),
+                                ),
+                        )
+                        .into_any_element();
+                }
                 column = match &pending.unknown {
                     None => column.child(
                         h_flex()
@@ -1445,13 +1524,43 @@ impl ElseApp {
                         .child("No messages yet. Say hello.")
                         .into_any_element()
                 } else {
-                    list(
-                        view.list.clone(),
-                        cx.processor(|app, ix, window, cx| app.render_row(ix, window, cx)),
-                    )
-                    .flex_1()
-                    .py_2()
-                    .into_any_element()
+                    let older = view
+                        .conversation
+                        .as_ref()
+                        .is_some_and(|c| c.older_before_seq.is_some());
+                    // Outside the list, so prepending history shifts the
+                    // anchored message instead of the button.
+                    let mut column = v_flex().flex_1().min_h_0();
+                    if older {
+                        let loading = view.loading_older;
+                        column =
+                            column.child(
+                                h_flex().justify_center().py_1().child(
+                                    Button::new("load-older")
+                                        .label(if loading {
+                                            "Loading…"
+                                        } else {
+                                            "Load older messages"
+                                        })
+                                        .xsmall()
+                                        .ghost()
+                                        .disabled(loading)
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.load_older(window, cx)
+                                        })),
+                                ),
+                            );
+                    }
+                    column
+                        .child(
+                            list(
+                                view.list.clone(),
+                                cx.processor(|app, ix, window, cx| app.render_row(ix, window, cx)),
+                            )
+                            .flex_1()
+                            .py_2(),
+                        )
+                        .into_any_element()
                 }
             }
             _ => div()
