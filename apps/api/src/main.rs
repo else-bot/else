@@ -164,6 +164,20 @@ fn run_serve() -> anyhow::Result<()> {
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;
+        // Terminate provider sandboxes left by an earlier API process before
+        // anything is reconciled or dispatched.
+        match else_api::providers::host::HostSandbox::detect(&config.data_dir) {
+            Ok(sandbox) => {
+                let swept = sandbox.sweep_orphans();
+                if swept > 0 {
+                    tracing::warn!(
+                        swept,
+                        "terminated provider processes left by an earlier API"
+                    );
+                }
+            }
+            Err(err) => tracing::warn!(error = %err, "host provider sandbox unavailable"),
+        }
         let registry = else_api::providers::registry(&config);
         // Reconcile interrupted work before the scheduler admits anything.
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;

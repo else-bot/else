@@ -6,6 +6,7 @@ pub mod config;
 pub mod credentials;
 pub mod db;
 pub mod events;
+pub mod grants;
 pub mod http;
 pub mod providers;
 pub mod runtime_lock;

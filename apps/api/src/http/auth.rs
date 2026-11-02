@@ -155,8 +155,18 @@ pub async fn require_owner(
 
 /// Check the owner bearer credential, returning the rejection response.
 pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
-    let authenticated = bearer(headers).is_some_and(|token| state.owner_token.matches(token));
+    let presented = bearer(headers);
+    let authenticated = presented.is_some_and(|token| state.owner_token.matches(token));
     if !authenticated {
+        // A valid task grant is authenticated but not allowed here.
+        if presented.is_some_and(|token| state.scheduler.grants().resolve(token).is_some()) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "task_grant_forbidden",
+                "Task grants cannot use owner routes.",
+            )
+            .into_response());
+        }
         // The valid owner is never locked out; failures beyond the budget
         // get a cheap 429 instead of a 401.
         if let Some(retry_after) = state.auth_failures.blocked_for() {
@@ -241,5 +251,47 @@ mod tests {
             HeaderValue::from_static("Bearer abc"),
         );
         assert_eq!(bearer(&headers), None, "duplicated header");
+    }
+}
+
+/// Authenticate a task-scoped tool request. Identity comes only from the
+/// grant record; the owner token is not accepted here.
+pub async fn require_task_grant(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let presented = bearer(request.headers());
+    if presented.is_some_and(|token| state.owner_token.matches(token)) {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "owner_token_forbidden",
+            "Tool routes accept task grants only.",
+        )
+        .into_response();
+    }
+    match presented.and_then(|token| state.scheduler.grants().resolve(token)) {
+        Some(grant) => {
+            request.extensions_mut().insert(grant);
+            next.run(request).await
+        }
+        None => {
+            if let Some(retry_after) = state.auth_failures.blocked_for() {
+                return ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too_many_failures",
+                    "Too many failed authentication attempts.",
+                )
+                .retry_after(retry_after)
+                .into_response();
+            }
+            state.auth_failures.record_failure();
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_task_grant",
+                "A valid task grant is required.",
+            )
+            .into_response()
+        }
     }
 }

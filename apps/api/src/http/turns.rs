@@ -193,6 +193,7 @@ async fn cancel(
             }
             .with_request_id(body.request_id)
         })?;
+    state.scheduler.grants().revoke_bot(bot_id);
     if let Some(turn_id) = receipt.interrupt {
         state.scheduler.interrupt(turn_id);
     }

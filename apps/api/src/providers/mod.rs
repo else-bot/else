@@ -1,5 +1,8 @@
 //! Provider adapters and the registry the API exposes through capabilities.
 
+pub mod codex_home;
+pub mod codex_rpc;
+pub mod host;
 pub mod synthetic;
 
 use std::sync::Arc;

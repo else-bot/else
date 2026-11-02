@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::app::providers::TurnOutcome;
 use crate::db::turns::{self, FLUSH_INTERVAL, PgSink};
+use crate::grants::Grants;
 use crate::providers::Registry;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
@@ -28,6 +29,7 @@ pub struct Scheduler {
     max_active: usize,
     cancel_grace: Duration,
     tasks: TaskTracker,
+    grants: Arc<Grants>,
 }
 
 /// How long an interrupted provider may take to stop before it is abandoned.
@@ -51,12 +53,18 @@ impl Scheduler {
             running: Mutex::new(HashMap::new()),
             max_active,
             cancel_grace,
+            grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
         })
     }
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Task grants issued to running turns. Revoked when a turn ends.
+    pub fn grants(&self) -> &Arc<Grants> {
+        &self.grants
     }
 
     /// Hint that new work may be eligible. Rows remain authoritative.
@@ -132,6 +140,7 @@ impl Scheduler {
             let this = self.clone();
             self.tasks.spawn(async move {
                 this.execute(turn_id, token).await;
+                this.grants.revoke_turn(turn_id);
                 this.running().remove(&turn_id);
                 this.wake();
             });

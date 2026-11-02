@@ -88,6 +88,7 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 | `SECRET_KEY_FILE` | `$ELSE_DATA_DIR/secret-key` | Master key file used when `SECRET_KEY` is unset. |
 | `ELSE_SYNTHETIC_PROVIDER` | `0` | `1` exposes the deterministic `synthetic` provider, labeled "Synthetic (test)", for demos and manual checks. It runs no model. |
 | `ELSE_MAX_ACTIVE_TURNS` | `2` | Provider turns running at once across all bots, from 1 to 32. Each bot runs at most one turn at a time regardless. |
+| (bubblewrap) | required for providers | Provider CLIs run inside `bwrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). Without it the API starts, but host providers report unavailable. See [host provider processes](security.md#implemented-codex-launch-profile). |
 | `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. A larger declared `Content-Length` receives `413 too_large` on every route; body extractors also stop chunked bodies at the limit. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never query strings, headers, or bodies. |

@@ -5,6 +5,7 @@ pub mod bots;
 pub mod conversation;
 pub mod error;
 pub mod settings;
+pub mod tools;
 pub mod turns;
 
 use std::sync::Arc;
@@ -77,6 +78,17 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         .nest("/v1", v1)
+        // Task-scoped tools: a separate route group that accepts only task
+        // grants and never the owner token.
+        .nest(
+            "/tools/v1",
+            tools::routes()
+                .fallback(|| async { ApiError::not_found() })
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth::require_task_grant,
+                )),
+        )
         // Paths such as `/v1/` that the nested router does not match are
         // still authenticated before reporting 404.
         .fallback(fallback)
