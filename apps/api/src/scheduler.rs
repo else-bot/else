@@ -33,6 +33,22 @@ pub struct Scheduler {
     cancel_grace: Duration,
     tasks: TaskTracker,
     grants: Arc<Grants>,
+    /// Memory summaries running; they share the provider budget.
+    summaries: std::sync::atomic::AtomicUsize,
+}
+
+/// A provider slot held by one memory summary. Released on drop.
+pub struct SummaryPermit {
+    scheduler: Arc<Scheduler>,
+}
+
+impl Drop for SummaryPermit {
+    fn drop(&mut self) {
+        self.scheduler
+            .summaries
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.scheduler.wake();
+    }
 }
 
 /// How long an interrupted provider may take to stop before it is abandoned.
@@ -58,6 +74,7 @@ impl Scheduler {
             cancel_grace,
             grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
+            summaries: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -68,6 +85,33 @@ impl Scheduler {
     /// Task grants issued to running turns. Revoked when a turn ends.
     pub fn grants(&self) -> &Arc<Grants> {
         &self.grants
+    }
+
+    /// Take a provider slot for one memory summary if one is free. Summaries
+    /// are low priority: the caller checks first that no turn is waiting,
+    /// and at most `limit` run at once.
+    pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
+        use std::sync::atomic::Ordering;
+        let running = self.running().len();
+        let mut current = self.summaries.load(Ordering::SeqCst);
+        loop {
+            if current >= limit || running + current >= self.max_active {
+                return None;
+            }
+            match self.summaries.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Some(SummaryPermit {
+                        scheduler: self.clone(),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Hint that new work may be eligible. Rows remain authoritative.
@@ -132,7 +176,9 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
-        while self.running().len() < self.max_active {
+        while self.running().len() + self.summaries.load(std::sync::atomic::Ordering::SeqCst)
+            < self.max_active
+        {
             let Some(turn_id) = turns::claim_next(&self.pool, &[]).await? else {
                 break;
             };

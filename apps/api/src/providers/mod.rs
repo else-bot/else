@@ -15,6 +15,11 @@ use crate::config::Config;
 /// always listed; it reports unavailable (with a reason) when bubblewrap,
 /// the CLI, or its host login is missing.
 pub fn registry(config: &Config) -> Registry {
+    build(config).0
+}
+
+/// The registry and the no-tools summarizer for memory (the same Codex).
+pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker::Summarizer>>) {
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
     let sandbox = host::HostSandbox::detect(&config.data_dir).ok();
     let program = config.codex_bin.clone().or_else(|| find_on_path("codex"));
@@ -28,15 +33,15 @@ pub fn registry(config: &Config) -> Registry {
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
     }
     let tool_url = format!("http://{tool_addr}/tools/v1/mcp");
-    providers.push(Arc::new(
-        codex::Codex::detect(sandbox, program, auth).with_tools(tool_url),
-    ));
+    let codex = Arc::new(codex::Codex::detect(sandbox, program, auth).with_tools(tool_url));
+    providers.push(codex.clone());
     if config.synthetic_provider {
         providers.push(Arc::new(synthetic::Synthetic::new(
             std::time::Duration::from_millis(40),
         )));
     }
-    Registry::new(providers)
+    let summarizer: Arc<dyn crate::memory_worker::Summarizer> = codex;
+    (Registry::new(providers), Some(summarizer))
 }
 
 /// An executable on `PATH`, resolved to its real file. Version-manager

@@ -58,6 +58,8 @@ pub struct TurnInput {
     pub session: Option<SessionState>,
     /// Task grant for else.bot tools during this turn; revoked when it ends.
     pub tool_grant: Option<String>,
+    /// The bot's saved memory, bounded, for a new session.
+    pub memory: Option<MemoryContext>,
 }
 
 /// A provider's native session for one conversation.
@@ -67,6 +69,15 @@ pub struct SessionState {
     pub fingerprint: String,
     /// History through this owner turn was already given to the session.
     pub considered_through_turn: i64,
+    /// The memory view revision given to the session, if any.
+    pub memory_revision: Option<i64>,
+}
+
+/// Bounded saved memory for a session that has not received it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryContext {
+    pub revision: i64,
+    pub text: String,
 }
 
 /// Terminal result of a provider attempt. Text alone never implies success.

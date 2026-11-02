@@ -178,7 +178,7 @@ fn run_serve() -> anyhow::Result<()> {
             }
             Err(err) => tracing::warn!(error = %err, "host provider sandbox unavailable"),
         }
-        let registry = else_api::providers::registry(&config);
+        let (registry, summarizer) = else_api::providers::build(&config);
         // Reconcile interrupted work before the scheduler admits anything.
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
         if requeued + uncertain > 0 {
@@ -199,10 +199,15 @@ fn run_serve() -> anyhow::Result<()> {
             stop_on_loss.cancel();
         });
         // Builds memory tree nodes; stops with the scheduler.
-        let compactor = tokio::spawn(else_api::memory_worker::run(
-            pool.clone(),
-            stop_scheduler.clone(),
-        ));
+        let compactor = match summarizer {
+            Some(summarizer) => else_api::memory_worker::Compactor::with_summaries(
+                pool.clone(),
+                summarizer,
+                scheduler.clone(),
+            ),
+            None => else_api::memory_worker::Compactor::deterministic(pool.clone()),
+        };
+        let compactor = tokio::spawn(compactor.run(stop_scheduler.clone()));
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         let state = Arc::new(http::AppState::new(owner_token, pool, scheduler, events));
         let result = serve(&config, listener, state, lock_lost.clone()).await;

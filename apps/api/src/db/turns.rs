@@ -428,8 +428,9 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         text,
     })
     .collect();
-    let session = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT native_session_id, fingerprint, considered_through_turn FROM provider_sessions s
+    let session = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
+        "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision
+         FROM provider_sessions s
          WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'
            -- A session that may hold an uncertain delivery is never resumed.
            AND NOT EXISTS (SELECT 1 FROM turns u
@@ -440,10 +441,11 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     .fetch_optional(&mut *conn)
     .await?
     .map(
-        |(native_id, fingerprint, considered_through_turn)| SessionState {
+        |(native_id, fingerprint, considered_through_turn, memory_revision)| SessionState {
             native_id,
             fingerprint,
             considered_through_turn,
+            memory_revision,
         },
     );
     Ok(TurnInput {
@@ -458,6 +460,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         history,
         session,
         tool_grant: None,
+        memory: crate::db::memory_tree::session_context(pool, turn.bot_id).await?,
     })
 }
 
@@ -790,11 +793,13 @@ impl TurnSink for PgSink {
             let session_id = match existing {
                 Some(id) => {
                     sqlx::query(
-                        "UPDATE provider_sessions SET considered_through_turn = $2, updated_at = now()
+                        "UPDATE provider_sessions SET considered_through_turn = $2,
+                             memory_revision = coalesce($3, memory_revision), updated_at = now()
                          WHERE id = $1",
                     )
                     .bind(id)
                     .bind(state.considered_through_turn)
+                    .bind(state.memory_revision)
                     .execute(&mut *tx)
                     .await?;
                     id
@@ -812,8 +817,8 @@ impl TurnSink for PgSink {
                     let id = Uuid::new_v4();
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
-                             native_session_id, fingerprint, considered_through_turn)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                             native_session_id, fingerprint, considered_through_turn, memory_revision)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -822,6 +827,7 @@ impl TurnSink for PgSink {
                     .bind(&state.native_id)
                     .bind(&state.fingerprint)
                     .bind(state.considered_through_turn)
+                    .bind(state.memory_revision)
                     .execute(&mut *tx)
                     .await?;
                     id
