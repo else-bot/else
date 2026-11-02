@@ -153,18 +153,18 @@ server → {"channel":"bot:<bot-uuid>","error":{"code":"cursor_reset_required","
 
 `bots` sends the whole list (`include_deleting` semantics) on subscribe and again whenever it changes. Bot creation, deletion, cleanup, and every journaled activity change wake it. `bot:<id>` requires a cursor from a snapshot of that bot and sends committed journal rows after it, in order, each with its encoded cursor as `id`. Subscribing to a channel that is already open replaces it.
 
-A channel error ends only that channel; the connection and other channels continue.
+A channel error ends only that channel; the connection and other channels continue. Every subscription ends with exactly one error or an unsubscribe, never silently. Each subscription has a server-side generation: once a channel is replaced or unsubscribed, nothing still queued from the earlier subscription is written, including its error.
 
 | Code | Meaning and client action |
 | --- | --- |
 | `cursor_required`, `invalid_cursor` | Missing or malformed cursor, or a cursor for another bot. Reload a snapshot. |
 | `cursor_reset_required` | Cursor from an earlier API process or beyond the latest event. Reload a snapshot. |
-| `bot_deleted` | The bot was deleted. Data already queued for the channel is dropped, then this error is sent. Refresh the list. |
+| `bot_deleted` | The bot was deleted. Data already queued for it is dropped and stays dropped for the rest of the connection, even after a new subscribe; only this error is sent. Refresh the list. |
 | `not_found` | Unknown bot. Refresh the list. |
 | `unknown_channel`, `invalid_message`, `too_many_subscriptions` | Client bug or more than 32 channels. |
-| `unavailable` | The database read failed. Resubscribe from the last cursor later. |
+| `unavailable` | A database read failed or timed out. Resubscribe from the last cursor (the desktop reloads a snapshot). |
 
-Limits: client messages up to 64 KiB, 32 channels per connection, and a bounded 256-message outgoing queue. A journal read is at most 200 rows; a slow reader blocks only its channel and continues from its cursor, so memory does not grow. The server pings every 15 seconds and closes a connection that is silent for 60 seconds or cannot take a write within 30 seconds.
+Limits: client messages up to 64 KiB, 32 running channels per connection (ended ones free their slot), and one bounded 256-message outgoing queue shared by all channels. A journal read is at most 200 rows, and a channel waits for queue space instead of buffering more, so memory stays bounded; a slow reader therefore slows every channel on its connection. While waiting, a channel still notices deletion within about a second. The server pings every 15 seconds and closes a connection that is silent for 60 seconds or cannot take a write within 30 seconds; the close itself is bounded too.
 
 Persist a small per-bot event journal with `bot_id`, `seq`, `kind`, and `data`. Existing history remains the source for snapshots. This journal provides replay, not a replacement event-sourced database. Retain it with conversation data initially. Do not build a compactor or message broker for the first release.
 
@@ -203,9 +203,9 @@ Each event is one WebSocket message, shaped like the `item.delta` example above.
 
 ### Client behavior
 
-The client first fetches a snapshot over HTTP and then subscribes after its cursor. Events committed between those operations replay from the journal. Apply only the next contiguous event. Ignore an ID at or below the applied cursor. A gap, unknown event kind, missing item, or offset mismatch drops the subscription and reloads a snapshot. Advance the cursor only after successful application. Older-page responses merge by item ID and history order, without replacing newer loaded text or advancing the live cursor.
+The client first fetches a snapshot over HTTP and then subscribes after its cursor. Events committed between those operations replay from the journal. Apply only the next contiguous event. Ignore an ID at or below the applied cursor. A gap, unknown event kind, missing item, or offset mismatch drops the subscription and reloads a snapshot. The desktop records a frame's cursor when it receives it and hands frames to the view in order without dropping any, so a resumed subscription neither skips nor repeats events; if the view cannot apply one, it reloads a snapshot. Older-page responses merge by item ID and history order, without replacing newer loaded text or advancing the live cursor.
 
-When the connection drops, reconnect with jittered exponential backoff from 500 ms to 15 seconds, subscribe to `bots` again, and resubscribe each open bot channel from its last applied cursor. A connection with no traffic for 45 seconds is treated as lost. On `401`, show the credential error and retry only every 30 seconds. After a desktop restart, obtain a fresh snapshot. Restoring a database requires restarting the API, which changes the instance ID and forces every cursor to reset.
+When the connection drops, reconnect with jittered exponential backoff from 500 ms to 15 seconds (reset only after a connection stayed up 30 seconds), subscribe to `bots` again, and resubscribe each open bot channel from its last received cursor. A connection with no traffic for 45 seconds is treated as lost. On `401`, show the credential error and retry only every 30 seconds. After a desktop restart, obtain a fresh snapshot. Restoring a database requires restarting the API, which changes the instance ID and forces every cursor to reset.
 
 Deletion ends the bot's channel at once with `bot_deleted`, and nothing more is delivered for it. A disconnect, unsubscribe, selection change, or window close never cancels the bot's work or releases a guest job lease.
 
