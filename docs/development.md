@@ -90,6 +90,27 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/else-bot/owner-token)" \
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never headers or bodies. |
 
+### Owner routes
+
+The implemented routes follow the [desktop contract](research/desktop-and-feature-contracts.md#proposed-rest-endpoints):
+
+| Route | Behavior |
+| --- | --- |
+| `GET /v1/capabilities` | API version and the per-process `server_instance_id`. |
+| `GET /v1/bots[?include_deleting=true]` | `default_bot_id` and active bots, oldest first. `include_deleting` adds tombstones whose shutdown is pending. |
+| `POST /v1/bots` | `{request_id, name, role}`. `201` with `Location` on first acceptance; the same request returns `200` with the same bot; changed input under that ID returns `409 request_conflict`. |
+| `GET /v1/bots/{id}` | An active bot, or a deletion receipt with `cleanup.state` and no role or conversation reference. |
+| `DELETE /v1/bots/{id}` | Commits the tombstone, clears the default if it pointed at this bot, and returns the receipt. Repeating it returns the same receipt. History and conversations are retained. |
+
+Unknown or malformed IDs return `404 not_found`, always after authentication. Try it with a synthetic bot:
+
+```sh
+TOKEN="$(cat ~/.local/share/else-bot/owner-token)"
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+	-d "{\"request_id\":\"$(uuidgen)\",\"name\":\"Work\",\"role\":\"Help with my work\"}" \
+	http://127.0.0.1:7878/v1/bots
+```
+
 ### Database and migrations
 
 Versioned SQL migrations live in `apps/api/migrations` and are embedded in the binary. Applied versions are recorded in `_sqlx_migrations`, so applying them again is a no-op. Apply them explicitly with:

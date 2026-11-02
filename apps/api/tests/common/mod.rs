@@ -108,3 +108,86 @@ impl Drop for TestDb {
         });
     }
 }
+
+pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// The real router over a test database, driven in-process.
+pub struct TestApp {
+    pub router: axum::Router,
+    pub db: TestDb,
+    pub state: std::sync::Arc<else_api::http::AppState>,
+}
+
+pub struct Reply {
+    pub status: axum::http::StatusCode,
+    pub headers: axum::http::HeaderMap,
+    pub body: serde_json::Value,
+}
+
+impl TestApp {
+    /// Migrated database with explicit setup completed.
+    pub async fn installed() -> Self {
+        let db = TestDb::migrated().await;
+        else_api::db::installation::setup(&db.pool).await.unwrap();
+        Self::with_db(db)
+    }
+
+    pub fn with_db(db: TestDb) -> Self {
+        let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
+        let state = std::sync::Arc::new(else_api::http::AppState::new(
+            else_api::credentials::OwnerToken::parse(TOKEN).unwrap(),
+            db.pool.clone(),
+        ));
+        let router = else_api::http::router(&config, state.clone());
+        Self { router, db, state }
+    }
+
+    pub async fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        token: Option<&str>,
+    ) -> Reply {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "127.0.0.1:7878");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string())),
+            None => request.body(axum::body::Body::empty()),
+        }
+        .unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        Reply {
+            status,
+            headers,
+            body: serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    pub async fn owner(&self, method: &str, path: &str, body: Option<serde_json::Value>) -> Reply {
+        self.call(method, path, body, Some(TOKEN)).await
+    }
+}
+
+struct MapEnv(Vec<(&'static str, &'static str)>);
+
+impl else_api::config::Source for MapEnv {
+    fn get(&self, name: &str) -> Option<String> {
+        self.0
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.to_string())
+    }
+}

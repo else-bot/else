@@ -1,6 +1,7 @@
 //! HTTP transport. Handlers translate requests into application operations.
 
 pub mod auth;
+pub mod bots;
 pub mod error;
 
 use std::sync::Arc;
@@ -43,6 +44,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
     // paths are authenticated before they report 404.
     let v1 = Router::new()
         .route("/capabilities", get(capabilities))
+        .merge(bots::routes())
         .fallback(|| async { ApiError::not_found() })
         .layer(middleware::from_fn_with_state(
             state.clone(),

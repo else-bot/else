@@ -129,3 +129,30 @@ impl From<JsonRejection> for ApiError {
 #[derive(axum::extract::FromRequest)]
 #[from_request(via(axum::Json), rejection(ApiError))]
 pub struct ApiJson<T>(pub T);
+
+/// Path extractor. A malformed object ID is reported as an unknown object.
+#[derive(axum::extract::FromRequestParts)]
+#[from_request(via(axum::extract::Path), rejection(ApiError))]
+pub struct ApiPath<T>(pub T);
+
+impl From<axum::extract::rejection::PathRejection> for ApiError {
+    fn from(_: axum::extract::rejection::PathRejection) -> Self {
+        ApiError::not_found()
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(err: sqlx::Error) -> Self {
+        // Database messages can describe schema details; keep them in logs.
+        match err {
+            sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) | sqlx::Error::PoolClosed => {
+                tracing::warn!(error = %err, "database unavailable");
+                ApiError::unavailable("database_unavailable", "The database is not reachable.")
+            }
+            other => {
+                tracing::error!(error = %other, "database error");
+                ApiError::internal()
+            }
+        }
+    }
+}

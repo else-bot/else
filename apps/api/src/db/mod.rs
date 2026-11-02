@@ -1,6 +1,7 @@
 //! PostgreSQL adapter: connection, versioned migrations, and the
 //! transactional operations that persist application state.
 
+pub mod bots;
 pub mod installation;
 
 use std::time::Duration;
