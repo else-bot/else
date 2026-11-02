@@ -1,0 +1,4 @@
+[workspace]
+members = ["apps/api", "apps/desktop"]
+exclude = ["docs/experiments/backups"]
+resolver = "3"

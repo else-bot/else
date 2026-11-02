@@ -4,7 +4,7 @@ else.bot is a personal AI agent that learns to reflect its owner. One main assis
 
 You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
 
-The project is in research and design. No application implementation has started.
+The repository has Rust starter crates and local development infrastructure. Application implementation has not started.
 
 The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
 
@@ -43,12 +43,43 @@ else.bot should work with AI providers through CLIs installed on the host and yo
 
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
+## Repository and local setup
+
+The Cargo workspace separates the API and desktop client. Development services live under `infra/`.
+
+```text
+Cargo.toml
+Cargo.lock
+apps/
+	api/
+		Cargo.toml
+		src/main.rs
+	desktop/
+		Cargo.toml
+		src/main.rs
+infra/
+	compose.yaml
+docs/
+.env.example
+```
+
+From the repository root, create the local environment file, start PostgreSQL, and check the Rust workspace:
+
+```sh
+test -e .env || cp .env.example .env
+docker compose up -d --wait
+cargo check --workspace --locked
+```
+
+The two binaries contain only generated `cargo init` starters. See [local development](docs/development.md) for prerequisites, configuration, run commands, and database persistence. The [architecture notes](docs/architecture.md#repository-boundaries) explain directory ownership and the intended dependency direction.
+
 ## Design notes
 
 The detailed notes separate requirements, decisions, proposals, and research results. Experiments and validation work are marked where they remain incomplete.
 
 | Topic | Details |
 | --- | --- |
+| [Local development](docs/development.md) | Workspace commands, PostgreSQL setup, configuration, and database lifecycle. |
 | [Research review](docs/research/README.md) | Seven research tracks, local evidence, the starting design, and remaining integration checks. |
 | [Product requirements](docs/product.md) | Context recognition, delegation, built-in tools, and bot computers. |
 | [Architecture](docs/architecture.md) | Rust API, desktop client, and the preference for native iOS. |

@@ -1,8 +1,25 @@
 # Application architecture
 
-These are the current application choices. else.bot is still in research and design. No application implementation has started.
+These are the current application choices. The repository contains starter crates and development infrastructure. Application implementation has not started.
 
 The project should use a monorepo. Start with the Rust API and GPUI desktop client for one owner. Add the mobile app later.
+
+## Repository boundaries
+
+| Location | Responsibility |
+| --- | --- |
+| `Cargo.toml` and `Cargo.lock` | Workspace membership, dependency resolution, and the shared application lockfile. |
+| `apps/api` | Rust API executable and future server application behavior. |
+| `apps/desktop` | Rust desktop executable and future GPUI interface. |
+| `infra/compose.yaml` | Local PostgreSQL and future supporting container services. |
+| `docs` | Product decisions, research, and development instructions. |
+| `docs/experiments` | Independent verification fixtures, outside the application workspace. |
+
+Both application crates contain only generated `cargo init` binary starters. Frameworks, GPUI, database dependencies, and internal modules are added with the features that need them. The [development guide](development.md) covers the current commands.
+
+The desktop connects to the API through its public contract. It must not depend on the API executable or connect directly to PostgreSQL. Infrastructure configuration starts supporting services; the Rust programs run on the host.
+
+Within the future API, application rules own their data types and required interfaces. HTTP handlers call application operations. PostgreSQL, provider CLI, and VM adapters implement those interfaces. Application rules must not depend on transport or storage frameworks. Add shared library crates only when concrete code needs a shared boundary.
 
 ## API
 
