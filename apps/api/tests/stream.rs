@@ -529,3 +529,41 @@ fn parser_handles_split_multibyte_characters() {
         assert_eq!(frames[0].data["text"], "✓é");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deletion_revokes_a_stalled_reader() {
+    let server = Server::start().await;
+    let bot = server.app.create_bot("Stalled", "reader stalls").await;
+    let (_, snapshot) = server.get(&format!("/v1/bots/{bot}/conversation")).await;
+    let mut model = Model::from_snapshot(&snapshot);
+    let mut response = server.open(&bot, Some(&model.cursor()), Some(TOKEN)).await;
+    // Produce events while the client reads nothing.
+    for i in 0..4 {
+        let sent = server
+            .app
+            .send(
+                &bot,
+                Uuid::new_v4(),
+                &format!("burst {i}"),
+                Some("synthetic"),
+            )
+            .await;
+        wait_completed(&server, sent.body["turn"]["id"].as_str().unwrap()).await;
+    }
+    server
+        .app
+        .owner("DELETE", &format!("/v1/bots/{bot}"), None)
+        .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let started = std::time::Instant::now();
+    let ended = read_until(
+        &mut response,
+        &mut Parser::default(),
+        &mut model,
+        &mut Vec::new(),
+        |_| false,
+    )
+    .await;
+    assert!(ended, "stream ended after deletion");
+    assert!(started.elapsed() < Duration::from_secs(3));
+}

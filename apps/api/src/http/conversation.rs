@@ -13,6 +13,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::AppState;
@@ -146,11 +147,23 @@ async fn stream(
     // Subscribe before the first read so no wake between them is lost.
     let wake = state.events.subscribe();
     let (tx, rx) = mpsc::channel::<Event>(64);
-    tokio::spawn(pump(state.clone(), bot_id, after, wake, tx));
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|event| (Ok::<_, Infallible>(event), rx))
+    // Cancelled when the bot stops being active: the response then ends at
+    // once and discards any events still buffered for this client.
+    let revoked = CancellationToken::new();
+    tokio::spawn(pump(
+        state.clone(),
+        bot_id,
+        after,
+        wake,
+        tx,
+        revoked.clone(),
+    ));
+    let stream = futures_util::stream::unfold((rx, revoked), |(mut rx, revoked)| async move {
+        tokio::select! {
+            biased;
+            _ = revoked.cancelled() => None,
+            event = rx.recv() => event.map(|event| (Ok::<_, Infallible>(event), (rx, revoked))),
+        }
     });
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(HEARTBEAT))
@@ -164,40 +177,86 @@ async fn stream(
     Ok(response)
 }
 
+/// Bound every database wait so a stalled query cannot keep a stream task
+/// alive after its client has gone.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum Step<T> {
+    Done(T),
+    Stop,
+}
+
+/// Run `fut` unless the client disconnects or it takes too long.
+async fn guarded<T>(
+    tx: &mpsc::Sender<Event>,
+    fut: impl std::future::Future<Output = Result<T, sqlx::Error>>,
+) -> Step<T> {
+    tokio::select! {
+        _ = tx.closed() => Step::Stop,
+        result = tokio::time::timeout(QUERY_TIMEOUT, fut) => match result {
+            Ok(Ok(value)) => Step::Done(value),
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "event stream database read failed");
+                Step::Stop
+            }
+            Err(_) => {
+                tracing::warn!("event stream database read timed out");
+                Step::Stop
+            }
+        },
+    }
+}
+
 /// Send committed journal rows after `after` in order, then wait for a wake
-/// hint or the polling fallback. Ends when the client disconnects or the bot
-/// stops being active (deletion closes access immediately).
+/// hint or the polling fallback. Ends when the client disconnects, on a
+/// database problem (the client reconnects), or when the bot stops being
+/// active, which also revokes events already buffered for the client.
 async fn pump(
     state: Arc<AppState>,
     bot_id: Uuid,
     mut after: i64,
     mut wake: broadcast::Receiver<Uuid>,
     tx: mpsc::Sender<Event>,
+    revoked: CancellationToken,
 ) {
     loop {
-        match bot_is_active(&state, bot_id).await {
-            Ok(Some((true, _))) => {}
-            Ok(_) => return,
-            Err(err) => {
-                tracing::warn!(error = %err, "event stream lost the database");
-                return;
-            }
-        }
-        let rows = match events::after(&state.db, bot_id, after, BATCH).await {
-            Ok(rows) => rows,
-            Err(err) => {
-                tracing::warn!(error = %err, "reading events failed");
-                return;
-            }
+        let Step::Done(rows) = guarded(&tx, events::after(&state.db, bot_id, after, BATCH)).await
+        else {
+            return;
         };
+        // Checked after the read, so a deletion committed meanwhile is seen
+        // before any of these rows are sent.
+        match guarded(&tx, bot_is_active(&state, bot_id)).await {
+            Step::Done(Some((true, _))) => {}
+            Step::Done(_) => {
+                revoked.cancel();
+                return;
+            }
+            Step::Stop => return,
+        }
         let full = rows.len() as i64 == BATCH;
         for (seq, kind, data) in rows {
             let event = Event::default()
                 .id(encode_cursor(state.server_instance_id, bot_id, seq))
                 .event(kind)
                 .data(data.to_string());
-            if tx.send(event).await.is_err() {
-                return;
+            // A slow reader must not delay revocation: watch for this bot's
+            // wake hints while waiting for buffer space.
+            let mut send = std::pin::pin!(tx.send(event));
+            loop {
+                tokio::select! {
+                    sent = &mut send => {
+                        if sent.is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    received = wake.recv() => {
+                        if is_for(received, bot_id) && !still_active(&state, &tx, &revoked, bot_id).await {
+                            return;
+                        }
+                    }
+                }
             }
             after = seq;
         }
@@ -207,15 +266,38 @@ async fn pump(
         tokio::select! {
             _ = tx.closed() => return,
             _ = tokio::time::sleep(POLL_FALLBACK) => {}
-            received = wake.recv() => match received {
-                Ok(id) if id == bot_id || id.is_nil() => {}
-                // Lagged or another bot: re-poll anyway, it is cheap.
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => {
+            received = wake.recv() => {
+                if matches!(received, Err(broadcast::error::RecvError::Closed)) {
                     tokio::time::sleep(POLL_FALLBACK).await;
                 }
-            },
+            }
         }
+    }
+}
+
+fn is_for(received: Result<Uuid, broadcast::error::RecvError>, bot_id: Uuid) -> bool {
+    match received {
+        Ok(id) => id == bot_id || id.is_nil(),
+        // Missed hints may have been for this bot.
+        Err(broadcast::error::RecvError::Lagged(_)) => true,
+        Err(broadcast::error::RecvError::Closed) => false,
+    }
+}
+
+/// Re-check the bot; revoke the stream when it is no longer active.
+async fn still_active(
+    state: &AppState,
+    tx: &mpsc::Sender<Event>,
+    revoked: &CancellationToken,
+    bot_id: Uuid,
+) -> bool {
+    match guarded(tx, bot_is_active(state, bot_id)).await {
+        Step::Done(Some((true, _))) => true,
+        Step::Done(_) => {
+            revoked.cancel();
+            false
+        }
+        Step::Stop => false,
     }
 }
 
