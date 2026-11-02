@@ -319,7 +319,243 @@ async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Value {
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    reply.body["result"].clone()
+    let mut result = reply.body["result"].clone();
+    // Results travel once, as JSON text; expose it parsed for assertions.
+    assert!(
+        result.to_string().len() <= memory::RESPONSE_BUDGET,
+        "budget"
+    );
+    if result["isError"] != true {
+        let text = result["content"][0]["text"].as_str().unwrap();
+        result["structuredContent"] = serde_json::from_str(text).unwrap();
+    }
+    result
+}
+
+/// A running turn of `bot` and a memory grant for it.
+async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
+    let reply = app
+        .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
+        .await;
+    let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    app.wait_turn(&turn.to_string(), &["running"]).await;
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let token = app.scheduler.grants().issue(
+        bot.parse().unwrap(),
+        conversation,
+        turn,
+        vec![Tool::ReadMemory],
+        DEFAULT_TTL,
+    );
+    (turn, token)
+}
+
+fn owner_entry<'a>(key: &'a str, body: &'a str, supersedes: Option<i64>) -> NewEntry<'a> {
+    NewEntry {
+        request_key: key,
+        kind: if supersedes.is_some() {
+            Kind::OwnerCorrection
+        } else {
+            Kind::OwnerMessage
+        },
+        body,
+        source: json!({}),
+        supersedes_seq: supersedes,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_stay_within_budget_even_with_escaped_text() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Big", "big").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    // Quotes and control characters double or sextuple when escaped twice.
+    let body = "\"\u{1}".repeat(400);
+    for i in 0..20 {
+        append(
+            &app,
+            bot_id,
+            &entry(&format!("e{i}"), &format!("needle {i} {body}")),
+        )
+        .await
+        .unwrap();
+    }
+    let (_, token) = running_grant(&app, &bot).await;
+    let read = tool(
+        &app,
+        &token,
+        "memory_read",
+        json!({ "start_seq": 0, "count": 20 }),
+    )
+    .await;
+    let shown = read["structuredContent"]["entries"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(shown >= 1);
+    if shown < 20 {
+        assert_eq!(read["structuredContent"]["next_start_seq"], shown as i64);
+    }
+    let search = tool(&app, &token, "memory_search", json!({ "query": "needle" })).await;
+    let hits = search["structuredContent"]["hits"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(hits >= 1 && hits <= 20);
+    // A long entry pages exactly: offsets inside a character are normalized
+    // and `next_offset` continues without loss.
+    let long = format!("é{}", "x".repeat(30_000));
+    let seq = append(&app, bot_id, &entry("long", &long)).await.unwrap()[0];
+    let mut offset = 1; // inside "é"
+    let mut text = String::new();
+    loop {
+        let page = tool(
+            &app,
+            &token,
+            "memory_read",
+            json!({ "start_seq": seq, "count": 1, "offset": offset }),
+        )
+        .await;
+        let e = &page["structuredContent"]["entries"][0];
+        if text.is_empty() {
+            assert_eq!(e["offset"], 0, "normalized to the character start");
+        }
+        text.push_str(e["body"].as_str().unwrap());
+        match e["next_offset"].as_u64() {
+            Some(next) => {
+                assert_eq!(e["truncated"], true);
+                offset = next;
+            }
+            None => {
+                assert_eq!(e["truncated"], false);
+                break;
+            }
+        }
+    }
+    assert_eq!(text, long);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_pages_ignore_corrections_made_after_the_first_page() {
+    let app = TestApp::installed().await;
+    let bot: Uuid = app.create_bot("Pages", "pages").await.parse().unwrap();
+    for i in 0..21 {
+        append(
+            &app,
+            bot,
+            &owner_entry(&format!("p{i}"), &format!("topic item {i}"), None),
+        )
+        .await
+        .unwrap();
+    }
+    let first = memory::search(&app.db.pool, bot, "topic", false, None, 0)
+        .await
+        .unwrap();
+    assert_eq!(first.hits.len(), 20);
+    let seen: Vec<i64> = first.hits.iter().map(|h| h.seq).collect();
+    let missing: Vec<i64> = (0..21).filter(|s| !seen.contains(s)).collect();
+    assert_eq!(missing.len(), 1);
+    // A correction of a hit on the first page, made between pages.
+    append(
+        &app,
+        bot,
+        &owner_entry("fix", "replaced wording", Some(seen[0])),
+    )
+    .await
+    .unwrap();
+    let second = memory::search(
+        &app.db.pool,
+        bot,
+        "topic",
+        false,
+        Some(first.watermark),
+        first.next_offset.unwrap(),
+    )
+    .await
+    .unwrap();
+    let rest: Vec<i64> = second.hits.iter().map(|h| h.seq).collect();
+    assert_eq!(rest, missing, "the second page continues the same snapshot");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_append_racing_a_deletion_never_lands_after_it() {
+    let app = TestApp::installed().await;
+    let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
+    // A deletion in progress holds the bot row.
+    let mut deletion = app.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+        .bind(bot)
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+    let pool = app.db.pool.clone();
+    let append = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        let result = memory::append(&mut tx, bot, &entry("racer", "late")).await;
+        if result.is_ok() {
+            tx.commit().await.unwrap();
+        }
+        result.map(|_| ())
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!append.is_finished(), "the append waits for the deletion");
+    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now() WHERE id = $1")
+        .bind(bot)
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+    deletion.commit().await.unwrap();
+    assert!(matches!(
+        append.await.unwrap(),
+        Err(AppendError::BotInactive)
+    ));
+    assert!(seqs(&app, bot).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_json_rpc_is_rejected_before_dispatch() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Rpc", "rpc").await;
+    let (_, token) = running_grant(&app, &bot).await;
+    let send = |body: Value| app.call("POST", "/tools/v1/mcp", Some(body), Some(&token));
+    for (body, code) in [
+        (json!({ "id": 1, "method": "tools/list" }), -32600),
+        (
+            json!({ "jsonrpc": "2.0", "id": null, "method": "tools/list" }),
+            -32600,
+        ),
+        (
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1] }),
+            -32600,
+        ),
+        (json!({ "jsonrpc": "2.0", "params": {} }), -32600),
+        (
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "arguments": {} } }),
+            -32602,
+        ),
+        (
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": { "name": "memory_bots", "arguments": [1] } }),
+            -32602,
+        ),
+    ] {
+        let reply = send(body.clone()).await;
+        assert_eq!(
+            reply.body["error"]["code"], code,
+            "{body} -> {}",
+            reply.body
+        );
+    }
+    let logged: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM memory_entry WHERE kind = 'tool_activity'")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(logged, 0, "nothing ran");
 }
 
 #[tokio::test(flavor = "multi_thread")]

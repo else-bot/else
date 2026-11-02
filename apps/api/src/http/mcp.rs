@@ -41,8 +41,18 @@ pub async fn endpoint(
     let Ok(Json(message)) = body else {
         return rpc_error(Value::Null, -32700, "Parse error");
     };
-    let id = message.get("id").cloned();
-    let method = message["method"].as_str().unwrap_or_default();
+    // A JSON-RPC 2.0 request or notification, nothing else.
+    let valid_version = message["jsonrpc"] == "2.0";
+    let method = message["method"].as_str();
+    let params_ok = matches!(message.get("params"), None | Some(Value::Object(_)));
+    let id = match message.get("id") {
+        Some(id @ (Value::String(_) | Value::Number(_))) => Some(id.clone()),
+        None => None,
+        Some(_) => return rpc_error(Value::Null, -32600, "Invalid request"),
+    };
+    let (Some(method), true, true) = (method, valid_version, params_ok) else {
+        return rpc_error(id.unwrap_or(Value::Null), -32600, "Invalid request");
+    };
     // Notifications get no response body.
     let Some(id) = id else {
         return StatusCode::ACCEPTED.into_response();
@@ -70,9 +80,12 @@ pub async fn endpoint(
             if let Err(err) = check(&state, &grant, Tool::ReadMemory).await {
                 return err.into_response();
             }
-            let name = params["name"].as_str().unwrap_or_default();
-            let args = &params["arguments"];
-            Ok(call(&state, &grant, name, args).await)
+            match (params["name"].as_str(), &params["arguments"]) {
+                (Some(name), args @ (Value::Object(_) | Value::Null)) => {
+                    Ok(call(&state, &grant, name, args).await)
+                }
+                _ => Err((-32602, "Invalid params: name and object arguments")),
+            }
         }
         _ => Err((-32601, "Method not found")),
     };
@@ -143,10 +156,47 @@ fn tool_error(message: &str) -> Value {
 }
 
 fn tool_result(value: Value) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": value.to_string() }],
-        "structuredContent": value,
-    })
+    json!({ "content": [{ "type": "text", "text": value.to_string() }] })
+}
+
+/// Bytes of the complete tool result that would carry `value`.
+fn wire_size(value: &Value) -> usize {
+    tool_result(value.clone()).to_string().len()
+}
+
+/// Append items built by `make(max_body)` to `result[key]` while the
+/// complete response stays within the budget. Each item may shrink its body
+/// to fit; an item that cannot fit even with an empty body ends the page.
+/// Returns how many items were added.
+fn fill(
+    result: &mut Value,
+    key: &str,
+    count: usize,
+    first_body: usize,
+    mut make: impl FnMut(usize, usize) -> Value,
+) -> usize {
+    let mut added = 0;
+    for index in 0..count {
+        let remaining = RESPONSE_BUDGET.saturating_sub(wire_size(result));
+        let mut max = first_body.min(remaining / (count - index).max(1)).max(64);
+        loop {
+            let item = make(index, max);
+            result[key].as_array_mut().unwrap().push(item);
+            let size = wire_size(result);
+            if size <= RESPONSE_BUDGET {
+                break;
+            }
+            result[key].as_array_mut().unwrap().pop();
+            if max == 0 {
+                // Not even its metadata fits: the page ends here.
+                return added;
+            }
+            // Each removed body byte removes at least one serialized byte.
+            max = max.saturating_sub(size - RESPONSE_BUDGET);
+        }
+        added += 1;
+    }
+    added
 }
 
 /// The bot whose memory is read: the caller's, or a granted target.
@@ -171,22 +221,27 @@ async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, V
     }
 }
 
-/// Cut at a UTF-8 boundary at or below `max` bytes.
-fn slice(text: &str, start: usize, max: usize) -> &str {
+/// The text from `start` (moved back to a character boundary) of at most
+/// `max` bytes, ending on a character boundary, with its normalized start.
+fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
     let mut from = start.min(text.len());
     while !text.is_char_boundary(from) {
         from -= 1;
     }
-    let mut to = (from + max).min(text.len());
+    let mut to = from.saturating_add(max).min(text.len());
     while !text.is_char_boundary(to) {
         to -= 1;
     }
-    &text[from..to]
+    (from, &text[from..to])
 }
 
+/// Correction links shown per entry; more are flagged, not listed.
+const MAX_LINKS: usize = 10;
+
 fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Value {
-    let body = slice(&entry.body, offset, max);
-    let end = offset.min(entry.body.len()) + body.len();
+    let (from, body) = slice(&entry.body, offset, max);
+    let end = from + body.len();
+    let links = &entry.superseded_by[..entry.superseded_by.len().min(MAX_LINKS)];
     json!({
         "bot_id": bot_id,
         "seq": entry.seq,
@@ -196,12 +251,14 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
         "source": entry.source,
         "part": { "index": entry.part_index, "count": entry.part_count },
         "supersedes_seq": entry.supersedes_seq,
-        "superseded_by": entry.superseded_by,
+        "superseded_by": links,
+        "more_superseded_by": entry.superseded_by.len() > links.len(),
         "body": body,
         "body_bytes": entry.body.len(),
-        "offset": offset,
-        // Explicit: more text follows; read it with offset.
+        "offset": from,
+        // Explicit: more text follows; read it with offset = next_offset.
         "truncated": end < entry.body.len(),
+        "next_offset": (end < entry.body.len()).then_some(end),
     })
 }
 
@@ -224,14 +281,15 @@ type Outcome = (Value, Option<String>);
 async fn bots(state: &AppState, grant: &Grant) -> Outcome {
     match memory::readable_bots(&state.db, grant.bot_id).await {
         Ok(rows) => {
-            let bots: Vec<Value> = rows
-                .iter()
-                .map(|(id, name, role)| {
-                    json!({ "bot_id": id, "name": name, "role": role, "self": *id == grant.bot_id })
-                })
-                .collect();
-            let log = format!("{} readable bots", bots.len());
-            (tool_result(json!({ "bots": bots })), Some(log))
+            let mut result = json!({ "bots": [], "more": false });
+            let shown = fill(&mut result, "bots", rows.len(), 2_000, |i, max| {
+                let (id, name, role) = &rows[i];
+                json!({ "bot_id": id, "name": name, "role": slice(role, 0, max).1,
+                        "self": *id == grant.bot_id })
+            });
+            result["more"] = json!(shown < rows.len());
+            let log = format!("{shown} readable bots");
+            (tool_result(result), Some(log))
         }
         Err(_) => (tool_error("Memory is unavailable right now."), None),
     }
@@ -281,19 +339,10 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             return (tool_error("Memory is unavailable right now."), None);
         }
     };
-    let mut hits = Vec::new();
-    let mut used = 0;
-    let mut shown = 0;
-    for entry in &page.hits {
-        let hit = entry_json(bot_id, entry, 0, HIT_BODY);
-        let size = hit.to_string().len();
-        if used + size > RESPONSE_BUDGET && !hits.is_empty() {
-            break;
-        }
-        used += size;
-        shown += 1;
-        hits.push(hit);
-    }
+    let mut result = json!({ "bot_id": bot_id, "hits": [], "next_cursor": null });
+    let shown = fill(&mut result, "hits", page.hits.len(), HIT_BODY, |i, max| {
+        entry_json(bot_id, &page.hits[i], 0, max.min(HIT_BODY))
+    });
     // Hits left out by the byte budget come on the next page.
     let next = if shown < page.hits.len() {
         Some(offset + shown as i64)
@@ -315,11 +364,7 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         shown,
         seqs.join(", ")
     );
-    let result = json!({
-        "bot_id": bot_id,
-        "hits": hits,
-        "next_cursor": next.map(|o| format!("{}.{}", page.watermark, o)),
-    });
+    result["next_cursor"] = json!(next.map(|o| format!("{}.{}", page.watermark, o)));
     (tool_result(result), Some(log))
 }
 
@@ -355,11 +400,19 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             return (tool_error("Memory is unavailable right now."), None);
         }
     };
-    let per_entry = (RESPONSE_BUDGET - 2_000) / rows.len().max(1);
-    let entries: Vec<Value> = rows
-        .iter()
-        .map(|e| entry_json(bot_id, e, offset as usize, per_entry))
-        .collect();
+    let mut result = json!({ "bot_id": bot_id, "entries": [], "length": length,
+                             "next_start_seq": null });
+    let shown = fill(
+        &mut result,
+        "entries",
+        rows.len(),
+        RESPONSE_BUDGET,
+        |i, max| entry_json(bot_id, &rows[i], offset as usize, max),
+    );
+    // Entries the budget left out are read from here.
+    if shown < rows.len() {
+        result["next_start_seq"] = json!(rows[shown].seq);
+    }
     let log = format!(
         "read{} from seq {start}: {} entries",
         if bot_id == grant.bot_id {
@@ -367,9 +420,8 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         } else {
             format!(" bot {bot_id}")
         },
-        entries.len()
+        shown
     );
-    let result = json!({ "bot_id": bot_id, "entries": entries, "length": length });
     (tool_result(result), Some(log))
 }
 
