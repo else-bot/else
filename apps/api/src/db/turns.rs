@@ -15,7 +15,9 @@ use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::app::providers::{Fenced, HistoryEntry, Profile, TurnInput, TurnOutcome, TurnSink};
+use crate::app::providers::{
+    Fenced, HistoryEntry, Profile, SessionState, TurnInput, TurnOutcome, TurnSink,
+};
 
 /// Turn statuses past the queue that hold the bot's single active slot.
 pub const ACTIVE_STATUSES: &str = "('preparing', 'sending', 'running', 'cancelling')";
@@ -424,6 +426,21 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         text,
     })
     .collect();
+    let session = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT native_session_id, fingerprint, considered_through_turn FROM provider_sessions
+         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'",
+    )
+    .bind(turn.conversation_id)
+    .bind(&turn.provider_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .map(
+        |(native_id, fingerprint, considered_through_turn)| SessionState {
+            native_id,
+            fingerprint,
+            considered_through_turn,
+        },
+    );
     Ok(TurnInput {
         bot_id: turn.bot_id,
         conversation_id: turn.conversation_id,
@@ -434,6 +451,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         text,
         profile: turn.profile.map(|Json(profile)| profile),
         history,
+        session,
     })
 }
 
@@ -720,6 +738,102 @@ impl TurnSink for PgSink {
 
     async fn running(&self) -> Result<(), Fenced> {
         self.transition("sending", "running").await
+    }
+
+    async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
+        if self.is_fenced() {
+            return Err(Fenced);
+        }
+        let result: Result<bool, sqlx::Error> = async {
+            let mut tx = self.pool.begin().await?;
+            if self.guard(&mut tx, ACTIVE_STATUSES).await?.is_none() {
+                return Ok(false);
+            }
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM provider_sessions
+                 WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'
+                   AND native_session_id = $3 AND fingerprint = $4",
+            )
+            .bind(self.conversation_id)
+            .bind(&self.provider_id)
+            .bind(&state.native_id)
+            .bind(&state.fingerprint)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let session_id = match existing {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE provider_sessions SET considered_through_turn = $2, updated_at = now()
+                         WHERE id = $1",
+                    )
+                    .bind(id)
+                    .bind(state.considered_through_turn)
+                    .execute(&mut *tx)
+                    .await?;
+                    id
+                }
+                None => {
+                    // A replacement retires the previous native session.
+                    sqlx::query(
+                        "UPDATE provider_sessions SET status = 'retired', updated_at = now()
+                         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'",
+                    )
+                    .bind(self.conversation_id)
+                    .bind(&self.provider_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let id = Uuid::new_v4();
+                    sqlx::query(
+                        "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
+                             native_session_id, fingerprint, considered_through_turn)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(id)
+                    .bind(self.bot_id)
+                    .bind(self.conversation_id)
+                    .bind(&self.provider_id)
+                    .bind(&state.native_id)
+                    .bind(&state.fingerprint)
+                    .bind(state.considered_through_turn)
+                    .execute(&mut *tx)
+                    .await?;
+                    id
+                }
+            };
+            sqlx::query("UPDATE turns SET provider_session_id = $2 WHERE id = $1")
+                .bind(self.turn_id)
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(true)
+        }
+        .await;
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(self.fence()),
+            Err(err) => {
+                tracing::error!(turn = %self.turn_id, error = %err, "recording provider session failed");
+                Err(self.fence())
+            }
+        }
+    }
+
+    async fn reported(&self, profile: &Profile, native_turn_id: &str) -> Result<(), Fenced> {
+        if self.is_fenced() {
+            return Err(Fenced);
+        }
+        sqlx::query("UPDATE turns SET reported_profile = $2, native_turn_id = $3 WHERE id = $1")
+            .bind(self.turn_id)
+            .bind(Json(profile))
+            .bind(native_turn_id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                tracing::error!(turn = %self.turn_id, error = %err, "recording reported settings failed");
+                self.fence()
+            })
     }
 
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {

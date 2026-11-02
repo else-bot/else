@@ -54,6 +54,17 @@ pub struct TurnInput {
     pub profile: Option<Profile>,
     /// Settled history from owner turns before this one, oldest first.
     pub history: Vec<HistoryEntry>,
+    /// The bot's active native session with this provider, if any.
+    pub session: Option<SessionState>,
+}
+
+/// A provider's native session for one conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionState {
+    pub native_id: String,
+    pub fingerprint: String,
+    /// History through this owner turn was already given to the session.
+    pub considered_through_turn: i64,
 }
 
 /// Terminal result of a provider attempt. Text alone never implies success.
@@ -92,6 +103,11 @@ pub trait TurnSink: Send + Sync {
     /// Append assistant text. It is buffered and persisted by the scheduler
     /// within about 100 ms; this call performs no I/O.
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
+    /// Record the native session this turn uses (new or resumed). Replaces
+    /// any other active session of this provider for the conversation.
+    async fn session(&self, state: &SessionState) -> Result<(), Fenced>;
+    /// Record the settings the provider reported and its turn ID.
+    async fn reported(&self, profile: &Profile, native_turn_id: &str) -> Result<(), Fenced>;
 }
 
 /// Availability as reported in capabilities.

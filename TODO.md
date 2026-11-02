@@ -28,7 +28,7 @@ Use the first usable POC as the default target. If the implementation request in
 - [x] [POC-008: GPUI window and API connection](docs/implementation/02-desktop-and-codex.md#poc-008-gpui-window-and-api-connection)
 - [x] [POC-009: Desktop bot management and messaging](docs/implementation/02-desktop-and-codex.md#poc-009-desktop-bot-management-and-messaging)
 - [x] [POC-010: Restricted host provider execution](docs/implementation/02-desktop-and-codex.md#poc-010-restricted-host-provider-execution)
-- [ ] [POC-011: Codex conversation adapter](docs/implementation/02-desktop-and-codex.md#poc-011-codex-conversation-adapter)
+- [x] [POC-011: Codex conversation adapter](docs/implementation/02-desktop-and-codex.md#poc-011-codex-conversation-adapter)
 - [ ] [POC-012: First usable POC acceptance](docs/implementation/02-desktop-and-codex.md#poc-012-first-usable-poc-acceptance)
 
 ## Assistant POC

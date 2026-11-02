@@ -52,6 +52,8 @@ pub struct Config {
     pub synthetic_provider: bool,
     /// Provider turns running at once across all bots.
     pub max_active_turns: usize,
+    /// Explicit Codex CLI path; otherwise `codex` on `PATH`.
+    pub codex_bin: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,7 +120,12 @@ impl Config {
         )?);
         let synthetic_provider = parse_bool(source, "ELSE_SYNTHETIC_PROVIDER")?;
         let max_active_turns = parse_number(source, "ELSE_MAX_ACTIVE_TURNS", 2, 1, 32)? as usize;
+        let codex_bin = match source.get("ELSE_CODEX_BIN") {
+            Some(path) => Some(absolute_path("ELSE_CODEX_BIN", path)?),
+            None => None,
+        };
         Ok(Self {
+            codex_bin,
             synthetic_provider,
             max_active_turns,
             database_url: database_url(source)?,

@@ -86,6 +86,7 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 | `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
 | `SECRET_KEY` | unset | Installation master key: 32 bytes as standard base64. When set, it is validated and used instead of the file. |
 | `SECRET_KEY_FILE` | `$ELSE_DATA_DIR/secret-key` | Master key file used when `SECRET_KEY` is unset. |
+| `ELSE_CODEX_BIN` | `codex` on `PATH` | The Codex CLI used for the `codex` provider. Its login is the host's (`$CODEX_HOME` or `~/.codex`); run `codex login` once as the API user. |
 | `ELSE_SYNTHETIC_PROVIDER` | `0` | `1` exposes the deterministic `synthetic` provider, labeled "Synthetic (test)", for demos and manual checks. It runs no model. |
 | `ELSE_MAX_ACTIVE_TURNS` | `2` | Provider turns running at once across all bots, from 1 to 32. Each bot runs at most one turn at a time regardless. |
 | (bubblewrap) | required for providers | Provider CLIs run inside `bwrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). Without it the API starts, but host providers report unavailable. See [host provider processes](security.md#implemented-codex-launch-profile). |
@@ -130,6 +131,18 @@ History `seq` is arrival order. A message queued behind a running turn can there
 On startup the API takes two singleton locks before reading or changing runtime state: an exclusive lock on `$ELSE_DATA_DIR/api.lock` and a PostgreSQL session advisory lock. A second API on the same data directory exits with `another else.bot API is already running`, and one on the same database with `another else.bot API is already using this database`, before reconciling or dispatching anything. It then binds the listener and reconciles: a turn claimed but never sent returns to the queue; a turn that may have reached its provider, including one being stopped, becomes `uncertain` with `effect_uncertain = true` and is never resent; pending stops and deletions waiting on those turns complete.
 
 An interrupted provider has 10 seconds to stop. If it does not, its turn is recorded as `uncertain` rather than claiming the action was undone.
+
+### Codex provider
+
+The `codex` provider is listed first and is the default when available. It reports unavailable, with the reason, when bubblewrap, the CLI, or the host login is missing. Each turn starts `codex app-server` inside the bot's sandbox, opens or resumes the bot's native thread, sends the message with the saved profile (`gpt-6.1-sol`, `medium`, `priority` by default) on thread start or resume and on turn start, streams the reply, and stops the process after the terminal event. The settings Codex reports back must equal the requested ones or the turn fails with `profile_mismatch`. A native thread is reused while its fingerprint (prompt version, sandbox layout, tool and agent policy, profile, bot name and role) matches. A changed profile or role, or a thread Codex can no longer resume, starts a new thread and sends earlier history from PostgreSQL (whole messages, newest first, within 32 KiB) ahead of the owner's message. History handled by another provider since the thread last ran is sent the same way. Stop work sends `turn/interrupt` and keeps the partial reply. Any tool, command, file, web, image, or native-agent item, or any approval request, ends the turn as `policy_violation`. Reasoning text is never stored.
+
+Profile updates accept models `gpt-6.1-sol`, efforts `low` to `max`, and tiers `default` or `priority`. `ultra` is refused because it delegates to native sub-agents.
+
+Live checks use the owner's subscription and run only on request:
+
+```sh
+ELSE_LIVE_CODEX=1 cargo test -p else-api --test codex_live -- --nocapture
+```
 
 ### Events and reconnecting
 

@@ -263,8 +263,18 @@ impl TestApp {
 
     /// Poll the database until a turn reaches one of `statuses`.
     pub async fn wait_turn(&self, turn_id: &str, statuses: &[&str]) -> String {
+        self.wait_turn_for(turn_id, statuses, std::time::Duration::from_secs(10))
+            .await
+    }
+
+    pub async fn wait_turn_for(
+        &self,
+        turn_id: &str,
+        statuses: &[&str],
+        timeout: std::time::Duration,
+    ) -> String {
         let id: uuid::Uuid = turn_id.parse().unwrap();
-        for _ in 0..400 {
+        for _ in 0..(timeout.as_millis() / 25) {
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
                 .bind(id)
                 .fetch_one(&self.db.pool)
