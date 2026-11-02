@@ -10,6 +10,14 @@ Recorded at POC-024. These are known gaps, not part of the delivered targets. De
 - **Provider-spawn crash boundary.** Turn recovery is tested with synthetic providers and API kills; a crash at a real provider CLI's spawn boundary (and its descendants) has no process-level test.
 - **Desktop input.** Mouse text selection and IME composition were not exercised; the omabox check typed with synthetic key events.
 
+- **Codex login refresh.** The host `auth.json` is bind-mounted into each sandbox; a Codex token refresh that replaces the file by rename may fail through the bind mount (POC-010). Check: force a refresh (an expired access token) during a turn and confirm the host file is updated.
+- **Provider network access.** Provider sandboxes keep open network access, because the CLIs talk to their services; only the absence of credentials and the API's authorization limit what a provider can reach (POC-010). Check: an egress allowlist for the provider endpoints, tested with a canary listener.
+- **Accepted send, lost response.** A send whose HTTP response is lost after the API accepted it was not demonstrated end to end; the API-down case was (POC-012). Check: drop the response with a proxy and confirm the desktop's retry finds the stored turn.
+- **Summary quality.** Model summaries were checked on a synthetic corpus with a handful of recall questions (POC-015); there is no broader quality evaluation. Check: a recall set across long histories, compared with the deterministic view.
+- **Hostile child results and forced parking.** A delegated child's result is data to its parent, but a hostile result and a parked parent that must be terminated were tested only with synthetic providers (POC-016). Check: a live child returning instructions, and a parent that ignores the park interrupt.
+- **Guest isolation.** VM network isolation and the guest's lack of credentials were checked with smoke probes (private, link-local, and host targets denied; no credential directories), not an exhaustive audit (POC-017, POC-018). Check: a broader probe set, including IPv6 and DNS rebinding, from the guest.
+- **Injection resistance.** The acceptance run shows injected text could not widen API access (no grant, no cross-bot memory, owner token and anonymous calls refused); it does not prove a model never follows injected instructions within its own permissions.
+
 ## Behavior to revisit
 
 - **Foreground commands.** Stop work cancels background guest jobs but not a running `computer_run`, which ends with its 300 s timeout.
