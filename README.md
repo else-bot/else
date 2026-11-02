@@ -41,6 +41,8 @@ Each bot also has an isolated computer with Chromium, a desktop, and a terminal.
 
 else.bot should work with AI providers through CLIs installed on the host and your existing subscriptions. Bots operate their isolated computers through scoped tools when a task needs them. You can switch providers during a task while keeping one conversation and handing over the context needed to continue.
 
+The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings are saved in PostgreSQL and can be updated by the owner. Provider-native sub-agents are disabled for the POC. See the [execution policy](docs/providers.md#saved-execution-profile).
+
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
 ## Repository and local setup
@@ -73,12 +75,19 @@ cargo check --workspace --locked
 
 The two binaries contain only generated `cargo init` starters. See [local development](docs/development.md) for prerequisites, configuration, run commands, and database persistence. The [architecture notes](docs/architecture.md#repository-boundaries) explain directory ownership and the intended dependency direction.
 
+## Implementation backlog
+
+[TODO.md](TODO.md) is the ordered queue for implementation. It defines a first usable messaging POC and a second milestone for memory, delegation, bot computers, provider switching, and recovery. Each task has dependencies, references, and acceptance checks.
+
+The [agent runbook](docs/implementation/README.md) explains how to select a task, verify it, commit progress, and continue. The [handoff log](docs/implementation/progress.md) records active work and evidence across sessions.
+
 ## Design notes
 
 The detailed notes separate requirements, decisions, proposals, and research results. Experiments and validation work are marked where they remain incomplete.
 
 | Topic | Details |
 | --- | --- |
+| [Implementation backlog](TODO.md) | Ordered POC tasks, completion gates, and autonomous-agent handoff. |
 | [Local development](docs/development.md) | Workspace commands, PostgreSQL setup, configuration, and database lifecycle. |
 | [Research review](docs/research/README.md) | Seven research tracks, local evidence, the starting design, and remaining integration checks. |
 | [Product requirements](docs/product.md) | Context recognition, delegation, built-in tools, and bot computers. |

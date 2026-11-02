@@ -8,6 +8,8 @@ Install Rust with Cargo and rustfmt, and Docker Engine with Docker Compose. The 
 
 Provider CLIs and KVM are needed when implementing provider and VM features. The current starters have no external Rust dependencies.
 
+The planned Codex runtime default is GPT 6.1 Sol Medium Fast, saved as `gpt-6.1-sol`, `medium`, and `priority` in PostgreSQL. Provider-native sub-agents are disabled for the POC. These settings are part of the [provider implementation tasks](implementation/02-desktop-and-codex.md), not active configuration in the generated starters. Future owner changes use the [saved profile contract](providers.md#saved-execution-profile).
+
 ## Configure the development services
 
 Create the local environment file if it does not exist:
@@ -86,3 +88,7 @@ docker compose down --volumes
 ```
 
 This deletes the current Compose project's database. Use ordinary `down` when you want to retain it.
+
+## Start implementation work
+
+Read the [POC backlog](../TODO.md) and [agent runbook](implementation/README.md). Resume from the [latest handoff](implementation/progress.md). The backlog separates the first usable messaging checkpoint from later assistant capabilities and defines the evidence required for each task.
