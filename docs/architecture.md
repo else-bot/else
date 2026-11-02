@@ -1,6 +1,6 @@
 # Application architecture
 
-These are the current application choices. The repository contains starter crates and development infrastructure. Application implementation has not started.
+These are the current application choices. The repository contains the API and desktop crates and development infrastructure. Implementation follows the [POC backlog](../TODO.md).
 
 The project should use a monorepo. Start with the Rust API and GPUI desktop client for one owner. Add the mobile app later.
 
@@ -15,7 +15,7 @@ The project should use a monorepo. Start with the Rust API and GPUI desktop clie
 | `docs` | Product decisions, research, and development instructions. |
 | `docs/experiments` | Independent verification fixtures, outside the application workspace. |
 
-Both application crates contain only generated `cargo init` binary starters. Frameworks, GPUI, database dependencies, and internal modules are added with the features that need them. The [development guide](development.md) covers the current commands.
+The API uses Tokio and Axum. Its `main.rs` only parses the command and composes the process; configuration and HTTP transport live in separate modules. Frameworks, GPUI, database dependencies, and internal modules are added with the features that need them. The [development guide](development.md) covers the current commands.
 
 The desktop connects to the API through its public contract. It must not depend on the API executable or connect directly to PostgreSQL. Infrastructure configuration starts supporting services; the Rust programs run on the host.
 
