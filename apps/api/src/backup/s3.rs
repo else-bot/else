@@ -65,6 +65,11 @@ pub enum Put {
 pub struct S3 {
     config: S3Config,
     http: reqwest::Client,
+    scheme: String,
+    /// The authority exactly as sent: lowercase host, and a port only when
+    /// it is not the scheme's default (what the HTTP client transmits, so
+    /// the signed `host` matches).
+    authority: String,
 }
 
 fn uri_encode(text: &str, keep_slash: bool) -> String {
@@ -114,21 +119,53 @@ fn tag(xml: &str, name: &str) -> Option<String> {
 
 impl S3 {
     pub fn new(mut config: S3Config) -> Result<Self, S3Error> {
-        config.endpoint = config.endpoint.trim_end_matches('/').to_owned();
-        if !(config.endpoint.starts_with("https://") || config.endpoint.starts_with("http://")) {
+        let url = reqwest::Url::parse(&config.endpoint)
+            .map_err(|_| S3Error::Protocol("the endpoint is not a URL".into()))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.path().trim_matches('/').is_empty()
+            || url.query().is_some()
+            || !url.username().is_empty()
+        {
             return Err(S3Error::Protocol(
-                "the endpoint must be an http(s) URL".into(),
+                "the endpoint must be an http(s) URL without a path".into(),
             ));
         }
+        let host = url
+            .host_str()
+            .ok_or_else(|| S3Error::Protocol("the endpoint has no host".into()))?
+            .to_ascii_lowercase();
+        // `port()` is `None` for the scheme's default port, as sent.
+        let authority = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        };
+        let scheme = url.scheme().to_owned();
+        config.endpoint = format!("{scheme}://{authority}");
         if !config.prefix.is_empty() && !config.prefix.ends_with('/') {
             config.prefix.push('/');
         }
+        // An idle timeout rather than a total one: a multi-gigabyte archive
+        // streams for as long as data keeps arriving.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
+            .read_timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| S3Error::Transport(e.to_string()))?;
-        Ok(Self { config, http })
+        Ok(Self {
+            config,
+            http,
+            scheme,
+            authority,
+        })
+    }
+
+    /// Identifies the destination (endpoint, bucket, and prefix), so state
+    /// recorded for one bucket is never taken for another.
+    pub fn destination(&self) -> String {
+        format!(
+            "{}://{}/{}/{}",
+            self.scheme, self.authority, self.config.bucket, self.config.prefix
+        )
     }
 
     pub fn config(&self) -> &S3Config {
@@ -141,7 +178,7 @@ impl S3 {
     }
 
     fn target(&self, key: &str) -> (String, String, String) {
-        let (scheme, host) = self.config.endpoint.split_once("://").expect("validated");
+        let (scheme, host) = (self.scheme.as_str(), self.authority.as_str());
         let encoded_key = uri_encode(key, true);
         if self.config.path_style {
             let path = if key.is_empty() {
@@ -547,7 +584,26 @@ mod tests {
             path_style: true,
         };
         assert!(!format!("{config:?}").contains("SECRET"));
-        let s3 = S3::new(config).unwrap();
+        let s3 = S3::new(config.clone()).unwrap();
         assert_eq!(s3.key("sets/x"), "p/sets/x");
+        // The signed authority is the one sent: no default port, lowercase.
+        let with = |endpoint: &str| {
+            S3::new(S3Config {
+                endpoint: endpoint.into(),
+                ..config.clone()
+            })
+        };
+        assert_eq!(
+            with("https://ACCOUNT.R2.example.com:443/")
+                .unwrap()
+                .target("k")
+                .1,
+            "account.r2.example.com"
+        );
+        assert_eq!(
+            with("http://127.0.0.1:8333").unwrap().target("k").1,
+            "127.0.0.1:8333"
+        );
+        assert!(with("https://host/path").is_err());
     }
 }

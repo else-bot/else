@@ -194,13 +194,21 @@ fn run_restore_remote(
     let config = load_config()?;
     let (_, key) = backup_parts(&config)?;
     let downloads = config.data_dir.join("restore-download");
-    let set_dir = runtime()?.block_on(async {
-        let url = config.require_database().context("invalid configuration")?;
-        let pool = db::connect(url).await?;
-        let replicator =
-            replicator(&config, &pool)?.context("no bucket is configured (set ELSE_S3_*)")?;
-        anyhow::Ok(replicator.download_set(set_id, &downloads, &key).await?)
-    })?;
+    // Only the bucket is needed to download: the source database may not
+    // exist on a replacement server.
+    let s3 = else_api::backup::s3::S3::new(
+        config
+            .s3
+            .clone()
+            .context("no bucket is configured (set ELSE_S3_*)")?,
+    )?;
+    let set_dir = runtime()?.block_on(else_api::backup::replicate::download_set(
+        &s3,
+        set_id,
+        &downloads,
+        &key,
+        config.backup.max_bytes,
+    ))?;
     let result = run_restore(&set_dir.display().to_string(), target, new_data_dir);
     let _ = std::fs::remove_dir_all(&set_dir);
     result

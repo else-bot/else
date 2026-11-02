@@ -210,6 +210,9 @@ impl BackupWorker {
             .map_err(|e| BackupError::Io(e.to_string()))?
     }
 
+    /// Run the schedule: captures and uploads have separate deadlines, so
+    /// a bucket outage (or a conflicting old set) never stops local
+    /// backups, and pending uploads start at once after a restart.
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         if self.config.interval.is_zero() {
             return;
@@ -217,41 +220,56 @@ impl BackupWorker {
         if let Err(err) = self.recover().await {
             tracing::warn!(error = %err, "backup recovery failed");
         }
-        let mut retry = FIRST_RETRY;
+        use tokio::time::Instant;
+        let mut capture_retry = FIRST_RETRY;
+        let mut upload_retry = FIRST_RETRY;
+        let mut capture_at = Instant::now() + self.next_due().unwrap_or(FIRST_RETRY);
+        // Sets left awaiting upload by an earlier process go first.
+        let mut upload_at = match &self.replicator {
+            Some(replicator) => match replicator.awaiting(&self.config.dir).await {
+                Ok(awaiting) if !awaiting.is_empty() => Some(Instant::now()),
+                _ => None,
+            },
+            None => None,
+        };
         loop {
-            let wait = self.next_due().unwrap_or(FIRST_RETRY);
+            let wake = upload_at.map_or(capture_at, |u| u.min(capture_at));
             tokio::select! {
                 _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(wait) => {}
+                _ = tokio::time::sleep_until(wake) => {}
             }
-            // Shutdown kills the dump and waits for it to be reaped.
-            let result = self.run_once_until(&cancel).await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            match result {
-                Ok(summary) if matches!(summary.remote, Some(Err(_))) => {
-                    // Captured locally; keep retrying the upload alone.
-                    let mut delay = FIRST_RETRY;
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            _ = tokio::time::sleep(delay.min(self.config.interval)) => {}
-                        }
-                        if self.replicate_now().await.is_ok() {
-                            break;
-                        }
-                        delay = (delay * 2).min(MAX_RETRY);
+            if upload_at.is_some_and(|u| u <= Instant::now()) {
+                match self.replicate_now().await {
+                    Ok(_) => {
+                        upload_at = None;
+                        upload_retry = FIRST_RETRY;
                     }
-                    retry = FIRST_RETRY;
+                    Err(err) => {
+                        tracing::warn!(error = %err, "replication will be retried");
+                        upload_at = Some(Instant::now() + upload_retry);
+                        upload_retry = (upload_retry * 2).min(MAX_RETRY);
+                    }
                 }
-                Ok(_) => retry = FIRST_RETRY,
-                Err(_) => {
-                    let delay = retry.min(self.config.interval);
-                    retry = (retry * 2).min(MAX_RETRY);
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(delay) => {}
+            }
+            if capture_at <= Instant::now() {
+                // Shutdown kills the dump and waits for it to be reaped.
+                let result = self.run_once_until(&cancel).await;
+                if cancel.is_cancelled() {
+                    return;
+                }
+                match result {
+                    Ok(summary) => {
+                        capture_retry = FIRST_RETRY;
+                        capture_at =
+                            Instant::now() + self.next_due().unwrap_or(self.config.interval);
+                        if matches!(summary.remote, Some(Err(_))) && upload_at.is_none() {
+                            upload_at = Some(Instant::now() + upload_retry);
+                            upload_retry = (upload_retry * 2).min(MAX_RETRY);
+                        }
+                    }
+                    Err(_) => {
+                        capture_at = Instant::now() + capture_retry.min(self.config.interval);
+                        capture_retry = (capture_retry * 2).min(MAX_RETRY);
                     }
                 }
             }

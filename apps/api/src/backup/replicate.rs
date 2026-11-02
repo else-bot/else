@@ -73,18 +73,23 @@ impl Replicator {
         set_id: &str,
         state: &str,
         error: Option<&str>,
+        whole_assistant: bool,
     ) -> Result<(), BackupError> {
         let error: Option<String> = error.map(|e| e.chars().take(500).collect());
         sqlx::query(
-            "INSERT INTO backup_remote (set_id, state, error, updated_at,
-                 verified_at)
-             VALUES ($1, $2, $3, now(), CASE WHEN $2 = 'completed' THEN now() END)
-             ON CONFLICT (set_id) DO UPDATE SET state = $2, error = $3, updated_at = now(),
-                 verified_at = CASE WHEN $2 = 'completed' THEN now() ELSE backup_remote.verified_at END",
+            "INSERT INTO backup_remote (destination, set_id, state, error, whole_assistant,
+                 updated_at, verified_at)
+             VALUES ($1, $2, $3, $4, $5, now(), CASE WHEN $3 = 'completed' THEN now() END)
+             ON CONFLICT (destination, set_id) DO UPDATE SET state = $3, error = $4,
+                 whole_assistant = $5, updated_at = now(),
+                 verified_at = CASE WHEN $3 = 'completed' THEN now()
+                                    ELSE backup_remote.verified_at END",
         )
+        .bind(self.s3.destination())
         .bind(set_id)
         .bind(state)
         .bind(&error)
+        .bind(whole_assistant)
         .execute(&self.pool)
         .await?;
         sqlx::query("UPDATE backup_runs SET remote_status = $2 WHERE set_id = $1")
@@ -95,12 +100,28 @@ impl Replicator {
         Ok(())
     }
 
-    /// Local sets whose remote completion is not verified.
+    /// Sets this installation verified as complete at this destination.
+    async fn verified(&self) -> Result<Vec<(String, bool)>, BackupError> {
+        Ok(sqlx::query_as(
+            "SELECT set_id, whole_assistant FROM backup_remote
+             WHERE destination = $1 AND state = 'completed' ORDER BY set_id",
+        )
+        .bind(self.s3.destination())
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Local sets whose remote completion is not verified at this
+    /// destination.
     pub async fn awaiting(&self, dir: &Path) -> Result<Vec<String>, BackupError> {
-        let done: Vec<String> =
-            sqlx::query_scalar("SELECT set_id FROM backup_remote WHERE state = 'completed'")
-                .fetch_all(&self.pool)
-                .await?;
+        // Completed here, or retired from here by remote retention.
+        let done: Vec<String> = sqlx::query_scalar(
+            "SELECT set_id FROM backup_remote
+             WHERE destination = $1 AND state IN ('completed', 'retired')",
+        )
+        .bind(self.s3.destination())
+        .fetch_all(&self.pool)
+        .await?;
         Ok(super::completed_sets(dir)?
             .into_iter()
             .filter(|s| !done.contains(s))
@@ -122,13 +143,13 @@ impl Replicator {
                 .replicate_set(&dir.join(&set_id), key, &mut stats)
                 .await
             {
-                Ok(()) => {
-                    self.record(&set_id, "completed", None).await?;
+                Ok(whole) => {
+                    self.record(&set_id, "completed", None, whole).await?;
                     stats.completed.push(set_id);
                 }
                 Err(err) => {
                     tracing::warn!(set = %set_id, error = %err, "replication failed");
-                    self.record(&set_id, "failed", Some(&err.to_string()))
+                    self.record(&set_id, "failed", Some(&err.to_string()), false)
                         .await?;
                     first_error.get_or_insert(err);
                 }
@@ -197,12 +218,14 @@ impl Replicator {
         result
     }
 
+    /// Replicate one set; returns its whole-assistant flag once every
+    /// object and the completion record are verified remotely.
     async fn replicate_set(
         &self,
         set_dir: &Path,
         key: &SecretKey,
         stats: &mut Stats,
-    ) -> Result<(), BackupError> {
+    ) -> Result<bool, BackupError> {
         let set_id = set_dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -211,22 +234,9 @@ impl Replicator {
         let local_complete =
             super::read_regular(&set_dir.join(COMPLETE), super::MAX_COMPLETE_BYTES)?;
         let complete_key = self.set_key(&set_id, COMPLETE);
-        // Already published: identical is done, different is a conflict.
-        if self.s3.head(&complete_key).await?.is_some() {
-            let remote = self
-                .s3
-                .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
-                .await?;
-            return if remote == local_complete {
-                Ok(())
-            } else {
-                Err(BackupError::Refused(format!(
-                    "the remote set {set_id} has a different completion record; it is never replaced"
-                )))
-            };
-        }
         // Validates the set and lists its objects.
         let (completion, manifest, _) = super::restore::open_set(set_dir, key)?;
+        let whole = manifest.coverage.whole_assistant;
         let mut objects: Vec<(String, u64, String)> = vec![(
             MANIFEST.into(),
             completion.manifest.ciphertext_bytes,
@@ -239,6 +249,24 @@ impl Replicator {
                 a.ciphertext_sha256.clone(),
             )
         }));
+        // An existing completion record must be this set's own; it is never
+        // replaced. Its objects are still verified (and repaired) below: a
+        // record alone does not prove the payload.
+        let published = match self.s3.head(&complete_key).await? {
+            Some(_) => {
+                let remote = self
+                    .s3
+                    .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
+                    .await?;
+                if remote != local_complete {
+                    return Err(BackupError::Refused(format!(
+                        "the remote set {set_id} has a different completion record; it is never replaced"
+                    )));
+                }
+                true
+            }
+            None => false,
+        };
         // A crashed earlier attempt may have left multipart uploads.
         for (upload_key, upload_id) in self.s3.list_multipart(&self.set_key(&set_id, "")).await? {
             self.s3.abort_multipart(&upload_key, &upload_id).await?;
@@ -267,34 +295,36 @@ impl Replicator {
                 )));
             }
         }
-        match self
-            .s3
-            .put(&complete_key, local_complete.clone(), true)
-            .await?
-        {
-            Put::Created => {}
-            Put::Exists => {
-                let remote = self
-                    .s3
-                    .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
-                    .await?;
-                if remote != local_complete {
-                    return Err(BackupError::Refused(format!(
-                        "the remote set {set_id} was completed with other contents"
-                    )));
+        if !published {
+            match self
+                .s3
+                .put(&complete_key, local_complete.clone(), true)
+                .await?
+            {
+                Put::Created => {}
+                Put::Exists => {
+                    let remote = self
+                        .s3
+                        .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
+                        .await?;
+                    if remote != local_complete {
+                        return Err(BackupError::Refused(format!(
+                            "the remote set {set_id} was completed with other contents"
+                        )));
+                    }
                 }
             }
         }
-        let published = self
+        let read_back = self
             .s3
             .get_bytes(&complete_key, super::MAX_COMPLETE_BYTES)
             .await?;
-        if published != local_complete {
+        if read_back != local_complete {
             return Err(BackupError::Invalid(
                 "the published completion record differs".into(),
             ));
         }
-        Ok(())
+        Ok(whole)
     }
 
     /// Remote sets: (set id, has completion, every key).
@@ -332,26 +362,37 @@ impl Replicator {
             .collect())
     }
 
-    /// Keep the newest `keep` complete remote sets (never fewer than one);
-    /// remove older ones completion record first. Incomplete remote sets are
-    /// removed only when no local set awaits them.
+    /// Keep the newest `keep` remote sets this installation verified at
+    /// this destination (never fewer than one) and the newest verified
+    /// whole-assistant set; remove older verified sets, completion record
+    /// first. A set with a completion record this installation did not
+    /// verify is never counted as a recovery point and never removed.
+    /// Incomplete remote sets are removed only when no local set awaits
+    /// them.
     async fn apply_remote_retention(&self, dir: &Path) -> Result<Vec<String>, BackupError> {
         let sets = self.remote_sets().await?;
-        let complete: Vec<&String> = sets.iter().filter(|s| s.1).map(|s| &s.0).collect();
+        let verified = self.verified().await?;
+        let present: Vec<&(String, bool)> = verified
+            .iter()
+            .filter(|(id, _)| sets.iter().any(|(s, complete, _)| s == id && *complete))
+            .collect();
         let keep = self.keep.max(1);
-        let old: Vec<String> = if complete.len() > keep {
-            complete[..complete.len() - keep]
-                .iter()
-                .map(|s| (*s).clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut kept: Vec<String> = present
+            .iter()
+            .rev()
+            .take(keep)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if let Some((id, _)) = present.iter().rev().find(|(_, whole)| *whole) {
+            kept.push(id.clone());
+        }
         let local = super::completed_sets(dir)?;
         let mut removed = Vec::new();
         for (id, has_complete, keys) in &sets {
+            let ours = present.iter().any(|(v, _)| v == id);
+            let old = ours && !kept.contains(id);
             let abandoned = !has_complete && !local.contains(id);
-            if !old.contains(id) && !abandoned {
+            if !old && !abandoned {
                 continue;
             }
             if *has_complete {
@@ -363,88 +404,113 @@ impl Replicator {
             {
                 self.s3.delete(key).await?;
             }
+            if old {
+                sqlx::query(
+                    "UPDATE backup_remote SET state = 'retired', updated_at = now()
+                     WHERE destination = $1 AND set_id = $2",
+                )
+                .bind(self.s3.destination())
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
             removed.push(id.clone());
         }
         Ok(removed)
     }
+}
 
-    /// Download a completed remote set into a new private directory under
-    /// `parent`, fetching only the objects its decrypted manifest names.
-    /// The result is checked again by the restore.
-    pub async fn download_set(
-        &self,
-        set_id: &str,
-        parent: &Path,
-        key: &SecretKey,
-    ) -> Result<PathBuf, BackupError> {
-        if !super::valid_set_id(set_id) {
-            return Err(BackupError::Invalid("not a set ID".into()));
-        }
-        super::ensure_private_dir(parent)?;
-        let dir = parent.join(set_id);
-        super::private_dir(&dir)?;
-        let result = async {
-            let complete = self
-                .s3
-                .get_bytes(&self.set_key(set_id, COMPLETE), super::MAX_COMPLETE_BYTES)
-                .await
-                .map_err(|e| match e {
-                    S3Error::Status { status: 404, .. } => {
-                        BackupError::Invalid(format!("the remote set {set_id} is not complete"))
-                    }
-                    other => other.into(),
-                })?;
-            let completion: Completion = serde_json::from_slice(&complete)
-                .map_err(|e| BackupError::Invalid(format!("remote completion record: {e}")))?;
-            if completion.set_id != set_id || completion.manifest.object != MANIFEST {
-                return Err(BackupError::Invalid(
-                    "the remote completion record names another set".into(),
-                ));
-            }
-            write_new(&dir.join(COMPLETE), &complete)?;
-            self.fetch(set_id, MANIFEST, completion.manifest.ciphertext_bytes, &dir)
-                .await?;
-            let (_, manifest, _) = super::restore::open_set(&dir, key)?;
-            for artifact in &manifest.artifacts {
-                self.fetch(set_id, &artifact.object, artifact.ciphertext_bytes, &dir)
-                    .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(err) = result {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(err);
-        }
-        Ok(dir)
+/// Download a completed remote set into a new private directory under
+/// `parent`, fetching only the objects its decrypted manifest names, each
+/// bounded before it is fetched (the manifest by the manifest limit,
+/// artifacts by `max_bytes`). Needs only the bucket, not the database. The
+/// result is checked again by the restore.
+pub async fn download_set(
+    s3: &S3,
+    set_id: &str,
+    parent: &Path,
+    key: &SecretKey,
+    max_bytes: u64,
+) -> Result<PathBuf, BackupError> {
+    if !super::valid_set_id(set_id) {
+        return Err(BackupError::Invalid("not a set ID".into()));
     }
-
-    async fn fetch(
-        &self,
-        set_id: &str,
-        object: &str,
-        bytes: u64,
-        dir: &Path,
-    ) -> Result<(), BackupError> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let path = dir.join(object);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(|e| BackupError::io(path.display(), e))?;
-        self.s3
-            .get_with(&self.set_key(set_id, object), bytes, |piece| {
-                file.write_all(piece)
-                    .map_err(|e| S3Error::Protocol(e.to_string()))
-            })
+    super::ensure_private_dir(parent)?;
+    let dir = parent.join(set_id);
+    super::private_dir(&dir)?;
+    let set_key = |object: &str| s3.key(&format!("sets/{set_id}/{object}"));
+    let result = async {
+        let complete = s3
+            .get_bytes(&set_key(COMPLETE), super::MAX_COMPLETE_BYTES)
+            .await
+            .map_err(|e| match e {
+                S3Error::Status { status: 404, .. } => {
+                    BackupError::Invalid(format!("the remote set {set_id} is not complete"))
+                }
+                other => other.into(),
+            })?;
+        let completion: Completion = serde_json::from_slice(&complete)
+            .map_err(|e| BackupError::Invalid(format!("remote completion record: {e}")))?;
+        if completion.set_id != set_id || completion.manifest.object != MANIFEST {
+            return Err(BackupError::Invalid(
+                "the remote completion record names another set".into(),
+            ));
+        }
+        // The record is unauthenticated: its sizes are bounded first.
+        if completion.manifest.ciphertext_bytes > super::MAX_MANIFEST_BYTES + 64 * 1024 {
+            return Err(BackupError::Invalid(
+                "the remote manifest is too large".into(),
+            ));
+        }
+        write_new(&dir.join(COMPLETE), &complete)?;
+        fetch(
+            s3,
+            &set_key(MANIFEST),
+            completion.manifest.ciphertext_bytes,
+            &dir.join(MANIFEST),
+        )
+        .await?;
+        let (_, manifest, _) = super::restore::open_set(&dir, key)?;
+        for artifact in &manifest.artifacts {
+            // Age adds 16 bytes per 64 KiB chunk and a small header.
+            if artifact.ciphertext_bytes > max_bytes + max_bytes / 4096 + 64 * 1024 {
+                return Err(BackupError::TooLarge(max_bytes));
+            }
+            fetch(
+                s3,
+                &set_key(&artifact.object),
+                artifact.ciphertext_bytes,
+                &dir.join(&artifact.object),
+            )
             .await?;
-        file.sync_all()
-            .map_err(|e| BackupError::io(path.display(), e))
+        }
+        Ok(())
     }
+    .await;
+    if let Err(err) = result {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(err);
+    }
+    Ok(dir)
+}
+
+async fn fetch(s3: &S3, key: &str, bytes: u64, path: &Path) -> Result<(), BackupError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| BackupError::io(path.display(), e))?;
+    s3.get_with(key, bytes, |piece| {
+        file.write_all(piece)
+            .map_err(|e| S3Error::Protocol(e.to_string()))
+    })
+    .await?;
+    file.sync_all()
+        .map_err(|e| BackupError::io(path.display(), e))
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), BackupError> {

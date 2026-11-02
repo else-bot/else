@@ -201,9 +201,11 @@ async fn an_object_altered_before_publication_is_detected() {
         let s3 = target.clone();
         Box::pin(async move {
             let key = s3.key(&format!("sets/{set}/{}", backup::DATABASE));
-            s3.put(&key, b"tampered through the API".to_vec(), false)
-                .await
-                .unwrap();
+            // Same length, one byte different: only the SHA-256 tells.
+            let mut bytes = s3.get_bytes(&key, 1 << 30).await.unwrap();
+            let at = bytes.len() / 2;
+            bytes[at] ^= 0x01;
+            s3.put(&key, bytes, false).await.unwrap();
         })
     }));
     let summary = worker(&app, dir.path(), tampering)
@@ -524,14 +526,27 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     drop(fake);
     compose(&["restart", "seaweedfs"]);
     compose(&["up", "-d", "--wait", "seaweedfs"]);
-    assert_eq!(
-        r.completed_remote().await.unwrap(),
-        std::slice::from_ref(&summary.set_id)
-    );
-    let downloaded = r
-        .download_set(&summary.set_id, &dir.path().join("download"), &key())
-        .await
-        .unwrap();
+    // It may answer 500 for a moment after its health check passes.
+    let mut listed = None;
+    for _ in 0..30 {
+        match r.completed_remote().await {
+            Ok(sets) => {
+                listed = Some(sets);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    assert_eq!(listed.unwrap(), std::slice::from_ref(&summary.set_id));
+    let downloaded = else_api::backup::replicate::download_set(
+        &r.s3,
+        &summary.set_id,
+        &dir.path().join("download"),
+        &key(),
+        1 << 30,
+    )
+    .await
+    .unwrap();
     let fresh = Arc::new(Fake::default());
     let new_dir = dir.path().join("installation");
     std::fs::create_dir(&new_dir).unwrap();
@@ -587,13 +602,14 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         "the computer's disk came from the bucket"
     );
     // A forged or incomplete remote set is not downloaded.
-    let missing = r
-        .download_set(
-            "20000101T000000000Z-00000000",
-            &dir.path().join("download"),
-            &key(),
-        )
-        .await;
+    let missing = else_api::backup::replicate::download_set(
+        &r.s3,
+        "20000101T000000000Z-00000000",
+        &dir.path().join("download"),
+        &key(),
+        1 << 30,
+    )
+    .await;
     assert!(
         matches!(missing, Err(BackupError::Invalid(_))),
         "{missing:?}"
@@ -644,13 +660,278 @@ async fn a_real_bucket_round_trip_when_authorized() {
         s3.put(&complete, b"{}".to_vec(), true).await.unwrap(),
         Put::Exists
     );
-    let downloaded = r
-        .download_set(&summary.set_id, &dir.path().join("download"), &key())
-        .await
-        .unwrap();
+    let downloaded = else_api::backup::replicate::download_set(
+        &r.s3,
+        &summary.set_id,
+        &dir.path().join("download"),
+        &key(),
+        1 << 30,
+    )
+    .await
+    .unwrap();
     else_api::backup::restore::open_set(&downloaded, &key()).unwrap();
     // Leave the isolated prefix empty.
     for (key, _) in s3.list(&s3.key("")).await.unwrap() {
         s3.delete(&key).await.unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_completion_is_not_trusted_without_its_payload() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let w = worker(&app, dir.path(), replicator(&app, &s3));
+    let summary = w.run_once().await.unwrap();
+    assert!(matches!(summary.remote, Some(Ok(_))));
+    // A crash after publication lost the record, and the remote dump was
+    // damaged (same length) meanwhile.
+    sqlx::query("DELETE FROM backup_remote")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let key = set_key(&s3, &summary.set_id, backup::DATABASE);
+    let mut bytes = s3.get_bytes(&key, 1 << 30).await.unwrap();
+    bytes[10] ^= 0x01;
+    s3.put(&key, bytes, false).await.unwrap();
+    let stats = w.replicate_now().await.unwrap().unwrap();
+    assert_eq!(stats.uploaded, 1, "the damaged object was repaired");
+    assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
+    let dump = summary
+        .manifest
+        .artifacts
+        .iter()
+        .find(|a| a.kind == "postgres")
+        .unwrap();
+    let (_, sha) = s3.get_with(&key, u64::MAX, |_| Ok(())).await.unwrap();
+    assert_eq!(sha, dump.ciphertext_sha256);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_destination_is_replicated_afresh() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let first = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, dir.path(), replicator(&app, &first))
+        .run_once()
+        .await
+        .unwrap();
+    assert!(matches!(summary.remote, Some(Ok(_))));
+    let second = bucket().await;
+    let r = replicator(&app, &second);
+    assert_eq!(
+        r.awaiting(&dir.path().join("backups")).await.unwrap(),
+        std::slice::from_ref(&summary.set_id),
+        "completion in another bucket does not count here"
+    );
+    let stats = worker(&app, dir.path(), r)
+        .replicate_now()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
+    assert!(
+        second
+            .head(&set_key(&second, &summary.set_id, "complete.json"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
+    let _serial = SERIAL.lock().await;
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        ComputerConfig {
+            state_dir: dir.path().join("state"),
+            idle_after: Duration::from_secs(3600),
+            ..ComputerConfig::default()
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Builder", "builds").await.parse().unwrap();
+    let Acquire::Ready { lease_id, .. } = manager.acquire(bot, "test:use").await.unwrap() else {
+        panic!()
+    };
+    manager.release(lease_id).await.unwrap();
+    let s3 = bucket().await;
+    let mut r = replicator(&app, &s3);
+    r.keep = 1;
+    // A whole-assistant set first.
+    let whole = worker(&app, dir.path(), r.clone())
+        .with_coordinator(Coordinator {
+            scheduler: Some(app.scheduler.clone()),
+            computers: Some(manager.clone()),
+            drain: Duration::from_secs(5),
+            exclusive: false,
+        })
+        .run_once()
+        .await
+        .unwrap();
+    assert!(whole.manifest.coverage.whole_assistant);
+    // A forged newer remote set with a completion record of its own.
+    let forged = "29991231T235959999Z-ffffffff";
+    s3.put(&set_key(&s3, forged, "complete.json"), b"{}".to_vec(), true)
+        .await
+        .unwrap();
+    // Then a database-only (partial) set, with keep 1.
+    let mut partial_worker = worker(&app, dir.path(), r.clone());
+    partial_worker.config.keep = 1;
+    let partial = partial_worker.run_once().await.unwrap();
+    assert!(!partial.manifest.coverage.whole_assistant);
+    assert!(
+        matches!(partial.remote, Some(Ok(_))),
+        "{:?}",
+        partial.remote
+    );
+    let remote = r.completed_remote().await.unwrap();
+    assert!(
+        remote.contains(&whole.set_id),
+        "the newest whole set is kept: {remote:?}"
+    );
+    assert!(remote.contains(&partial.set_id));
+    assert!(
+        remote.contains(&forged.to_owned()),
+        "an unverified set is left alone"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_start() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    // An unreachable bucket: captures still happen on schedule.
+    let unreachable = S3::new(S3Config {
+        endpoint: "http://127.0.0.1:9".into(),
+        ..s3_config("nowhere")
+    })
+    .unwrap();
+    let mut w = worker(&app, dir.path(), replicator(&app, &unreachable));
+    w.config.interval = Duration::from_secs(2);
+    let w = Arc::new(w);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(w.clone().run(stop.clone()));
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    stop.cancel();
+    task.await.unwrap();
+    let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
+    assert!(sets.len() >= 2, "captures continued: {sets:?}");
+    // A restarted worker with a reachable bucket uploads them at once,
+    // before its next capture is due.
+    let s3 = bucket().await;
+    let mut w = worker(&app, dir.path(), replicator(&app, &s3));
+    w.config.interval = Duration::from_secs(3600);
+    let w = Arc::new(w);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(w.clone().run(stop.clone()));
+    let r = replicator(&app, &s3);
+    let mut done = false;
+    for _ in 0..100 {
+        if r.awaiting(&dir.path().join("backups"))
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop.cancel();
+    task.await.unwrap();
+    assert!(done, "pending uploads ran at startup");
+    assert_eq!(
+        backup::completed_sets(&dir.path().join("backups"))
+            .unwrap()
+            .len(),
+        sets.len(),
+        "no new capture was due"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_remote_works_without_the_source_database() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, dir.path(), replicator(&app, &s3))
+        .run_once()
+        .await
+        .unwrap();
+    assert!(matches!(summary.remote, Some(Ok(_))));
+    // A replacement server: the configured database does not exist.
+    let params = PgParams::parse(app.db.url.expose()).unwrap();
+    let absent = format!(
+        "postgresql://{}:{}@{}:{}/else_absent_{}",
+        params.user(),
+        params.password().unwrap_or_default(),
+        params.host(),
+        params.port(),
+        Uuid::new_v4().simple()
+    );
+    let data = dir.path().join("operator");
+    std::fs::create_dir(&data).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let target = format!("else_restore_{}", Uuid::new_v4().simple());
+    let config = s3.config().clone();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &data)
+        .env("DATABASE_URL", &absent)
+        .env("ELSE_DATA_DIR", &data)
+        .env(
+            "SECRET_KEY",
+            base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        )
+        .env("ELSE_S3_ENDPOINT", &config.endpoint)
+        .env("ELSE_S3_REGION", &config.region)
+        .env("ELSE_S3_BUCKET", &config.bucket)
+        .env("ELSE_S3_PREFIX", &config.prefix)
+        .env("ELSE_S3_ACCESS_KEY_ID", &config.access_key_id)
+        .env(
+            "ELSE_S3_SECRET_ACCESS_KEY",
+            config.secret_access_key.as_str(),
+        )
+        .args(["restore-remote", &summary.set_id, &target])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut admin = sqlx::PgConnection::connect_with(&params.with_database("postgres").options)
+        .await
+        .unwrap();
+    let restored: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&target)
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS \"{target}\" WITH (FORCE)"
+    )))
+    .execute(&mut admin)
+    .await;
+    assert!(out.status.success(), "{text}");
+    assert!(restored);
+    assert!(!text.contains(config.secret_access_key.as_str()));
 }
