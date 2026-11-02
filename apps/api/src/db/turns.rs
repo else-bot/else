@@ -413,7 +413,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     let history = sqlx::query_as::<_, (i64, String, String)>(
         "SELECT t.turn_no, i.kind, i.text FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = $1 AND t.turn_no < $2 AND i.kind IN ('user', 'assistant')
-         ORDER BY i.seq",
+         ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)
     .bind(turn.turn_no)
@@ -427,8 +427,11 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     })
     .collect();
     let session = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT native_session_id, fingerprint, considered_through_turn FROM provider_sessions
-         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'",
+        "SELECT native_session_id, fingerprint, considered_through_turn FROM provider_sessions s
+         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'
+           -- A session that may hold an uncertain delivery is never resumed.
+           AND NOT EXISTS (SELECT 1 FROM turns u
+                           WHERE u.provider_session_id = s.id AND u.status = 'uncertain')",
     )
     .bind(turn.conversation_id)
     .bind(&turn.provider_id)
@@ -737,7 +740,26 @@ impl TurnSink for PgSink {
     }
 
     async fn running(&self) -> Result<(), Fenced> {
-        self.transition("sending", "running").await
+        // A stop may already have moved the turn to `cancelling`; the turn
+        // was still accepted and must be drained, so that is not a fence.
+        match self.transition("sending", "running").await {
+            Ok(()) => Ok(()),
+            Err(Fenced) => {
+                let cancelling: Result<bool, sqlx::Error> = sqlx::query_scalar(
+                    "SELECT t.status = 'cancelling' AND b.status = 'active'
+                     FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = $1",
+                )
+                .bind(self.turn_id)
+                .fetch_one(&self.pool)
+                .await;
+                if matches!(cancelling, Ok(true)) {
+                    *self.fenced.lock().unwrap_or_else(|p| p.into_inner()) = false;
+                    Ok(())
+                } else {
+                    Err(Fenced)
+                }
+            }
+        }
     }
 
     async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
@@ -812,28 +834,35 @@ impl TurnSink for PgSink {
         match result {
             Ok(true) => Ok(()),
             Ok(false) => Err(self.fence()),
+            // Bookkeeping failure: without a recorded session the next turn
+            // simply starts a new one, so output is never fenced for it.
             Err(err) => {
-                tracing::error!(turn = %self.turn_id, error = %err, "recording provider session failed");
-                Err(self.fence())
+                tracing::warn!(turn = %self.turn_id, error = %err, "recording provider session failed");
+                Ok(())
             }
         }
     }
 
-    async fn reported(&self, profile: &Profile, native_turn_id: &str) -> Result<(), Fenced> {
+    async fn reported(
+        &self,
+        settings: &serde_json::Value,
+        native_turn_id: &str,
+    ) -> Result<(), Fenced> {
         if self.is_fenced() {
             return Err(Fenced);
         }
-        sqlx::query("UPDATE turns SET reported_profile = $2, native_turn_id = $3 WHERE id = $1")
-            .bind(self.turn_id)
-            .bind(Json(profile))
-            .bind(native_turn_id)
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
-            .map_err(|err| {
-                tracing::error!(turn = %self.turn_id, error = %err, "recording reported settings failed");
-                self.fence()
-            })
+        // Bookkeeping: a database error is logged, never fences the output.
+        if let Err(err) =
+            sqlx::query("UPDATE turns SET reported_profile = $2, native_turn_id = $3 WHERE id = $1")
+                .bind(self.turn_id)
+                .bind(Json(settings))
+                .bind(native_turn_id)
+                .execute(&self.pool)
+                .await
+        {
+            tracing::warn!(turn = %self.turn_id, error = %err, "recording reported settings failed");
+        }
+        Ok(())
     }
 
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {

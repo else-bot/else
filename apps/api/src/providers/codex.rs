@@ -58,17 +58,75 @@ pub struct Codex {
     sandbox: Option<HostSandbox>,
     program: Option<PathBuf>,
     auth: Option<PathBuf>,
+    version: String,
     unavailable: Option<String>,
 }
 
+/// Codex versions whose policy controls were verified (see POC-010).
+const VERIFIED_VERSIONS: &[&str] = &["codex-cli 0.166."];
+
+/// Settings Codex reported for a thread or turn; absent fields are unknown.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Reported {
+    model: Option<String>,
+    effort: Option<String>,
+    tier: Option<String>,
+}
+
+impl Reported {
+    fn from_response(value: &Value) -> Self {
+        let text = |key: &str| value[key].as_str().map(str::to_owned);
+        Self {
+            model: text("model"),
+            effort: text("reasoningEffort").or_else(|| text("effort")),
+            tier: text("serviceTier"),
+        }
+    }
+
+    /// Every field Codex did report must equal the request.
+    fn mismatch(&self, profile: &Profile) -> Option<String> {
+        let check = |field: &str, got: &Option<String>, want: &str| {
+            got.as_ref()
+                .filter(|got| *got != want)
+                .map(|got| format!("{field} {got} instead of {want}"))
+        };
+        let issues: Vec<String> = [
+            check("model", &self.model, &profile.model),
+            check("reasoning effort", &self.effort, &profile.reasoning_effort),
+            check("service tier", &self.tier, &profile.service_tier),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!issues.is_empty()).then(|| format!("Codex reported {}.", issues.join(", ")))
+    }
+
+    fn to_json(&self) -> Value {
+        json!({ "model": self.model, "reasoning_effort": self.effort, "service_tier": self.tier })
+    }
+}
+
 impl Codex {
-    /// Locate the CLI and the host login. A missing piece makes the provider
-    /// unavailable with a reason instead of failing startup.
+    /// Locate the CLI and the host login and check the CLI version. A
+    /// missing piece or an unverified version makes the provider unavailable
+    /// with a reason instead of failing startup.
     pub fn detect(
         sandbox: Option<HostSandbox>,
         program: Option<PathBuf>,
         auth: Option<PathBuf>,
     ) -> Self {
+        let version = program
+            .as_ref()
+            .and_then(|program| {
+                std::process::Command::new(program)
+                    .arg("--version")
+                    .env_clear()
+                    .output()
+                    .ok()
+            })
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_default();
+        let allow_unverified = std::env::var("ELSE_CODEX_ALLOW_UNVERIFIED").as_deref() == Ok("1");
         let unavailable = match (&sandbox, &program, &auth) {
             (None, _, _) => Some("bubblewrap is not available on this host".to_owned()),
             (_, None, _) => Some("the codex CLI was not found on the host".to_owned()),
@@ -76,23 +134,35 @@ impl Codex {
                 Some("Codex is not logged in on the host (run `codex login`)".to_owned())
             }
             (_, _, None) => Some("the Codex login location is unknown".to_owned()),
+            _ if !allow_unverified && !VERIFIED_VERSIONS.iter().any(|v| version.starts_with(v)) => {
+                Some(format!(
+                    "{} is not a verified Codex version (verified: 0.166); set \
+                     ELSE_CODEX_ALLOW_UNVERIFIED=1 after checking its policy controls",
+                    if version.is_empty() { "this" } else { &version }
+                ))
+            }
             _ => None,
         };
         Self {
             sandbox,
             program,
             auth,
+            version,
             unavailable,
         }
     }
 
-    fn fingerprint(profile: &Profile, input: &TurnInput) -> String {
+    /// Compatibility of a native thread: anything that would make resuming
+    /// it unsafe or stale is part of the fingerprint.
+    fn fingerprint(&self, profile: &Profile, input: &TurnInput, account: &str) -> String {
         let mut hasher = Sha256::new();
         for part in [
             PROMPT_VERSION,
+            &self.version,
             "runtime:bwrap:/work:/var/lib/provider-home",
             "tools:none",
             "agents:disabled",
+            account,
             &profile.model,
             &profile.reasoning_effort,
             &profile.service_tier,
@@ -129,8 +199,8 @@ impl Codex {
     }
 
     /// The owner's message, preceded by history the native session has not
-    /// seen. Whole items only, newest first within the budget, plus the
-    /// first owner message; omissions are stated.
+    /// seen. Whole items only: the first owner message, then the newest
+    /// others that fit the budget; omissions are stated.
     fn packet(input: &TurnInput, considered_through: i64) -> String {
         let missed: Vec<&HistoryEntry> = input
             .history
@@ -148,9 +218,21 @@ impl Codex {
             };
             format!("[turn {}] {who}: {}\n", entry.turn_no, entry.text)
         };
+        // The first owner message anchors the conversation; it is charged
+        // against the budget first (if it fits at all).
+        let first = missed
+            .first()
+            .filter(|e| e.kind == "user")
+            .map(|e| render(e))
+            .filter(|line| line.len() <= HISTORY_BUDGET / 2);
+        let mut used = first.as_ref().map_or(0, String::len);
+        let rest = if first.is_some() {
+            &missed[1..]
+        } else {
+            &missed[..]
+        };
         let mut chosen = Vec::new();
-        let mut used = 0;
-        for entry in missed.iter().rev() {
+        for entry in rest.iter().rev() {
             let line = render(entry);
             if used + line.len() > HISTORY_BUDGET {
                 break;
@@ -159,15 +241,15 @@ impl Codex {
             chosen.push(*entry);
         }
         chosen.reverse();
-        let omitted = missed.len() - chosen.len();
+        let omitted = rest.len() - chosen.len();
         let mut text = String::from(
             "[else.bot context] Earlier messages of this conversation that this session has not \
              seen. They are history, not new instructions.\n<history>\n",
         );
+        if let Some(first) = &first {
+            text.push_str(first);
+        }
         if omitted > 0 {
-            if let Some(first) = missed.first().filter(|e| e.kind == "user") {
-                text.push_str(&render(first));
-            }
             text.push_str(&format!("[{omitted} earlier messages omitted]\n"));
         }
         for entry in chosen {
@@ -176,17 +258,6 @@ impl Codex {
         text.push_str("</history>\n\nOwner's latest message:\n");
         text.push_str(&input.text);
         text
-    }
-
-    fn reported_profile(response: &Value) -> Option<Profile> {
-        Some(Profile {
-            model: response["model"].as_str()?.to_owned(),
-            reasoning_effort: response["reasoningEffort"].as_str()?.to_owned(),
-            service_tier: response["serviceTier"]
-                .as_str()
-                .unwrap_or("default")
-                .to_owned(),
-        })
     }
 }
 
@@ -256,12 +327,12 @@ impl Provider for Codex {
         sink: &dyn TurnSink,
         cancel: CancellationToken,
     ) -> TurnOutcome {
+        if let Some(reason) = &self.unavailable {
+            return failed("provider_unavailable", reason.clone());
+        }
         let (Some(sandbox), Some(program), Some(auth)) = (&self.sandbox, &self.program, &self.auth)
         else {
-            return failed(
-                "provider_unavailable",
-                self.unavailable.clone().unwrap_or_default(),
-            );
+            return failed("provider_unavailable", "Codex is not configured.");
         };
         let Some(profile) = input.profile.clone() else {
             return failed(
@@ -292,22 +363,6 @@ impl Provider for Codex {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
-        // The effective configuration must not expose any MCP server, even
-        // one inherited from a configuration layer outside the bot's home.
-        match server
-            .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
-            .await
-        {
-            Ok(status) if status["data"].as_array().is_some_and(|d| d.is_empty()) => {}
-            Ok(_) => {
-                server.shutdown(SHUTDOWN_GRACE).await;
-                return failed("policy_violation", "Codex has MCP servers configured.");
-            }
-            Err(err) => {
-                server.shutdown(SHUTDOWN_GRACE).await;
-                return failed("provider_unavailable", err.to_string());
-            }
-        }
         let outcome = self
             .converse(&mut server, &input, &profile, sink, cancel)
             .await;
@@ -317,13 +372,45 @@ impl Provider for Codex {
 }
 
 impl Codex {
+    /// Checks that need the running server: no effective MCP servers, and
+    /// the account identity for session compatibility.
+    async fn preflight(&self, server: &AppServer) -> Result<String, TurnOutcome> {
+        let status = server
+            .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
+            .await
+            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        if !status["data"].as_array().is_some_and(|d| d.is_empty()) {
+            return Err(failed(
+                "policy_violation",
+                "Codex has MCP servers configured.",
+            ));
+        }
+        let account = server
+            .request("account/read", json!({}), RPC_TIMEOUT)
+            .await
+            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        let account = &account["account"];
+        if account.is_null() {
+            return Err(failed(
+                "provider_unavailable",
+                "Codex is not logged in on the host (run `codex login`).",
+            ));
+        }
+        // Only a digest of the identity is kept, inside the fingerprint.
+        Ok(format!(
+            "{}:{}",
+            account["type"].as_str().unwrap_or_default(),
+            account["email"].as_str().unwrap_or_default()
+        ))
+    }
+
     async fn open_thread(
         &self,
         server: &AppServer,
         input: &TurnInput,
         profile: &Profile,
         fingerprint: &str,
-    ) -> Result<(String, i64, Profile), TurnOutcome> {
+    ) -> Result<(String, i64, Reported), TurnOutcome> {
         let settings = json!({
             "model": profile.model,
             "serviceTier": profile.service_tier,
@@ -343,11 +430,10 @@ impl Codex {
             params["threadId"] = json!(session.native_id);
             match server.request("thread/resume", params, RPC_TIMEOUT).await {
                 Ok(response) => {
-                    let reported = Self::reported_profile(&response);
                     return Ok((
                         session.native_id.clone(),
                         session.considered_through_turn,
-                        reported.unwrap_or_else(|| profile.clone()),
+                        Reported::from_response(&response),
                     ));
                 }
                 Err(RpcError::Remote { message, .. }) => {
@@ -364,8 +450,7 @@ impl Codex {
             .as_str()
             .ok_or_else(|| failed("provider_protocol", "thread/start returned no thread ID"))?
             .to_owned();
-        let reported = Self::reported_profile(&response).unwrap_or_else(|| profile.clone());
-        Ok((thread, 0, reported))
+        Ok((thread, 0, Reported::from_response(&response)))
     }
 
     async fn converse(
@@ -376,28 +461,32 @@ impl Codex {
         sink: &dyn TurnSink,
         cancel: CancellationToken,
     ) -> TurnOutcome {
-        let fingerprint = Self::fingerprint(profile, input);
+        let account = match self.preflight(server).await {
+            Ok(account) => account,
+            Err(outcome) => return outcome,
+        };
+        let fingerprint = self.fingerprint(profile, input, &account);
         let (thread_id, considered, reported) =
             match self.open_thread(server, input, profile, &fingerprint).await {
                 Ok(opened) => opened,
                 Err(outcome) => return outcome,
             };
         // Reject silent substitution of the requested settings.
-        if reported != *profile {
-            return failed(
-                "profile_mismatch",
-                format!(
-                    "Codex reported {}/{}/{} instead of the requested {}/{}/{}.",
-                    reported.model,
-                    reported.reasoning_effort,
-                    reported.service_tier,
-                    profile.model,
-                    profile.reasoning_effort,
-                    profile.service_tier
-                ),
-            );
+        if let Some(mismatch) = reported.mismatch(profile) {
+            return failed("profile_mismatch", mismatch);
         }
         if cancel.is_cancelled() {
+            return TurnOutcome::Interrupted;
+        }
+        // Record which native session this attempt uses before sending, so
+        // an uncertain delivery retires it instead of being resumed with a
+        // stale coverage cursor.
+        let mut state = SessionState {
+            native_id: thread_id.clone(),
+            fingerprint,
+            considered_through_turn: considered,
+        };
+        if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
         let packet = Self::packet(input, considered);
@@ -435,24 +524,15 @@ impl Codex {
                 };
             }
         };
+        // Accepted. A stop or deletion racing with acceptance still drains
+        // the turn to its terminal event below.
         if sink.running().await.is_err() {
-            let _ = server
-                .request(
-                    "turn/interrupt",
-                    json!({ "threadId": thread_id, "turnId": native_turn }),
-                    RPC_TIMEOUT,
-                )
-                .await;
-            return TurnOutcome::Interrupted;
+            cancel.cancel();
         }
-        let state = SessionState {
-            native_id: thread_id.clone(),
-            fingerprint,
-            considered_through_turn: input.turn_no,
-        };
+        state.considered_through_turn = input.turn_no;
         let _ = sink.session(&state).await;
-        let _ = sink.reported(&reported, &native_turn).await;
-        self.drain(server, &thread_id, &native_turn, sink, cancel)
+        let _ = sink.reported(&reported.to_json(), &native_turn).await;
+        self.drain(server, &thread_id, &native_turn, profile, sink, cancel)
             .await
     }
 
@@ -461,12 +541,13 @@ impl Codex {
         server: &mut AppServer,
         thread_id: &str,
         native_turn: &str,
+        profile: &Profile,
         sink: &dyn TurnSink,
         cancel: CancellationToken,
     ) -> TurnOutcome {
         let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
         let mut interrupted = false;
-        let mut violation: Option<String> = None;
+        let mut violation: Option<(&str, String)> = None;
         let mut current_message: Option<String> = None;
         loop {
             let message = tokio::select! {
@@ -486,73 +567,88 @@ impl Codex {
                     message: "The Codex process exited before the turn finished.".into(),
                 };
             };
-            match message {
+            let mut flag = |code: &'static str, reason: String| {
+                if violation.is_none() {
+                    violation = Some((code, reason));
+                }
+            };
+            let (method, params) = match message {
                 Incoming::Refused { method } => {
-                    // The client already refused it; no approval or tool
-                    // exists in this version.
-                    violation.get_or_insert(format!("Codex requested {method}"));
-                    if !interrupted {
-                        interrupted = true;
-                        interrupt(server, thread_id, native_turn).await;
+                    // Already refused by the client; nothing it asked for ran.
+                    flag("policy_violation", format!("Codex requested {method}"));
+                    (String::new(), Value::Null)
+                }
+                Incoming::Notification { method, params } => (method, params),
+            };
+            // Only events of this thread and turn concern this attempt.
+            let thread = params["threadId"].as_str();
+            let turn = params["turnId"].as_str().or(params["turn"]["id"].as_str());
+            let other_thread = thread.is_some_and(|t| t != thread_id);
+            let other_turn = turn.is_some_and(|t| t != native_turn);
+            match method.as_str() {
+                "thread/started" if params["thread"]["id"].as_str() != Some(thread_id) => {
+                    flag(
+                        "policy_violation",
+                        "Codex started a native sub-agent thread".into(),
+                    );
+                }
+                _ if other_thread || other_turn => {}
+                "item/started" => {
+                    let kind = params["item"]["type"].as_str().unwrap_or_default();
+                    if FORBIDDEN_ITEMS.contains(&kind) {
+                        flag("policy_violation", format!("Codex attempted a {kind} item"));
                     }
                 }
-                Incoming::Notification { method, params } => {
-                    if params["turnId"].as_str().is_some_and(|t| t != native_turn) {
-                        continue;
-                    }
-                    match method.as_str() {
-                        "item/started" => {
-                            let kind = params["item"]["type"].as_str().unwrap_or_default();
-                            if FORBIDDEN_ITEMS.contains(&kind) {
-                                violation.get_or_insert(format!("Codex attempted a {kind} item"));
-                                if !interrupted {
-                                    interrupted = true;
-                                    interrupt(server, thread_id, native_turn).await;
-                                }
-                            }
-                        }
-                        "thread/started" if params["thread"]["id"].as_str() != Some(thread_id) => {
-                            violation
-                                .get_or_insert("Codex started a native sub-agent thread".into());
-                            if !interrupted {
-                                interrupted = true;
-                                interrupt(server, thread_id, native_turn).await;
-                            }
-                        }
-                        "item/agentMessage/delta" => {
-                            let item = params["itemId"].as_str().unwrap_or_default().to_owned();
-                            // Separate distinct agent messages in one turn.
-                            if current_message.as_ref().is_some_and(|c| *c != item) {
-                                let _ = sink.text("\n\n").await;
-                            }
-                            current_message = Some(item);
-                            if let Some(delta) = params["delta"].as_str() {
-                                if sink.text(delta).await.is_err() && !interrupted {
-                                    interrupted = true;
-                                    interrupt(server, thread_id, native_turn).await;
-                                }
-                            }
-                        }
-                        "turn/completed" => {
-                            let turn = &params["turn"];
-                            if let Some(reason) = violation {
-                                return failed("policy_violation", reason);
-                            }
-                            return match turn["status"].as_str() {
-                                Some("completed") => TurnOutcome::Completed,
-                                Some("interrupted") => TurnOutcome::Interrupted,
-                                _ => failed(
-                                    "provider_failed",
-                                    turn["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or("Codex reported a failed turn.")
-                                        .to_owned(),
-                                ),
-                            };
-                        }
-                        _ => {}
+                "model/rerouted" => {
+                    let to = params["toModel"].as_str().unwrap_or_default();
+                    if to != profile.model {
+                        flag(
+                            "profile_mismatch",
+                            format!("Codex rerouted the turn to {to}."),
+                        );
                     }
                 }
+                "thread/settings/updated" => {
+                    let settings = &params["threadSettings"];
+                    if let Some(mismatch) = Reported::from_response(settings).mismatch(profile) {
+                        flag("profile_mismatch", mismatch);
+                    }
+                }
+                "item/agentMessage/delta" => {
+                    let item = params["itemId"].as_str().unwrap_or_default().to_owned();
+                    // Separate distinct agent messages in one turn.
+                    if current_message.as_ref().is_some_and(|c| *c != item) {
+                        let _ = sink.text("\n\n").await;
+                    }
+                    current_message = Some(item);
+                    if let Some(delta) = params["delta"].as_str() {
+                        if sink.text(delta).await.is_err() {
+                            cancel.cancel();
+                        }
+                    }
+                }
+                "turn/completed" => {
+                    if let Some((code, reason)) = violation {
+                        return failed(code, reason);
+                    }
+                    let turn = &params["turn"];
+                    return match turn["status"].as_str() {
+                        Some("completed") => TurnOutcome::Completed,
+                        Some("interrupted") => TurnOutcome::Interrupted,
+                        _ => failed(
+                            "provider_failed",
+                            turn["error"]["message"]
+                                .as_str()
+                                .unwrap_or("Codex reported a failed turn.")
+                                .to_owned(),
+                        ),
+                    };
+                }
+                _ => {}
+            }
+            if violation.is_some() && !interrupted {
+                interrupted = true;
+                interrupt(server, thread_id, native_turn).await;
             }
         }
     }
@@ -618,8 +714,45 @@ mod tests {
     }
 
     #[test]
+    fn a_large_first_message_still_fits_the_budget() {
+        let first = "f".repeat(30 * 1024);
+        let other = "o".repeat(10 * 1024);
+        let input = input(vec![
+            (1, "user", &first),
+            (2, "user", &other),
+            (3, "user", &other),
+            (4, "user", &other),
+        ]);
+        let packet = Codex::packet(&input, 0);
+        assert!(packet.len() <= HISTORY_BUDGET + 1024, "{}", packet.len());
+        assert!(packet.contains("omitted"));
+    }
+
+    #[test]
+    fn reported_settings_are_checked_field_by_field() {
+        let profile = Profile {
+            model: "gpt-6.1-sol".into(),
+            reasoning_effort: "medium".into(),
+            service_tier: "priority".into(),
+        };
+        let partial =
+            Reported::from_response(&json!({ "model": "gpt-6.1-sol", "reasoningEffort": null }));
+        assert_eq!(
+            partial.mismatch(&profile),
+            None,
+            "unknown fields are not mismatches"
+        );
+        let other_model =
+            Reported::from_response(&json!({ "model": "gpt-5", "reasoningEffort": null }));
+        assert!(other_model.mismatch(&profile).unwrap().contains("gpt-5"));
+        let other_tier = Reported::from_response(&json!({ "serviceTier": "default" }));
+        assert!(other_tier.mismatch(&profile).is_some());
+    }
+
+    #[test]
     fn profile_validation_refuses_delegating_effort() {
         let codex = Codex::detect(None, None, None);
+        assert!(codex.unavailable.is_some());
         let ok = Profile {
             model: "gpt-6.1-sol".into(),
             reasoning_effort: "medium".into(),
@@ -653,15 +786,21 @@ mod tests {
             reasoning_effort: "medium".into(),
             service_tier: "priority".into(),
         };
-        let base = Codex::fingerprint(&profile, &a);
+        let codex = Codex::detect(None, None, None);
+        let base = codex.fingerprint(&profile, &a, "chatgpt:a");
+        assert_ne!(
+            base,
+            codex.fingerprint(&profile, &a, "chatgpt:b"),
+            "account"
+        );
         let high = Profile {
             reasoning_effort: "high".into(),
             ..profile.clone()
         };
-        assert_ne!(base, Codex::fingerprint(&high, &a));
+        assert_ne!(base, codex.fingerprint(&high, &a, "chatgpt:a"));
         let mut b = a.clone();
         b.bot_role = "Different".into();
-        assert_ne!(base, Codex::fingerprint(&profile, &b));
-        assert_eq!(base, Codex::fingerprint(&profile, &a.clone()));
+        assert_ne!(base, codex.fingerprint(&profile, &b, "chatgpt:a"));
+        assert_eq!(base, codex.fingerprint(&profile, &a.clone(), "chatgpt:a"));
     }
 }

@@ -106,8 +106,13 @@ pub trait TurnSink: Send + Sync {
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.
     async fn session(&self, state: &SessionState) -> Result<(), Fenced>;
-    /// Record the settings the provider reported and its turn ID.
-    async fn reported(&self, profile: &Profile, native_turn_id: &str) -> Result<(), Fenced>;
+    /// Record the settings the provider reported (unknown fields null) and
+    /// its turn ID.
+    async fn reported(
+        &self,
+        settings: &serde_json::Value,
+        native_turn_id: &str,
+    ) -> Result<(), Fenced>;
 }
 
 /// Availability as reported in capabilities.
