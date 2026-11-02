@@ -38,6 +38,9 @@ pub struct SetSummary {
     pub set_id: String,
     pub path: PathBuf,
     pub manifest: Manifest,
+    /// Replication after this capture, when a bucket is configured: the
+    /// local set is complete either way.
+    pub remote: Option<Result<super::replicate::Stats, String>>,
 }
 
 fn now() -> String {
@@ -244,6 +247,7 @@ pub async fn create_set(
                 set_id,
                 path: final_dir,
                 manifest,
+                remote: None,
             })
         }
         Err(err) => {

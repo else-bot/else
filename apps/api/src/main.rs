@@ -13,7 +13,8 @@ use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
-else-api restore <set-dir> <new-database> [<new-data-dir>]\n\n\
+else-api restore <set-dir> <new-database> [<new-data-dir>]\n       \
+else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
@@ -21,7 +22,8 @@ bot and default provider profiles once; never replaces existing state\n  \
 migrate  apply pending versioned migrations only\n  \
 backup   capture one encrypted database backup set now\n  \
 restore  verify a backup set and restore it into a new database on the same\n           \
-server; never changes an existing database or file\n";
+server; never changes an existing database or file\n  \
+restore-remote  download a completed set from the configured bucket, then restore it\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
@@ -49,7 +51,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("serve");
     let arity_ok = match command {
-        "restore" => args.len() == 3 || args.len() == 4,
+        "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
         _ => args.len() <= 1,
     };
     if !arity_ok {
@@ -60,6 +62,7 @@ fn main() -> ExitCode {
         "serve" => run_serve(),
         "backup" => run_backup(),
         "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
+        "restore-remote" => run_restore_remote(&args[1], &args[2], args.get(3).map(String::as_str)),
         "setup" => run_setup(),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
@@ -141,19 +144,66 @@ fn run_backup() -> anyhow::Result<()> {
                 None
             }
         };
-        let worker =
-            else_api::backup::worker::BackupWorker::new(pool, params, key, config.backup.clone())
-                .with_coordinator(else_api::backup::capture::Coordinator {
-                    scheduler: None,
-                    computers,
-                    drain: std::time::Duration::from_secs(0),
-                    exclusive: true,
-                });
+        let mut worker = else_api::backup::worker::BackupWorker::new(
+            pool.clone(),
+            params,
+            key,
+            config.backup.clone(),
+        )
+        .with_coordinator(else_api::backup::capture::Coordinator {
+            scheduler: None,
+            computers,
+            drain: std::time::Duration::from_secs(0),
+            exclusive: true,
+        });
+        if let Some(replicator) = replicator(&config, &pool)? {
+            worker = worker.with_replicator(replicator);
+        }
         let summary = worker.run_once().await?;
         println!("backup set: {}", summary.path.display());
         println!("coverage: {}", summary.manifest.coverage.note);
+        match &summary.remote {
+            Some(Ok(stats)) => println!("remote: {} sets replicated", stats.completed.len()),
+            Some(Err(err)) => println!("remote: failed ({err}); the local set is complete"),
+            None => {}
+        }
         Ok(())
     })
+}
+
+fn replicator(
+    config: &else_api::config::Config,
+    pool: &sqlx::PgPool,
+) -> anyhow::Result<Option<else_api::backup::replicate::Replicator>> {
+    let Some(s3) = config.s3.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(else_api::backup::replicate::Replicator::new(
+        else_api::backup::s3::S3::new(s3)?,
+        pool.clone(),
+        config.backup.keep,
+    )))
+}
+
+/// Download a completed remote set, then restore it like a local one.
+fn run_restore_remote(
+    set_id: &str,
+    target: &str,
+    new_data_dir: Option<&str>,
+) -> anyhow::Result<()> {
+    let config = load_config()?;
+    let (_, key) = backup_parts(&config)?;
+    let downloads = config.data_dir.join("restore-download");
+    let set_dir = runtime()?.block_on(async {
+        let url = config.require_database().context("invalid configuration")?;
+        let pool = db::connect(url).await?;
+        let replicator =
+            replicator(&config, &pool)?.context("no bucket is configured (set ELSE_S3_*)")?;
+        anyhow::Ok(replicator.download_set(set_id, &downloads, &key).await?)
+    })?;
+    let result = run_restore(&set_dir.display().to_string(), target, new_data_dir);
+    let _ = std::fs::remove_dir_all(&set_dir);
+    result
 }
 
 /// Restore a verified set into a new database (and, for bot computers, a
@@ -385,20 +435,24 @@ fn run_serve() -> anyhow::Result<()> {
             .map(|url| else_api::backup::PgParams::parse(url.expose()))
         {
             Some(Ok(params)) if !config.backup.interval.is_zero() => {
-                let worker = Arc::new(
-                    else_api::backup::worker::BackupWorker::new(
-                        pool.clone(),
-                        params,
-                        secret_key.clone(),
-                        config.backup.clone(),
-                    )
-                    .with_coordinator(else_api::backup::capture::Coordinator {
-                        scheduler: Some(state.scheduler.clone()),
-                        computers: state.computers.clone(),
-                        drain: std::time::Duration::from_secs(300),
-                        exclusive: false,
-                    }),
-                );
+                let mut worker = else_api::backup::worker::BackupWorker::new(
+                    pool.clone(),
+                    params,
+                    secret_key.clone(),
+                    config.backup.clone(),
+                )
+                .with_coordinator(else_api::backup::capture::Coordinator {
+                    scheduler: Some(state.scheduler.clone()),
+                    computers: state.computers.clone(),
+                    drain: std::time::Duration::from_secs(300),
+                    exclusive: false,
+                });
+                match replicator(&config, &pool) {
+                    Ok(Some(replicator)) => worker = worker.with_replicator(replicator),
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!(error = %err, "backup replication disabled"),
+                }
+                let worker = Arc::new(worker);
                 Some(tokio::spawn(worker.run(stop_scheduler.clone())))
             }
             Some(Err(err)) => {

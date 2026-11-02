@@ -45,6 +45,8 @@ docker compose ps
 
 The service uses `postgres:18.6`, password authentication for TCP connections, and a persistent named volume. Its health check uses TCP so the temporary initialization server does not report ready. PostgreSQL 18 stores its versioned data directory under `/var/lib/postgresql`, which is the volume mount used here. See the [official image documentation](https://hub.docker.com/_/postgres).
 
+Compose also starts `seaweedfs` (`chrislusf/seaweedfs:4.50`, `server -dir=/data -s3 -s3.port=8333`, a named volume, bound to `127.0.0.1:8333`): a local S3 emulator for the backup replication tests, with synthetic keys from the `ELSE_TEST_S3_*` entries in `.env` (copy them from `.env.example`). It never stands in for a real bucket in normal use.
+
 Open a database shell inside the container:
 
 ```sh
@@ -95,6 +97,8 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 | `ELSE_BACKUP_KEEP` | `7` | Completed local sets kept. |
 | `ELSE_BACKUP_MAX_BYTES` | `8589934592` | Largest database dump accepted (bounds temporary storage). |
 | `ELSE_PG_DUMP`, `ELSE_PG_RESTORE` | `pg_dump`, `pg_restore` on `PATH` | PostgreSQL client tools for backup and restore, matching the server's major version. |
+| `ELSE_S3_ENDPOINT`, `ELSE_S3_BUCKET`, `ELSE_S3_ACCESS_KEY_ID`, `ELSE_S3_SECRET_ACCESS_KEY` | unset | Bucket replication of backup sets; all four or none. |
+| `ELSE_S3_REGION`, `ELSE_S3_PREFIX`, `ELSE_S3_PATH_STYLE` | `auto`, `else-backups/`, `1` | Bucket region, key prefix, and path-style addressing. |
 | `ELSE_SYNTHETIC_PROVIDER` | `0` | `1` exposes the deterministic `synthetic` provider, labeled "Synthetic (test)", for demos and manual checks. It runs no model. |
 | `ELSE_MAX_ACTIVE_TURNS` | `2` | Provider turns running at once across all bots, from 1 to 32. Each bot runs at most one turn at a time regardless. |
 | (bubblewrap) | required for providers | Provider CLIs run inside `bwrap` (`pacman -S bubblewrap`, `apt install bubblewrap`). Without it the API starts, but host providers report unavailable. See [host provider processes](security.md#implemented-codex-launch-profile). |
@@ -242,6 +246,12 @@ The API's worker captures the whole assistant at one checkpoint (POC-022). Work 
 
 `else-api backup` now takes the API's singleton lock before migrating anything (it refuses while the API runs, which backs up on its own schedule) and captures the computers too when Microsandbox is available. `else-api restore <set-dir> <new-database> [<new-data-dir>]` restores a set with computers or host artifacts only into a new installation directory, created exclusively (an existing path, including one a concurrent restore just made, is refused) and given a copy of the master key and a new owner token before anything is restored: each archive is verified and decrypted to private staging, restored into `<new-data-dir>/microsandbox` with its recorded resources and desktop port and an explicit network policy (`msb snapshot restore` does not carry the source's; `public` becomes default deny with DNS and public egress allowed and ingress allowed, the policy `create --net public` records), and left stopped; the desktop password and host artifacts are written to the new directory. The restored database then records the restored computers as stopped, any computer not in the set as `missing` (never recreated), every native provider session as retired (conversations are rebuilt from PostgreSQL; providers may need a fresh login on a new host), memory job leases as released, and the run that made the set as completed. If anything fails, every computer the restore tried to create is stopped and confirmed stopped, and the new database and directory are removed; if a stop cannot be confirmed, the directory is kept and the error says so. Point the API at both to switch over.
 
+#### Bucket replication
+
+With `ELSE_S3_ENDPOINT`, `ELSE_S3_BUCKET`, `ELSE_S3_ACCESS_KEY_ID`, and `ELSE_S3_SECRET_ACCESS_KEY` set (and optionally `ELSE_S3_REGION`, default `auto`; `ELSE_S3_PREFIX`, default `else-backups/`; `ELSE_S3_PATH_STYLE`, default `1`), the backup worker replicates every completed local set to the bucket after each capture, in the same process and under the same lock (POC-023). It uses a small Signature V4 client and only the operations the emulator probe verified: `PutObject` (with a SHA-256 checksum, and `If-None-Match: *` for the completion record), multipart create, upload, complete, list, and abort, `HeadObject`, `GetObject`, `ListObjectsV2`, and `DeleteObject`; no AWS endpoint is assumed. Objects go to `<prefix>sets/<set id>/`. For a set without a verified remote completion it aborts that set's abandoned multipart uploads, uploads the manifest and every artifact (objects over 16 MiB in parts), skipping any whose remote readback already hashes to the recorded SHA-256, then reads every object back again and compares its SHA-256, and only then publishes `complete.json` create-only and reads it back. A mismatch fails the set (it is not marked remotely complete and is repaired on a later pass); a remote completion record with other contents is a conflict and is never replaced. Local and remote outcomes are recorded separately (`backup_runs.remote_status`, `backup_remote`, migration `0020`); a remote failure leaves the local set complete and is retried with backoff (1 minute, doubling to an hour) without capturing again. Local retention never removes a set awaiting replication. Remote retention keeps the newest `ELSE_BACKUP_KEEP` complete remote sets (never fewer than one), removing an old set's completion record before its other objects, and removes incomplete remote sets that no local set awaits.
+
+`else-api restore-remote <set-id> <new-database> [<new-data-dir>]` downloads a completed set (only the completion record, the manifest, and the objects the decrypted manifest names, each bounded by its recorded size) into `$ELSE_DATA_DIR/restore-download`, restores it exactly like a local set, and removes the download.
+
 ### Events and reconnecting
 
 Every change to history or turn state appends rows to `bot_events` in the same transaction, under the bot's row lock, so a bot's event sequence follows commit order. Cursors are `<server_instance_id>:<bot_id>:<seq>`; the instance ID changes on every API start. The socket sends only committed rows; inside the API, channels wake on a `pg_notify` hint or a one-second database poll. `item.delta` carries `offset_utf8`, the byte length of the item's text before the delta; a client appends only when its current length matches.
@@ -293,7 +303,7 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, up
 
 ### PostgreSQL tests
 
-`cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests.
+`cargo test --workspace` includes tests that need the Compose PostgreSQL service. Each test creates its own `else_test_<uuid>` database, applies migrations, and drops it with `WITH (FORCE)` when the test ends. The application database is never used. Set `TEST_DATABASE_URL` to use a different server; its user needs `CREATEDB`. Start the service with `docker compose up -d --wait` before running tests. The replication tests (`--test replication`) likewise require the Compose S3 emulator and fail with a message naming it when it is not reachable; each uses its own bucket, and some stop or restart the `seaweedfs` container.
 
 ## Run the desktop
 

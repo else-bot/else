@@ -14,7 +14,9 @@
 //! whole-assistant backup.
 
 pub mod capture;
+pub mod replicate;
 pub mod restore;
+pub mod s3;
 pub mod worker;
 
 use std::fs::{self, File, OpenOptions};
@@ -65,6 +67,9 @@ pub enum BackupError {
     /// Live work prevents a consistent capture now; retried later.
     #[error("deferred: {0}")]
     Deferred(String),
+    /// The bucket could not be reached or answered an error.
+    #[error("remote storage: {0}")]
+    Remote(String),
     /// A failed restore left something that may still run; the caller must
     /// not delete the new installation's state.
     #[error("{0}")]
@@ -633,6 +638,17 @@ pub fn clean_incomplete(dir: &Path) -> Result<usize, BackupError> {
 /// a half-removed set is never taken for a backup. The caller holds the
 /// backup lock.
 pub fn apply_retention(dir: &Path, keep: usize, protect: &str) -> Result<Vec<String>, BackupError> {
+    apply_retention_protecting(dir, keep, protect, &[])
+}
+
+/// As [`apply_retention`], also never removing `awaiting` (sets not yet
+/// replicated to a configured bucket).
+pub fn apply_retention_protecting(
+    dir: &Path,
+    keep: usize,
+    protect: &str,
+    awaiting: &[String],
+) -> Result<Vec<String>, BackupError> {
     let mut sets = completed_sets(dir)?;
     // The newest whole-assistant set is never replaced by lower coverage.
     let newest_whole = sets
@@ -645,7 +661,7 @@ pub fn apply_retention(dir: &Path, keep: usize, protect: &str) -> Result<Vec<Str
                 .is_some_and(|c| c.whole_assistant)
         })
         .cloned();
-    sets.retain(|s| s != protect && Some(s) != newest_whole.as_ref());
+    sets.retain(|s| s != protect && Some(s) != newest_whole.as_ref() && !awaiting.contains(s));
     let keep = keep.max(1) - 1;
     let mut removed = Vec::new();
     if sets.len() <= keep {

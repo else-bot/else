@@ -25,6 +25,7 @@ pub struct BackupWorker {
     key: Arc<SecretKey>,
     pub config: BackupConfig,
     coordinator: Coordinator,
+    replicator: Option<super::replicate::Replicator>,
 }
 
 impl BackupWorker {
@@ -35,7 +36,31 @@ impl BackupWorker {
             key,
             config,
             coordinator: Coordinator::default(),
+            replicator: None,
         }
+    }
+
+    /// Replicate completed sets to a bucket after each capture (POC-023).
+    pub fn with_replicator(mut self, replicator: super::replicate::Replicator) -> Self {
+        self.replicator = Some(replicator);
+        self
+    }
+
+    pub fn replicator(&self) -> Option<&super::replicate::Replicator> {
+        self.replicator.as_ref()
+    }
+
+    /// Replicate awaiting sets now (no capture), under the backup lock.
+    pub async fn replicate_now(&self) -> Result<Option<super::replicate::Stats>, BackupError> {
+        let Some(replicator) = &self.replicator else {
+            return Ok(None);
+        };
+        let _lock = super::try_lock(&self.config.dir)?
+            .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
+        replicator
+            .replicate_pending(&self.config.dir, &self.key)
+            .await
+            .map(Some)
     }
 
     /// Coordinate with the scheduler and the bot computers: whole-assistant
@@ -59,7 +84,38 @@ impl BackupWorker {
         let _lock = super::try_lock(&self.config.dir)?
             .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
         self.recover_locked().await?;
-        self.locked_run(cancel).await
+        let mut summary = self.locked_run(cancel).await?;
+        if let Some(replicator) = &self.replicator {
+            // The local set is complete; replication is a separate outcome.
+            summary.remote = Some(
+                replicator
+                    .replicate_pending(&self.config.dir, &self.key)
+                    .await
+                    .map_err(|e| e.to_string()),
+            );
+        }
+        self.apply_local_retention(&summary.set_id).await?;
+        Ok(summary)
+    }
+
+    /// Local retention, never removing a set that still awaits replication.
+    async fn apply_local_retention(&self, newest: &str) -> Result<(), BackupError> {
+        let awaiting = match &self.replicator {
+            Some(replicator) => replicator.awaiting(&self.config.dir).await?,
+            None => Vec::new(),
+        };
+        let dir = self.config.dir.clone();
+        let keep = self.config.keep;
+        let newest = newest.to_owned();
+        let removed = tokio::task::spawn_blocking(move || {
+            super::apply_retention_protecting(&dir, keep, &newest, &awaiting)
+        })
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))??;
+        if !removed.is_empty() {
+            tracing::info!(removed = removed.len(), "old local backup sets removed");
+        }
+        Ok(())
     }
 
     async fn locked_run(&self, cancel: &CancellationToken) -> Result<SetSummary, BackupError> {
@@ -97,15 +153,7 @@ impl BackupWorker {
                 .bind(sqlx::types::Json(json!(summary.manifest.coverage)))
                 .execute(&self.pool)
                 .await?;
-                let dir = self.config.dir.clone();
-                let keep = self.config.keep;
-                let protect = summary.set_id.clone();
-                let removed = tokio::task::spawn_blocking(move || {
-                    super::apply_retention(&dir, keep, &protect)
-                })
-                .await
-                .map_err(|e| BackupError::Io(e.to_string()))??;
-                tracing::info!(set = %summary.set_id, bytes, removed = removed.len(), "backup set completed");
+                tracing::info!(set = %summary.set_id, bytes, "backup set completed");
             }
             Err(err) => {
                 let message: String = err.to_string().chars().take(500).collect();
@@ -182,6 +230,21 @@ impl BackupWorker {
                 return;
             }
             match result {
+                Ok(summary) if matches!(summary.remote, Some(Err(_))) => {
+                    // Captured locally; keep retrying the upload alone.
+                    let mut delay = FIRST_RETRY;
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(delay.min(self.config.interval)) => {}
+                        }
+                        if self.replicate_now().await.is_ok() {
+                            break;
+                        }
+                        delay = (delay * 2).min(MAX_RETRY);
+                    }
+                    retry = FIRST_RETRY;
+                }
                 Ok(_) => retry = FIRST_RETRY,
                 Err(_) => {
                     let delay = retry.min(self.config.interval);

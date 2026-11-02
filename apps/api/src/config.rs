@@ -61,6 +61,8 @@ pub struct Config {
     pub computers: crate::computers::ComputerConfig,
     /// Encrypted local database backups (POC-021).
     pub backup: crate::backup::capture::BackupConfig,
+    /// Bucket replication of completed sets (POC-023), when configured.
+    pub s3: Option<crate::backup::s3::S3Config>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +170,42 @@ impl Config {
                 30 * 86_400,
             )?),
         };
+        let s3 = match (
+            source.get("ELSE_S3_ENDPOINT"),
+            source.get("ELSE_S3_BUCKET"),
+            source.get("ELSE_S3_ACCESS_KEY_ID"),
+            source.get("ELSE_S3_SECRET_ACCESS_KEY"),
+        ) {
+            (Some(endpoint), Some(bucket), Some(access), Some(secret)) => {
+                if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
+                    return Err(invalid("ELSE_S3_ENDPOINT", "expected an http(s) URL"));
+                }
+                Some(crate::backup::s3::S3Config {
+                    endpoint,
+                    region: source
+                        .get("ELSE_S3_REGION")
+                        .unwrap_or_else(|| "auto".into()),
+                    bucket,
+                    prefix: source
+                        .get("ELSE_S3_PREFIX")
+                        .unwrap_or_else(|| "else-backups/".into()),
+                    access_key_id: access,
+                    secret_access_key: zeroize::Zeroizing::new(secret),
+                    path_style: !matches!(
+                        source.get("ELSE_S3_PATH_STYLE").as_deref(),
+                        Some("0" | "false")
+                    ),
+                })
+            }
+            (None, None, None, None) => None,
+            _ => {
+                return Err(invalid(
+                    "ELSE_S3_ENDPOINT",
+                    "set ELSE_S3_ENDPOINT, ELSE_S3_BUCKET, ELSE_S3_ACCESS_KEY_ID, and \
+                     ELSE_S3_SECRET_ACCESS_KEY together",
+                ));
+            }
+        };
         let defaults = crate::computers::ComputerConfig::default();
         let vm_memory = parse_number(
             source,
@@ -228,6 +266,7 @@ impl Config {
             codex_bin,
             claude_bin,
             backup,
+            s3,
             synthetic_provider,
             max_active_turns,
             database_url: database_url(source)?,
