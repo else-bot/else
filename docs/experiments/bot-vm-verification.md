@@ -33,7 +33,7 @@ The first create took 3.997 seconds with an image pull. A second create using th
 
 The empty Python guest used about 141 MiB of host VM-worker RSS. The running test service used 189.7 MiB, and the paused service retained 189.8 MiB. Stop removed the worker process.
 
-The restored desktop with one local Chromium page used about 563 MiB of worker RSS. The first desktop run retained about 1.49 GiB after package installation, including guest caches. Keep 2 GiB per active desktop bot as a prototype budget. Real websites, more tabs, and provider CLIs still need workload measurements.
+The restored desktop with one local Chromium page used about 563 MiB of worker RSS. The first desktop run retained about 1.49 GiB after package installation, including guest caches. Keep 2 GiB per active desktop bot as a prototype budget. Real websites and more tabs still need guest workload measurements. Under the revised host execution design, measure provider CLI resources separately on the host.
 
 Use stop when the idle policy needs to reclaim RAM. Pause preserves execution for short idle periods but still counts against the memory budget.
 
@@ -60,7 +60,7 @@ The first desktop fixture captured Chromium while it was still open. Restoration
 ## Remaining integration work
 
 - Build a repeatable desktop image and launch its services through a supervised guest startup process.
-- Test Codex and Claude subscription login, renewal, MCP access, and conversation recovery in the guest.
+- Test host Codex and Claude subscription login, renewal, MCP access, and conversation recovery. Verify their scoped tools operate the guest without granting host task execution.
 - Implement and test else.bot's VM leases, idle policy, resource queue, and handling of owner-stopped bots.
 - Test PostgreSQL and VM backup coordination, encrypted R2 or S3 uploads, retention, and whole-assistant restore.
 - Validate network and tool permissions against hostile workloads. The filesystem canary and browser checks are smoke tests, not a VM escape or prompt injection audit.

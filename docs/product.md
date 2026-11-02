@@ -2,6 +2,14 @@
 
 These requirements describe the planned assistant. See the [product overview](../README.md) for the motivation and the [architecture notes](architecture.md) for the application structure.
 
+## First version
+
+Start with one owner's messaging app. The owner can list bots, create a bot with a name and role, open its conversation, send messages, and delete the bot. Keep conversation history and memory persistent. The main assistant remains the default place to ask for help.
+
+Build the supporting provider, memory, authentication, backup, and execution contracts with this scope in mind. Research fixtures verify individual design choices. They are separate from application implementation.
+
+Email, kanban, notes, routines, native mobile apps, and additional desktop views remain product goals for later versions. The requirements below describe that broader direction.
+
 ## One assistant that understands my context
 
 The main assistant should act as a copy of myself in the sense that it learns my circumstances, habits, and ways of working. It should recognize which part of my life a request belongs to and delegate to the appropriate bot when needed.
