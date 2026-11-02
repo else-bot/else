@@ -56,6 +56,8 @@ pub struct TurnInput {
     pub history: Vec<HistoryEntry>,
     /// The bot's active native session with this provider, if any.
     pub session: Option<SessionState>,
+    /// Task grant for else.bot tools during this turn; revoked when it ends.
+    pub tool_grant: Option<String>,
 }
 
 /// A provider's native session for one conversation.

@@ -24,6 +24,8 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 pub enum Tool {
     /// Read this conversation's own history.
     ReadHistory,
+    /// Read the bot's memory and memory the owner shared with it.
+    ReadMemory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

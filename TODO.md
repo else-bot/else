@@ -33,7 +33,7 @@ Use the first usable POC as the default target. If the implementation request in
 
 ## Assistant POC
 
-- [ ] [POC-013: Original memory log and retrieval](docs/implementation/03-assistant.md#poc-013-original-memory-log-and-retrieval)
+- [x] [POC-013: Original memory log and retrieval](docs/implementation/03-assistant.md#poc-013-original-memory-log-and-retrieval)
 - [ ] [POC-014: Deterministic summary tree and saved views](docs/implementation/03-assistant.md#poc-014-deterministic-summary-tree-and-saved-views)
 - [ ] [POC-015: Model compaction and memory quality](docs/implementation/03-assistant.md#poc-015-model-compaction-and-memory-quality)
 - [ ] [POC-016: Asynchronous bot delegation](docs/implementation/03-assistant.md#poc-016-asynchronous-bot-delegation)

@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 use crate::app::providers::TurnOutcome;
 use crate::db::turns::{self, FLUSH_INTERVAL, PgSink};
-use crate::grants::Grants;
+use crate::grants::{Grants, Tool};
+
+/// Longer than a provider turn's own deadline.
+const TOOL_GRANT_TTL: Duration = Duration::from_secs(40 * 60);
 use crate::providers::Registry;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
@@ -159,7 +162,7 @@ impl Scheduler {
             Ok::<_, sqlx::Error>((input, provider_id))
         }
         .await;
-        let (input, provider_id) = match loaded {
+        let (mut input, provider_id) = match loaded {
             Ok(loaded) => loaded,
             Err(err) => {
                 tracing::error!(turn = %turn_id, error = %err, "loading turn failed");
@@ -180,6 +183,14 @@ impl Scheduler {
                 return;
             }
         };
+        // Tools for this turn only; revoked when it ends (see dispatch).
+        input.tool_grant = Some(self.grants.issue(
+            input.bot_id,
+            input.conversation_id,
+            turn_id,
+            vec![Tool::ReadHistory, Tool::ReadMemory],
+            TOOL_GRANT_TTL,
+        ));
         let sink = PgSink::new(self.pool.clone(), &input, &provider_id);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {

@@ -21,6 +21,10 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/history", get(history))
         .route("/items/{item_id}", get(item))
+        .route(
+            "/mcp",
+            axum::routing::post(super::mcp::endpoint).get(super::mcp::no_stream),
+        )
 }
 
 fn revoked() -> ApiError {
@@ -32,7 +36,7 @@ fn revoked() -> ApiError {
 }
 
 /// The grant's turn must still be running and its bot active.
-async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result<(), ApiError> {
+pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result<(), ApiError> {
     if !grant.allows(tool) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,

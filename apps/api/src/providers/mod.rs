@@ -22,7 +22,15 @@ pub fn registry(config: &Config) -> Registry {
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     );
-    providers.push(Arc::new(codex::Codex::detect(sandbox, program, auth)));
+    // Sandboxed providers reach the API over loopback.
+    let mut tool_addr = config.bind;
+    if tool_addr.ip().is_unspecified() {
+        tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    let tool_url = format!("http://{tool_addr}/tools/v1/mcp");
+    providers.push(Arc::new(
+        codex::Codex::detect(sandbox, program, auth).with_tools(tool_url),
+    ));
     if config.synthetic_provider {
         providers.push(Arc::new(synthetic::Synthetic::new(
             std::time::Duration::from_millis(40),

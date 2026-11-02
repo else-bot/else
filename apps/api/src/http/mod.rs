@@ -4,6 +4,8 @@ pub mod auth;
 pub mod bots;
 pub mod conversation;
 pub mod error;
+pub mod mcp;
+pub mod memory;
 pub mod settings;
 pub mod tools;
 pub mod turns;
@@ -67,6 +69,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(turns::routes())
         .merge(conversation::routes())
         .merge(ws::routes())
+        .merge(memory::routes())
         .merge(settings::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })

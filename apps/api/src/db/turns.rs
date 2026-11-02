@@ -226,6 +226,8 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
         .execute(&mut *tx)
         .await?;
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
+    // The owner's message enters the bot's memory with its acceptance.
+    crate::db::memory::log_item(&mut tx, item_id).await?;
     let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
     tx.commit().await?;
     Ok(Accepted {
@@ -455,6 +457,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
         profile: turn.profile.map(|Json(profile)| profile),
         history,
         session,
+        tool_grant: None,
     })
 }
 
@@ -721,6 +724,8 @@ impl PgSink {
         .rows_affected();
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
+            // The reply's final text enters memory with the terminal status.
+            crate::db::memory::log_turn_end(&mut tx, self.turn_id).await?;
         }
         // Confirm a pending Stop work or deletion now that this turn ended.
         crate::db::stop::settle(&mut tx, self.bot_id).await?;
@@ -918,6 +923,9 @@ It was not resent; send a follow-up to continue.',
     for (turn_id, bot_id) in requeued.iter().chain(&uncertain) {
         crate::db::events::turn_changed(&mut tx, *bot_id, *turn_id).await?;
     }
+    for (turn_id, _) in &uncertain {
+        crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
+    }
     tx.commit().await?;
     // Stops and deletions waiting on those turns can now complete. Queued
     // turns of deleted bots never run (claim requires an active bot).
@@ -961,6 +969,7 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
         .rows_affected();
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
+            crate::db::memory::log_turn_end(&mut tx, turn_id).await?;
             crate::db::stop::settle(&mut tx, bot_id).await?;
             settled += 1;
         }

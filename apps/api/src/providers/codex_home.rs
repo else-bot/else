@@ -46,10 +46,13 @@ pub const DISABLED_FEATURES: &[&str] = &[
     "skill_search",
     "skill_mcp_dependency_install",
     "workspace_dependencies",
-    "code_mode_host",
 ];
 
-pub fn config_toml() -> String {
+/// Environment variable carrying the turn's task grant to Codex, which
+/// sends it as the bearer token to else.bot's MCP endpoint.
+pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
+
+pub fn config_toml(tool_url: Option<&str>) -> String {
     let mut text = String::from(
         "# Written by else.bot before every launch; edits are overwritten.\n\
          approval_policy = \"never\"\n\
@@ -66,7 +69,27 @@ pub fn config_toml() -> String {
     for feature in DISABLED_FEATURES {
         text.push_str(&format!("{feature} = false\n"));
     }
+    // Codex reaches MCP tools only through its code-mode host; without
+    // else.bot tools there is nothing for it to call.
+    text.push_str(&format!("code_mode_host = {}\n", tool_url.is_some()));
     text.push_str("\n[mcp_servers]\n");
+    if let Some(url) = tool_url {
+        let tools: Vec<String> = crate::http::mcp::TOOL_NAMES
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect();
+        text.push_str(&format!(
+            "\n[mcp_servers.{name}]\n\
+             url = \"{url}\"\n\
+             bearer_token_env_var = \"{GRANT_ENV}\"\n\
+             enabled_tools = [{tools}]\n\
+             required = true\n\
+             startup_timeout_sec = 15\n\
+             tool_timeout_sec = 30\n",
+            name = crate::http::mcp::SERVER_NAME,
+            tools = tools.join(", "),
+        ));
+    }
     text
 }
 
@@ -103,8 +126,12 @@ fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> 
 
 /// Prepare the bot's Codex home: rewrite the locked config and reset the
 /// empty mount point for the login. Returns the bind for the login file.
-pub fn prepare(dirs: &BotDirs, host_auth: &Path) -> std::io::Result<Bind> {
-    replace_file(&dirs.provider_home, "config.toml", config_toml().as_bytes())?;
+pub fn prepare(dirs: &BotDirs, host_auth: &Path, tool_url: Option<&str>) -> std::io::Result<Bind> {
+    replace_file(
+        &dirs.provider_home,
+        "config.toml",
+        config_toml(tool_url).as_bytes(),
+    )?;
     // An empty placeholder the login is mounted over; never a copy. Anything
     // else at that path (a symlink, a directory, content) is replaced.
     let placeholder = fs::symlink_metadata(dirs.provider_home.join("auth.json"));
@@ -128,7 +155,7 @@ mod tests {
 
     #[test]
     fn config_disables_native_agents_and_tools() {
-        let text = config_toml();
+        let text = config_toml(None);
         assert!(text.contains("[agents]\nenabled = false"));
         for flag in [
             "multi_agent = false",
@@ -138,6 +165,21 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+    }
+
+    #[test]
+    fn config_offers_only_elsebot_tools_with_the_grant_from_the_environment() {
+        assert!(!config_toml(None).contains("[mcp_servers."));
+        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"));
+        assert!(
+            text.contains("[mcp_servers.elsebot]\nurl = \"http://127.0.0.1:7878/tools/v1/mcp\"")
+        );
+        assert!(text.contains("bearer_token_env_var = \"ELSE_TASK_GRANT\""));
+        assert!(
+            text.contains("enabled_tools = [\"memory_bots\", \"memory_search\", \"memory_read\"]")
+        );
+        // The grant itself is never written to disk.
+        assert!(!text.contains("tg_"));
     }
 
     #[test]
@@ -154,7 +196,7 @@ mod tests {
             work: dir.path().join("work"),
             provider_home: home.clone(),
         };
-        prepare(&dirs, Path::new("/nonexistent/auth.json")).unwrap();
+        prepare(&dirs, Path::new("/nonexistent/auth.json"), None).unwrap();
         assert_eq!(fs::read_to_string(&outside).unwrap(), "HOST FILE");
         assert!(
             fs::symlink_metadata(home.join("config.toml"))
@@ -163,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(home.join("config.toml")).unwrap(),
-            config_toml()
+            config_toml(None)
         );
         let auth = fs::symlink_metadata(home.join("auth.json")).unwrap();
         assert!(auth.is_file() && auth.len() == 0);

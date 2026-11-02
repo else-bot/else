@@ -222,7 +222,7 @@ async fn codex_runs_locked_down_with_the_shared_login() {
     };
     let fx = fixture();
     let dirs = fx.sandbox.bot_dirs(Uuid::new_v4(), "codex").unwrap();
-    let login = codex_home::prepare(&dirs, &auth).unwrap();
+    let login = codex_home::prepare(&dirs, &auth, None).unwrap();
     let launch = |args: &[&str]| LaunchSpec {
         turn_id: Uuid::new_v4(),
         dirs: dirs.clone(),
