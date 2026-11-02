@@ -95,7 +95,7 @@ async fn stop(
     manager(&state)?
         .owner_stop(bot_id)
         .await
-        .map_err(|crate::computers::ComputerError::Db(err)| ApiError::from(err))?;
+        .map_err(computer_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -107,6 +107,19 @@ async fn resume(
     manager(&state)?
         .owner_resume(bot_id)
         .await
-        .map_err(|crate::computers::ComputerError::Db(err)| ApiError::from(err))?;
+        .map_err(computer_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn computer_error(err: crate::computers::ComputerError) -> ApiError {
+    match err {
+        crate::computers::ComputerError::Db(err) => err.into(),
+        other => {
+            tracing::warn!(error = %other, "computer operation failed");
+            ApiError::unavailable(
+                "computer_unavailable",
+                "The computer could not be changed now.",
+            )
+        }
+    }
 }

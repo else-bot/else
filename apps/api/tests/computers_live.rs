@@ -31,10 +31,9 @@ async fn ready(manager: &ComputerManager, bot: Uuid, holder: &str) -> (Uuid, Str
     }
 }
 
-async fn sh(manager: &ComputerManager, name: &str, script: &str) -> String {
+async fn sh(manager: &ComputerManager, lease: Uuid, script: &str) -> String {
     let out = manager
-        .runtime()
-        .exec(name, "sh", &["-c", script], Duration::from_secs(60))
+        .exec(lease, "sh", &["-c", script], Duration::from_secs(60))
         .await
         .unwrap();
     assert_eq!(out.status, Some(0), "{}", out.stderr);
@@ -57,6 +56,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     };
     let msb = || Arc::new(Msb::detect(dir.path(), None).expect("msb installed"));
     let manager = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
+    manager.reconcile_startup().await.unwrap();
     let a: Uuid = app.create_bot("Alpha", "alpha").await.parse().unwrap();
     let b: Uuid = app.create_bot("Beta", "beta").await.parse().unwrap();
 
@@ -67,20 +67,23 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         started.elapsed()
     );
     let (lease_b, name_b) = ready(&manager, b, "test:b").await;
-    sh(&manager, &name_a, "echo ALPHA-FILE > /root/marker").await;
-    sh(&manager, &name_b, "echo BETA-FILE > /root/marker").await;
+    sh(&manager, lease_a, "echo ALPHA-FILE > /root/marker").await;
+    sh(&manager, lease_b, "echo BETA-FILE > /root/marker").await;
     assert_eq!(
-        sh(&manager, &name_a, "cat /root/marker").await,
+        sh(&manager, lease_a, "cat /root/marker").await,
         "ALPHA-FILE"
     );
-    assert_eq!(sh(&manager, &name_b, "cat /root/marker").await, "BETA-FILE");
-    assert_eq!(sh(&manager, &name_a, "nproc").await, "1");
+    assert_eq!(sh(&manager, lease_b, "cat /root/marker").await, "BETA-FILE");
+    assert_eq!(sh(&manager, lease_a, "nproc").await, "1");
 
     // Idle: both stop once released; their workers are gone.
     manager.release(lease_a).await.unwrap();
     manager.release(lease_b).await.unwrap();
-    manager.tick().await.unwrap();
-    let states = manager.runtime().list().await.unwrap();
+    manager
+        .tick(&tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    let states = manager.runtime_list().await.unwrap();
     for name in [&name_a, &name_b] {
         assert!(
             states.contains(&(name.clone(), RuntimeState::Stopped)),
@@ -91,7 +94,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     // An API restart only inspects: nothing wakes.
     let restarted = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
     restarted.reconcile_startup().await.unwrap();
-    let states = restarted.runtime().list().await.unwrap();
+    let states = restarted.runtime_list().await.unwrap();
     assert!(
         states.iter().all(|(_, s)| *s == RuntimeState::Stopped),
         "{states:?}"
@@ -100,7 +103,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     // Reuse after restart: the same computer with its file.
     let (lease_a, _) = ready(&restarted, a, "test:a2").await;
     assert_eq!(
-        sh(&restarted, &name_a, "cat /root/marker").await,
+        sh(&restarted, lease_a, "cat /root/marker").await,
         "ALPHA-FILE"
     );
     restarted.release(lease_a).await.unwrap();
@@ -112,7 +115,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         Acquire::OwnerStopped
     );
     assert_eq!(
-        restarted.runtime().state(&name_a).await.unwrap(),
+        restarted.runtime_state(&name_a).await.unwrap(),
         Some(RuntimeState::Stopped)
     );
 
@@ -125,26 +128,30 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
             ..config
         },
     );
+    pausing.reconcile_startup().await.unwrap();
     let (lease_b, _) = ready(&pausing, b, "test:b2").await;
     sh(
         &pausing,
-        &name_b,
+        lease_b,
         "sleep 600 >/dev/null 2>&1 & echo $! > /root/pid",
     )
     .await;
-    let pid = sh(&pausing, &name_b, "cat /root/pid").await;
+    let pid = sh(&pausing, lease_b, "cat /root/pid").await;
     pausing.release(lease_b).await.unwrap();
-    pausing.tick().await.unwrap();
+    pausing
+        .tick(&tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(
-        pausing.runtime().state(&name_b).await.unwrap(),
+        pausing.runtime_state(&name_b).await.unwrap(),
         Some(RuntimeState::Paused)
     );
     let (lease_b, _) = ready(&pausing, b, "test:b3").await;
     assert_eq!(
-        sh(&pausing, &name_b, &format!("kill -0 {pid} && echo ALIVE")).await,
+        sh(&pausing, lease_b, &format!("kill -0 {pid} && echo ALIVE")).await,
         "ALIVE"
     );
-    assert_eq!(sh(&pausing, &name_b, "cat /root/marker").await, "BETA-FILE");
+    assert_eq!(sh(&pausing, lease_b, "cat /root/marker").await, "BETA-FILE");
     pausing.release(lease_b).await.unwrap();
 
     // Cleanup of this test's own runtime home only.

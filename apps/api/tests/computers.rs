@@ -20,6 +20,12 @@ use uuid::Uuid;
 struct Fake {
     computers: Mutex<HashMap<String, (RuntimeState, HashMap<String, String>)>>,
     calls: Mutex<Vec<String>>,
+    /// Stops fail and leave the computer running.
+    fail_stop: std::sync::atomic::AtomicBool,
+    /// Listing fails (the runtime cannot be inspected).
+    fail_list: std::sync::atomic::AtomicBool,
+    /// Creation takes this long.
+    create_delay: Mutex<Duration>,
 }
 
 impl Fake {
@@ -46,6 +52,9 @@ impl Fake {
 impl ComputerRuntime for Fake {
     async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
         self.log("list".into());
+        if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Unavailable("listing failed".into()));
+        }
         Ok(self
             .computers
             .lock()
@@ -59,6 +68,10 @@ impl ComputerRuntime for Fake {
             "create {} {}cpu {}MiB",
             spec.name, spec.cpus, spec.memory_mib
         ));
+        let delay = *self.create_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         let mut computers = self.computers.lock().unwrap();
         if computers.contains_key(&spec.name) {
             return Err(RuntimeError::Failed {
@@ -75,6 +88,12 @@ impl ComputerRuntime for Fake {
     }
     async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
         self.log(format!("stop {name}"));
+        if self.fail_stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeError::Failed {
+                operation: "stop".into(),
+                message: "timed out".into(),
+            });
+        }
         self.set(name, RuntimeState::Stopped)
     }
     async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
@@ -111,6 +130,7 @@ impl ComputerRuntime for Fake {
             status: Some(0),
             stdout,
             stderr: String::new(),
+            truncated: false,
         })
     }
 }
@@ -124,8 +144,14 @@ fn config(max_vms: u64) -> ComputerConfig {
     }
 }
 
-fn manager(app: &TestApp, fake: &Arc<Fake>, config: ComputerConfig) -> ComputerManager {
-    ComputerManager::new(app.db.pool.clone(), fake.clone(), config)
+async fn manager(app: &TestApp, fake: &Arc<Fake>, config: ComputerConfig) -> ComputerManager {
+    let manager = ComputerManager::new(app.db.pool.clone(), fake.clone(), config);
+    manager.reconcile_startup().await.unwrap();
+    manager
+}
+
+fn never() -> tokio_util::sync::CancellationToken {
+    tokio_util::sync::CancellationToken::new()
 }
 
 async fn ready(manager: &ComputerManager, bot: Uuid, holder: &str) -> (Uuid, String) {
@@ -151,36 +177,32 @@ async fn observed(app: &TestApp, bot: Uuid) -> String {
 async fn computers_are_created_on_first_use_reused_and_kept_apart() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = manager(&app, &fake, config(2));
+    let manager = manager(&app, &fake, config(2)).await;
     let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
     let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
-    assert!(fake.calls().is_empty(), "bot creation starts no computer");
+    assert_eq!(
+        fake.calls(),
+        vec!["list".to_owned()],
+        "bot creation starts no computer"
+    );
 
     let (lease_a, name_a) = ready(&manager, a, "test:a").await;
-    let (_, name_b) = ready(&manager, b, "test:b").await;
+    let (lease_b, name_b) = ready(&manager, b, "test:b").await;
     assert_ne!(name_a, name_b);
-    let rt = manager.runtime();
-    rt.exec(
-        &name_a,
-        "write",
-        &["/root/note", "A-only"],
-        Duration::from_secs(1),
-    )
-    .await
-    .unwrap();
-    rt.exec(
-        &name_b,
-        "write",
-        &["/root/note", "B-only"],
-        Duration::from_secs(1),
-    )
-    .await
-    .unwrap();
+    let second = Duration::from_secs(1);
+    manager
+        .exec(lease_a, "write", &["/root/note", "A-only"], second)
+        .await
+        .unwrap();
+    manager
+        .exec(lease_b, "write", &["/root/note", "B-only"], second)
+        .await
+        .unwrap();
     // A retry by the same holder keeps one lease; a second use reuses the computer.
     let (again, _) = ready(&manager, a, "test:a").await;
     assert_eq!(again, lease_a);
     manager.release(lease_a).await.unwrap();
-    ready(&manager, a, "test:a2").await;
+    let (lease_a, _) = ready(&manager, a, "test:a2").await;
     let creates = fake
         .calls()
         .iter()
@@ -191,27 +213,16 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
         fake.calls().iter().any(|c| c.contains("1cpu 2048MiB")),
         "1 vCPU and 2 GiB"
     );
-    assert_eq!(
-        rt.exec(&name_a, "read", &["/root/note"], Duration::from_secs(1))
-            .await
-            .unwrap()
-            .stdout,
-        "A-only"
-    );
-    assert_eq!(
-        rt.exec(&name_b, "read", &["/root/note"], Duration::from_secs(1))
-            .await
-            .unwrap()
-            .stdout,
-        "B-only"
-    );
+    let read = |lease| manager.exec(lease, "read", &["/root/note"], second);
+    assert_eq!(read(lease_a).await.unwrap().stdout, "A-only");
+    assert_eq!(read(lease_b).await.unwrap().stdout, "B-only");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = Arc::new(manager(&app, &fake, config(2)));
+    let manager = Arc::new(manager(&app, &fake, config(2)).await);
     let bot = app.create_bot("Stopped", "stopped").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, name) = ready(&manager, bot_id, "test:x").await;
@@ -233,7 +244,7 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
         .await;
     app.wait_turn(reply.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    manager.tick().await.unwrap();
+    manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
     assert!(
         !fake.calls().iter().any(|c| c == &format!("start {name}")),
@@ -266,7 +277,7 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
         idle_action: IdleAction::Pause,
         ..config(1)
     };
-    let manager = manager(&app, &fake, pausing);
+    let manager = manager(&app, &fake, pausing).await;
     let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
     let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
     let (lease, _) = ready(&manager, a, "test:a").await;
@@ -276,7 +287,7 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
     ));
     // Idle pause keeps A's memory reserved.
     manager.release(lease).await.unwrap();
-    manager.tick().await.unwrap();
+    manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, a).await, "paused");
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
@@ -293,7 +304,7 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
 async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = manager(&app, &fake, config(2));
+    let manager = manager(&app, &fake, config(2)).await;
     let bot = app.create_bot("Idle", "idle").await;
     let bot_id: Uuid = bot.parse().unwrap();
     // A running turn holds the computer.
@@ -310,7 +321,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    manager.tick().await.unwrap();
+    manager.tick(&never()).await.unwrap();
     assert_eq!(
         observed(&app, bot_id).await,
         "running",
@@ -339,7 +350,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    manager.tick().await.unwrap();
+    manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
 }
 
@@ -347,14 +358,14 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
 async fn acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = Arc::new(manager(&app, &fake, config(2)));
+    let manager = Arc::new(manager(&app, &fake, config(2)).await);
     let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
     for round in 0..20 {
         let m = manager.clone();
         let acquire =
             tokio::spawn(async move { m.acquire(bot, &format!("test:{round}")).await.unwrap() });
         let m = manager.clone();
-        let tick = tokio::spawn(async move { m.tick().await.unwrap() });
+        let tick = tokio::spawn(async move { m.tick(&never()).await.unwrap() });
         let acquired = acquire.await.unwrap();
         tick.await.unwrap();
         if let Acquire::Ready { lease_id, .. } = acquired {
@@ -372,7 +383,7 @@ async fn acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer
 async fn startup_inspects_without_waking_recreating_or_removing() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = manager(&app, &fake, config(3));
+    let manager = manager(&app, &fake, config(3)).await;
     let kept: Uuid = app.create_bot("Kept", "kept").await.parse().unwrap();
     let lost: Uuid = app.create_bot("Lost", "lost").await.parse().unwrap();
     let paused: Uuid = app.create_bot("Paused", "paused").await.parse().unwrap();
@@ -414,12 +425,12 @@ async fn startup_inspects_without_waking_recreating_or_removing() {
 async fn deleting_a_bot_stops_its_computer_and_keeps_it() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
-    let manager = manager(&app, &fake, config(2));
+    let manager = manager(&app, &fake, config(2)).await;
     let bot = app.create_bot("Gone", "gone").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, name) = ready(&manager, bot_id, "test:g").await;
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
-    manager.tick().await.unwrap();
+    manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, bot_id).await, "stopped");
     assert!(
         fake.computers.lock().unwrap().contains_key(&name),
@@ -429,4 +440,104 @@ async fn deleting_a_bot_stops_its_computer_and_keeps_it() {
         manager.acquire(bot_id, "test:h").await.unwrap(),
         Acquire::BotInactive
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_stop_keeps_its_reservation_and_is_retried() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(1)).await;
+    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    ready(&manager, a, "test:a").await;
+    fake.fail_stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    manager.owner_stop(a).await.unwrap();
+    // The runtime still runs it: recorded as running, budget still held.
+    assert_eq!(observed(&app, a).await, "running");
+    assert!(matches!(
+        manager.acquire(b, "test:b").await.unwrap(),
+        Acquire::Queued { .. }
+    ));
+    // Maintenance retries the owner's stop until it is confirmed.
+    fake.fail_stop
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(observed(&app, a).await, "stopped");
+    ready(&manager, b, "test:b").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    *fake.create_delay.lock().unwrap() = Duration::from_millis(400);
+    let manager = Arc::new(manager(&app, &fake, config(2)).await);
+    let bot = app.create_bot("Short", "short").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let m = manager.clone();
+    let acquiring = tokio::spawn(async move { m.acquire(bot_id, "test:s").await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(acquiring.await.unwrap(), Acquire::BotInactive);
+    assert_eq!(observed(&app, bot_id).await, "stopped");
+    let leases: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM computer_leases WHERE bot_id = $1 AND released_at IS NULL",
+    )
+    .bind(bot_id)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(leases, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(2)).await;
+    let bot: Uuid = app.create_bot("Lease", "lease").await.parse().unwrap();
+    let (lease, _) = ready(&manager, bot, "test:l").await;
+    sqlx::query(
+        "UPDATE computer_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(lease)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(manager.renew(lease).await.unwrap());
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(
+        observed(&app, bot).await,
+        "running",
+        "the renewed lease still holds it"
+    );
+    // After an owner stop the old lease cannot run anything (the fake
+    // panics if exec reaches a stopped computer).
+    manager.owner_stop(bot).await.unwrap();
+    assert!(matches!(
+        manager
+            .exec(lease, "read", &["/x"], Duration::from_secs(1))
+            .await,
+        Err(else_api::computers::ComputerError::LeaseEnded)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_used_until_the_runtime_has_been_inspected() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    fake.fail_list
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let manager = ComputerManager::new(app.db.pool.clone(), fake.clone(), config(2));
+    manager.reconcile_startup().await.unwrap();
+    let bot: Uuid = app.create_bot("Wait", "wait").await.parse().unwrap();
+    assert!(matches!(
+        manager.acquire(bot, "test:w").await.unwrap(),
+        Acquire::Queued { .. }
+    ));
+    fake.fail_list
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    manager.tick(&never()).await.unwrap();
+    ready(&manager, bot, "test:w").await;
 }

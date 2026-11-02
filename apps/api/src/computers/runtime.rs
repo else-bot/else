@@ -39,6 +39,25 @@ pub struct ExecOutput {
     pub status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// Output beyond the capture limit was discarded.
+    pub truncated: bool,
+}
+
+/// Bytes kept from each of stdout and stderr; the rest is read and dropped
+/// so a noisy guest cannot exhaust host memory.
+pub const OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// The runtime version whose behavior was verified.
+pub const VERIFIED_VERSION: &str = "msb 0.7.13";
+
+/// An OCI image reference safe to pass as one positional argument.
+pub fn valid_image(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 512
+        && !image.starts_with('-')
+        && image
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/:@+".contains(c))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +127,26 @@ impl Msb {
             })
             .ok_or_else(|| RuntimeError::Unavailable("msb was not found".into()))?;
         let program = std::fs::canonicalize(&program).unwrap_or(program);
+        // Only the verified runtime is used; another version needs an
+        // explicit, checked opt-in.
+        let version = std::process::Command::new(&program)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+        let allow = std::env::var("ELSE_MSB_ALLOW_UNVERIFIED").as_deref() == Ok("1");
+        if version != VERIFIED_VERSION && !allow {
+            return Err(RuntimeError::Unavailable(format!(
+                "{} is not the verified runtime ({VERIFIED_VERSION}); set \
+                 ELSE_MSB_ALLOW_UNVERIFIED=1 after checking it",
+                if version.is_empty() {
+                    "this msb"
+                } else {
+                    &version
+                }
+            )));
+        }
         // The firmware ships next to the binary (`../lib/libkrunfw.so.*`).
         let libkrunfw = program.parent().and_then(|bin| {
             let lib = bin.parent()?.join("lib");
@@ -124,6 +163,11 @@ impl Msb {
             found.sort();
             found.pop()
         });
+        if libkrunfw.is_none() {
+            return Err(RuntimeError::Unavailable(
+                "the libkrunfw firmware bundled with msb was not found".into(),
+            ));
+        }
         let home = data_dir.join("microsandbox");
         std::fs::create_dir_all(&home)
             .map_err(|e| RuntimeError::Unavailable(format!("runtime home: {e}")))?;
@@ -152,19 +196,49 @@ impl Msb {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
+        use tokio::io::AsyncReadExt;
         let mut command = self.command();
-        command.args(args);
-        let output = tokio::time::timeout(timeout, command.output())
+        command
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
+        // Keep at most OUTPUT_LIMIT bytes of each stream; keep reading (and
+        // dropping) the rest so the child never blocks on a full pipe.
+        async fn capture(mut stream: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, bool) {
+            let mut kept = Vec::new();
+            let mut truncated = false;
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = stream.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                let room = OUTPUT_LIMIT.saturating_sub(kept.len());
+                kept.extend_from_slice(&chunk[..n.min(room)]);
+                truncated |= n > room;
+            }
+            (kept, truncated)
+        }
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let work = async {
+            let (out, err, status) = tokio::join!(capture(stdout), capture(stderr), child.wait());
+            (out, err, status)
+        };
+        let ((stdout, out_cut), (stderr, err_cut), status) = tokio::time::timeout(timeout, work)
             .await
             .map_err(|_| RuntimeError::Failed {
                 operation: operation.into(),
                 message: format!("timed out after {} s", timeout.as_secs()),
-            })?
-            .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
+            })?;
+        let status = status.map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
         Ok(ExecOutput {
-            status: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            truncated: out_cut || err_cut,
         })
     }
 
@@ -230,8 +304,15 @@ impl ComputerRuntime for Msb {
     }
 
     async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
+        if !valid_image(&spec.image) {
+            return Err(RuntimeError::Failed {
+                operation: "create".into(),
+                message: "the image reference is not valid".into(),
+            });
+        }
         let cpus = spec.cpus.to_string();
         let memory = format!("{}M", spec.memory_mib);
+        // `--` keeps the image a positional argument, never an option.
         self.control(
             "create",
             &[
@@ -243,6 +324,7 @@ impl ComputerRuntime for Msb {
                 "--memory",
                 &memory,
                 "--quiet",
+                "--",
                 &spec.image,
             ],
         )
@@ -275,5 +357,19 @@ impl ComputerRuntime for Msb {
         let mut all = vec!["exec", name, "--", program];
         all.extend_from_slice(args);
         self.run("exec", &all, timeout).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_references_cannot_become_options() {
+        assert!(valid_image("python:3.12-slim"));
+        assert!(valid_image("ghcr.io/else/desktop@sha256:abc123"));
+        for bad in ["--help", "--replace", "", "a b", "x;rm"] {
+            assert!(!valid_image(bad), "{bad}");
+        }
     }
 }

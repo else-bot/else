@@ -228,14 +228,16 @@ fn run_serve() -> anyhow::Result<()> {
         }
         let state = Arc::new(state);
         let result = serve(&config, listener, state, lock_lost.clone()).await;
-        drop(lock);
-        // Stop provider work after HTTP so no new message is accepted.
+        // Stop provider work after HTTP so no new message is accepted. The
+        // singleton lock is held until every worker that changes runtime
+        // state has stopped, so a successor never overlaps with them.
         stop_scheduler.cancel();
         let _ = scheduler_task.await;
         let _ = compactor.await;
         if let Some(task) = computer_task {
             let _ = task.await;
         }
+        drop(lock);
         tracing::info!("API stopped");
         result
     })

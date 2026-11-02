@@ -140,8 +140,12 @@ impl Config {
             65_536,
         )?;
         let vm_cpus = parse_number(source, "ELSE_VM_CPUS", defaults.cpus as u64, 1, 16)?;
+        let image = source.get("ELSE_VM_IMAGE").unwrap_or(defaults.image);
+        if !crate::computers::runtime::valid_image(&image) {
+            return Err(invalid("ELSE_VM_IMAGE", "not a valid image reference"));
+        }
         let computers = crate::computers::ComputerConfig {
-            image: source.get("ELSE_VM_IMAGE").unwrap_or(defaults.image),
+            image,
             cpus: vm_cpus as u32,
             memory_mib: vm_memory as u32,
             overhead_mib: parse_number(
