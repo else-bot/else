@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::messages::{MAX_QUEUED_TURNS, validate_text};
+use crate::app::messages::{InvalidMessage, MAX_QUEUED_TURNS, validate_text};
 use crate::app::providers::Availability;
 use crate::db::turns::{self, AcceptError, ItemRecord, SendRequest, TurnRecord};
 
@@ -114,8 +114,14 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let request_id = body.request_id;
     let with_id = |err: ApiError| err.with_request_id(request_id);
-    validate_text(&body.text)
-        .map_err(|err| with_id(ApiError::bad_request("invalid_input", err.to_string())))?;
+    validate_text(&body.text).map_err(|err| {
+        with_id(match err {
+            InvalidMessage::TooLarge => {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
+            }
+            _ => ApiError::bad_request("invalid_input", err.to_string()),
+        })
+    })?;
     let registry = state.scheduler.registry();
     let provider_id = match body.provider_id.as_deref() {
         Some(id) => id,

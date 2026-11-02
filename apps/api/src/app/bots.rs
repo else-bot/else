@@ -12,8 +12,19 @@ context, remember what matters, and coordinate with the other bots when they are
 pub enum InvalidBot {
     #[error("Name must be 1 to 80 characters after trimming.")]
     Name,
-    #[error("Role must be non-empty and at most 8 KiB.")]
+    #[error("Role must not be empty.")]
     Role,
+    #[error("Role must be at most 8 KiB.")]
+    RoleTooLarge,
+    #[error("Name and role must not contain NUL characters.")]
+    Nul,
+}
+
+impl InvalidBot {
+    /// Size violations are reported as `413`, others as `400`.
+    pub fn is_size_limit(&self) -> bool {
+        matches!(self, Self::RoleTooLarge)
+    }
 }
 
 /// Trimmed display name. Duplicates are allowed; IDs identify bots.
@@ -22,6 +33,9 @@ pub struct BotName(String);
 
 impl BotName {
     pub fn parse(raw: &str) -> Result<Self, InvalidBot> {
+        if raw.contains('\0') {
+            return Err(InvalidBot::Nul);
+        }
         let name = raw.trim();
         let chars = name.chars().count();
         if chars == 0 || chars > MAX_NAME_CHARS {
@@ -41,7 +55,13 @@ pub struct BotRole(String);
 
 impl BotRole {
     pub fn parse(raw: &str) -> Result<Self, InvalidBot> {
-        if raw.trim().is_empty() || raw.len() > MAX_ROLE_BYTES {
+        if raw.contains('\0') {
+            return Err(InvalidBot::Nul);
+        }
+        if raw.len() > MAX_ROLE_BYTES {
+            return Err(InvalidBot::RoleTooLarge);
+        }
+        if raw.trim().is_empty() {
             return Err(InvalidBot::Role);
         }
         Ok(Self(raw.to_owned()))
@@ -68,7 +88,12 @@ mod tests {
     fn role_rules() {
         assert!(BotRole::parse("Help with my work").is_ok());
         assert_eq!(BotRole::parse(" \n"), Err(InvalidBot::Role));
-        assert_eq!(BotRole::parse(&"x".repeat(8193)), Err(InvalidBot::Role));
+        assert_eq!(
+            BotRole::parse(&"x".repeat(8193)),
+            Err(InvalidBot::RoleTooLarge)
+        );
+        assert_eq!(BotRole::parse("a\0b"), Err(InvalidBot::Nul));
+        assert_eq!(BotName::parse("a\0b"), Err(InvalidBot::Nul));
         assert!(BotName::parse(MAIN_BOT_NAME).is_ok() && BotRole::parse(MAIN_BOT_ROLE).is_ok());
     }
 }

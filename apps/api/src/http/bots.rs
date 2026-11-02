@@ -112,7 +112,12 @@ async fn create(
     ApiJson(body): ApiJson<CreateBot>,
 ) -> Result<Response, ApiError> {
     let invalid = |err: crate::app::bots::InvalidBot| {
-        ApiError::bad_request("invalid_input", err.to_string()).with_request_id(body.request_id)
+        let error = if err.is_size_limit() {
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
+        } else {
+            ApiError::bad_request("invalid_input", err.to_string())
+        };
+        error.with_request_id(body.request_id)
     };
     let name = BotName::parse(&body.name).map_err(invalid)?;
     let role = BotRole::parse(&body.role).map_err(invalid)?;

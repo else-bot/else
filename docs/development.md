@@ -108,7 +108,7 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 | `GET /v1/bots/{id}/turns/by-request/{request_id}` | Resolves a lost send response, or `404`. |
 | `GET`, `PATCH /v1/settings/providers/{provider_id}` | Read or update the saved execution profile. `PATCH` takes any of `model`, `reasoning_effort`, `service_tier`, and an optional `expected_revision`. The adapter validates the exact values; unsupported values return `400 invalid_profile` and nothing changes. A change bumps the revision. Accepted turns keep the revision they were accepted with. |
 
-Unknown or malformed IDs return `404 not_found`, always after authentication. Try it with a synthetic bot:
+Unknown or malformed IDs return `404 not_found`, always after authentication. A role over 8 KiB or message text over 32 KiB returns `413 too_large`; other invalid input, including NUL characters, returns `400 invalid_input`. Try it with a synthetic bot:
 
 ```sh
 printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)" |

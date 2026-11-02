@@ -143,17 +143,24 @@ pub struct Listing {
 /// Active bots, plus tombstones whose shutdown is still pending when
 /// requested. Completed tombstones never appear. Ordered oldest first.
 pub async fn list(pool: &PgPool, include_deleting: bool) -> Result<Listing, sqlx::Error> {
+    // One snapshot for both reads, so a concurrent deletion cannot pair a
+    // cleared default with the bot it just deleted.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let bots = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT_BOT} WHERE b.status = 'active' OR ($1 AND b.status = 'deleting')
          ORDER BY b.created_at, b.id"
     )))
     .bind(include_deleting)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     let default_bot_id = sqlx::query_scalar("SELECT default_bot_id FROM installation")
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
         .flatten();
+    tx.commit().await?;
     Ok(Listing {
         default_bot_id,
         bots,

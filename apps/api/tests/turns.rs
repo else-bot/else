@@ -372,8 +372,9 @@ async fn invalid_and_rejected_sends_create_nothing() {
         (
             &*"x".repeat(32 * 1024 + 1),
             Some("synthetic"),
-            StatusCode::BAD_REQUEST,
+            StatusCode::PAYLOAD_TOO_LARGE,
         ),
+        ("nul\u{0}", Some("synthetic"), StatusCode::BAD_REQUEST),
         ("hi", Some("nope"), StatusCode::BAD_REQUEST),
     ] {
         let reply = app.send(&bot, Uuid::new_v4(), text, provider).await;

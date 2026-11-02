@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use axum::http::StatusCode;
 use common::TestApp;
 use serde_json::json;
@@ -53,12 +55,19 @@ async fn create_retry_and_conflict() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_retries_create_one_bot() {
-    let app = std::sync::Arc::new(TestApp::installed().await);
+    let app = Arc::new(TestApp::installed().await);
     let request = Uuid::new_v4();
-    let calls = (0..6).map(|_| {
-        let app = app.clone();
-        tokio::spawn(async move { create(&app, request, "Family", "Family logistics").await })
-    });
+    // Spawn every request before awaiting any, released together.
+    let barrier = Arc::new(tokio::sync::Barrier::new(6));
+    let calls: Vec<_> = (0..6)
+        .map(|_| {
+            let (app, barrier) = (app.clone(), barrier.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                create(&app, request, "Family", "Family logistics").await
+            })
+        })
+        .collect();
     let mut ids = Vec::new();
     let mut created = 0;
     for call in calls {
