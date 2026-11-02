@@ -57,6 +57,8 @@ pub async fn halt_accepted(
     boundary: i64,
     message: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
+    // Children's bots before any root or child turn (their order).
+    crate::db::delegations::lock_targets_of_bot(conn, bot_id).await?;
     let queued: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = $3,
              finished_at = now(), updated_at = now()

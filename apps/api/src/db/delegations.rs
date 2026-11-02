@@ -55,6 +55,8 @@ pub struct Accepted {
     pub target_bot_id: Uuid,
     pub target_name: String,
     pub status: String,
+    /// For a retry of a child that already ended: its result or error.
+    pub outcome: Option<String>,
     /// False when this was a retry of an existing delegation.
     pub created: bool,
 }
@@ -71,12 +73,24 @@ pub async fn create(
         return Err(DelegateError::InvalidTask);
     }
     let mut tx = pool.begin().await?;
+    // Lock order everywhere: bot rows (parent before target), then turns.
+    let parent_bot: Option<Uuid> = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = $1")
+        .bind(turn_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(parent_bot) = parent_bot else {
+        return Err(DelegateError::NotRunning);
+    };
+    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+        .bind(parent_bot)
+        .execute(&mut *tx)
+        .await?;
     let caller: Option<(Uuid, String, i32, String, Option<Uuid>, String)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, t.attempt, c.kind,
                 (SELECT default_bot_id FROM installation), b.status
          FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN bots b ON b.id = t.bot_id
-         WHERE t.id = $1 FOR UPDATE OF t, b",
+         WHERE t.id = $1 FOR UPDATE OF t",
     )
     .bind(turn_id)
     .fetch_optional(&mut *tx)
@@ -95,9 +109,14 @@ pub async fn create(
     if target == parent {
         return Err(DelegateError::SelfTarget);
     }
-    let hash = Sha256::digest(task.as_bytes()).to_vec();
-    let existing: Option<(Uuid, Uuid, String, String)> = sqlx::query_as(
-        "SELECT d.id, d.target_bot_id, b.name, d.status FROM delegations d
+    // A retry is the same task to the same target.
+    let mut hasher = Sha256::new();
+    hasher.update(target.as_bytes());
+    hasher.update(task.as_bytes());
+    let hash = hasher.finalize().to_vec();
+    let existing: Option<(Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT d.id, d.target_bot_id, b.name, d.status, coalesce(d.result, d.error)
+         FROM delegations d
          JOIN bots b ON b.id = d.target_bot_id
          WHERE d.root_turn_id = $1 AND d.task_hash = $2",
     )
@@ -105,13 +124,14 @@ pub async fn create(
     .bind(&hash)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((id, target_bot_id, target_name, status)) = existing {
-        // A retried call: the same child, never another.
+    if let Some((id, target_bot_id, target_name, status, outcome)) = existing {
+        // A retried call: the same child, never another, with its status.
         return Ok(Accepted {
             delegation_id: id,
             target_bot_id,
             target_name,
             status,
+            outcome,
             created: false,
         });
     }
@@ -236,81 +256,101 @@ pub async fn create(
         target_bot_id: target,
         target_name,
         status: "queued".into(),
+        outcome: None,
         created: true,
     })
 }
 
-/// Cancel work delegated by roots of `bot_id` up to `boundary` that is still
-/// pending. Queued children end at once; running ones move to `cancelling`
-/// for the scheduler to interrupt. Runs under the caller's bot row lock.
+/// Lock, in ID order, the target bots of children of `bot_id`'s roots that
+/// are still pending. Call before locking any of those roots or child turns:
+/// a child's own transactions lock its bot before its turn and the root.
+pub async fn lock_targets_of_bot(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT 1 FROM bots WHERE id IN (
+             SELECT target_bot_id FROM delegations
+             WHERE parent_bot_id = $1 AND status IN ('queued', 'running'))
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(bot_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The same for one root's pending children.
+pub async fn lock_targets_of_root(conn: &mut PgConnection, root: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT 1 FROM bots WHERE id IN (
+             SELECT target_bot_id FROM delegations
+             WHERE root_turn_id = $1 AND status IN ('queued', 'running'))
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(root)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// End the pending children: a queued child is interrupted at once, a
+/// running one moves to `cancelling` for the scheduler to interrupt. The
+/// trigger on the child turn records each delegation's outcome. The caller
+/// holds the target bot locks (see `lock_targets_of_*`).
+async fn stop_children(
+    conn: &mut PgConnection,
+    children: Vec<(Uuid, Uuid)>,
+    message: &str,
+) -> Result<(), sqlx::Error> {
+    for (child, target) in children {
+        let changed = sqlx::query(
+            "UPDATE turns SET
+                 status = CASE WHEN status = 'queued' THEN 'interrupted' ELSE 'cancelling' END,
+                 error_code = 'cancelled',
+                 error_message = $2,
+                 finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END,
+                 updated_at = now()
+             WHERE id = $1 AND status IN ('queued', 'preparing', 'sending', 'running')",
+        )
+        .bind(child)
+        .bind(message)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if changed > 0 {
+            events::turn_changed(conn, target, child).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Stop work delegated by roots of `bot_id` up to `boundary`.
 pub async fn cancel_for_bot(
     conn: &mut PgConnection,
     bot_id: Uuid,
     boundary: i64,
 ) -> Result<(), sqlx::Error> {
     let children: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE delegations d SET status = 'cancelled', error = 'cancelled: the owner stopped the request',
-             finished_at = now()
-         FROM turns r
-         WHERE r.id = d.root_turn_id AND d.parent_bot_id = $1 AND r.turn_no <= $2
-           AND d.status IN ('queued', 'running')
-         RETURNING d.child_turn_id, d.target_bot_id",
+        "SELECT d.child_turn_id, d.target_bot_id FROM delegations d JOIN turns r ON r.id = d.root_turn_id
+         WHERE d.parent_bot_id = $1 AND r.turn_no <= $2 AND d.status IN ('queued', 'running')
+         ORDER BY d.created_at",
     )
     .bind(bot_id)
     .bind(boundary)
     .fetch_all(&mut *conn)
     .await?;
-    for (child, target) in children {
-        let changed = sqlx::query(
-            "UPDATE turns SET
-                 status = CASE WHEN status = 'queued' THEN 'interrupted' ELSE 'cancelling' END,
-                 error_code = CASE WHEN status = 'queued' THEN 'cancelled' ELSE error_code END,
-                 error_message = CASE WHEN status = 'queued' THEN 'The delegating request was stopped.'
-                                      ELSE error_message END,
-                 finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END,
-                 updated_at = now()
-             WHERE id = $1 AND status IN ('queued', 'preparing', 'sending', 'running')",
-        )
-        .bind(child)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        if changed > 0 {
-            events::turn_changed(conn, target, child).await?;
-        }
-    }
-    Ok(())
+    stop_children(conn, children, "The delegating request was stopped.").await
 }
 
-/// Cancel pending children of one root whose attempt ended without a
-/// result to wait for (failed or uncertain).
+/// Stop the pending children of one root whose attempt ended without a
+/// result to wait for (failed, uncertain, or reconciled after a restart).
 pub async fn cancel_for_root(conn: &mut PgConnection, root: Uuid) -> Result<(), sqlx::Error> {
     let children: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE delegations SET status = 'cancelled', error = 'cancelled: the delegating attempt ended',
-             finished_at = now()
-         WHERE root_turn_id = $1 AND status IN ('queued', 'running')
-         RETURNING child_turn_id, target_bot_id",
+        "SELECT child_turn_id, target_bot_id FROM delegations
+         WHERE root_turn_id = $1 AND status IN ('queued', 'running') ORDER BY created_at",
     )
     .bind(root)
     .fetch_all(&mut *conn)
     .await?;
-    for (child, target) in children {
-        let changed = sqlx::query(
-            "UPDATE turns SET
-                 status = CASE WHEN status = 'queued' THEN 'interrupted' ELSE 'cancelling' END,
-                 finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END,
-                 updated_at = now()
-             WHERE id = $1 AND status IN ('queued', 'preparing', 'sending', 'running')",
-        )
-        .bind(child)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        if changed > 0 {
-            events::turn_changed(conn, target, child).await?;
-        }
-    }
-    Ok(())
+    stop_children(conn, children, "The delegating request ended.").await
 }
 
 pub use crate::app::providers::DelegationOutcome as Outcome;
@@ -409,8 +449,14 @@ pub async fn context(conn: &mut PgConnection, turn_id: Uuid) -> Result<Context, 
     .fetch_one(&mut *conn)
     .await?;
     if kind == "task" {
+        let parent: Option<Uuid> =
+            sqlx::query_scalar("SELECT parent_bot_id FROM delegations WHERE child_turn_id = $1")
+                .bind(turn_id)
+                .fetch_optional(&mut *conn)
+                .await?;
         return Ok(Context {
             delegated_task: true,
+            parent_bot_id: parent,
             ..Context::default()
         });
     }
@@ -431,6 +477,7 @@ pub async fn context(conn: &mut PgConnection, turn_id: Uuid) -> Result<Context, 
     Ok(Context {
         can_delegate: true,
         delegated_task: false,
+        parent_bot_id: None,
         registry,
         remaining: (MAX_CHILDREN - used).max(0),
         outcomes: undelivered(conn, turn_id).await?,

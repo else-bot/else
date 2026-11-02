@@ -255,8 +255,24 @@ impl Scheduler {
                 return;
             }
         };
+        // A delegated task reads its own bot's memory, and other bots only
+        // where both the delegating bot and its own bot may: delegation
+        // never widens what the original request could reach.
+        let memory_scope = match input.delegation.parent_bot_id {
+            Some(parent) if input.delegation.delegated_task => {
+                match delegated_scope(&self.pool, parent, input.bot_id).await {
+                    Ok(scope) => Some(scope),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "loading a delegated memory scope failed");
+                        Some(vec![input.bot_id])
+                    }
+                }
+            }
+            _ if input.delegation.delegated_task => Some(vec![input.bot_id]),
+            _ => None,
+        };
         // Tools for this turn only; revoked when it ends (see dispatch).
-        input.tool_grant = Some(self.grants.issue(
+        input.tool_grant = Some(self.grants.issue_scoped(
             input.bot_id,
             input.conversation_id,
             turn_id,
@@ -265,6 +281,7 @@ impl Scheduler {
             } else {
                 vec![Tool::ReadHistory, Tool::ReadMemory]
             },
+            memory_scope,
             TOOL_GRANT_TTL,
         ));
         let sink = PgSink::new(self.pool.clone(), &input, &provider_id);
@@ -334,4 +351,25 @@ impl Scheduler {
             }
         }
     }
+}
+
+/// The bots a delegated task may read: its own, plus those both the
+/// delegating bot and its own bot may read.
+pub async fn delegated_scope(
+    pool: &sqlx::PgPool,
+    parent: Uuid,
+    target: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let parent_reads: Vec<Uuid> = crate::db::memory::readable_bots(pool, parent)
+        .await?
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+    let mut scope = vec![target];
+    for (id, _, _) in crate::db::memory::readable_bots(pool, target).await? {
+        if id != target && parent_reads.contains(&id) {
+            scope.push(id);
+        }
+    }
+    Ok(scope)
 }

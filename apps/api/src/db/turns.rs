@@ -729,14 +729,13 @@ impl PgSink {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Outcomes this attempt carried were given to the provider.
-        crate::db::delegations::mark_delivered(
-            &mut tx,
-            self.turn_id,
-            self.attempt,
-            &self.delivered,
-        )
-        .await?;
+        // Children's bots, then the root turn: a child settling meanwhile
+        // takes the same root lock, so parking sees its outcome.
+        crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
+        sqlx::query("SELECT 1 FROM turns WHERE id = $1 FOR UPDATE")
+            .bind(self.turn_id)
+            .execute(&mut *tx)
+            .await?;
         // A root that delegated parks instead of finishing: `waiting` while a
         // child works, or `queued` again (a continuation) when every child
         // has an outcome this attempt did not see. A Stop (`cancelling`)
@@ -806,7 +805,28 @@ impl TurnSink for PgSink {
         // A stop may already have moved the turn to `cancelling`; the turn
         // was still accepted and must be drained, so that is not a fence.
         match self.transition("sending", "running").await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Accepted by the provider: the outcomes this attempt carried
+                // were delivered.
+                if !self.delivered.is_empty() {
+                    let marked = async {
+                        let mut tx = self.pool.begin().await?;
+                        crate::db::delegations::mark_delivered(
+                            &mut tx,
+                            self.turn_id,
+                            self.attempt,
+                            &self.delivered,
+                        )
+                        .await?;
+                        tx.commit().await
+                    }
+                    .await;
+                    if let Err(err) = marked {
+                        tracing::warn!(turn = %self.turn_id, error = %err, "recording delivered outcomes failed");
+                    }
+                }
+                Ok(())
+            }
             Err(Fenced) => {
                 let cancelling: Result<bool, sqlx::Error> = sqlx::query_scalar(
                     "SELECT t.status = 'cancelling' AND b.status = 'active'
@@ -986,6 +1006,8 @@ It was not resent; send a follow-up to continue.',
     }
     for (turn_id, _) in &uncertain {
         crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
+        // A root that ended here leaves no child running for it.
+        crate::db::delegations::cancel_for_root(&mut tx, *turn_id).await?;
     }
     tx.commit().await?;
     // Stops and deletions waiting on those turns can now complete. Queued
@@ -1012,6 +1034,7 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
+        crate::db::delegations::lock_targets_of_root(&mut tx, turn_id).await?;
         let updated = sqlx::query(
             "UPDATE turns SET
                  status = CASE WHEN status = 'preparing' THEN 'failed' ELSE 'uncertain' END,
@@ -1031,6 +1054,7 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
             crate::db::memory::log_turn_end(&mut tx, turn_id).await?;
+            crate::db::delegations::cancel_for_root(&mut tx, turn_id).await?;
             crate::db::stop::settle(&mut tx, bot_id).await?;
             settled += 1;
         }

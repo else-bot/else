@@ -35,6 +35,8 @@ pub const ID: &str = "codex";
 const PROMPT_VERSION: &str = "else-codex-v3";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
+/// How long an interrupted parked attempt may take to report its end.
+const PARK_STOP: Duration = Duration::from_secs(15);
 const MODELS: &[&str] = &["gpt-6.1-sol"];
 /// `ultra` delegates to native agents, which are disabled.
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -779,7 +781,15 @@ impl Codex {
                     tracing::info!(turn = %native_turn, "parent kept going after delegating; interrupting");
                     interrupted = true;
                     interrupt(server, thread_id, native_turn).await;
+                    // The interrupt must end the turn soon; otherwise the
+                    // attempt ends anyway (the caller reaps the process) and
+                    // the request waits for its child.
+                    park_at = Some(tokio::time::Instant::now() + PARK_STOP);
                     continue;
+                }
+                _ = tokio::time::sleep_until(park_at.unwrap_or(deadline)), if park_at.is_some() && interrupted => {
+                    tracing::warn!(turn = %native_turn, "parked attempt did not stop; ending it");
+                    return TurnOutcome::Interrupted;
                 }
                 message = server.next() => message,
             };

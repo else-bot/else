@@ -292,6 +292,15 @@ async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, V
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| tool_error("bot_id must be a bot ID from memory_bots."))?,
     };
+    if grant
+        .memory_scope
+        .as_ref()
+        .is_some_and(|scope| !scope.contains(&target))
+    {
+        return Err(tool_error(
+            "No readable memory for that bot. Use memory_bots.",
+        ));
+    }
     match memory::readable(&state.db, grant.bot_id, target).await {
         Ok(true) => Ok(target),
         // Unknown, deleted, and unshared bots look the same.
@@ -368,7 +377,10 @@ type Outcome = (Value, Option<String>);
 
 async fn bots(state: &AppState, grant: &Grant) -> Outcome {
     match memory::readable_bots(&state.db, grant.bot_id).await {
-        Ok(rows) => {
+        Ok(mut rows) => {
+            if let Some(scope) = &grant.memory_scope {
+                rows.retain(|(id, _, _)| scope.contains(id));
+            }
             let mut result = json!({ "bots": [], "more": false });
             let shown = fill(&mut result, "bots", rows.len(), 2_000, |i, max| {
                 let (id, name, role) = &rows[i];
@@ -759,6 +771,18 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         return (tool_error("task is required."), None);
     };
     match delegations::create(&state.db, grant.turn_id, target, task).await {
+        Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
+            // A retry of a child that already ended: its recorded outcome.
+            let log = format!("already {} {}", accepted.status, accepted.delegation_id);
+            let result = json!({
+                "status": accepted.status,
+                "task_id": accepted.delegation_id,
+                "target": { "bot_id": accepted.target_bot_id, "name": accepted.target_name },
+                "outcome": accepted.outcome,
+                "next": "This task already ended; use its recorded outcome and do not resubmit it.",
+            });
+            (tool_result(result), Some(log))
+        }
         Ok(accepted) => {
             // This attempt must now end; the API refuses its further calls.
             state.scheduler.grants().park(grant.turn_id);

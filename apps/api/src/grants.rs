@@ -36,6 +36,9 @@ pub struct Grant {
     pub conversation_id: Uuid,
     pub turn_id: Uuid,
     pub tools: Vec<Tool>,
+    /// When set, memory may be read only from these bots (a delegated task
+    /// does not inherit its bot's unrelated standing permissions).
+    pub memory_scope: Option<Vec<Uuid>>,
     expires_at: Instant,
 }
 
@@ -71,6 +74,19 @@ impl Grants {
         tools: Vec<Tool>,
         ttl: Duration,
     ) -> String {
+        self.issue_scoped(bot_id, conversation_id, turn_id, tools, None, ttl)
+    }
+
+    /// Issue a grant whose memory reads are limited to `memory_scope`.
+    pub fn issue_scoped(
+        &self,
+        bot_id: Uuid,
+        conversation_id: Uuid,
+        turn_id: Uuid,
+        tools: Vec<Tool>,
+        memory_scope: Option<Vec<Uuid>>,
+        ttl: Duration,
+    ) -> String {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).expect("system random source");
         // A distinct prefix keeps grants and owner tokens visibly different.
@@ -83,6 +99,7 @@ impl Grants {
                 conversation_id,
                 turn_id,
                 tools,
+                memory_scope,
                 expires_at: Instant::now() + ttl,
             },
         );

@@ -96,6 +96,8 @@ pub struct DelegationContext {
     pub can_delegate: bool,
     /// This turn is a delegated task (a leaf).
     pub delegated_task: bool,
+    /// For a delegated task: the bot that delegated it.
+    pub parent_bot_id: Option<Uuid>,
     /// Other active bots: ID, name, role.
     pub registry: Vec<(Uuid, String, String)>,
     pub remaining: i64,
