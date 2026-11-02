@@ -12,12 +12,16 @@ use else_api::scheduler::Scheduler;
 use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
-const USAGE: &str = "usage: else-api [serve|setup|migrate]\n\n\
+const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
+else-api restore <set-dir> <new-database>\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
 bot and default provider profiles once; never replaces existing state\n  \
-migrate  apply pending versioned migrations only\n";
+migrate  apply pending versioned migrations only\n  \
+backup   capture one encrypted database backup set now\n  \
+restore  verify a backup set and restore it into a new database on the same\n           \
+server; never changes an existing database or file\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
@@ -44,12 +48,18 @@ fn main() -> ExitCode {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("serve");
-    if args.len() > 1 {
+    let arity_ok = match command {
+        "restore" => args.len() == 3,
+        _ => args.len() <= 1,
+    };
+    if !arity_ok {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
     let result = match command {
         "serve" => run_serve(),
+        "backup" => run_backup(),
+        "restore" => run_restore(&args[1], &args[2]),
         "setup" => run_setup(),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
@@ -86,6 +96,54 @@ async fn database(config: &Config) -> anyhow::Result<sqlx::PgPool> {
     let pool = db::connect(url).await?;
     db::migrate(&pool).await?;
     Ok(pool)
+}
+
+fn backup_parts(
+    config: &else_api::config::Config,
+) -> anyhow::Result<(else_api::backup::PgParams, Arc<credentials::SecretKey>)> {
+    let url = config.require_database().context("invalid configuration")?;
+    let params = else_api::backup::PgParams::parse(url.expose())?;
+    // A missing key is an error; backups never generate one.
+    let key = credentials::load_secret_key(&config.secret_key)?;
+    Ok((params, Arc::new(key)))
+}
+
+/// Capture one set now (serialized with the running API's worker).
+fn run_backup() -> anyhow::Result<()> {
+    let config = load_config()?;
+    let (params, key) = backup_parts(&config)?;
+    runtime()?.block_on(async {
+        let pool = database(&config).await?;
+        let worker =
+            else_api::backup::worker::BackupWorker::new(pool, params, key, config.backup.clone());
+        let summary = worker.run_once().await?;
+        println!("backup set: {}", summary.path.display());
+        println!("coverage: {}", summary.manifest.coverage.note);
+        Ok(())
+    })
+}
+
+/// Restore a verified set into a new database. The API is not started and
+/// nothing existing is changed; switch to the new database explicitly.
+fn run_restore(set_dir: &str, target: &str) -> anyhow::Result<()> {
+    let config = load_config()?;
+    let (params, key) = backup_parts(&config)?;
+    runtime()?.block_on(async {
+        let report =
+            else_api::backup::restore::restore(else_api::backup::restore::RestoreRequest {
+                set_dir: std::path::Path::new(set_dir),
+                key: &key,
+                server: &params,
+                target_database: target,
+                pg_restore: &config.backup.pg_restore,
+                staging_parent: &config.data_dir.join("restore-staging"),
+            })
+            .await?;
+        println!("restored set {} into database {target}", report.set_id);
+        println!("migration version: {}", report.migration_version);
+        println!("coverage: {}", report.manifest.coverage.note);
+        Ok(())
+    })
 }
 
 fn run_migrate() -> anyhow::Result<()> {
@@ -152,7 +210,7 @@ fn run_serve() -> anyhow::Result<()> {
     let config = load_config()?;
     // Credentials load before the listener opens. Neither is logged.
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
-    let _secret_key = credentials::load_secret_key(&config.secret_key)?;
+    let secret_key = Arc::new(credentials::load_secret_key(&config.secret_key)?);
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
@@ -226,6 +284,27 @@ fn run_serve() -> anyhow::Result<()> {
             }
             Err(err) => tracing::warn!(error = %err, "bot computers unavailable"),
         }
+        // The serialized backup worker (scheduled local sets).
+        let backup_task = match config
+            .database_url
+            .as_ref()
+            .map(|url| else_api::backup::PgParams::parse(url.expose()))
+        {
+            Some(Ok(params)) if !config.backup.interval.is_zero() => {
+                let worker = Arc::new(else_api::backup::worker::BackupWorker::new(
+                    pool.clone(),
+                    params,
+                    secret_key.clone(),
+                    config.backup.clone(),
+                ));
+                Some(tokio::spawn(worker.run(stop_scheduler.clone())))
+            }
+            Some(Err(err)) => {
+                tracing::warn!(error = %err, "backups disabled");
+                None
+            }
+            _ => None,
+        };
         let state = Arc::new(state);
         let result = serve(&config, listener, state, lock_lost.clone()).await;
         // Stop provider work after HTTP so no new message is accepted. The
@@ -235,6 +314,9 @@ fn run_serve() -> anyhow::Result<()> {
         let _ = scheduler_task.await;
         let _ = compactor.await;
         if let Some(task) = computer_task {
+            let _ = task.await;
+        }
+        if let Some(task) = backup_task {
             let _ = task.await;
         }
         drop(lock);

@@ -2,6 +2,7 @@
 //! integration tests drive them directly against PostgreSQL.
 
 pub mod app;
+pub mod backup;
 pub mod computers;
 pub mod config;
 pub mod credentials;

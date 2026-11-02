@@ -84,11 +84,16 @@ impl OwnerToken {
     }
 }
 
-/// The installation master key. Kept for the backup and secret-storage tasks;
-/// at this stage startup only proves it is present and well formed.
+/// The installation master key. Backups derive their keys from it
+/// (purpose-separated, never used raw); it is never logged or exported.
 pub struct SecretKey {
-    #[allow(dead_code)] // Consumed by the encryption tasks.
     bytes: [u8; KEY_BYTES],
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
 }
 
 impl fmt::Debug for SecretKey {
@@ -98,6 +103,11 @@ impl fmt::Debug for SecretKey {
 }
 
 impl SecretKey {
+    /// Input key material for purpose-separated derivations.
+    pub(crate) fn bytes(&self) -> &[u8; KEY_BYTES] {
+        &self.bytes
+    }
+
     /// Parse standard base64 encoding 32 bytes.
     pub fn parse(text: &str) -> Option<Self> {
         let bytes = STANDARD.decode(text).ok()?;

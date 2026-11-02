@@ -1,0 +1,657 @@
+//! POC-021: encrypted database backups and non-destructive restore, against
+//! the Compose PostgreSQL with the real `pg_dump` and `pg_restore`.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use base64::Engine;
+use common::TestApp;
+use else_api::backup::capture::BackupConfig;
+use else_api::backup::restore::{RestoreRequest, restore};
+use else_api::backup::worker::BackupWorker;
+use else_api::backup::{self, BackupError, PgParams};
+use else_api::credentials::SecretKey;
+use serde_json::json;
+use sqlx::Connection;
+use uuid::Uuid;
+
+/// Fault points are process-wide: one test at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn key_text(byte: u8) -> String {
+    let mut bytes = [byte; 32];
+    bytes[0] = 0xA5;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn key(byte: u8) -> SecretKey {
+    SecretKey::parse(&key_text(byte)).unwrap()
+}
+
+fn config(dir: &Path) -> BackupConfig {
+    BackupConfig {
+        dir: dir.join("backups"),
+        pg_dump: PathBuf::from("pg_dump"),
+        pg_restore: PathBuf::from("pg_restore"),
+        keep: 7,
+        max_bytes: 1 << 30,
+        interval: Duration::from_secs(3600),
+    }
+}
+
+fn worker(app: &TestApp, key: SecretKey, config: BackupConfig) -> BackupWorker {
+    BackupWorker::new(
+        app.db.pool.clone(),
+        PgParams::parse(app.db.url.expose()).unwrap(),
+        Arc::new(key),
+        config,
+    )
+}
+
+/// A database created by a restore, dropped when the test ends.
+struct Target {
+    name: String,
+    admin: PgParams,
+}
+
+impl Target {
+    fn new(app: &TestApp) -> Self {
+        let params = PgParams::parse(app.db.url.expose()).unwrap();
+        Self {
+            name: format!("else_restore_{}", Uuid::new_v4().simple()),
+            admin: params.with_database("postgres"),
+        }
+    }
+
+    fn url(&self) -> String {
+        let p = &self.admin;
+        format!(
+            "postgresql://{}:{}@{}:{}/{}",
+            p.user,
+            p.password.clone().unwrap_or_default(),
+            p.host,
+            p.port,
+            self.name
+        )
+    }
+
+    async fn exists(&self) -> bool {
+        let mut conn = sqlx::PgConnection::connect(&self.admin_url())
+            .await
+            .unwrap();
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&self.name)
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+    }
+
+    fn admin_url(&self) -> String {
+        let p = &self.admin;
+        format!(
+            "postgresql://{}:{}@{}:{}/postgres",
+            p.user,
+            p.password.clone().unwrap_or_default(),
+            p.host,
+            p.port
+        )
+    }
+}
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        let url = self.admin_url();
+        let name = self.name.clone();
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move {
+                    if let Ok(mut conn) = sqlx::PgConnection::connect(&url).await {
+                        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+                        )))
+                        .execute(&mut conn)
+                        .await;
+                    }
+                })
+        })
+        .join();
+    }
+}
+
+async fn restore_into(
+    app: &TestApp,
+    set: &Path,
+    key: &SecretKey,
+    target: &Target,
+    staging: &Path,
+) -> Result<else_api::backup::restore::RestoreReport, BackupError> {
+    let server = PgParams::parse(app.db.url.expose()).unwrap();
+    restore(RestoreRequest {
+        set_dir: set,
+        key,
+        server: &server,
+        target_database: &target.name,
+        pg_restore: Path::new("pg_restore"),
+        staging_parent: staging,
+    })
+    .await
+}
+
+async fn rows(url: &str, sql: &str) -> Vec<String> {
+    let mut conn = sqlx::PgConnection::connect(url).await.unwrap();
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t::text FROM ({sql}) t ORDER BY 1"
+    )))
+    .fetch_all(&mut conn)
+    .await
+    .unwrap()
+}
+
+/// An installation with bots, a conversation, and a changed profile.
+async fn populated() -> TestApp {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Planner", "plans trips ✈").await;
+    for text in ["first message ünïcode", "second message"] {
+        let reply = app
+            .send(&bot, Uuid::new_v4(), text, Some("synthetic"))
+            .await;
+        let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+        app.wait_turn(&turn, &["completed"]).await;
+    }
+    let patched = app
+        .owner(
+            "PATCH",
+            "/v1/settings/providers/codex",
+            Some(json!({ "reasoning_effort": "high", "service_tier": "default" })),
+        )
+        .await;
+    assert!(patched.status.is_success(), "{:?}", patched.body);
+    app
+}
+
+const COMPARED: &[&str] = &[
+    "SELECT id, name, role, status FROM bots",
+    "SELECT id, bot_id, kind, last_turn_no FROM conversations",
+    "SELECT id, conversation_id, seq, kind, text FROM items",
+    "SELECT provider_id, model, reasoning_effort, service_tier, revision FROM provider_profiles",
+    "SELECT version, description, checksum, success FROM _sqlx_migrations",
+    "SELECT bot_id, seq, kind, body FROM memory_entry",
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backup_restores_into_a_new_database_with_matching_rows() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker(&app, key(1), config(dir.path()));
+    let summary = worker.run_once().await.unwrap();
+    let manifest = &summary.manifest;
+    assert!(
+        !manifest.coverage.whole_assistant,
+        "a database-only set says so"
+    );
+    assert_eq!(manifest.coverage.vm, "omitted");
+    assert!(manifest.bots.iter().all(|b| b.vm == "omitted"));
+    assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
+    assert!(manifest.application.migration_version >= 18);
+    // The set: three files, private, and nothing else.
+    let mut names: Vec<String> = std::fs::read_dir(&summary.path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["complete.json", "database.dump.age", "manifest.json.age"]
+    );
+    use std::os::unix::fs::PermissionsExt;
+    for name in &names {
+        let mode = std::fs::metadata(summary.path.join(name))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{name} is private");
+    }
+    // Neither the master key nor its bytes appear in any file, and the dump
+    // itself (decrypted) does not hold them either.
+    let text = key_text(1);
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&text)
+        .unwrap();
+    let (_, _, identity) = else_api::backup::restore::open_set(&summary.path, &key(1)).unwrap();
+    let dump = std::fs::read(summary.path.join(backup::DATABASE)).unwrap();
+    let plain = backup::open_small(&dump, &identity, 1 << 30).unwrap();
+    assert!(plain.starts_with(b"PGDMP"), "a custom-format dump");
+    for bytes in names
+        .iter()
+        .map(|n| std::fs::read(summary.path.join(n)).unwrap())
+        .chain([plain.clone()])
+    {
+        assert!(!bytes.windows(text.len()).any(|w| w == text.as_bytes()));
+        assert!(!bytes.windows(raw.len()).any(|w| w == raw.as_slice()));
+    }
+    let complete = std::fs::read_to_string(summary.path.join("complete.json")).unwrap();
+    assert!(
+        !complete.contains("Planner"),
+        "the bootstrap reveals no content"
+    );
+
+    // Restore beside an existing staging file, into a new database.
+    let staging = dir.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("keep.txt"), "untouched").unwrap();
+    let target = Target::new(&app);
+    let report = restore_into(&app, &summary.path, &key(1), &target, &staging)
+        .await
+        .unwrap();
+    assert_eq!(report.set_id, summary.set_id);
+    assert_eq!(
+        report.migration_version,
+        manifest.application.migration_version
+    );
+    for sql in COMPARED {
+        let source = rows(app.db.url.expose(), sql).await;
+        let restored = rows(&target.url(), sql).await;
+        assert_eq!(source, restored, "{sql}");
+        assert!(!source.is_empty(), "{sql}");
+    }
+    let profile = rows(
+        &target.url(),
+        "SELECT reasoning_effort, service_tier, revision FROM provider_profiles WHERE provider_id = 'codex'",
+    )
+    .await;
+    assert_eq!(profile, ["(high,default,2)"]);
+    assert_eq!(
+        std::fs::read_to_string(staging.join("keep.txt")).unwrap(),
+        "untouched"
+    );
+    let left: Vec<_> = std::fs::read_dir(&staging).unwrap().collect();
+    assert_eq!(left.len(), 1, "decrypted staging files are removed");
+    // The same target again: refused, and the restored data is unchanged.
+    let again = restore_into(&app, &summary.path, &key(1), &target, &staging).await;
+    assert!(matches!(again, Err(BackupError::Refused(_))), "{again:?}");
+    assert_eq!(
+        rows(&target.url(), COMPARED[0]).await,
+        rows(app.db.url.expose(), COMPARED[0]).await
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().join("staging");
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+
+    // Wrong key: recognized from the recorded key ID, before decrypting.
+    let target = Target::new(&app);
+    let wrong = restore_into(&app, &summary.path, &key(2), &target, &staging).await;
+    assert!(
+        matches!(wrong, Err(BackupError::WrongKey { .. })),
+        "{wrong:?}"
+    );
+    assert!(!target.exists().await);
+
+    // Damaged copies of the set (same name, in another directory).
+    let damaged = |name: &str, change: &dyn Fn(&Path)| {
+        let root = dir.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        let copy = root.join(&summary.set_id);
+        std::fs::create_dir(&copy).unwrap();
+        for file in ["complete.json", backup::DATABASE, backup::MANIFEST] {
+            std::fs::copy(summary.path.join(file), copy.join(file)).unwrap();
+        }
+        change(&copy);
+        copy
+    };
+    let truncated = damaged("truncated", &|set| {
+        let path = set.join(backup::DATABASE);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len(len - 100).unwrap();
+    });
+    let corrupted = damaged("corrupted", &|set| {
+        let path = set.join(backup::DATABASE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let at = bytes.len() / 2;
+        bytes[at] ^= 0x40;
+        std::fs::write(&path, bytes).unwrap();
+    });
+    let bad_manifest = damaged("manifest", &|set| {
+        let path = set.join(backup::MANIFEST);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 5;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+    });
+    let no_completion = damaged("unfinished", &|set| {
+        std::fs::remove_file(set.join("complete.json")).unwrap();
+    });
+    let swapped_salt = damaged("salt", &|set| {
+        let path = set.join("complete.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["encryption"]["salt_hex"] = json!("00".repeat(32));
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    });
+    for (what, set) in [
+        ("truncated", &truncated),
+        ("corrupted", &corrupted),
+        ("manifest", &bad_manifest),
+        ("unfinished", &no_completion),
+        ("salt", &swapped_salt),
+    ] {
+        let target = Target::new(&app);
+        let result = restore_into(&app, set, &key(1), &target, &staging).await;
+        assert!(result.is_err(), "{what} was restored");
+        assert!(
+            !matches!(result, Err(BackupError::WrongKey { .. })),
+            "{what}: {result:?}"
+        );
+        assert!(!target.exists().await, "{what} created a database");
+    }
+
+    // An existing database is refused and left exactly as it was.
+    let existing = Target::new(&app);
+    {
+        let mut conn = sqlx::PgConnection::connect(&existing.admin_url())
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            existing.name
+        )))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let mut db = sqlx::PgConnection::connect(&existing.url()).await.unwrap();
+        for sql in [
+            "CREATE TABLE precious (v text)",
+            "INSERT INTO precious VALUES ('keep me')",
+        ] {
+            sqlx::query(sql).execute(&mut db).await.unwrap();
+        }
+    }
+    let refused = restore_into(&app, &summary.path, &key(1), &existing, &staging).await;
+    assert!(
+        matches!(refused, Err(BackupError::Refused(_))),
+        "{refused:?}"
+    );
+    assert_eq!(
+        rows(&existing.url(), "SELECT v FROM precious").await,
+        ["(\"keep me\")"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    // A pg_dump that writes part of a dump and fails.
+    let fake = dir.path().join("pg_dump");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (fake) 0'; exit 0; fi\n\
+         printf 'PGDMP partial output'\necho 'connection lost' >&2\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut failing = config(dir.path());
+    failing.pg_dump = fake;
+    let result = worker(&app, key(1), failing.clone()).run_once().await;
+    assert!(
+        matches!(result, Err(BackupError::Producer(ref m)) if m.contains("connection lost")),
+        "{result:?}"
+    );
+    let backups = dir.path().join("backups");
+    assert!(backup::completed_sets(&backups).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(&backups).unwrap().count(),
+        0,
+        "staging removed"
+    );
+    let (status, error): (String, Option<String>) = sqlx::query_as(
+        "SELECT local_status, error FROM backup_runs ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "failed");
+    assert!(!error.unwrap().contains(&key_text(1)));
+
+    // Too large for the configured bound: nothing kept.
+    let mut small = config(dir.path());
+    small.max_bytes = 1000;
+    let result = worker(&app, key(1), small).run_once().await;
+    assert!(
+        matches!(result, Err(BackupError::TooLarge(1000))),
+        "{result:?}"
+    );
+    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+
+    // Interrupted publication: the set exists but is not complete, is not
+    // listed, cannot be restored, and is cleaned on the next start.
+    else_api::faults::arm("backup.before_complete");
+    let worker = worker(&app, key(1), config(dir.path()));
+    assert!(matches!(
+        worker.run_once().await,
+        Err(BackupError::Interrupted)
+    ));
+    let unfinished: Vec<PathBuf> = std::fs::read_dir(&backups)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(unfinished.len(), 1);
+    assert!(!unfinished[0].join("complete.json").exists());
+    assert!(backup::completed_sets(&backups).unwrap().is_empty());
+    let target = Target::new(&app);
+    let result = restore_into(
+        &app,
+        &unfinished[0],
+        &key(1),
+        &target,
+        &dir.path().join("s"),
+    )
+    .await;
+    assert!(matches!(result, Err(BackupError::Invalid(_))), "{result:?}");
+    assert!(!target.exists().await);
+    // A run left `running` by a crash is failed at the next start.
+    sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES ($1, 'crashed')")
+        .bind(Uuid::new_v4())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(worker.recover().await.unwrap(), 1);
+    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+    let running: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM backup_runs WHERE local_status = 'running'")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(running, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.keep = 2;
+    let worker = Arc::new(worker(&app, key(1), cfg));
+    assert_eq!(
+        worker.next_due().unwrap(),
+        Duration::ZERO,
+        "nothing yet: due now"
+    );
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(worker.run_once().await.unwrap().set_id);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+    }
+    let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
+    assert_eq!(sets, ids[1..].to_vec(), "the two newest kept");
+    let due = worker.next_due().unwrap();
+    assert!(
+        due > Duration::from_secs(3500) && due <= Duration::from_secs(3600),
+        "{due:?}"
+    );
+    // Two runs at once: one is refused rather than interleaved.
+    let (a, b) = tokio::join!(worker.run_once(), worker.run_once());
+    let refused = [&a, &b]
+        .iter()
+        .filter(|r| matches!(r, Err(BackupError::Refused(m)) if m.contains("another backup")))
+        .count();
+    assert_eq!(refused, 1, "{a:?} {b:?}");
+    // The scheduled loop: due at once with no set (a missed backup runs
+    // once at start), then idle until the interval passes.
+    let empty = tempfile::tempdir().unwrap();
+    let mut cfg = config(empty.path());
+    cfg.interval = Duration::from_secs(3600);
+    let scheduled = Arc::new(BackupWorker::new(
+        app.db.pool.clone(),
+        PgParams::parse(app.db.url.expose()).unwrap(),
+        Arc::new(key(1)),
+        cfg,
+    ));
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(scheduled.clone().run(stop.clone()));
+    for _ in 0..200 {
+        if !backup::completed_sets(&empty.path().join("backups"))
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        backup::completed_sets(&empty.path().join("backups"))
+            .unwrap()
+            .len(),
+        1
+    );
+    stop.cancel();
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_profile_cannot_enable_native_agents() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    // A saved value no adapter accepts (Codex's `ultra` delegates to
+    // native sub-agents), written behind the API's validation.
+    sqlx::query(
+        "UPDATE provider_profiles SET reasoning_effort = 'ultra' WHERE provider_id = 'codex'",
+    )
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target = Target::new(&app);
+    let result = restore_into(&app, &summary.path, &key(1), &target, &dir.path().join("s")).await;
+    assert!(
+        matches!(result, Err(BackupError::Invalid(ref m)) if m.contains("not allowed")),
+        "{result:?}"
+    );
+    assert!(
+        !target.exists().await,
+        "the refused restore left no database"
+    );
+}
+
+/// The operator commands on a real installation: `setup`, `backup`, then
+/// `restore` into a new database; logs never contain the master key.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backup_and_restore_commands_work_on_an_installation() {
+    let _serial = SERIAL.lock().await;
+    let db = common::TestDb::migrated().await;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |args: &[&str]| {
+        let out = common::api_command(&db, &data, common::free_port())
+            .env("RUST_LOG", "info")
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (ok, out) = run(&["setup"]);
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["backup"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("Database only"), "{out}");
+    let key = std::fs::read_to_string(data.join("secret-key")).unwrap();
+    let key = key.trim();
+    let set = out
+        .lines()
+        .find_map(|l| l.strip_prefix("backup set: "))
+        .unwrap()
+        .to_owned();
+    let app = TestApp::with_db(db);
+    let target = Target::new(&app);
+    let db = app.db.clone();
+    let mut command = common::api_command(&db, &data, common::free_port());
+    let out = command
+        .env("RUST_LOG", "info")
+        .args(["restore", &set, &target.name])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains(&format!("into database {}", target.name)));
+    assert!(!text.contains(key), "the key is never printed");
+    assert_eq!(
+        rows(&target.url(), COMPARED[0]).await,
+        rows(db.url.expose(), COMPARED[0]).await
+    );
+    // With another key the restore fails and changes nothing.
+    let other = Target::new(&app);
+    let out = common::api_command(&db, &data, common::free_port())
+        .env("SECRET_KEY", key_text(9))
+        .args(["restore", &set, &other.name])
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("made with key"));
+    assert!(!other.exists().await);
+    // The original key file is untouched.
+    assert_eq!(
+        std::fs::read_to_string(data.join("secret-key"))
+            .unwrap()
+            .trim(),
+        key
+    );
+}

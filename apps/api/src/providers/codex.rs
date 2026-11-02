@@ -228,6 +228,34 @@ fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
     }
 }
 
+/// The profile rules without an adapter (also used to check restored
+/// settings).
+pub fn validate(profile: &Profile) -> Result<(), String> {
+    if !MODELS.contains(&profile.model.as_str()) {
+        return Err(format!(
+            "Unsupported Codex model {}. Supported: {}.",
+            profile.model,
+            MODELS.join(", ")
+        ));
+    }
+    if !EFFORTS.contains(&profile.reasoning_effort.as_str()) {
+        return Err(format!(
+            "Unsupported reasoning effort {}. Supported: {} (ultra delegates to native \
+             sub-agents, which are disabled).",
+            profile.reasoning_effort,
+            EFFORTS.join(", ")
+        ));
+    }
+    if !TIERS.contains(&profile.service_tier.as_str()) {
+        return Err(format!(
+            "Unsupported service tier {}. Supported: {}.",
+            profile.service_tier,
+            TIERS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Provider for Codex {
     fn id(&self) -> &'static str {
@@ -250,29 +278,7 @@ impl Provider for Codex {
     }
 
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        if !MODELS.contains(&profile.model.as_str()) {
-            return Err(format!(
-                "Unsupported Codex model {}. Supported: {}.",
-                profile.model,
-                MODELS.join(", ")
-            ));
-        }
-        if !EFFORTS.contains(&profile.reasoning_effort.as_str()) {
-            return Err(format!(
-                "Unsupported reasoning effort {}. Supported: {} (ultra delegates to native \
-                 sub-agents, which are disabled).",
-                profile.reasoning_effort,
-                EFFORTS.join(", ")
-            ));
-        }
-        if !TIERS.contains(&profile.service_tier.as_str()) {
-            return Err(format!(
-                "Unsupported service tier {}. Supported: {}.",
-                profile.service_tier,
-                TIERS.join(", ")
-            ));
-        }
-        Ok(())
+        validate(profile)
     }
 
     async fn checkpoint(

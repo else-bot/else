@@ -629,6 +629,33 @@ fn collect_stderr(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandl
     })
 }
 
+/// The profile rules without an adapter (also used to check restored
+/// settings).
+pub fn validate(profile: &Profile) -> Result<(), String> {
+    if !MODELS.contains(&profile.model.as_str()) {
+        return Err(format!(
+            "Unsupported Claude model {}. Use an explicit model ID: {}.",
+            profile.model,
+            MODELS.join(", ")
+        ));
+    }
+    if !EFFORTS.contains(&profile.reasoning_effort.as_str()) {
+        return Err(format!(
+            "Unsupported reasoning effort {}. Supported: {}.",
+            profile.reasoning_effort,
+            EFFORTS.join(", ")
+        ));
+    }
+    if !TIERS.contains(&profile.service_tier.as_str()) {
+        return Err(format!(
+            "Unsupported service tier {}. Supported: {}.",
+            profile.service_tier,
+            TIERS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Provider for Claude {
     fn id(&self) -> &'static str {
@@ -651,28 +678,7 @@ impl Provider for Claude {
     }
 
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        if !MODELS.contains(&profile.model.as_str()) {
-            return Err(format!(
-                "Unsupported Claude model {}. Use an explicit model ID: {}.",
-                profile.model,
-                MODELS.join(", ")
-            ));
-        }
-        if !EFFORTS.contains(&profile.reasoning_effort.as_str()) {
-            return Err(format!(
-                "Unsupported reasoning effort {}. Supported: {}.",
-                profile.reasoning_effort,
-                EFFORTS.join(", ")
-            ));
-        }
-        if !TIERS.contains(&profile.service_tier.as_str()) {
-            return Err(format!(
-                "Unsupported service tier {}. Supported: {}.",
-                profile.service_tier,
-                TIERS.join(", ")
-            ));
-        }
-        Ok(())
+        validate(profile)
     }
 
     async fn checkpoint(

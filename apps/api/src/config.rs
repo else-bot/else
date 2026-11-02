@@ -59,6 +59,8 @@ pub struct Config {
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
     pub computers: crate::computers::ComputerConfig,
+    /// Encrypted local database backups (POC-021).
+    pub backup: crate::backup::capture::BackupConfig,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +139,35 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
             None => None,
         };
+        let backup = crate::backup::capture::BackupConfig {
+            dir: match source.get("ELSE_BACKUP_DIR") {
+                Some(path) => absolute_path("ELSE_BACKUP_DIR", path)?,
+                None => data_dir.join("backups"),
+            },
+            pg_dump: match source.get("ELSE_PG_DUMP") {
+                Some(path) => absolute_path("ELSE_PG_DUMP", path)?,
+                None => PathBuf::from("pg_dump"),
+            },
+            pg_restore: match source.get("ELSE_PG_RESTORE") {
+                Some(path) => absolute_path("ELSE_PG_RESTORE", path)?,
+                None => PathBuf::from("pg_restore"),
+            },
+            keep: parse_number(source, "ELSE_BACKUP_KEEP", 7, 1, 1000)? as usize,
+            max_bytes: parse_number(
+                source,
+                "ELSE_BACKUP_MAX_BYTES",
+                8 * 1024 * 1024 * 1024,
+                1024 * 1024,
+                1 << 44,
+            )?,
+            interval: std::time::Duration::from_secs(parse_number(
+                source,
+                "ELSE_BACKUP_INTERVAL_SECS",
+                86_400,
+                0,
+                30 * 86_400,
+            )?),
+        };
         let defaults = crate::computers::ComputerConfig::default();
         let vm_memory = parse_number(
             source,
@@ -196,6 +227,7 @@ impl Config {
             computers,
             codex_bin,
             claude_bin,
+            backup,
             synthetic_provider,
             max_active_turns,
             database_url: database_url(source)?,
