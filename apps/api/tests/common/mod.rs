@@ -233,7 +233,12 @@ impl TestApp {
             .with_test_writer()
             .try_init();
         let config = Config::load(&MapEnv(vec![("HOME", "/tmp")])).unwrap();
-        let scheduler = else_api::scheduler::Scheduler::new(db.pool.clone(), registry, max_active);
+        let scheduler = else_api::scheduler::Scheduler::with_cancel_grace(
+            db.pool.clone(),
+            registry,
+            max_active,
+            std::time::Duration::from_secs(1),
+        );
         let stop = tokio_util::sync::CancellationToken::new();
         tokio::spawn(
             scheduler
@@ -359,5 +364,108 @@ impl else_api::config::Source for MapEnv {
             .iter()
             .find(|(k, _)| *k == name)
             .map(|(_, v)| v.to_string())
+    }
+}
+
+/// A real `else-api serve` process over a test database and a private data
+/// directory, with the synthetic provider enabled.
+pub struct ApiProcess {
+    pub child: std::process::Child,
+    pub base: String,
+    pub token: String,
+}
+
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+pub fn api_command(db: &TestDb, data_dir: &std::path::Path, port: u16) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"));
+    command
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", data_dir)
+        .env("DATABASE_URL", db.url.expose())
+        .env("ELSE_DATA_DIR", data_dir)
+        .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
+        .env("ELSE_SYNTHETIC_PROVIDER", "1")
+        .env("ELSE_SHUTDOWN_GRACE_SECS", "2")
+        .env("RUST_LOG", "warn")
+        .current_dir(data_dir)
+        .stdout(std::process::Stdio::null());
+    command
+}
+
+impl ApiProcess {
+    /// Run `setup` once for this data directory, then start `serve`.
+    pub async fn start(db: &TestDb, data_dir: &std::path::Path) -> Self {
+        if !data_dir.join("owner-token").exists() {
+            let status = api_command(db, data_dir, 1).arg("setup").status().unwrap();
+            assert!(status.success());
+        }
+        let port = free_port();
+        let child = api_command(db, data_dir, port)
+            .arg("serve")
+            .spawn()
+            .unwrap();
+        let token = std::fs::read_to_string(data_dir.join("owner-token"))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let process = Self {
+            child,
+            base: format!("http://127.0.0.1:{port}"),
+            token,
+        };
+        let client = reqwest::Client::new();
+        for _ in 0..200 {
+            if client
+                .get(format!("{}/readyz", process.base))
+                .send()
+                .await
+                .is_ok()
+            {
+                return process;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("API did not start");
+    }
+
+    pub async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        let mut request = reqwest::Client::new()
+            .request(method, format!("{}{path}", self.base))
+            .bearer_auth(&self.token);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status().as_u16();
+        (
+            status,
+            response.json().await.unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// SIGKILL: no shutdown code runs, like a crash or power loss.
+    pub fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+impl Drop for ApiProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

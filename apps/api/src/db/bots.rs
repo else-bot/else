@@ -176,20 +176,29 @@ pub async fn list(pool: &PgPool, include_deleting: bool) -> Result<Listing, sqlx
     })
 }
 
-/// Commit the tombstone and clear a matching default before returning.
-/// Repeating it returns the existing tombstone unchanged.
-pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<BotRecord, BotError> {
+/// Result of a delete request.
+pub struct Deleted {
+    pub bot: BotRecord,
+    /// The active turn to interrupt, when work was still running.
+    pub interrupt: Option<Uuid>,
+}
+
+/// Commit the tombstone, clear a matching default, and halt all accepted
+/// work before returning. With work still running the bot stays `deleting`
+/// until its provider stops; otherwise it is `deleted` at once. Repeating it
+/// returns the existing tombstone unchanged. History is retained.
+pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<Deleted, BotError> {
     let mut tx = pool.begin().await?;
     let status: Option<BotStatus> =
         sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
             .bind(bot_id)
             .fetch_optional(&mut *tx)
             .await?;
+    let mut interrupt = None;
     match status {
         None => return Err(BotError::NotFound),
         Some(BotStatus::Active) => {
-            // No provider work exists yet, so shutdown completes at once.
-            sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now() WHERE id = $1")
+            sqlx::query("UPDATE bots SET status = 'deleting', deleted_at = now() WHERE id = $1")
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;
@@ -197,9 +206,16 @@ pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<BotRecord, BotError> 
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;
+            interrupt =
+                super::stop::halt_accepted(&mut tx, bot_id, i64::MAX, "The bot was deleted.")
+                    .await?;
+            super::stop::settle(&mut tx, bot_id).await?;
+            // Wake this bot's streams so they close promptly.
+            super::events::notify(&mut tx, bot_id).await?;
         }
         Some(BotStatus::Deleting | BotStatus::Deleted) => {}
     }
     tx.commit().await?;
-    find(pool, bot_id).await?.ok_or(BotError::NotFound)
+    let bot = find(pool, bot_id).await?.ok_or(BotError::NotFound)?;
+    Ok(Deleted { bot, interrupt })
 }

@@ -233,16 +233,28 @@ async fn different_bots_run_concurrently_within_the_global_limit() {
         app.send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
             .await;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE status = 'running'")
+    let mut counts = (0, 0);
+    for _ in 0..120 {
+        counts = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT count(*) FILTER (WHERE status = 'running'),
+                    count(*) FILTER (WHERE status = 'queued') FROM turns",
+        )
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
+        if counts == (2, 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(counts, (2, 1));
+    // The limit holds over time, not just at one sample.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE status = 'queued'")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    assert_eq!((active, queued), (2, 1));
+    assert_eq!(queued, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -547,7 +559,21 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
     let db = app.db.clone();
     // Abandon the old scheduler's in-memory state, then reconcile as startup does.
     drop(app);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Let the old scheduler finish draining (the hang takes 200 ms to stop)
+    // before simulating that the crash left the row running.
+    let id = hang_id.parse::<Uuid>().unwrap();
+    for _ in 0..200 {
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if status != "running" && status != "cancelling" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
     sqlx::query(
         "UPDATE turns SET status = 'running', finished_at = NULL, error_code = NULL WHERE id = $1",
     )

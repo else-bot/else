@@ -156,8 +156,9 @@ fn run_serve() -> anyhow::Result<()> {
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
-        // Bind before touching runtime state: a second instance that cannot
-        // serve must not reconcile or dispatch the running instance's work.
+        // Take the singleton locks and bind before touching runtime state: a
+        // second instance must not reconcile or dispatch another's work.
+        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;

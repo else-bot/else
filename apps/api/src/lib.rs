@@ -8,5 +8,6 @@ pub mod db;
 pub mod events;
 pub mod http;
 pub mod providers;
+pub mod runtime_lock;
 pub mod scheduler;
 pub mod views;

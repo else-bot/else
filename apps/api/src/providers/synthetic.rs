@@ -6,8 +6,12 @@
 //! behavior for tests:
 //!
 //! - `[synthetic:slow]` streams one chunk every 200 ms.
-//! - `[synthetic:hang]` acknowledges, then waits until cancelled.
+//! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
+//!   200 ms to drain, like a provider confirming an interrupt.
 //! - `[synthetic:fail]` acknowledges, then fails.
+//! - `[synthetic:ignore-cancel]` acknowledges and never stops on its own.
+//! - `[synthetic:stall-send]` marks delivery as started, then waits until
+//!   cancelled without acknowledging (a crash here leaves delivery unknown).
 //! - `[synthetic:refuse]` fails before delivery (nothing was sent).
 
 use std::time::Duration;
@@ -76,7 +80,16 @@ impl Provider for Synthetic {
                 message: "The synthetic provider refused the message.".into(),
             };
         }
-        if sink.sending().await.is_err() || sink.running().await.is_err() {
+        if sink.sending().await.is_err() {
+            return TurnOutcome::Interrupted;
+        }
+        if input.text.contains("[synthetic:stall-send]") {
+            cancel.cancelled().await;
+            return TurnOutcome::Uncertain {
+                message: "Stopped before the synthetic provider acknowledged.".into(),
+            };
+        }
+        if sink.running().await.is_err() {
             return TurnOutcome::Interrupted;
         }
         if input.text.contains("[synthetic:fail]") {
@@ -86,8 +99,12 @@ impl Provider for Synthetic {
                 message: "The synthetic provider failed.".into(),
             };
         }
+        if input.text.contains("[synthetic:ignore-cancel]") {
+            std::future::pending::<()>().await;
+        }
         if input.text.contains("[synthetic:hang]") {
             cancel.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             return TurnOutcome::Interrupted;
         }
         let delay = if input.text.contains("[synthetic:slow]") {

@@ -49,7 +49,7 @@ pub async fn notify(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::E
     Ok(())
 }
 
-async fn bot_updated(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn bot_updated(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     if let Some(bot) = bots::find_in(conn, bot_id).await? {
         append(
             conn,

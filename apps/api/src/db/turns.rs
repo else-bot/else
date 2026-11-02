@@ -686,6 +686,8 @@ impl PgSink {
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
         }
+        // Confirm a pending Stop work or deletion now that this turn ended.
+        crate::db::stop::settle(&mut tx, self.bot_id).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
             buffer.assistant_item = Some(item_id);
@@ -726,7 +728,9 @@ pub async fn recover_after_restart(pool: &PgPool) -> Result<(u64, u64), sqlx::Er
     let mut tx = pool.begin().await?;
     let requeued: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "UPDATE turns SET status = 'queued', started_at = NULL, updated_at = now()
-         WHERE status = 'preparing' RETURNING id, bot_id",
+         WHERE status = 'preparing'
+           AND bot_id IN (SELECT id FROM bots WHERE status = 'active' AND NOT cancel_pending)
+         RETURNING id, bot_id",
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -740,9 +744,23 @@ It was not resent; send a follow-up to continue.',
     )
     .fetch_all(&mut *tx)
     .await?;
+    // A claim that never reached its provider, on a bot being stopped or
+    // deleted, simply ends.
+    let mut uncertain = uncertain;
+    let halted: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "UPDATE turns SET status = 'interrupted', error_code = 'cancelled',
+             error_message = 'Stopped before it was sent.', finished_at = now(), updated_at = now()
+         WHERE status = 'preparing' RETURNING id, bot_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    uncertain.extend(halted);
     for (turn_id, bot_id) in requeued.iter().chain(&uncertain) {
         crate::db::events::turn_changed(&mut tx, *bot_id, *turn_id).await?;
     }
     tx.commit().await?;
+    // Stops and deletions waiting on those turns can now complete. Queued
+    // turns of deleted bots never run (claim requires an active bot).
+    crate::db::stop::settle_all(pool).await?;
     Ok((requeued.len() as u64, uncertain.len() as u64))
 }

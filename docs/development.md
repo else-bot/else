@@ -102,7 +102,8 @@ The implemented routes follow the [desktop contract](research/desktop-and-featur
 | `GET /v1/bots[?include_deleting=true]` | `default_bot_id` and active bots, oldest first. `include_deleting` adds tombstones whose shutdown is pending. |
 | `POST /v1/bots` | `{request_id, name, role}`. `201` with `Location` on first acceptance; the same request returns `200` with the same bot; changed input under that ID returns `409 request_conflict`. |
 | `GET /v1/bots/{id}` | An active bot, or a deletion receipt with `cleanup.state` and no role or conversation reference. |
-| `DELETE /v1/bots/{id}` | Commits the tombstone, clears the default if it pointed at this bot, and returns the receipt. Repeating it returns the same receipt. History and conversations are retained. |
+| `DELETE /v1/bots/{id}` | Commits the tombstone, clears the default if it pointed at this bot, ends queued messages, and interrupts running work before returning. `200` with `cleanup.state = done` when nothing was running; `202` with `pending` while the provider stops, after which the bot becomes `deleted`. Repeating it returns the same receipt. History and conversations are retained, and late provider output is never appended. |
+| `POST /v1/bots/{id}/cancel` | Stop work: `{request_id}`. Ends every queued message and interrupts the running one accepted up to now. `202 {state: "pending"}` until the provider has stopped, then `200 {state: "done"}`. New messages get `409 cancellation_pending` meanwhile. Retrying a completed request ID returns its receipt and never affects later messages. |
 
 | `POST /v1/bots/{id}/turns` | `{request_id, text, provider_id}`. Saves the owner message and a queued turn in one transaction, then wakes the scheduler. `202` on acceptance; a matching retry returns `200` with the same item and turn; different text or provider under that ID returns `409`. A deleted bot returns `410 bot_deleted`. More than four waiting messages return `429 queue_full` with `Retry-After`. A `null` provider uses the default. |
 | `GET /v1/bots/{id}/turns/by-request/{request_id}` | Resolves a lost send response, or `404`. |
@@ -125,7 +126,9 @@ One scheduler runs inside the API. PostgreSQL rows are the queue: it claims the 
 
 History `seq` is arrival order. A message queued behind a running turn can therefore precede that turn's reply; each item carries its `turn_id`.
 
-On startup, before the scheduler runs, a turn claimed but never sent returns to the queue. A turn that may have reached its provider becomes `uncertain` with `effect_uncertain = true` and is never resent.
+On startup the API takes two singleton locks before reading or changing runtime state: an exclusive lock on `$ELSE_DATA_DIR/api.lock` and a PostgreSQL session advisory lock. A second API on the same data directory exits with `another else.bot API is already running`, and one on the same database with `another else.bot API is already using this database`, before reconciling or dispatching anything. It then binds the listener and reconciles: a turn claimed but never sent returns to the queue; a turn that may have reached its provider, including one being stopped, becomes `uncertain` with `effect_uncertain = true` and is never resent; pending stops and deletions waiting on those turns complete.
+
+An interrupted provider has 10 seconds to stop. If it does not, its turn is recorded as `uncertain` rather than claiming the action was undone.
 
 ### Events and reconnecting
 

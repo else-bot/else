@@ -112,7 +112,11 @@ async fn delete(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Response, ApiError> {
-    let bot = bots::delete(&state.db, bot_id).await?;
+    let deleted = bots::delete(&state.db, bot_id).await?;
+    if let Some(turn_id) = deleted.interrupt {
+        state.scheduler.interrupt(turn_id);
+    }
+    let bot = deleted.bot;
     let status = match bot.status {
         BotStatus::Deleted => StatusCode::OK,
         _ => StatusCode::ACCEPTED,

@@ -6,6 +6,7 @@ pub mod conversation;
 pub mod events;
 pub mod installation;
 pub mod profiles;
+pub mod stop;
 pub mod turns;
 
 use std::time::Duration;

@@ -25,6 +25,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/turns/by-request/{request_id}",
             get(by_request),
         )
+        .route("/bots/{bot_id}/cancel", post(cancel))
 }
 
 pub fn bot_deleted() -> ApiError {
@@ -166,4 +167,47 @@ async fn by_request(
     Ok(Json(
         json!({ "item": item_json(&item), "turn": turn_json(&turn) }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelBody {
+    request_id: Uuid,
+}
+
+/// Stop work: cancel everything accepted for this bot so far. `202` while
+/// the provider is still stopping, `200` once confirmed. New messages are
+/// rejected with `409 cancellation_pending` until then.
+async fn cancel(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+    ApiJson(body): ApiJson<CancelBody>,
+) -> Result<Response, ApiError> {
+    use crate::db::stop::{self, StopError};
+    let receipt = stop::stop_work(&state.db, bot_id, body.request_id)
+        .await
+        .map_err(|err| {
+            match err {
+                StopError::Bot(err) => ApiError::from(err),
+                StopError::Deleted => bot_deleted(),
+            }
+            .with_request_id(body.request_id)
+        })?;
+    if let Some(turn_id) = receipt.interrupt {
+        state.scheduler.interrupt(turn_id);
+    }
+    let status = if receipt.state == "done" {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((
+        status,
+        Json(json!({
+            "request_id": receipt.request_id,
+            "bot_id": receipt.bot_id,
+            "state": receipt.state,
+        })),
+    )
+        .into_response())
 }

@@ -26,17 +26,31 @@ pub struct Scheduler {
     /// Cancellation handles of turns running in this process, by turn ID.
     running: Mutex<HashMap<Uuid, CancellationToken>>,
     max_active: usize,
+    cancel_grace: Duration,
     tasks: TaskTracker,
 }
 
+/// How long an interrupted provider may take to stop before it is abandoned.
+pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
+
 impl Scheduler {
     pub fn new(pool: PgPool, registry: Registry, max_active: usize) -> Arc<Self> {
+        Self::with_cancel_grace(pool, registry, max_active, DEFAULT_CANCEL_GRACE)
+    }
+
+    pub fn with_cancel_grace(
+        pool: PgPool,
+        registry: Registry,
+        max_active: usize,
+        cancel_grace: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             pool,
             registry,
             wake: Notify::new(),
             running: Mutex::new(HashMap::new()),
             max_active,
+            cancel_grace,
             tasks: TaskTracker::new(),
         })
     }
@@ -163,7 +177,22 @@ impl Scheduler {
                         }
                     }
                 };
-                tokio::join!(run, flusher).0
+                // A provider that ignores interruption is abandoned after
+                // the grace period; its effects are then unknown.
+                let watchdog = async {
+                    cancel.cancelled().await;
+                    tokio::time::sleep(self.cancel_grace).await;
+                };
+                tokio::select! {
+                    (outcome, ()) = async { tokio::join!(run, flusher) } => outcome,
+                    () = watchdog => TurnOutcome::Uncertain {
+                        message: format!(
+                            "The provider did not stop within {} seconds after being interrupted; \
+                             its effects are unknown.",
+                            self.cancel_grace.as_secs()
+                        ),
+                    },
+                }
             }
         };
         tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");
