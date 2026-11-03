@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive the guest's Chromium through DevTools on guest loopback.
 
-Usage: else-browser open URL | text | title | click SELECTOR | type SELECTOR TEXT
+Usage: else-browser open URL | text | title | click SELECTOR | type SELECTOR TEXT | reconcile
 Prints one JSON object. Runs inside the guest; nothing leaves the VM.
 """
 import fcntl, json, os, sys, time, urllib.request
@@ -44,6 +44,65 @@ class Tab:
             time.sleep(0.1)
 
 LOCK = "/var/lib/elsebot/browser.lock"
+CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
+
+def reconcile():
+    """After a script was stopped (run by every guest kill): the tabs a
+    script that no longer runs opened are closed, and code in the tabs it
+    attached to is halted, so its browser work does not outlive it."""
+    try:
+        with open(CONTROLLED) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        print(json.dumps({"closed": 0, "halted": 0}))
+        return
+    keep, orphans = [], []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            os.kill(int(entry["pid"]), 0)
+            keep.append(line)
+        except ProcessLookupError:
+            orphans.append(entry)
+        except Exception:
+            pass
+    closed = halted = 0
+    errors = []
+    try:
+        tabs = {t["id"]: t for t in json.load(urllib.request.urlopen(DEVTOOLS + "/json/list", timeout=2))}
+    except Exception:
+        tabs = {}
+    for entry in orphans:
+        tab = tabs.get(entry.get("target"))
+        if not tab:
+            continue
+        try:
+            if entry.get("created"):
+                urllib.request.urlopen(DEVTOOLS + "/json/close/" + tab["id"], timeout=2).read()
+                closed += 1
+            else:
+                ws = websocket.create_connection(tab["webSocketDebuggerUrl"], timeout=5)
+                # Each command answered before the next (closing at once
+                # could drop it): terminateExecution interrupts running code.
+                for n, method in enumerate(["Runtime.terminateExecution", "Page.stopLoading"], 1):
+                    ws.send(json.dumps({"id": n, "method": method, "params": {}}))
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        if json.loads(ws.recv()).get("id") == n:
+                            break
+                ws.close()
+                halted += 1
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+    with open(CONTROLLED, "w") as f:
+        f.write("".join(l + "\n" for l in keep))
+    result = {"closed": closed, "halted": halted, "orphans": len(orphans), "errors": errors}
+    try:
+        with open("/var/lib/elsebot/browser-reconcile.log", "a") as f:
+            f.write(json.dumps(result) + "\n")
+    except OSError:
+        pass
+    print(json.dumps(result))
 
 def lock():
     """The browser lock CDP scripts also take (one controller at a time)."""
@@ -62,6 +121,8 @@ def lock():
 def main(argv):
     if not argv:
         raise SystemExit(json.dumps({"error": __doc__.strip()}))
+    if argv[0] == "reconcile":
+        return reconcile()
     _held = lock()
     tab = Tab()
     action, rest = argv[0], argv[1:]

@@ -118,17 +118,20 @@ const PROBE: &str = r#"b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/
 if [ -f "$1/exit" ]; then echo "done $(cat "$1/exit")"; elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running; else echo lost; fi; tail -c "$2" "$1/out" 2>/dev/null"#;
 
 /// Stop a job's whole process group and confirm it is gone. procps `kill`
-/// takes a negative process group (the shell builtin does not). Prints
-/// `stopped` or `alive`.
-const KILL: &str = r#"b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/sys/kernel/random/boot_id)" ] && { echo stopped; exit 0; }
-pg=$(cat "$1/pid" 2>/dev/null) || { echo stopped; exit 0; }
+/// takes a negative process group (the shell builtin does not). Once it is
+/// gone, the browser work of any script that no longer runs is reconciled
+/// (`else-browser reconcile` closes the tabs it opened and halts code in
+/// those it attached to). Prints `stopped` or `alive`.
+const KILL: &str = r#"settled() { [ -x /usr/local/bin/else-browser ] && /usr/local/bin/else-browser reconcile > /dev/null 2>&1; echo stopped; exit 0; }
+b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/sys/kernel/random/boot_id)" ] && settled
+pg=$(cat "$1/pid" 2>/dev/null) || settled
 alive() { pgrep -g "$pg" > /dev/null 2>&1; }
-alive || { echo stopped; exit 0; }
+alive || settled
 /usr/bin/kill -s TERM -- "-$pg" 2>/dev/null
 for i in 1 2 3 4 5 6 7 8 9 10; do alive || break; sleep 0.3; done
 alive && /usr/bin/kill -s KILL -- "-$pg" 2>/dev/null
 for i in 1 2 3 4 5 6 7 8 9 10; do alive || break; sleep 0.2; done
-if alive; then echo alive; else [ -f "$1/exit" ] || echo 130 > "$1/exit"; echo stopped; fi"#;
+if alive; then echo alive; else [ -f "$1/exit" ] || echo 130 > "$1/exit"; settled; fi"#;
 
 /// What a tool learns about a job.
 #[derive(Debug, Clone, PartialEq, Eq)]

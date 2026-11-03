@@ -13,11 +13,12 @@ including a virtual environment:
         print(page.read("document.title"))
 
 Control is serialized: connect() takes the computer's browser lock, which
-computer_browser also takes. Reads are retried once after a browser restart;
-actions that change a page (click, fill, navigate, evaluate) are never repeated
-automatically: a lost reply raises Uncertain, and the script decides. Errors:
-BrowserNotReady, BrowserBusy, TargetClosed, NavigationTimeout, Uncertain,
-CdpError.
+computer_browser also takes. Nothing that runs in a page is ever sent twice: a
+lost reply raises Uncertain (for actions) or TargetClosed, and the script
+decides. Page code runs with a browser-side time limit, and the tabs a script
+controls are recorded, so if the script is stopped the computer closes the tabs
+it opened and halts code in the ones it attached to. Errors: BrowserNotReady,
+BrowserBusy, TargetClosed, NavigationTimeout, Uncertain, CdpError.
 """
 
 import base64
@@ -33,6 +34,35 @@ import urllib.request
 
 ENDPOINT = "http://127.0.0.1:9222"
 LOCK = "/var/lib/elsebot/browser.lock"
+# The longest page code may run, in seconds (enforced by the browser).
+MAX_EVALUATE = 300
+# Tabs scripts control: one JSON line {pid, target, created} each.
+CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
+
+
+def _record(target, created):
+    fd = os.open(CONTROLLED, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (json.dumps({"pid": os.getpid(), "target": target, "created": created}) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def _forget():
+    try:
+        with open(CONTROLLED) as f:
+            lines = f.read().splitlines()
+        kept = []
+        for line in lines:
+            try:
+                if json.loads(line)["pid"] != os.getpid():
+                    kept.append(line)
+            except Exception:  # noqa: BLE001 - drop unreadable lines
+                pass
+        with open(CONTROLLED, "w") as f:
+            f.write("".join(l + "\n" for l in kept))
+    except OSError:
+        pass
 
 
 class CdpError(Exception):
@@ -100,9 +130,32 @@ class _Socket:
         if b" 101 " not in head.split(b"\r\n", 1)[0] or accept.encode() not in head:
             raise CdpError("bad WebSocket handshake")
         self.closed = False
+        self.parts = []
 
-    def _read(self, n):
-        while len(self.buf) < n:
+    def recv(self, deadline):
+        """The next text message, by an absolute monotonic deadline. Frame
+        parsing state survives a timeout: partial frames stay buffered."""
+        while True:
+            frame = self._parse()
+            if frame is not None:
+                op, fin, payload = frame
+                if op == 8:
+                    self.closed = True
+                    raise TargetClosed("DevTools closed the connection")
+                if op == 9:
+                    self._frame(10, payload)
+                    continue
+                if op in (0, 1):
+                    self.parts.append(payload)
+                    if fin:
+                        text = b"".join(self.parts).decode("utf-8")
+                        self.parts = []
+                        return text
+                continue
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise socket.timeout()
+            self.sock.settimeout(left)
             try:
                 chunk = self.sock.recv(65536)
             except socket.timeout:
@@ -113,30 +166,25 @@ class _Socket:
                 self.closed = True
                 raise TargetClosed("the DevTools connection closed")
             self.buf += chunk
-        out, self.buf = self.buf[:n], self.buf[n:]
-        return out
 
-    def recv(self, timeout):
-        self.sock.settimeout(timeout)
-        parts = []
-        while True:
-            b0, b1 = self._read(2)
-            op, fin, n = b0 & 0x0F, b0 & 0x80, b1 & 0x7F
-            if n == 126:
-                n = struct.unpack(">H", self._read(2))[0]
-            elif n == 127:
-                n = struct.unpack(">Q", self._read(8))[0]
-            payload = self._read(n)
-            if op == 8:
-                self.closed = True
-                raise TargetClosed("DevTools closed the connection")
-            if op == 9:
-                self._frame(10, payload)
-                continue
-            if op in (0, 1):
-                parts.append(payload)
-                if fin:
-                    return b"".join(parts).decode("utf-8")
+    def _parse(self):
+        """One complete frame from the buffer, or None (nothing consumed)."""
+        b = self.buf
+        if len(b) < 2:
+            return None
+        op, fin, n, at = b[0] & 0x0F, b[0] & 0x80, b[1] & 0x7F, 2
+        if n == 126:
+            if len(b) < 4:
+                return None
+            n, at = struct.unpack(">H", b[2:4])[0], 4
+        elif n == 127:
+            if len(b) < 10:
+                return None
+            n, at = struct.unpack(">Q", b[2:10])[0], 10
+        if len(b) < at + n:
+            return None
+        self.buf = b[at + n:]
+        return op, fin, b[at:at + n]
 
     def _frame(self, op, data):
         mask = os.urandom(4)
@@ -180,11 +228,8 @@ class _Connection:
         self.socket.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
         deadline = time.monotonic() + timeout
         while True:
-            left = deadline - time.monotonic()
             try:
-                if left <= 0:
-                    raise socket.timeout()
-                msg = json.loads(self.socket.recv(left))
+                msg = json.loads(self.socket.recv(deadline))
             except socket.timeout:
                 if mutating:
                     raise Uncertain(f"{method} did not answer within {timeout} s; it may or may not have happened") from None
@@ -218,36 +263,39 @@ class Page:
         return self.target["id"]
 
     def call(self, method, params=None, timeout=30, mutating=True):
-        """A CDP command on this page. Pass mutating=False for pure reads."""
+        """A CDP command on this page. mutating=False only changes how a lost
+        reply is reported (TargetClosed instead of Uncertain); nothing is ever
+        resent. After a restart, call reconnect() or open the page again."""
         if self.conn.closed:
-            if not mutating:
-                self.reconnect()
-            else:
-                raise TargetClosed("the page connection is closed; call reconnect() and check the page before acting again")
-        try:
-            return self.conn.call(method, params, timeout, mutating)
-        except TargetClosed:
-            if mutating:
-                raise
-            self.reconnect()
-            return self.conn.call(method, params, timeout, mutating)
+            raise TargetClosed("the page connection is closed; call reconnect() or open the page again, and check it before acting")
+        return self.conn.call(method, params, timeout, mutating)
 
     def evaluate(self, expression, mutating=True, timeout=30):
-        r = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": True}, timeout, mutating)
+        # The browser itself stops the code at the deadline, so it does not
+        # outlive the script.
+        limit = min(timeout, MAX_EVALUATE)
+        r = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": True,
+                                           "timeout": int(limit * 1000)}, limit + 2, mutating)
         if "exceptionDetails" in r:
             d = r["exceptionDetails"]
             raise CdpError(f"page script failed: {d.get('exception', {}).get('description', d.get('text'))}")
         return r.get("result", {}).get("value")
 
     def read(self, expression, timeout=30):
-        """Evaluate a side-effect-free expression (retried once after a restart)."""
+        """Evaluate an expression you consider side-effect free (a lost reply is
+        TargetClosed or CdpError rather than Uncertain; it is not resent)."""
         return self.evaluate(expression, mutating=False, timeout=timeout)
 
     def text(self):
         return self.read("document.body ? document.body.innerText : ''")
 
     def navigate(self, url, timeout=30):
-        """Navigate and wait for the page to load (bounded)."""
+        """Navigate and wait for that navigation's document to load (bounded)."""
+        token = os.urandom(8).hex()
+        try:
+            self.evaluate(f"window.__elseNav = {json.dumps(token)}", timeout=5)
+        except CdpError:
+            pass
         try:
             r = self.call("Page.navigate", {"url": url}, timeout)
         except Uncertain:
@@ -258,7 +306,11 @@ class Page:
             raise NavigationTimeout(f"loading {url} did not start within {timeout} s; the tab may still be loading") from None
         if r.get("errorText"):
             raise CdpError(f"navigation to {url} failed: {r['errorText']}")
-        self.wait_for("document.readyState === 'complete' && location.href !== 'about:blank'", timeout, f"loading {url}", NavigationTimeout)
+        # A new document lacks the marker; a same-document navigation (no
+        # loaderId) keeps its document.
+        fresh = f"window.__elseNav !== {json.dumps(token)} && " if r.get("loaderId") else ""
+        self.wait_for(f"{fresh}document.readyState === 'complete'", timeout, f"loading {url}", NavigationTimeout)
+        self.target["url"] = self.read("location.href")
 
     def wait_for(self, expression, timeout=10, what=None, error=CdpError):
         deadline = time.monotonic() + timeout
@@ -289,19 +341,20 @@ class Page:
 
     def show(self):
         """Make this the tab shown in the visible browser window."""
-        self.call("Page.bringToFront", mutating=False)
+        self.call("Page.bringToFront")
 
     def reconnect(self, timeout=30):
-        """After a browser restart: find this page again (same target, or the
-        same URL), or raise TargetClosed. Never repeats an action."""
+        """Reattach to this same tab (same target ID) after its connection
+        dropped, or raise TargetClosed: a browser restart gives tabs new IDs, so
+        open the page again with browser.page() and check it. Never repeats an
+        action, never picks another tab."""
         ready(timeout)
-        pages = [t for t in _get_json("/json/list") if t.get("type") == "page"]
-        found = next((t for t in pages if t["id"] == self.target["id"]), None) or next(
-            (t for t in pages if self.target.get("url") and t["url"] == self.target["url"]), None)
+        found = next((t for t in _get_json("/json/list") if t.get("type") == "page" and t["id"] == self.target["id"]), None)
         if not found:
-            raise TargetClosed(f"the page {self.target.get('url') or self.target['id']} is gone")
+            raise TargetClosed(f"the tab {self.target.get('url') or self.target['id']} is gone")
         self.target = found
         self.conn = _Connection(found["webSocketDebuggerUrl"], timeout)
+        self.show()
 
     def close(self):
         self.conn.close()
@@ -338,17 +391,18 @@ class Browser:
                 target = pages[0]
             if target is None:
                 raise TargetClosed(f"no page matches {dict(id=id, url_prefix=url_prefix, title=title)}")
+        _record(target["id"], bool(create))
         page = Page(self, target, self.timeout)
         self.pages.append(page)
         page.show()
         if create:
             page.navigate(create, self.timeout)
-            page.target["url"] = page.read("location.href")
         return page
 
     def close(self):
         for p in self.pages:
             p.close()
+        _forget()
         if self.lock_fd is not None:
             os.close(self.lock_fd)
             self.lock_fd = None

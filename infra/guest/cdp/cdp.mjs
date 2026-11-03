@@ -13,18 +13,38 @@
 //
 // Control is serialized: connect() takes the computer's browser lock, which
 // computer_browser also takes, so one script (or tool call) drives the
-// browser at a time. Reads are retried once after a browser restart;
-// actions that change a page (click, fill, navigate, evaluate) are never
-// repeated automatically: a lost reply raises Uncertain, and the script
-// decides. Errors: BrowserNotReady, TargetClosed, NavigationTimeout,
-// Uncertain, CdpError, BrowserBusy.
+// browser at a time. Nothing that runs in a page is ever sent twice: a
+// lost reply raises Uncertain (for actions) or TargetClosed, and the script
+// decides. Page code runs with a browser-side time limit, and the tabs a
+// script controls are recorded, so if the script is stopped the computer
+// closes the tabs it opened and halts code in the ones it attached to.
+// Errors: BrowserNotReady, TargetClosed, NavigationTimeout, Uncertain,
+// CdpError, BrowserBusy.
 
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 
 export const ENDPOINT = "http://127.0.0.1:9222";
 const LOCK = "/var/lib/elsebot/browser.lock";
+/** The longest page code may run (enforced by the browser). */
+export const MAX_EVALUATE_MS = 300000;
+/** Tabs scripts control: one JSON line {pid, target, created} each. */
+const CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl";
+
+function record(target, created) {
+  fs.appendFileSync(CONTROLLED, JSON.stringify({ pid: process.pid, target, created }) + "\n", { mode: 0o600 });
+}
+
+function forget() {
+  try {
+    const kept = fs.readFileSync(CONTROLLED, "utf8").split("\n").filter((l) => {
+      try { return l && JSON.parse(l).pid !== process.pid; } catch { return false; }
+    });
+    fs.writeFileSync(CONTROLLED, kept.map((l) => l + "\n").join(""), { mode: 0o600 });
+  } catch {}
+}
 
 export class BrowserNotReady extends Error {}
 export class BrowserBusy extends Error {}
@@ -274,31 +294,27 @@ export class Page {
     return this.target.id;
   }
 
-  /** A CDP command on this page. Set mutating: false for pure reads. */
+  /** A CDP command on this page. `mutating: false` only changes how a
+   * lost reply is reported (TargetClosed instead of Uncertain); nothing is
+   * ever resent. After a restart, call reconnect() or open the page again. */
   async call(method, params = {}, options = {}) {
     if (this.conn.closed) {
-      if (options.mutating === false) await this.reconnect();
-      else throw new TargetClosed("the page connection is closed; call reconnect() and check the page before acting again");
+      throw new TargetClosed("the page connection is closed; call reconnect() or open the page again, and check it before acting");
     }
-    try {
-      return await this.conn.call(method, params, options);
-    } catch (e) {
-      // Reads are safe to repeat once after the browser came back.
-      if (options.mutating === false && e instanceof TargetClosed) {
-        await this.reconnect();
-        return await this.conn.call(method, params, options);
-      }
-      throw e;
-    }
+    return await this.conn.call(method, params, options);
   }
 
   async evaluate(expression, { mutating = true, timeoutMs = 30000 } = {}) {
-    const r = await this.call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, { mutating, timeoutMs });
+    // The browser itself stops the code at the deadline (Runtime.evaluate's
+    // timeout), so it does not outlive the script.
+    const limit = Math.min(timeoutMs, MAX_EVALUATE_MS);
+    const r = await this.call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, timeout: limit }, { mutating, timeoutMs: limit + 2000 });
     if (r.exceptionDetails) throw new CdpError(`page script failed: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
     return r.result?.value;
   }
 
-  /** Evaluate a side-effect-free expression (retried once after a restart). */
+  /** Evaluate an expression you consider side-effect free (a lost reply is
+   * TargetClosed or CdpError rather than Uncertain; it is not resent). */
   read(expression, options = {}) {
     return this.evaluate(expression, { ...options, mutating: false });
   }
@@ -307,8 +323,10 @@ export class Page {
     return this.read("document.body ? document.body.innerText : ''");
   }
 
-  /** Navigate and wait for the page to load (bounded). */
+  /** Navigate and wait for that navigation's document to load (bounded). */
   async navigate(url, { timeoutMs = 30000 } = {}) {
+    const token = crypto.randomBytes(8).toString("hex");
+    await this.evaluate(`window.__elseNav = ${JSON.stringify(token)}`, { timeoutMs: 5000 }).catch(() => {});
     let r;
     try {
       r = await this.call("Page.navigate", { url }, { timeoutMs });
@@ -321,7 +339,11 @@ export class Page {
       throw e;
     }
     if (r.errorText) throw new CdpError(`navigation to ${url} failed: ${r.errorText}`);
-    await this.waitFor("document.readyState === 'complete' && location.href !== 'about:blank'", { timeoutMs, what: `loading ${url}`, error: NavigationTimeout });
+    // A new document lacks the marker; a same-document navigation (no
+    // loaderId) keeps its document.
+    const fresh = r.loaderId ? `window.__elseNav !== ${JSON.stringify(token)} && ` : "";
+    await this.waitFor(`${fresh}document.readyState === 'complete'`, { timeoutMs, what: `loading ${url}`, error: NavigationTimeout });
+    this.target.url = await this.read("location.href");
   }
 
   async waitFor(expression, { timeoutMs = 10000, what = expression, error = CdpError } = {}) {
@@ -349,19 +371,20 @@ export class Page {
 
   /** Make this the tab shown in the visible browser window. */
   async show() {
-    await this.call("Page.bringToFront", {}, { mutating: false });
+    await this.call("Page.bringToFront", {});
   }
 
-  /** After a browser restart: find this page again (same target, or the
-   * same URL), or fail with TargetClosed. Never repeats an action. */
+  /** Reattach to this same tab (same target ID) after its connection
+   * dropped, or fail with TargetClosed: a browser restart gives tabs new
+   * IDs, so open the page again with browser.page() and check it. Never
+   * repeats an action, never picks another tab. */
   async reconnect({ timeoutMs = 30000 } = {}) {
     await ready({ timeoutMs });
-    const targets = await getJson("/json/list");
-    const pages = targets.filter((t) => t.type === "page");
-    const found = pages.find((t) => t.id === this.target.id) ?? pages.find((t) => this.target.url && t.url === this.target.url);
-    if (!found) throw new TargetClosed(`the page ${this.target.url || this.target.id} is gone`);
+    const found = (await getJson("/json/list")).find((t) => t.type === "page" && t.id === this.target.id);
+    if (!found) throw new TargetClosed(`the tab ${this.target.url || this.target.id} is gone`);
     this.target = found;
     this.conn = new Connection(await Socket.open(found.webSocketDebuggerUrl, timeoutMs));
+    await this.show();
   }
 
   close() {
@@ -404,18 +427,17 @@ export class Browser {
         ?? (!id && !urlPrefix && !title ? pages[0] : undefined);
       if (!target) throw new TargetClosed(`no page matches ${JSON.stringify({ id, urlPrefix, title })}`);
     }
+    record(target.id, !!create);
     const page = new Page(this, target, new Connection(await Socket.open(target.webSocketDebuggerUrl, this.timeoutMs)));
     this.pages.push(page);
     await page.show();
-    if (create) {
-      await page.navigate(create, { timeoutMs: this.timeoutMs });
-      page.target.url = await page.read("location.href");
-    }
+    if (create) await page.navigate(create, { timeoutMs: this.timeoutMs });
     return page;
   }
 
   async close() {
     for (const p of this.pages) p.close();
+    forget();
     this.lock?.release();
   }
 }

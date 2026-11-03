@@ -5,7 +5,9 @@
 /search    results for ?q= (title "Results for <q>", #results)
 /slow      never finishes loading within a minute
 /order     a page whose button POSTs to /count
-/count     POST: counts one order after 3 s; GET: the count
+/count     POST: counts one order at once, then withholds the reply for
+           30 s (so a test can cut the connection after the side effect
+           and before its acknowledgment); GET: the count
 
 Usage: cdp_site.py PORT. Synthetic content only; binds 127.0.0.1.
 """
@@ -54,10 +56,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global COUNT
         if urlparse(self.path).path == "/count":
-            time.sleep(3)
             with LOCK:
                 COUNT += 1
                 n = COUNT
+            time.sleep(30)
             self.page(str(n))
         else:
             self.page("not found", 404)
