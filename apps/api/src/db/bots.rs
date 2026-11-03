@@ -106,6 +106,9 @@ pub async fn create(
     .bind(request_id)
     .fetch_optional(&mut *tx)
     .await?;
+    if super::categories::used_by_category(&mut tx, request_id).await? {
+        return Err(BotError::RequestConflict);
+    }
     if let Some((operation, saved_hash, bot_id)) = receipt {
         if operation != "create_bot" || saved_hash != hash {
             return Err(BotError::RequestConflict);
@@ -178,11 +181,9 @@ pub async fn list(pool: &PgPool, include_deleting: bool) -> Result<Listing, sqlx
         .fetch_optional(&mut *tx)
         .await?
         .flatten();
-    let categories = sqlx::query_as(
-        "SELECT id, name, created_at, updated_at FROM bot_categories ORDER BY lower(name), id",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let categories = sqlx::query_as(super::categories::LIST)
+        .fetch_all(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Listing {
         default_bot_id,

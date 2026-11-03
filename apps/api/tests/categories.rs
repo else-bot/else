@@ -101,10 +101,10 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .iter()
         .map(|c| c["name"].as_str().unwrap().to_owned())
         .collect();
-    // The database collation orders names case-insensitively; é sorts before F.
+    // By the case-folded name's code points: the same on any collation.
     assert_eq!(
         names,
-        vec!["archive".to_owned(), "é".repeat(80), "Family".to_owned()]
+        vec!["archive".to_owned(), "Family".to_owned(), "é".repeat(80)]
     );
     assert_eq!(
         listing(&app).await["categories"].as_array().unwrap().len(),
@@ -132,6 +132,75 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .await;
     assert_eq!(clash.status, StatusCode::CONFLICT);
 
+    // Unicode case folding: Straße and STRASSE are one name, on create and
+    // on rename.
+    assert_eq!(
+        create(&app, Uuid::new_v4(), "Straße").await.status,
+        StatusCode::CREATED
+    );
+    let folded = create(&app, Uuid::new_v4(), "STRASSE").await;
+    assert_eq!(folded.status, StatusCode::CONFLICT, "{:?}", folded.body);
+    let other = create(&app, Uuid::new_v4(), "Weg").await.body["category"]["id"].clone();
+    let renamed = app
+        .owner(
+            "PATCH",
+            &format!("/v1/categories/{}", other.as_str().unwrap()),
+            Some(json!({ "name": "strasse" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::CONFLICT);
+    app.owner(
+        "DELETE",
+        &format!("/v1/categories/{}", other.as_str().unwrap()),
+        None,
+    )
+    .await;
+    let strasse = app.owner("GET", "/v1/categories", None).await.body["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Straße")
+        .unwrap()["id"]
+        .clone();
+    app.owner(
+        "DELETE",
+        &format!("/v1/categories/{}", strasse.as_str().unwrap()),
+        None,
+    )
+    .await;
+
+    // Request IDs are one namespace, in both directions.
+    let shared = Uuid::new_v4();
+    assert_eq!(
+        create(&app, shared, "Shared").await.status,
+        StatusCode::CREATED
+    );
+    let bot = app
+        .owner(
+            "POST",
+            "/v1/bots",
+            Some(json!({ "request_id": shared, "name": "Late", "role": "r" })),
+        )
+        .await;
+    assert_eq!(
+        bot.status,
+        StatusCode::CONFLICT,
+        "a category's request ID cannot create a bot"
+    );
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": shared })),
+        )
+        .await;
+    assert_eq!(stop.status, StatusCode::CONFLICT, "nor stop work");
+    assert_eq!(
+        create(&app, shared, "Shared").await.status,
+        StatusCode::OK,
+        "the category retry still works"
+    );
+
     // Repeated startup keeps everything.
     let app = app.restart().await;
     else_api::db::migrate(&app.db.pool).await.unwrap();
@@ -140,7 +209,7 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        4
     );
 }
 
@@ -328,4 +397,119 @@ async fn task_grants_cannot_change_categories() {
         app.owner("GET", "/v1/categories", None).await.body["categories"],
         json!([])
     );
+}
+
+/// An installation migrated to 0026 with bots and chat gains categories at
+/// 0027 and 0028 without losing anything; every bot starts unassigned.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
+    let db = common::TestDb::empty().await;
+    let mut older = sqlx::migrate!("./migrations");
+    older.migrations = std::borrow::Cow::Owned(
+        older
+            .migrations
+            .iter()
+            .filter(|m| m.version < 27)
+            .cloned()
+            .collect(),
+    );
+    older.run(&db.pool).await.unwrap();
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let bot = Uuid::new_v4();
+    let conversation = Uuid::new_v4();
+    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, 'Old', 'from before')")
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES ($1, $2, 'owner')")
+        .bind(conversation)
+        .bind(bot)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let before: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM bots ORDER BY id")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    else_api::db::migrate(&db.pool).await.unwrap();
+    else_api::db::migrate(&db.pool).await.unwrap();
+    let after: Vec<(Uuid, String, Option<Uuid>)> =
+        sqlx::query_as("SELECT id, name, category_id FROM bots ORDER BY id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(after.len(), before.len());
+    for ((id, name), (id2, name2, category)) in before.iter().zip(&after) {
+        assert_eq!((id, name, *category), (id2, name2, None));
+    }
+    let conversations: i64 = sqlx::query_scalar("SELECT count(*) FROM conversations")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(conversations, 2, "the main bot's and the old bot's");
+}
+
+/// Concurrent deletes, assignments, Stop work, and bot deletions never
+/// deadlock into a server error.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_category_and_bot_changes_never_fail_with_server_errors() {
+    let app = std::sync::Arc::new(TestApp::installed().await);
+    for round in 0..25 {
+        let a = app.create_bot(&format!("A{round}"), "a").await;
+        let b = app.create_bot(&format!("B{round}"), "b").await;
+        let c = create(&app, Uuid::new_v4(), &format!("C{round}"))
+            .await
+            .body["category"]["id"]
+            .clone();
+        assign(&app, &a, c.clone()).await;
+        assign(&app, &b, c.clone()).await;
+        let mut tasks = Vec::new();
+        for kind in 0..5 {
+            let app = app.clone();
+            let (a, b, c) = (a.clone(), b.clone(), c.clone());
+            tasks.push(tokio::spawn(async move {
+                match kind {
+                    0 => {
+                        app.owner(
+                            "DELETE",
+                            &format!("/v1/categories/{}", c.as_str().unwrap()),
+                            None,
+                        )
+                        .await
+                        .status
+                    }
+                    1 => assign(&app, &a, c.clone()).await.status,
+                    2 => {
+                        app.owner(
+                            "POST",
+                            &format!("/v1/bots/{a}/cancel"),
+                            Some(json!({ "request_id": Uuid::new_v4() })),
+                        )
+                        .await
+                        .status
+                    }
+                    3 => {
+                        app.owner("DELETE", &format!("/v1/bots/{b}"), None)
+                            .await
+                            .status
+                    }
+                    _ => assign(&app, &b, Value::Null).await.status,
+                }
+            }));
+        }
+        for task in tasks {
+            let status = task.await.unwrap();
+            assert!(!status.is_server_error(), "round {round}: {status}");
+        }
+    }
+    // Whatever won, no bot points at a missing category.
+    let dangling: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bots b LEFT JOIN bot_categories c ON c.id = b.category_id
+         WHERE b.category_id IS NOT NULL AND (c.id IS NULL OR c.deleting)",
+    )
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(dangling, 0);
 }

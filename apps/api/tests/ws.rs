@@ -629,12 +629,38 @@ async fn bots_channel_carries_categories_to_every_client() {
             None,
         )
         .await;
-    let after = each(&mut clients, |d| d["categories"] == json!([])).await;
+    // Deletion hides the category first, then unassigns its bots; clients
+    // reach the settled snapshot (an unknown category reads as none).
+    let after = each(&mut clients, |d| {
+        d["categories"] == json!([]) && d["bots"][0]["category_id"].is_null()
+    })
+    .await;
     assert_eq!(
         after["bots"][0]["category_id"],
         Value::Null,
         "same snapshot"
     );
+    // Creating and deleting an empty category both reach every client.
+    let empty = server
+        .app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Brief" })),
+        )
+        .await
+        .body["category"]["id"]
+        .clone();
+    each(&mut clients, |d| d["categories"][0]["name"] == "Brief").await;
+    server
+        .app
+        .owner(
+            "DELETE",
+            &format!("/v1/categories/{}", empty.as_str().unwrap()),
+            None,
+        )
+        .await;
+    let after = each(&mut clients, |d| d["categories"] == json!([])).await;
     // A reconnect sees the same state.
     let mut again = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut again, json!({ "op": "subscribe", "channel": "bots" })).await;

@@ -159,6 +159,9 @@ pub async fn stop_work(
 ) -> Result<StopReceipt, StopError> {
     let mut tx = pool.begin().await?;
     lock_request(&mut tx, request_id).await?;
+    if crate::db::categories::used_by_category(&mut tx, request_id).await? {
+        return Err(BotError::RequestConflict.into());
+    }
     // Lock first, then read the boundary in a new statement: a send that
     // held the lock has committed by then, so its turn is inside the stop.
     let status: Option<String> =

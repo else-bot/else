@@ -698,3 +698,60 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         "the queued command never reached the guest"
     );
 }
+
+/// POC-030: a category change touches no computer state: a running guest
+/// job keeps its status and lease while its bot is assigned, moved, and
+/// its category deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn category_changes_leave_guest_jobs_running() {
+    let Setup { app, manager, .. } = setup().await;
+    let bot = app.create_bot("Jobs", "runs jobs").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let else_api::computers::jobs::Started::Job(job) = manager
+        .start_job(bot_id, None, "sleep 600", Duration::from_secs(900))
+        .await
+        .unwrap()
+    else {
+        panic!("not started")
+    };
+    let state = || async {
+        sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT j.status, l.released_at FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id
+             WHERE j.id = $1",
+        )
+        .bind(job)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(state().await, ("running".to_owned(), None));
+    let made = app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Batch" })),
+        )
+        .await;
+    let id = made.body["category"]["id"].clone();
+    for category in [id.clone(), Value::Null, id.clone()] {
+        let reply = app
+            .owner(
+                "PATCH",
+                &format!("/v1/bots/{bot}/category"),
+                Some(json!({ "category_id": category })),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+    }
+    app.owner(
+        "DELETE",
+        &format!("/v1/categories/{}", id.as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        state().await,
+        ("running".to_owned(), None),
+        "the job and its lease are untouched"
+    );
+}
