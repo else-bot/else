@@ -538,15 +538,29 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         }
     }
     assert_eq!(listed.unwrap(), std::slice::from_ref(&summary.set_id));
-    let downloaded = else_api::backup::replicate::download_set(
-        &r.s3,
-        &summary.set_id,
-        &dir.path().join("download"),
-        &key(),
-        1 << 30,
-    )
-    .await
-    .unwrap();
+    // The emulator can still answer 500 right after its restart.
+    let mut downloaded = None;
+    for attempt in 0..10 {
+        match else_api::backup::replicate::download_set(
+            &r.s3,
+            &summary.set_id,
+            &dir.path().join(format!("download-{attempt}")),
+            &key(),
+            1 << 30,
+        )
+        .await
+        {
+            Ok(set) => {
+                downloaded = Some(set);
+                break;
+            }
+            Err(err) => {
+                eprintln!("download attempt {attempt}: {err}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+    let downloaded = downloaded.expect("the set downloads once the emulator is back");
     let fresh = Arc::new(Fake::default());
     let new_dir = dir.path().join("installation");
     std::fs::create_dir(&new_dir).unwrap();
