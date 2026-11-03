@@ -561,3 +561,83 @@ async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
         }
     }
 }
+
+/// POC-030: every connected client gets committed category changes,
+/// including renaming or deleting an empty category, and a reconnect
+/// returns a consistent category and bot snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn bots_channel_carries_categories_to_every_client() {
+    let server = Server::start().await;
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
+        op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
+        let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(first["data"]["categories"], json!([]));
+        clients.push(socket);
+    }
+    /// The next snapshot on each client that satisfies `check`.
+    async fn each(clients: &mut [Socket], check: impl Fn(&Value) -> bool) -> Value {
+        let mut last = Value::Null;
+        for socket in clients.iter_mut() {
+            loop {
+                let message = next(socket, Duration::from_secs(5))
+                    .await
+                    .expect("a snapshot arrived");
+                if check(&message["data"]) {
+                    last = message["data"].clone();
+                    break;
+                }
+            }
+        }
+        last
+    }
+    let made = server
+        .app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Empty" })),
+        )
+        .await;
+    let id = made.body["category"]["id"].clone();
+    each(&mut clients, |d| d["categories"][0]["name"] == "Empty").await;
+    server
+        .app
+        .owner(
+            "PATCH",
+            &format!("/v1/categories/{}", id.as_str().unwrap()),
+            Some(json!({ "name": "Renamed" })),
+        )
+        .await;
+    each(&mut clients, |d| d["categories"][0]["name"] == "Renamed").await;
+    let main = server.app.main_bot().await;
+    server
+        .app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{main}/category"),
+            Some(json!({ "category_id": id })),
+        )
+        .await;
+    each(&mut clients, |d| d["bots"][0]["category_id"] == id).await;
+    server
+        .app
+        .owner(
+            "DELETE",
+            &format!("/v1/categories/{}", id.as_str().unwrap()),
+            None,
+        )
+        .await;
+    let after = each(&mut clients, |d| d["categories"] == json!([])).await;
+    assert_eq!(
+        after["bots"][0]["category_id"],
+        Value::Null,
+        "same snapshot"
+    );
+    // A reconnect sees the same state.
+    let mut again = server.connect(Some(TOKEN), None).await.unwrap();
+    op(&mut again, json!({ "op": "subscribe", "channel": "bots" })).await;
+    let fresh = next(&mut again, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(fresh["data"], after);
+}

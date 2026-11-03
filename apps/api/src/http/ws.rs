@@ -13,7 +13,7 @@
 //! client → {"op":"subscribe","channel":"bots"}
 //! client → {"op":"subscribe","channel":"bot:<id>","cursor":"<cursor>"}
 //! client → {"op":"unsubscribe","channel":"bot:<id>"}
-//! server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":…,"bots":[…]}}
+//! server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":…,"categories":[…],"bots":[…]}}
 //! server → {"channel":"bot:<id>","id":"<cursor>","event":"item.delta","data":{…}}
 //! server → {"channel":"bot:<id>","error":{"code":"cursor_reset_required","message":"…"}}
 //! ```
@@ -406,6 +406,7 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
             Read::Done(listing) => {
                 let data = json!({
                     "default_bot_id": listing.default_bot_id,
+                    "categories": listing.categories,
                     "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
                 });
                 if last.as_ref() != Some(&data) {

@@ -89,7 +89,10 @@ All routes require the owner bearer token, including reads and streams. Task gra
 | Method and path | Request and result |
 | --- | --- |
 | `GET /v1/capabilities` | Returns the capability shape above. No credentials or native session identifiers. |
-| `GET /v1/bots?include_deleting=true` | Returns `default_bot_id` and `bots[]`. Include active bots and deletion receipts whose cleanup remains pending. Completed tombstones stay out of the list. |
+| `GET /v1/bots?include_deleting=true` | Returns `default_bot_id`, `categories[]`, and `bots[]`. Include active bots and deletion receipts whose cleanup remains pending. Completed tombstones stay out of the list. Each active bot carries `category_id` (null when unassigned). |
+| `GET/POST /v1/categories` | Sidebar categories (POC-030): `{id, name, created_at, updated_at}`, ordered by name without case. Create takes `{request_id, name}`; a matching retry returns the same category (200), a different payload under the same ID is `409 request_conflict`, a case-insensitive duplicate name `409 duplicate_category`, an invalid name `400 invalid_name` (trimmed, 1 to 80 characters, no control characters), and a retry after the category was deleted `410 category_deleted`. |
+| `PATCH/DELETE /v1/categories/{id}` | Rename with `{name}`; delete in one transaction, unassigning its bots (`unassigned_bots` lists them) and never deleting or cancelling them or their data. Unknown IDs are `404 category_not_found`. |
+| `PATCH /v1/bots/{id}/category` | `{category_id: <uuid>}` assigns or moves, `{category_id: null}` unassigns. An unknown category is `404 category_not_found`; a deleted bot is `410` and is not revived. A category groups the sidebar only: it changes no identity, role, permission, memory, provider profile, or computer. |
 | `POST /v1/bots` | `{request_id, name, role}`. `201` with bot and `Location` on first acceptance. Matching retries return `200` with the same ID and current state. |
 | `GET /v1/bots/{bot_id}` | Active bot or owner-visible deletion receipt. Allows deletion progress polling without access to retained conversation data. |
 | `DELETE /v1/bots/{bot_id}` | No body. Tombstone and revoke before returning. `202` while stopping work, `200` when already stopped. Returns the same deletion receipt on retry. |
@@ -146,7 +149,7 @@ client → {"op":"subscribe","channel":"bots"}
 client → {"op":"subscribe","channel":"bot:<bot-uuid>","cursor":"<server-instance-uuid>:<bot-uuid>:42"}
 client → {"op":"unsubscribe","channel":"bot:<bot-uuid>"}
 
-server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":"<bot-uuid>","bots":[…]}}
+server → {"channel":"bots","event":"bots.snapshot","data":{"default_bot_id":"<bot-uuid>","categories":[…],"bots":[…]}}
 server → {"channel":"bot:<bot-uuid>","id":"<server-instance-uuid>:<bot-uuid>:43","event":"item.delta","data":{"bot_id":"<bot-uuid>","conversation_id":"<conversation-uuid>","item_id":"<item-uuid>","offset_utf8":6,"text":"world"}}
 server → {"channel":"bot:<bot-uuid>","error":{"code":"cursor_reset_required","message":"…"}}
 ```

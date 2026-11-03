@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod bots;
+pub mod categories;
 pub mod computers;
 pub mod conversation;
 pub mod error;
@@ -85,6 +86,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/capabilities", get(capabilities))
         .merge(bots::routes())
+        .merge(categories::routes())
         .merge(turns::routes())
         .merge(conversation::routes())
         .merge(ws::routes())

@@ -52,6 +52,7 @@ async fn list(
     let listing = bots::list(&state.db, query.include_deleting).await?;
     Ok(Json(json!({
         "default_bot_id": listing.default_bot_id,
+        "categories": listing.categories,
         "bots": listing.bots.iter().map(bot_json).collect::<Vec<_>>(),
     })))
 }

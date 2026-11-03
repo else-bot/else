@@ -29,6 +29,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         "created_at": bot.created_at,
         "deleted_at": null,
         "selected_provider_id": bot.selected_provider_id,
+        "category_id": bot.category_id,
         "activity": activity_json(bot),
         "cleanup": null,
     })

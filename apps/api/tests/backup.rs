@@ -828,3 +828,61 @@ async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
     assert!(!stale.exists(), "stale plaintext removed");
     assert!(staging.join(".restore-foreign").exists(), "not ours, kept");
 }
+
+/// POC-030: a backup set restores categories, their IDs and names, bot
+/// assignments, and the saved main-bot pointer.
+#[tokio::test(flavor = "multi_thread")]
+async fn categories_and_assignments_survive_backup_and_restore() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let main = app.main_bot().await;
+    let made = app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Household" })),
+        )
+        .await;
+    let id = made.body["category"]["id"].as_str().unwrap().to_owned();
+    app.owner(
+        "POST",
+        "/v1/categories",
+        Some(json!({ "request_id": Uuid::new_v4(), "name": "Empty one" })),
+    )
+    .await;
+    let reply = app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{main}/category"),
+            Some(json!({ "category_id": id })),
+        )
+        .await;
+    assert_eq!(reply.status, axum::http::StatusCode::OK);
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target = Target::new(&app);
+    restore_into(&app, &summary.path, &key(1), &target, dir.path())
+        .await
+        .unwrap();
+    let source = app.db.url.expose().to_owned();
+    for sql in [
+        "SELECT id, name FROM bot_categories",
+        "SELECT id, category_id FROM bots",
+        "SELECT default_bot_id FROM installation",
+    ] {
+        assert_eq!(
+            rows(&target.url(), sql).await,
+            rows(&source, sql).await,
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        rows(&target.url(), "SELECT name FROM bot_categories")
+            .await
+            .len(),
+        2
+    );
+}

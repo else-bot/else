@@ -38,10 +38,12 @@ pub struct BotRecord {
     pub active_turn_id: Option<Uuid>,
     pub active_turn_status: Option<String>,
     pub queued_count: i64,
+    /// Its sidebar category (POC-030), if any.
+    pub category_id: Option<Uuid>,
 }
 
 const SELECT_BOT: &str = "SELECT b.id, b.name, b.role, c.id AS conversation_id, b.status,
-        b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending,
+        b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
         a.id AS active_turn_id, a.status AS active_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
@@ -151,6 +153,8 @@ pub async fn find_in(
 
 pub struct Listing {
     pub default_bot_id: Option<Uuid>,
+    /// Sidebar categories (POC-030), in the same snapshot as the bots.
+    pub categories: Vec<super::categories::Category>,
     pub bots: Vec<BotRecord>,
 }
 
@@ -174,9 +178,15 @@ pub async fn list(pool: &PgPool, include_deleting: bool) -> Result<Listing, sqlx
         .fetch_optional(&mut *tx)
         .await?
         .flatten();
+    let categories = sqlx::query_as(
+        "SELECT id, name, created_at, updated_at FROM bot_categories ORDER BY lower(name), id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Listing {
         default_bot_id,
+        categories,
         bots,
     })
 }
