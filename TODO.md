@@ -65,7 +65,7 @@ Open work from [providers running on the host](docs/decisions/0001-providers-run
 
 - [ ] Include bot project directories (`ELSE_BOTS_DIR`) in backup sets and restore them.
 - [ ] Mount the project directory into computers restored from a backup.
-- [ ] Claude Code login on macOS, where it lives in the Keychain instead of `~/.claude/.credentials.json`.
+- [x] Claude Code login on macOS (Keychain): bots use the host's Claude configuration directory.
 - [ ] Startup sweep of leftover provider processes on macOS (it reads `/proc`, so it runs on Linux only).
 
 ## Outside this backlog

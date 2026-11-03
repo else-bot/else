@@ -125,7 +125,9 @@ impl Codex {
         // version and proves the executable starts with the passed
         // environment.
         let version = match (&host, &program) {
-            (Some(host), Some(program)) => host.probe(program, &["--version"]).unwrap_or_default(),
+            (Some(host), Some(program)) => {
+                host.probe(program, &["--version"], &[]).unwrap_or_default()
+            }
             _ => String::new(),
         };
         let allow_unverified = std::env::var("ELSE_CODEX_ALLOW_UNVERIFIED").as_deref() == Ok("1");

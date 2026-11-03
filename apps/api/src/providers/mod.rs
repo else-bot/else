@@ -47,7 +47,7 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
     let claude = claude::Claude::detect(
         Some(host),
         executable(config.claude_bin.as_deref(), "claude"),
-        claude_home::host_credentials_file(config_dir.as_deref(), home.as_deref()),
+        claude_home::host_config(config_dir.as_deref(), home.as_deref()),
         claude_home::host_account(config_dir.as_deref(), home.as_deref()),
     )
     .with_tools(tool_url);
