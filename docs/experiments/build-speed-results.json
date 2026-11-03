@@ -1,0 +1,204 @@
+{
+  "revision": "fbb9f3a9517d12a4d4587793ec3e09808e987d30",
+  "diff": "diff --git a/Cargo.toml b/Cargo.toml\nindex 1e34bd4..8a09aa7 100644\n--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -8,3 +8,17 @@ resolver = \"3\"\n [workspace.package]\n version = \"0.0.5\"\n edition = \"2024\"\n+\n+# Local installs manage hundreds of bots, with provider work in external\n+# processes. Prefer a quick first build over maximum LLVM optimization.\n+[profile.release]\n+opt-level = 1\n+codegen-units = 256\n+# `false` still enables thin local LTO; `\"off\"` skips that work too.\n+lto = \"off\"\n+\n+# Keep file/line backtraces without generating full variable/type debug info\n+# for the desktop's large dependency graph. Use CARGO_PROFILE_DEV_DEBUG=2 for\n+# full debugger support.\n+[profile.dev]\n+debug = \"line-tables-only\"",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 18,
+  "baseline_overrides": {
+    "release": {
+      "opt-level": "3",
+      "codegen-units": "16",
+      "lto": "false"
+    },
+    "dev": {
+      "debug": "2"
+    }
+  },
+  "builds": [
+    {
+      "profile": "release",
+      "variant": "baseline",
+      "run": 1,
+      "seconds": 67.136,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--config",
+        "profile.release.opt-level=3",
+        "--config",
+        "profile.release.codegen-units=16",
+        "--config",
+        "profile.release.lto=false"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 22174560,
+        "else-desktop": 32190080
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "current",
+      "run": 1,
+      "seconds": 55.565,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 27937200,
+        "else-desktop": 41447872
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "baseline",
+      "run": 1,
+      "seconds": 39.348,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--config",
+        "profile.dev.debug=2"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 65830056,
+        "else-desktop": 127727584
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "current",
+      "run": 1,
+      "seconds": 36.22,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 63011512,
+        "else-desktop": 122022592
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "current",
+      "run": 2,
+      "seconds": 53.509,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 27937200,
+        "else-desktop": 41447872
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "baseline",
+      "run": 2,
+      "seconds": 63.744,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--config",
+        "profile.release.opt-level=3",
+        "--config",
+        "profile.release.codegen-units=16",
+        "--config",
+        "profile.release.lto=false"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 22174560,
+        "else-desktop": 32190080
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "current",
+      "run": 2,
+      "seconds": 33.986,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 63011512,
+        "else-desktop": 122022592
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "baseline",
+      "run": 2,
+      "seconds": 38.211,
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--config",
+        "profile.dev.debug=2"
+      ],
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 65830056,
+        "else-desktop": 127727584
+      }
+    }
+  ]
+}

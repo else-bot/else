@@ -81,6 +81,36 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
 
+### Build speed
+
+The workspace favors first-build speed for a local installation managing up to
+hundreds of bots. Release builds (including the installer) use basic optimization,
+256 codegen units, and no LTO. Provider inference runs in external processes;
+maximum LLVM optimization of the manager is a lower priority than installation
+time. This can produce larger binaries and slower CPU-heavy Rust code than
+Cargo's default release profile.
+
+Development and test builds keep file/line backtraces without full type/variable
+debug information. For full debugger support, use
+`CARGO_PROFILE_DEV_DEBUG=2 cargo build --workspace --locked` (or
+`CARGO_PROFILE_TEST_DEBUG=2 cargo test --workspace --locked` for tests).
+
+Reproduce the [clean-build benchmark](experiments/build-speed.md) with Python 3
+and the normal build prerequisites:
+
+```sh
+cargo fetch --locked
+python3 scripts/benchmark-build.py --output /tmp/else-build-benchmark --runs 2
+```
+
+The output directory must be new. The runner compares the previous Cargo profile
+defaults against the current manifest, alternates their order, uses a fresh target
+directory for every build, and disables compiler wrappers. It retains logs, Cargo
+HTML timings, binary sizes, and `results.json`. Downloads, Rust installation, and
+the guest image are excluded; registry sources and filesystem caches stay warm.
+It does not modify the manifests or the normal `target` directory. Use
+`--profiles release` or `--profiles dev` to measure just one path.
+
 ## Run the API
 
 Start PostgreSQL, provision the installation once, then start the API from the repository root:
