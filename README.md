@@ -104,7 +104,7 @@ Outside `~/.else`: the system packages, the database's Docker volume and the gue
 
 ### Versions and releases
 
-There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`; both binaries report it (`else-api version`, `else-desktop --version`, and `/healthz`). A release is a `vX.Y.Z` tag: `scripts/release.sh 0.0.2` sets the version, refreshes `Cargo.lock`, commits `chore: release v0.0.2`, and tags it; `git push origin HEAD v0.0.2` publishes it, and installations pick it up on their next update.
+There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`; both binaries report it (`else-api version`, `else-desktop --version`, and `/healthz`). A release is a `vX.Y.Z` tag: `scripts/release.sh patch` (or `minor`, `major`), run from a clean `main` that matches `origin/main`, bumps the version (0.0.1 becomes 0.0.2, 0.1.0, or 1.0.0), refreshes `Cargo.lock`, commits `chore(release): vX.Y.Z`, tags it, and pushes `main` and the tag together after asking (`-y` does not ask). Installations pick it up on their next update.
 
 `scripts/test-install.sh [debian-12|debian-13|ubuntu-24.04|ubuntu-26.04|arch]` installs and updates in fresh containers through a pipe, as an unprivileged sudo user, against releases built from the working tree (see its header).
 
