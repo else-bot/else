@@ -1478,17 +1478,23 @@ impl ElseApp {
         let Some(bot) = self.selected_bot().cloned() else {
             return;
         };
-        let is_default = self.default_bot_id == Some(bot.id);
+        // The main bot is the entry point and is never deleted (the API
+        // refuses it too).
+        if self.default_bot_id == Some(bot.id) {
+            self.notice = Some(format!(
+                "{} is your main bot and cannot be deleted.",
+                bot.name
+            ));
+            cx.notify();
+            return;
+        }
         let app = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let mut text = format!(
+            let text = format!(
                 "Delete {}? This stops its work and removes it from messaging. Its history, \
                  memory, and files are kept.",
                 bot.name
             );
-            if is_default {
-                text.push_str(" This removes your default assistant.");
-            }
             let app = app.clone();
             let id = bot.id;
             let app_ok = app.clone();
@@ -1540,9 +1546,6 @@ impl ElseApp {
                     Ok(receipt) => {
                         if let Some(bot) = app.bots.iter_mut().find(|b| b.id == id) {
                             *bot = receipt;
-                        }
-                        if app.default_bot_id == Some(id) {
-                            app.default_bot_id = None;
                         }
                         app.reconcile_selection(window, cx);
                     }
@@ -1805,13 +1808,15 @@ impl ElseApp {
                 .disabled(self.connection != Connection::Connected || self.moving.contains(&bot.id))
                 .on_click(cx.listener(|app, _, window, cx| app.open_move_dialog(window, cx))),
         );
-        actions = actions.child(
-            Button::new("delete-bot")
-                .label("Delete")
-                .small()
-                .ghost()
-                .on_click(cx.listener(|app, _, window, cx| app.open_delete_dialog(window, cx))),
-        );
+        if self.default_bot_id != Some(bot.id) {
+            actions = actions.child(
+                Button::new("delete-bot")
+                    .label("Delete")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|app, _, window, cx| app.open_delete_dialog(window, cx))),
+            );
+        }
         h_flex()
             .px_4()
             .py_2()

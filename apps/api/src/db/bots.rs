@@ -66,6 +66,8 @@ pub enum BotError {
     RequestConflict,
     #[error("bot not found")]
     NotFound,
+    #[error("the main bot cannot be deleted")]
+    MainBot,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -199,12 +201,22 @@ pub struct Deleted {
     pub interrupt: Option<Uuid>,
 }
 
-/// Commit the tombstone, clear a matching default, and halt all accepted
-/// work before returning. With work still running the bot stays `deleting`
+/// Commit the tombstone and halt all accepted work before returning. The
+/// main bot (the installation's default) is refused: it is the owner's
+/// entry point and is never deleted. With work still running the bot stays `deleting`
 /// until its provider stops; otherwise it is `deleted` at once. Repeating it
 /// returns the existing tombstone unchanged. History is retained.
 pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<Deleted, BotError> {
     let mut tx = pool.begin().await?;
+    // Read under a share lock so the main bot cannot change meanwhile.
+    let main: Option<Uuid> =
+        sqlx::query_scalar("SELECT default_bot_id FROM installation FOR SHARE")
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+    if main == Some(bot_id) {
+        return Err(BotError::MainBot);
+    }
     let status: Option<BotStatus> =
         sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
             .bind(bot_id)
@@ -215,10 +227,6 @@ pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<Deleted, BotError> {
         None => return Err(BotError::NotFound),
         Some(BotStatus::Active) => {
             sqlx::query("UPDATE bots SET status = 'deleting', deleted_at = now() WHERE id = $1")
-                .bind(bot_id)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("UPDATE installation SET default_bot_id = NULL WHERE default_bot_id = $1")
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;

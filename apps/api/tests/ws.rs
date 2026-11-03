@@ -387,24 +387,28 @@ async fn bots_channel_pushes_list_changes() {
     }
     assert!(saw_working);
     let _ = sent;
+    // Deleting a bot is pushed too.
     server
         .app
-        .owner("DELETE", &format!("/v1/bots/{main}"), None)
+        .owner("DELETE", &format!("/v1/bots/{created}"), None)
         .await;
-    let mut cleared = false;
+    let mut removed = false;
     for _ in 0..10 {
         let Some(update) = next(&mut socket, Duration::from_secs(3)).await else {
             break;
         };
-        if update["data"]["default_bot_id"].is_null() {
-            cleared = true;
+        if !update["data"]["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["id"] == json!(created))
+        {
+            assert_eq!(update["data"]["default_bot_id"], json!(main));
+            removed = true;
             break;
         }
     }
-    assert!(
-        cleared,
-        "deleting the main bot clears the default for subscribers"
-    );
+    assert!(removed, "deleting a bot reaches subscribers");
 }
 
 #[tokio::test(flavor = "multi_thread")]

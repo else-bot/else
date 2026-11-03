@@ -26,6 +26,11 @@ impl From<BotError> for ApiError {
     fn from(err: BotError) -> Self {
         match err {
             BotError::NotFound => ApiError::not_found(),
+            BotError::MainBot => ApiError::new(
+                StatusCode::CONFLICT,
+                "main_bot",
+                "The main bot cannot be deleted.",
+            ),
             BotError::RequestConflict => ApiError::new(
                 StatusCode::CONFLICT,
                 "request_conflict",

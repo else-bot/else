@@ -192,7 +192,7 @@ async fn delete_retains_data_and_is_repeatable() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_main_and_last_bot_clears_default_permanently() {
+async fn the_main_bot_cannot_be_deleted() {
     let app = TestApp::installed().await;
     let listing = app.owner("GET", "/v1/bots", None).await;
     let main = listing.body["default_bot_id"].as_str().unwrap().to_owned();
@@ -201,37 +201,20 @@ async fn deleting_main_and_last_bot_clears_default_permanently() {
         .unwrap()
         .to_owned();
 
-    // Deleting a non-default bot leaves the default alone.
+    // Deleting another bot leaves the main bot alone.
     app.owner("DELETE", &format!("/v1/bots/{other}"), None)
         .await;
     let listing = app.owner("GET", "/v1/bots", None).await;
     assert_eq!(listing.body["default_bot_id"], main);
 
-    app.owner("DELETE", &format!("/v1/bots/{main}"), None).await;
+    // The main bot is refused, and stays the active main bot.
+    let refused = app.owner("DELETE", &format!("/v1/bots/{main}"), None).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(refused.body["error"]["code"], "main_bot");
     let listing = app.owner("GET", "/v1/bots", None).await;
-    assert_eq!(listing.body["default_bot_id"], serde_json::Value::Null);
-    assert_eq!(listing.body["bots"], json!([]));
-
-    // Repeated setup and startup respect the empty installation.
-    for _ in 0..2 {
-        else_api::db::migrate(&app.db.pool).await.unwrap();
-        let report = else_api::db::installation::setup(&app.db.pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            report.main_bot,
-            else_api::db::installation::MainBot::AlreadyInstalled(None)
-        );
-        assert_eq!(
-            else_api::db::installation::check_installed(&app.db.pool)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-    let listing = app.owner("GET", "/v1/bots", None).await;
-    assert_eq!(listing.body["bots"], json!([]));
-    assert_eq!(row_counts(&app).await, (2, 2), "tombstoned data retained");
+    assert_eq!(listing.body["default_bot_id"], main);
+    let bot = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
+    assert_eq!(bot.body["bot"]["deleted_at"], serde_json::Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread")]
