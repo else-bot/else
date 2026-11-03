@@ -4,18 +4,18 @@ This file records the active task and evidence for the next agent. [TODO.md](../
 
 ## Active work
 
-- Task: none. The first usable POC (POC-001 through POC-012) is complete.
-- Owner or session: Claude Code implementation session (first usable POC target, POC-001 through POC-012).
-- Changed implementation paths: `apps/api`, `apps/desktop`, `scripts/demo.sh`, `.env.example`, `docs/development.md`, `docs/architecture.md`.
-- Next action: the assistant POC (POC-013 onward) needs the owner's go-ahead.
-- Owned running processes or services: the owner's `else-dev` Compose PostgreSQL was started with `docker compose up -d --wait`; it is preserved. Disposable demo database `else_demo` and `/tmp/else-demo` were dropped after the smoke run; no API, desktop, or sandbox process is left running.
-- Blockers: none recorded.
+- Task: none claimed for the new milestone. POC-001 through POC-024 are marked complete in TODO.md.
+- Owner or session: no new implementation claim in this planning update.
+- Changed implementation paths: none by this update. Pre-existing work in `apps/api/tests/acceptance_live.rs` and `docs/implementation/follow-up.md` is preserved.
+- Next action: when assigned the new milestone, select POC-025 after checking the current checkout and its dependencies.
+- Owned running processes or services: not inspected during this documentation update; preserve existing development services.
+- Blockers: no new implementation attempt. Known POC limitations remain in [follow-up.md](follow-up.md).
 
 Replace these fields when starting work. If a task is blocked, name its ID, reproduce the failure, and state what would unblock it. Do not clear a real blocker without recording the resolution. A later agent must inspect local services before assuming none are running.
 
 ## Current execution policy
 
-Runtime bots use the saved GPT 6.1 Sol Medium Fast default and must not spawn provider-native sub-agents. See [provider settings and policy](../providers.md#saved-execution-profile). This is a requirement for the pending implementation tasks. No runtime setting has been implemented by this documentation change.
+Runtime bots use the saved GPT 6.1 Sol Medium Fast default and must not spawn provider-native sub-agents. See [provider settings and policy](../providers.md#saved-execution-profile). Preserve saved owner profile updates when extending the implemented runtime. New guest tooling, vision, and CDP features must not enable provider-native sub-agents or host task tools.
 
 ## Evidence log
 

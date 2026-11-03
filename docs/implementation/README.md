@@ -1,11 +1,11 @@
 # Implement the POC one task at a time
 
-Use [TODO.md](../../TODO.md) as the completion queue. Use the [handoff log](progress.md) to resume work. Task details link to existing design decisions and identify what to build and prove. The current request creates this plan; implementation begins when the owner asks an agent to work through it.
+Use [TODO.md](../../TODO.md) as the completion queue. Use the [handoff log](progress.md) to resume work. Task details link to existing design decisions and identify what to build and prove. Use this runbook when the owner assigns an implementation target. Adding or revising tasks does not execute them.
 
 ## Start or resume
 
 1. Read the owner's current instructions, repository instructions, TODO.md, and the latest handoff. Run `git status --short` and inspect existing changes before editing.
-2. Identify the assigned delivery target. The default is POC-001 through POC-012. A request for the assistant POC includes POC-013 through POC-024.
+2. Identify the assigned delivery target. POC-001 through POC-024 are marked complete. The next milestone is VM automation and sidebar categories, POC-025 through POC-032. Preserve completed checkboxes and their evidence.
 3. Resume the active task if its unfinished changes belong to this work. Otherwise choose the first unchecked task in the assigned target whose dependencies are complete and which has no unresolved blocker.
 4. Read that task's references and inspect the affected code. Verify the installed tool and dependency interfaces before relying on version-specific research.
 5. Record the active task and its immediate next action in the handoff. Implement that task, verify its acceptance checks, and record the result.
@@ -53,6 +53,10 @@ Use the [development setup](../development.md). Integration tests need their own
 
 Task completion includes stopping disposable services and test processes owned by that task. Preserve the owner's development services and saved data. Give long-lived test jobs explicit cleanup and deadlines.
 
+## Run GUI checks in a contained desktop
+
+Before launching or driving a GUI app or any test that may open a window, follow the environment's GUI-isolation instructions. On this host, read the omabox skill and run GPUI checks in its contained desktop. Never redirect display variables to the owner's real session. Bot desktop input and screenshots must target the assigned micro-VM's display. These are distinct from the development desktop used to test the GPUI client.
+
 ## Handle interruptions and blockers
 
 Before a context handoff, record the active task, changed paths, completed checks, exact unfinished action, and any running processes or owned service names. Another agent must be able to resume without rereading the full conversation.
@@ -67,16 +71,17 @@ If no task is eligible, report the concrete blocker. If the assigned target is c
 | --- | --- |
 | First usable POC | POC-001 through POC-012 complete. Real GPUI, PostgreSQL, and host Codex support two bots, create/delete, durable chat, stop work, and restart recovery. |
 | Assistant POC | POC-001 through POC-024 complete. Add verified memory, real one-slot delegation, isolated guest work, Codex/Claude switching, and encrypted remote recovery. |
+| VM automation and sidebar categories | POC-025 through POC-032 complete. Prove guest runtimes and scripts, model-visible screenshots and desktop input, CDP scripts against the visible browser, and categories preserved through restart and backup/restore. |
 
 A real implementation can be ready for its first demo while later research integrations remain unfinished. Report the completed target explicitly.
 
 ## Continuation prompt
 
-Give an implementation agent this prompt to work toward the first checkpoint:
+Give an implementation agent this prompt to work through the next milestone:
 
 ```text
 Work through TODO.md using docs/implementation/README.md.
-Target the first usable POC, POC-001 through POC-012.
+Target VM automation and sidebar categories, POC-025 through POC-032.
 Read docs/implementation/progress.md and inspect the current checkout first.
 Resume the active task or pick the first eligible unchecked task.
 Implement one task at a time, prove its acceptance checks, update the queue
@@ -85,4 +90,4 @@ Continue without per-task confirmation until the target passes or no eligible
 task remains. Keep commits local. Preserve existing data and unrelated work.
 ```
 
-To assign the full backlog, replace the target line with `Target the assistant POC, POC-001 through POC-024.`
+Earlier POC targets retain their original definitions and completed evidence. Do not reset them to make the new queue eligible. See [follow-up.md](follow-up.md) for known limitations outside this milestone.

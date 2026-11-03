@@ -4,7 +4,7 @@ else.bot is a personal AI agent that learns to reflect its owner. One main assis
 
 You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
 
-The first usable POC runs: a native GPUI desktop where you create bots, chat with each through your host Codex subscription, stop work, and delete bots, backed by a Rust API and PostgreSQL that survive restarts. Memory, delegation, bot computers, provider switching, and backups are the next milestone.
+POC-001 through POC-024 are marked complete: the GPUI messaging app, Rust API, PostgreSQL storage, memory, delegation, bot computers, provider switching, and backup/recovery paths are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits. The next milestone adds guest programming tools, script workflows, visual desktop control, CDP scripting, and sidebar categories.
 
 The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
 
@@ -57,7 +57,7 @@ cargo run -p else-api -- serve     # leave running
 cargo run -p else-desktop          # in another terminal
 ```
 
-The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs in a bubblewrap sandbox with no tools, no shell, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
+The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs in a bubblewrap sandbox with scoped else.bot tools, no native host shell, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
 
 ## Repository and local setup
 
@@ -89,7 +89,7 @@ See [local development](docs/development.md) for prerequisites, configuration, r
 
 ## Implementation backlog
 
-[TODO.md](TODO.md) is the ordered queue for implementation. It defines a first usable messaging POC and a second milestone for memory, delegation, bot computers, provider switching, and recovery. Each task has dependencies, references, and acceptance checks.
+[TODO.md](TODO.md) is the ordered queue for implementation. The two POC milestones are marked complete. [POC-025 through POC-032](docs/implementation/05-vm-automation-and-categories.md) cover the next VM automation and sidebar-category milestone. Each task has dependencies, references, and acceptance checks.
 
 The [agent runbook](docs/implementation/README.md) explains how to select a task, verify it, commit progress, and continue. The [handoff log](docs/implementation/progress.md) records active work and evidence across sessions.
 
