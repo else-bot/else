@@ -210,13 +210,16 @@ for distro in "${DISTROS[@]}"; do
 	docker run -d --name "$pg" --network "$network" -e POSTGRES_USER=else -e POSTGRES_DB=else \
 		-e POSTGRES_PASSWORD="$password" postgres:18.6 >/dev/null
 	for _ in $(seq 1 60); do docker exec "$pg" pg_isready -U else -d else >/dev/null 2>&1 && break; sleep 1; done
-	if timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
+	# In the background and waited for: an interrupt then reaches the trap
+	# at once, which removes the containers.
+	timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
 		-v "$PWD:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
 		-v "else-install-toolchain:/home/tester/.else/toolchain" \
 		-v "else-install-build-$distro:/home/tester/.else/build" \
 		-e ELSE_DATABASE_URL="postgresql://else:$password@$pg:5432/else" \
 		"$image" bash -c "bash /harness/prepare.sh && su - tester -c \"ELSE_DATABASE_URL='\$ELSE_DATABASE_URL' bash /harness/scenario.sh\"" \
-		>"$log" 2>&1; then
+		>"$log" 2>&1 &
+	if wait $!; then
 		results+=("$distro: PASS ($(($(date +%s) - started)) s)")
 	else
 		results+=("$distro: FAIL ($(($(date +%s) - started)) s), see $log")
