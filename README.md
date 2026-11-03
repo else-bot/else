@@ -60,11 +60,16 @@ It installs the latest release into `~/.else`, asking once before it installs an
 - in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
 - PostgreSQL 18 as the Docker Compose project `else-bot` with a generated password;
 - the guest VM image (about 15 minutes the first time);
-- `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`.
+- `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`. The installer asks once whether the API should start at boot; if yes, it turns on lingering for your user with `loginctl enable-linger`, using sudo if needed. `--autostart` and `--no-autostart` choose without asking, and the choice is kept for updates.
 
 Bot computers need `/dev/kvm`; the installer offers to add you to the `docker` and `kvm` groups (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
-On macOS the installer builds only the desktop client (it needs Xcode with the Metal toolchain) and prints how to reach an API on a Linux machine through an SSH tunnel. macOS and arm64 Linux are not tested yet.
+On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, PostgreSQL in Docker, Microsandbox, and the guest image. Before running it, install:
+- Xcode with the Metal toolchain (the desktop compiles Metal shaders);
+- OrbStack or Docker Desktop, running;
+- the PostgreSQL 18 client tools. If they are missing, the installer offers to run `brew install postgresql@18`.
+
+Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`, and you should also set OrbStack or Docker Desktop to start at login. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
 
 ### Update
 

@@ -4,7 +4,7 @@ The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL 
 
 ## Prerequisites
 
-For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else` and is tested by `scripts/test-install.sh` in Debian, Ubuntu, and Arch containers. A development checkout uses the root `.env` and `~/.local/share/else-bot` as below.
+For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else` and is tested by `scripts/test-install.sh` in Debian, Ubuntu, and Arch containers (the macOS path is checked by hand). A development checkout uses the root `.env` and `~/.local/share/else-bot` as below.
 
 Install Rust with Cargo and rustfmt, Docker Engine with Docker Compose, and the PostgreSQL 18 client tools (`pg_dump`, `pg_restore`; checked with 18.6) for backups. Checked with Rust 1.98.0 and Compose 5.6.1. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run the commands below from the repository root.
 
