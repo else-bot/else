@@ -33,7 +33,6 @@ actions!(
         NewBot,
         StopWork,
         DeleteBot,
-        NextProvider,
         LoadOlder,
         NewCategory,
         MoveBot
@@ -55,7 +54,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-n", NewBot, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-x", StopWork, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", DeleteBot, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-p", NextProvider, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-up", LoadOlder, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", NewCategory, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-m", MoveBot, Some(APP_CONTEXT)),
@@ -174,7 +172,6 @@ pub struct ElseApp {
     composer: Entity<TextareaState>,
     drafts: HashMap<Uuid, String>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
-    provider_choice: HashMap<Uuid, String>,
     stopping: HashSet<Uuid>,
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
@@ -236,7 +233,6 @@ impl ElseApp {
             composer,
             drafts: HashMap::new(),
             pending: HashMap::new(),
-            provider_choice: HashMap::new(),
             stopping: HashSet::new(),
             notice: None,
             create: None,
@@ -653,46 +649,6 @@ impl ElseApp {
 
     // ----- Sending ----------------------------------------------------------
 
-    fn provider_for(&self, bot: Uuid) -> Option<String> {
-        self.provider_choice
-            .get(&bot)
-            .cloned()
-            .or_else(|| {
-                self.view
-                    .as_ref()
-                    .filter(|v| v.bot_id == bot)
-                    .and_then(|v| v.conversation.as_ref())
-                    .and_then(|c| c.selected_provider_id.clone())
-            })
-            .or_else(|| {
-                self.caps
-                    .as_ref()
-                    .and_then(|c| c.default_provider_id.clone())
-            })
-    }
-
-    /// Choose the next available provider for the selected bot's next message.
-    fn cycle_provider(&mut self, cx: &mut Context<Self>) {
-        let (Some(bot), Some(caps)) = (self.selected, self.caps.as_ref()) else {
-            return;
-        };
-        let available: Vec<&str> = caps
-            .providers
-            .iter()
-            .filter(|p| p.available)
-            .map(|p| p.id.as_str())
-            .collect();
-        if available.is_empty() {
-            return;
-        }
-        let current = self.provider_for(bot);
-        let ix = current
-            .and_then(|c| available.iter().position(|p| *p == c))
-            .map_or(0, |ix| (ix + 1) % available.len());
-        self.provider_choice.insert(bot, available[ix].to_owned());
-        cx.notify();
-    }
-
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected else { return };
         let text = self.composer.read(cx).value().to_string();
@@ -711,29 +667,11 @@ impl ElseApp {
             cx.notify();
             return;
         }
-        // Never substitute another provider for the one chosen.
-        let provider = self.provider_for(bot);
-        if let Some(id) = &provider {
-            let info = self
-                .caps
-                .as_ref()
-                .and_then(|caps| caps.providers.iter().find(|p| p.id == *id));
-            if !info.is_some_and(|p| p.available) {
-                let reason = info
-                    .and_then(|p| p.unavailable_reason.clone())
-                    .unwrap_or_else(|| "it is not offered by this API".into());
-                self.notice = Some(format!(
-                    "{} is unavailable ({reason}). Choose another provider.",
-                    self.provider_label(id)
-                ));
-                cx.notify();
-                return;
-            }
-        }
         let pending = PendingSend {
             request_id: Uuid::new_v4(),
             text,
-            provider_id: provider,
+            // The bot's own provider and model, chosen by the API.
+            provider_id: None,
             unknown: None,
             rejected: None,
         };
@@ -1831,31 +1769,6 @@ impl ElseApp {
 
     fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let provider = self.provider_for(bot.id);
-        let mut picker = h_flex().gap_1();
-        if let Some(caps) = &self.caps {
-            for info in &caps.providers {
-                let id = info.id.clone();
-                let selected = provider.as_deref() == Some(info.id.as_str());
-                let mut button = Button::new(SharedString::from(format!("provider-{}", info.id)))
-                    .label(info.label.clone())
-                    .xsmall()
-                    .disabled(!info.available);
-                button = if selected {
-                    button.primary()
-                } else {
-                    button.ghost()
-                };
-                if let Some(reason) = &info.unavailable_reason {
-                    button = button.tooltip(reason.clone());
-                }
-                let bot_id = bot.id;
-                picker = picker.child(button.on_click(cx.listener(move |app, _, _, cx| {
-                    app.provider_choice.insert(bot_id, id.clone());
-                    cx.notify();
-                })));
-            }
-        }
         let activity = self
             .view
             .as_ref()
@@ -1865,7 +1778,7 @@ impl ElseApp {
         let busy = activity.as_ref().is_some_and(|a| a.phase != "idle");
         let stopping = self.stopping.contains(&bot.id)
             || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
-        let mut actions = h_flex().gap_2().child(picker);
+        let mut actions = h_flex().gap_2();
         if busy || stopping {
             actions = actions.child(
                 Button::new("stop-work")
@@ -2313,7 +2226,6 @@ impl Render for ElseApp {
             .on_action(cx.listener(|app, _: &DeleteBot, window, cx| {
                 app.open_delete_dialog(window, cx);
             }))
-            .on_action(cx.listener(|app, _: &NextProvider, _, cx| app.cycle_provider(cx)))
             .on_action(cx.listener(|app, _: &LoadOlder, window, cx| app.load_older(window, cx)))
             .on_action(cx.listener(|app, _: &NewCategory, window, cx| {
                 if app.connection == Connection::Connected {

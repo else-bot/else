@@ -22,6 +22,7 @@ use crate::model::{Item, Snapshot, Turn};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Read again by the bot model pickers.
 pub struct ProviderInfo {
     pub id: String,
     pub label: String,
@@ -35,6 +36,7 @@ pub struct Limits {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Read again by the bot model pickers.
 pub struct Capabilities {
     pub default_provider_id: Option<String>,
     pub providers: Vec<ProviderInfo>,
