@@ -10,7 +10,7 @@ This is the planned whole-assistant recovery procedure. VM archive and browser-p
 6. Apply any pending versioned migrations required by the installed application version.
 7. Import the image and snapshot artifacts into separate runtime storage. Preserve existing bot environments.
 8. Restore supported host provider-state artifacts to their isolated bot locations without overwriting existing state.
-9. Validate the recovered configuration and bot files with compute stopped. Preserve each computer's recorded on-demand or explicitly stopped intent and each bot's deletion state.
+9. Copy the bots' project directories (`<ELSE_BOTS_DIR>/<bot id>`) by hand: backup sets do not include them yet, and a restored computer has no project mount until it is recreated or upgraded. Validate the recovered configuration and bot files with compute stopped. Preserve each computer's recorded on-demand or explicitly stopped intent and each bot's deletion state.
 10. Explicitly select the verified new database and runtime paths, then start else.bot. Startup preserves restored state and creates only missing resources. A missing previously recorded bot computer requires recovery rather than an empty replacement.
 11. Reauthenticate provider accounts when necessary. Resume native sessions where compatible, or rebuild context from PostgreSQL. Reconnect clients.
 

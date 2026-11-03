@@ -534,6 +534,7 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), BackupError> {
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).expect("no NUL");
     let (a, b) = (c(from), c(to));
     // SAFETY: two valid NUL-terminated paths relative to the cwd.
+    #[cfg(target_os = "linux")]
     let rc = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
@@ -543,6 +544,9 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), BackupError> {
             libc::RENAME_NOREPLACE,
         )
     };
+    // SAFETY: as above; macOS spells the same guarantee RENAME_EXCL.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
     if rc != 0 {
         return Err(BackupError::io(
             to.display(),
@@ -721,6 +725,21 @@ pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
         };
     }
     Ok(Some(DirLock(file)))
+}
+
+/// A bare tool name found on the API's own `PATH`. The tools run with a
+/// cleared environment, where a bare name would only be looked up in the
+/// libc default (`/bin:/usr/bin`), missing e.g. Homebrew's client tools.
+pub fn resolve_tool(tool: &Path) -> PathBuf {
+    if tool.components().count() != 1 {
+        return tool.to_owned();
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| tool.to_owned())
 }
 
 /// Run a tool with its output drained continuously and only bounded tails

@@ -15,8 +15,8 @@ use crate::app::providers::{Availability, Provider};
 use crate::config::Config;
 
 /// Providers enabled by configuration, in default-selection order. Codex and
-/// Claude are always listed; it reports unavailable (with a reason) when bubblewrap,
-/// the CLI, or its host login is missing.
+/// Claude are always listed; each reports unavailable (with a reason) when its
+/// CLI or host login is missing.
 pub fn registry(config: &Config) -> Registry {
     build(config).0
 }
@@ -24,27 +24,28 @@ pub fn registry(config: &Config) -> Registry {
 /// The registry and the no-tools summarizer for memory (the same Codex).
 pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker::Summarizer>>) {
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
-    let sandbox = host::HostSandbox::detect(&config.data_dir).ok();
+    let host = host::Host::new(&config.data_dir, &config.bots_dir);
     let program = executable(config.codex_bin.as_deref(), "codex");
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     );
-    // Sandboxed providers reach the API over loopback.
+    // Providers reach the API over loopback.
     let mut tool_addr = config.bind;
     if tool_addr.ip().is_unspecified() {
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
     }
     let tool_url = format!("http://{tool_addr}/tools/v1/mcp");
-    let codex =
-        Arc::new(codex::Codex::detect(sandbox.clone(), program, auth).with_tools(tool_url.clone()));
+    let codex = Arc::new(
+        codex::Codex::detect(Some(host.clone()), program, auth).with_tools(tool_url.clone()),
+    );
     providers.push(codex.clone());
     // Claude is listed too; it is used only once an explicit Claude
     // profile is saved (no default is seeded).
     let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let home = std::env::var("HOME").ok();
     let claude = claude::Claude::detect(
-        sandbox,
+        Some(host),
         executable(config.claude_bin.as_deref(), "claude"),
         claude_home::host_credentials_file(config_dir.as_deref(), home.as_deref()),
         claude_home::host_account(config_dir.as_deref(), home.as_deref()),
@@ -62,7 +63,7 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
 
 /// A provider CLI: the configured path, else `name` on `PATH`, resolved
 /// to the native executable. Version-manager shims (such as mise's, which
-/// are links to the `mise` binary) cannot run in the sandbox, so a shim is
+/// are links to the `mise` binary) do not run with the passed environment, so a shim is
 /// resolved through `mise which` (with this process's environment, so the
 /// version mise selects now). A configured path that cannot be resolved is
 /// kept, and the provider reports why it does not run.

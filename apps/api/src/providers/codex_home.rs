@@ -1,31 +1,32 @@
-//! Per-bot Codex home and locked configuration.
+//! Per-bot Codex home and its configuration.
 //!
 //! Each bot gets its own `CODEX_HOME` (sessions, caches, and settings stay
-//! separate). The owner's supported ChatGPT login is shared by bind-mounting
-//! the host `auth.json` into that home: it is never copied, and token
-//! refreshes write through to the one file. The configuration is rewritten on
-//! every launch so nothing a session does can widen it: no shell or exec
-//! tools, no web search, browser, apps, plugins, hooks, MCP servers, image
-//! generation, or native sub-agents, read-only sandbox, never ask for
-//! approval.
+//! separate). The owner's supported ChatGPT login is shared by a symlink to
+//! the host `auth.json`: it is never copied, and token refreshes write
+//! through to the one file. The configuration is rewritten on every launch so
+//! nothing a session does can change it. A turn gets Codex's shell and file
+//! tools with full host access (`danger-full-access`, never asking for
+//! approval), else.bot's MCP tools, and nothing else: no web search,
+//! browser, apps, plugins, hooks, other MCP servers, image generation, or
+//! native sub-agents. A memory summary gets no tools at all and a read-only
+//! sandbox.
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::host::{Bind, BotDirs, SANDBOX_PROVIDER_HOME};
+use super::host::{BotDirs, link_login};
 
 /// Feature flags forced off for every bot session. Native sub-agents
-/// (`multi_agent*`) are disabled by policy, not only by prompt. Codex
-/// 0.166 keeps `unified_exec` (the execution backend) on regardless of
-/// configuration; with `shell_tool` off and a read-only, never-approve
-/// sandbox it exposes no command tool, which the adapter verifies from live
-/// turn events and rejects if seen.
+/// (`multi_agent*`) are disabled by policy, not only by prompt. `shell_tool`
+/// is set separately: on for turns, off for summaries. Codex 0.166 keeps
+/// `unified_exec` (the execution backend) on regardless of configuration;
+/// with `shell_tool` off and a read-only, never-approve sandbox it exposes
+/// no command tool, which the summary adapter verifies from live events.
 pub const DISABLED_FEATURES: &[&str] = &[
     "multi_agent",
     "multi_agent_v2",
-    "shell_tool",
     "shell_snapshot",
     "apps",
     "plugins",
@@ -52,11 +53,23 @@ pub const DISABLED_FEATURES: &[&str] = &[
 /// sends it as the bearer token to else.bot's MCP endpoint.
 pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
 
-pub fn config_toml(tool_url: Option<&str>) -> String {
-    let mut text = String::from(
+/// The sandbox mode for a session: full host access with host tools,
+/// otherwise read-only.
+pub fn sandbox_mode(host_tools: bool) -> &'static str {
+    if host_tools {
+        "danger-full-access"
+    } else {
+        "read-only"
+    }
+}
+
+/// The configuration for one launch. `host_tools` gives a turn Codex's own
+/// shell and file tools on the host; a summary runs without.
+pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
+    let mut text = format!(
         "# Written by else.bot before every launch; edits are overwritten.\n\
          approval_policy = \"never\"\n\
-         sandbox_mode = \"read-only\"\n\
+         sandbox_mode = \"{sandbox}\"\n\
          web_search = \"disabled\"\n\
          project_doc_max_bytes = 0\n\
          check_for_update_on_startup = false\n\
@@ -64,7 +77,9 @@ pub fn config_toml(tool_url: Option<&str>) -> String {
          [agents]\n\
          enabled = false\n\
          \n\
-         [features]\n",
+         [features]\n\
+         shell_tool = {host_tools}\n",
+        sandbox = sandbox_mode(host_tools),
     );
     for feature in DISABLED_FEATURES {
         text.push_str(&format!("{feature} = false\n"));
@@ -125,29 +140,24 @@ fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> 
     fs::rename(&temp, dir.join(name))
 }
 
-/// Prepare the bot's Codex home: rewrite the locked config and reset the
-/// empty mount point for the login. Returns the bind for the login file.
-pub fn prepare(dirs: &BotDirs, host_auth: &Path, tool_url: Option<&str>) -> std::io::Result<Bind> {
+/// Prepare the bot's Codex home: rewrite the config and point `auth.json`
+/// at the host login (anything else at that path is replaced).
+pub fn prepare(
+    dirs: &BotDirs,
+    host_auth: &Path,
+    tool_url: Option<&str>,
+    host_tools: bool,
+) -> std::io::Result<()> {
     replace_file(
         &dirs.provider_home,
         "config.toml",
-        config_toml(tool_url).as_bytes(),
+        config_toml(tool_url, host_tools).as_bytes(),
     )?;
-    // An empty placeholder the login is mounted over; never a copy. Anything
-    // else at that path (a symlink, a directory, content) is replaced.
-    let placeholder = fs::symlink_metadata(dirs.provider_home.join("auth.json"));
-    if !placeholder.is_ok_and(|m| m.is_file() && m.len() == 0) {
-        let path = dirs.provider_home.join("auth.json");
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            fs::remove_dir_all(&path)?;
-        }
-        replace_file(&dirs.provider_home, "auth.json", b"")?;
+    let path = dirs.provider_home.join("auth.json");
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+        fs::remove_dir_all(&path)?;
     }
-    Ok(Bind {
-        source: host_auth.to_owned(),
-        target: format!("{SANDBOX_PROVIDER_HOME}/auth.json"),
-        writable: true,
-    })
+    link_login(&dirs.provider_home, "auth.json", host_auth)
 }
 
 #[cfg(test)]
@@ -156,7 +166,7 @@ mod tests {
 
     #[test]
     fn config_disables_native_agents_and_tools() {
-        let text = config_toml(None);
+        let text = config_toml(None, false);
         assert!(text.contains("[agents]\nenabled = false"));
         for flag in [
             "multi_agent = false",
@@ -165,13 +175,26 @@ mod tests {
         ] {
             assert!(text.contains(flag), "{flag}");
         }
+        assert!(text.contains("sandbox_mode = \"read-only\""));
+        assert!(text.contains("web_search = \"disabled\""));
+    }
+
+    #[test]
+    fn host_tools_add_the_shell_with_full_access_and_nothing_else() {
+        let text = config_toml(None, true);
+        assert!(text.contains("shell_tool = true"));
+        assert!(text.contains("sandbox_mode = \"danger-full-access\""));
+        assert!(text.contains("approval_policy = \"never\""));
+        for flag in ["multi_agent = false", "multi_agent_v2 = false"] {
+            assert!(text.contains(flag), "{flag}");
+        }
         assert!(text.contains("web_search = \"disabled\""));
     }
 
     #[test]
     fn config_offers_only_elsebot_tools_with_the_grant_from_the_environment() {
-        assert!(!config_toml(None).contains("[mcp_servers."));
-        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"));
+        assert!(!config_toml(None, true).contains("[mcp_servers."));
+        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"), true);
         assert!(
             text.contains("[mcp_servers.elsebot]\nurl = \"http://127.0.0.1:7878/tools/v1/mcp\"")
         );
@@ -187,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_never_writes_through_planted_symlinks() {
+    fn prepare_never_writes_through_planted_symlinks_and_links_the_login() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("codex-home");
         fs::create_dir(&home).unwrap();
@@ -197,10 +220,12 @@ mod tests {
         std::os::unix::fs::symlink(&outside, home.join("auth.json")).unwrap();
         let dirs = BotDirs {
             root: dir.path().to_owned(),
-            work: dir.path().join("work"),
+            project: dir.path().join("project"),
             provider_home: home.clone(),
         };
-        prepare(&dirs, Path::new("/nonexistent/auth.json"), None).unwrap();
+        let login = dir.path().join("host-auth.json");
+        fs::write(&login, "LOGIN").unwrap();
+        prepare(&dirs, &login, None, true).unwrap();
         assert_eq!(fs::read_to_string(&outside).unwrap(), "HOST FILE");
         assert!(
             fs::symlink_metadata(home.join("config.toml"))
@@ -209,10 +234,12 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(home.join("config.toml")).unwrap(),
-            config_toml(None)
+            config_toml(None, true)
         );
-        let auth = fs::symlink_metadata(home.join("auth.json")).unwrap();
-        assert!(auth.is_file() && auth.len() == 0);
+        assert_eq!(fs::read_link(home.join("auth.json")).unwrap(), login);
+        // A refresh writes through to the host login.
+        fs::write(home.join("auth.json"), "REFRESHED").unwrap();
+        assert_eq!(fs::read_to_string(&login).unwrap(), "REFRESHED");
     }
 
     #[test]

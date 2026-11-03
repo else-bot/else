@@ -1,57 +1,62 @@
-//! POC-010: restricted host execution and the task-grant tool boundary.
+//! POC-010: provider CLIs on the host, and the task-grant tool boundary.
 //!
-//! The sandbox tests use the real bubblewrap. The Codex checks use the
-//! installed CLI and the owner's existing login without running inference.
+//! The launch tests run a shell the way providers run. The Codex check uses
+//! the installed CLI and the owner's existing login without running
+//! inference. Process discovery reads `/proc`, so those tests run on Linux.
 
 mod common;
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::TestApp;
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::codex_home;
-use else_api::providers::host::{HostSandbox, LaunchSpec, Supervised};
+#[cfg(target_os = "linux")]
+use else_api::providers::host::Supervised;
+use else_api::providers::host::{Host, LaunchSpec, MARKER_VAR};
 use serde_json::json;
 use uuid::Uuid;
 
 struct Fixture {
     _dir: tempfile::TempDir,
     data: PathBuf,
-    sandbox: HostSandbox,
+    bots: PathBuf,
+    host: Host,
 }
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
+    let root = dir.path().canonicalize().unwrap();
+    let data = root.join("data");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(data.join("owner-token"), "OWNER-TOKEN-CANARY").unwrap();
-    std::fs::write(data.join("secret-key"), "SECRET-KEY-CANARY").unwrap();
-    let sandbox = HostSandbox::detect(&data).expect("bubblewrap must work on this host");
+    let bots = root.join("bots");
+    let host = Host::new(&data, &bots);
     Fixture {
         _dir: dir,
         data,
-        sandbox,
+        bots,
+        host,
     }
 }
 
 fn shell(fx: &Fixture, bot: Uuid, script: &str) -> LaunchSpec {
     LaunchSpec {
         turn_id: Uuid::new_v4(),
-        dirs: fx.sandbox.bot_dirs(bot, "test").unwrap(),
-        program: PathBuf::from("/usr/bin/sh"),
+        dirs: fx.host.bot_dirs(bot, "test").unwrap(),
+        program: PathBuf::from("/bin/sh"),
         args: vec!["-c".into(), script.into()],
         env: vec![("PROVIDER_SETTING".into(), "allowed".into())],
-        extra_binds: vec![],
     }
 }
 
 async fn output(fx: &Fixture, spec: &LaunchSpec) -> String {
-    let out = fx.sandbox.command(spec).unwrap().output().await.unwrap();
+    let out = fx.host.command(spec).output().await.unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -61,143 +66,104 @@ async fn output(fx: &Fixture, spec: &LaunchSpec) -> String {
 }
 
 #[tokio::test]
-async fn sandbox_environment_and_files_are_restricted() {
+async fn runs_start_in_the_project_with_the_users_session_environment() {
     let fx = fixture();
     let bot = Uuid::new_v4();
-    let sibling = Uuid::new_v4();
-    let sibling_dirs = fx.sandbox.bot_dirs(sibling, "test").unwrap();
-    std::fs::write(sibling_dirs.work.join("sibling.txt"), "SIBLING-CANARY").unwrap();
-    let home = std::env::var("HOME").unwrap();
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
-    let own = shell(&fx, bot, "true");
-    std::fs::write(own.dirs.work.join("own.txt"), "OWN-OK").unwrap();
-    let data = fx.data.display().to_string();
-    let script = format!(
-        "env; echo ---; cat own.txt; echo; \
-         for f in '{data}/owner-token' '{data}/secret-key' '{sib}/sibling.txt' \
-                  '{home}/.codex/auth.json' '{home}/.ssh' '/run/user/{uid}/bus' \
-                  '/var/run/docker.sock' '/run/docker.sock' '/run' '/etc/os-release' \
-                  '/etc/codex' '/etc/machine-id'; do \
-           if [ -e \"$f\" ]; then echo \"VISIBLE $f\"; else echo \"hidden $f\"; fi; done; \
-         if [ -e /proc/{host_pid} ]; then echo \"VISIBLE host pid\"; fi; \
-         echo procs=$(ls /proc | grep -c '^[0-9]')",
-        sib = sibling_dirs.work.display(),
-        host_pid = std::process::id(),
-    );
-    let mut spec = shell(&fx, bot, &script);
-    spec.dirs = own.dirs.clone();
-    let out = output(&fx, &spec).await;
-    let (env, rest) = out.split_once("---").unwrap();
-    let mut keys: Vec<&str> = env
-        .lines()
-        .filter_map(|line| line.split_once('=').map(|(k, _)| k))
-        .collect();
-    keys.sort();
-    assert_eq!(
-        keys,
-        vec![
-            "ELSE_BOT_SANDBOX",
-            "HOME",
-            "LANG",
-            "PATH",
-            "PROVIDER_SETTING",
-            "PWD",
-            "SHLVL",
-            "TMPDIR",
-            "_", // set by the shell itself
-        ],
-        "only the allowlist reaches the provider"
-    );
-    for canary in [
-        "OWNER-TOKEN-CANARY",
-        "SECRET-KEY-CANARY",
-        "SIBLING-CANARY",
-        "DATABASE_URL",
-        "SECRET_KEY=",
-    ] {
-        assert!(!out.contains(canary), "{canary} leaked");
+    let spec = shell(&fx, bot, "pwd; echo ---; env");
+    let dirs = &spec.dirs;
+    assert_eq!(dirs.project, fx.bots.join(bot.to_string()));
+    assert_eq!(fx.host.project_path(bot), dirs.project);
+    assert!(dirs.provider_home.starts_with(fx.data.join("bots")));
+    for dir in [&dirs.project, &dirs.provider_home] {
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", dir.display());
     }
-    assert!(
-        rest.contains("OWN-OK"),
-        "the bot's own work directory is usable"
+    let out = output(&fx, &spec).await;
+    let (cwd, env) = out.split_once("---").unwrap();
+    assert_eq!(
+        Path::new(cwd.trim()).canonicalize().unwrap(),
+        dirs.project.canonicalize().unwrap(),
+        "the run starts in the bot's project"
     );
-    assert!(!rest.contains("VISIBLE"), "{rest}");
-    let procs: usize = rest
-        .trim()
-        .rsplit_once("procs=")
-        .unwrap()
-        .1
-        .parse()
-        .unwrap();
-    assert!(
-        procs <= 8,
-        "only the sandbox's own processes are visible ({procs})"
+    let vars: Vec<(&str, &str)> = env.lines().filter_map(|l| l.split_once('=')).collect();
+    let get = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    // The owner's session: host work sees their home and tools.
+    assert_eq!(get("HOME"), std::env::var("HOME").ok().as_deref());
+    assert_eq!(get("PATH"), std::env::var("PATH").ok().as_deref());
+    assert_eq!(get("PROVIDER_SETTING"), Some("allowed"));
+    assert_eq!(
+        get(MARKER_VAR),
+        Some(format!("{}:{}", fx.host.marker_prefix(), spec.turn_id).as_str())
     );
+    // Nothing of the API's own environment (cargo's, here) passes.
+    let session = [
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "PATH",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "TERM",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_AUTH_SOCK",
+    ];
+    let shell_own = ["PWD", "OLDPWD", "SHLVL", "_"];
+    for (key, _) in &vars {
+        assert!(
+            session.contains(key)
+                || shell_own.contains(key)
+                || key.starts_with("LC_")
+                || *key == "PROVIDER_SETTING"
+                || *key == MARKER_VAR,
+            "{key} leaked into the provider's environment"
+        );
+    }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn termination_reaps_the_whole_sandbox() {
+async fn termination_reaps_the_whole_process_group() {
     let fx = fixture();
     let spec = shell(
         &fx,
         Uuid::new_v4(),
         "sleep 300 & sleep 300 & sh -c 'sleep 300' & wait",
     );
-    let mut process = Supervised::spawn(fx.sandbox.command(&spec).unwrap()).unwrap();
+    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
-        fx.sandbox.live_processes(spec.turn_id).len() >= 4,
+        fx.host.live_processes(spec.turn_id).len() >= 4,
         "descendants are discoverable"
     );
     process.terminate(Duration::from_secs(2)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(fx.sandbox.live_processes(spec.turn_id), Vec::<i32>::new());
+    assert_eq!(fx.host.live_processes(spec.turn_id), Vec::<i32>::new());
 }
 
+/// A run whose supervisor vanished (as after an API crash) is found and
+/// terminated by the startup sweep.
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn sandbox_dies_with_its_parent_and_orphans_are_swept() {
+async fn orphans_are_swept() {
     let fx = fixture();
-    // The parent (a shell) is killed: bubblewrap takes the sandbox down.
     let spec = shell(&fx, Uuid::new_v4(), "sleep 300 & wait");
-    let mut args: Vec<OsString> = vec![
-        "-c".into(),
-        "\"$0\" \"$@\" & sleep 0.5; kill -9 $$".into(),
-        "/usr/bin/bwrap".into(),
-    ];
-    args.extend(fx.sandbox.args(&spec));
-    let status = tokio::process::Command::new("/usr/bin/sh")
-        .args(&args)
-        .env_clear()
-        .env(
-            "ELSE_BOT_SANDBOX",
-            format!("{}:{}", fx.sandbox.marker_prefix(), spec.turn_id),
-        )
-        .status()
-        .await
-        .unwrap();
-    assert!(!status.success());
-    for _ in 0..40 {
-        if fx.sandbox.live_processes(spec.turn_id).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        fx.sandbox.live_processes(spec.turn_id).is_empty(),
-        "no orphan after parent death"
-    );
-
-    // A sandbox whose supervisor vanished (as after an API crash that
-    // bubblewrap did not see) is found and terminated by the startup sweep.
-    let spec = shell(&fx, Uuid::new_v4(), "sleep 300 & wait");
-    let process = Supervised::spawn(fx.sandbox.command(&spec).unwrap()).unwrap();
+    let process = Supervised::spawn(fx.host.command(&spec)).unwrap();
     std::mem::forget(process);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!fx.sandbox.live_processes(spec.turn_id).is_empty());
-    assert!(fx.sandbox.sweep_orphans().unwrap() >= 1);
+    assert!(!fx.host.live_processes(spec.turn_id).is_empty());
+    assert!(fx.host.sweep_orphans().unwrap() >= 1);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(fx.sandbox.live_processes(spec.turn_id).is_empty());
+    assert!(fx.host.live_processes(spec.turn_id).is_empty());
 }
 
 fn installed_codex() -> Option<(PathBuf, PathBuf)> {
@@ -215,43 +181,52 @@ fn installed_codex() -> Option<(PathBuf, PathBuf)> {
 }
 
 #[tokio::test]
-async fn codex_runs_locked_down_with_the_shared_login() {
+async fn codex_runs_with_host_tools_and_the_shared_login() {
     let Some((codex, auth)) = installed_codex() else {
         eprintln!("SKIPPED: codex CLI or its login is not installed on this host");
         return;
     };
     let fx = fixture();
-    let dirs = fx.sandbox.bot_dirs(Uuid::new_v4(), "codex").unwrap();
-    let login = codex_home::prepare(&dirs, &auth, None).unwrap();
+    let dirs = fx.host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
+    codex_home::prepare(&dirs, &auth, None, true).unwrap();
     let launch = |args: &[&str]| LaunchSpec {
         turn_id: Uuid::new_v4(),
         dirs: dirs.clone(),
         program: codex.clone(),
         args: args.iter().map(OsString::from).collect(),
-        env: vec![("CODEX_HOME".into(), "/var/lib/provider-home".into())],
-        extra_binds: vec![login.clone()],
+        env: vec![(
+            "CODEX_HOME".into(),
+            dirs.provider_home.to_string_lossy().into_owned(),
+        )],
     };
-    // The locked configuration is valid for the installed version.
+    // The configuration is valid for the installed version.
     let out = output(
         &fx,
         &launch(&["--strict-config", "app-server", "--print-startup-config"]),
     )
     .await;
     assert!(out.contains("\"appServerVersion\""), "{out}");
-    // Native sub-agents and tool families are off.
+    // Native sub-agents and other tool families are off; the shell is on.
     let out = output(&fx, &launch(&["features", "list"])).await;
-    for feature in codex_home::DISABLED_FEATURES {
-        let line = out
-            .lines()
+    let state = |feature: &str| {
+        out.lines()
             .find(|line| line.split_whitespace().next() == Some(feature))
-            .unwrap_or_else(|| panic!("feature {feature} missing from `codex features list`"));
-        assert!(line.trim_end().ends_with("false"), "{line}");
+            .unwrap_or_else(|| panic!("feature {feature} missing from `codex features list`"))
+            .trim_end()
+            .to_owned()
+    };
+    for feature in codex_home::DISABLED_FEATURES {
+        assert!(state(feature).ends_with("false"), "{}", state(feature));
     }
+    assert!(
+        state("shell_tool").ends_with("true"),
+        "{}",
+        state("shell_tool")
+    );
     // The supported login works without copying credentials.
     let status = fx
-        .sandbox
+        .host
         .command(&launch(&["login", "status"]))
-        .unwrap()
         .output()
         .await
         .unwrap();
@@ -259,11 +234,10 @@ async fn codex_runs_locked_down_with_the_shared_login() {
         + &String::from_utf8_lossy(&status.stderr);
     assert!(status.status.success(), "{out}");
     assert!(out.to_lowercase().contains("logged in"), "{out}");
-    let placeholder = std::fs::metadata(dirs.provider_home.join("auth.json")).unwrap();
     assert_eq!(
-        placeholder.len(),
-        0,
-        "the bot's home holds a mount point, not a copy"
+        std::fs::read_link(dirs.provider_home.join("auth.json")).unwrap(),
+        auth,
+        "the bot's home links the login, never a copy"
     );
 }
 
@@ -475,23 +449,23 @@ async fn tool(app: &TestApp, path: &str, token: Option<&str>) -> common::Reply {
 
 /// Environment values given to a provider (such as its task grant) reach it
 /// but never appear on any host command line, which other users can read.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_secrets_stay_off_host_command_lines() {
     let fx = fixture();
     let mut spec = shell(&fx, Uuid::new_v4(), "echo \"$GRANT_CANARY\"; sleep 3");
     spec.env
         .push(("GRANT_CANARY".into(), "tg_canary_secret".into()));
-    let mut command = fx.sandbox.command(&spec).unwrap();
+    let mut command = fx.host.command(&spec);
     command.stdout(std::process::Stdio::piped());
     let process = Supervised::spawn(command).unwrap();
-    // Wait until the sandboxed shell runs (bubblewrap has read its options).
     for _ in 0..100 {
-        if !fx.sandbox.live_processes(spec.turn_id).is_empty() {
+        if !fx.host.live_processes(spec.turn_id).is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(!fx.sandbox.live_processes(spec.turn_id).is_empty());
+    assert!(!fx.host.live_processes(spec.turn_id).is_empty());
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
         if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
             let text = String::from_utf8_lossy(&cmdline);

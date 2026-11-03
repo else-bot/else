@@ -28,6 +28,8 @@ The [master key design](security.md#master-key-and-encrypted-secrets) covers `SE
 
 The `codex` and `claude` CLIs run on the host. VM snapshots therefore do not preserve their authentication or native session files.
 
+Each bot's project directory (`<ELSE_BOTS_DIR>/<bot id>`) is also on the host, mounted at `~/work` in its computer, so a computer's disk snapshot does not contain it. Backup sets do not include project directories yet, and a computer restored from a set has no project mount. Both are open work in the [backlog](../TODO.md).
+
 Inventory required host files per provider and pinned CLI version. Export only supported, necessary authentication and bot session state into a separate encrypted backup artifact. Do not archive the owner's whole home directory. Keep `SECRET_KEY` outside this artifact and ordinary backups.
 
 Record provider versions, bot-to-session mappings, and artifact references in the recovery manifest. PostgreSQL remains the source for conversation history, memory, instructions, and configuration. If a native session cannot be restored, create a new session with context rebuilt from PostgreSQL.

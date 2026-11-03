@@ -36,7 +36,10 @@ const GUEST_ARCHIVE: &str = "/var/lib/elsebot-upgrade/data.tar";
 /// SHA-256, and the user's numeric ID. It refuses unless the disk has room
 /// for the archive with a margin, and removes a partial archive on any
 /// failure, so the old computer never comes back with a full disk. Sparse
-/// files stay sparse.
+/// files stay sparse. The host project mounted at `~/work` is another file
+/// system and stays out; a computer created before that mount still has
+/// `~/work` on its disk, and unpacking it moves those files into the new
+/// computer's mount, the bot's host project directory.
 const PACK: &str = r#"set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
@@ -49,7 +52,7 @@ rm -f "$archive"
 need=$(du -skx $paths | awk '{s += $1} END {print s + 65536}')
 free=$(df -Pk /var/tmp | awk 'NR == 2 {print $4}')
 [ "$free" -ge "$need" ] || { echo "not enough free disk for the archive: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
-tar --numeric-owner --sparse -cpf "$archive" $paths
+tar --numeric-owner --sparse --one-file-system -cpf "$archive" $paths
 stat -c %s "$archive"
 sha256sum "$archive" | cut -d' ' -f1
 id -u elsebot 2>/dev/null || echo none
@@ -525,6 +528,7 @@ impl ComputerManager {
                 network: network.to_owned(),
                 ports,
                 files,
+                mounts: self.project_mounts(bot_id)?,
             })
             .await?;
         let out = self

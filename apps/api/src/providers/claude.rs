@@ -1,5 +1,5 @@
-//! The host Claude adapter, over Claude Code's structured print mode in the
-//! bot's sandbox (POC-020).
+//! The host Claude adapter, over Claude Code's structured print mode on the
+//! host, started in the bot's project directory (POC-020).
 //!
 //! One supervised CLI process runs per turn: `claude -p` with stream-json
 //! input and output, user-message replay, and partial messages. A new
@@ -10,17 +10,19 @@
 //! may hold an uncertain delivery is replaced and the conversation rebuilt
 //! from PostgreSQL.
 //!
-//! Restrictions, enforced by the CLI's flags and verified from its events:
-//! no built-in tools (`--tools ""`, and denied again in locked settings), so
-//! no shell, files, web, skills, or native sub-agents (the `Agent` tool); MCP
-//! only from else.bot's configuration (`--strict-mcp-config`), its tools
-//! pre-approved by name and authorized per call by the turn's task grant;
-//! no user, project, or local settings, hooks, or slash commands; an else.bot
-//! system prompt replacing Claude Code's. The `system/init` event must report
-//! exactly else.bot's tools and server and the saved model; any other tool
-//! use, a permission request, a sub-agent's event (anything carrying a
-//! parent tool use), a task lifecycle event, or another model ends the turn
-//! as a policy failure. An empty custom-agent list is not taken as proof:
+//! Tools, enforced by the CLI's flags and verified from its events: a turn
+//! gets the built-in shell and file tools ([`claude_home::HOST_TOOLS`], so
+//! the bot can work on the host) and else.bot's MCP tools, all pre-approved
+//! by name; nothing else (`--tools`, and the rest denied again in the
+//! settings), so no web, skills, or native sub-agents (the `Agent` tool). MCP
+//! comes only from else.bot's configuration (`--strict-mcp-config`), its
+//! tools authorized per call by the turn's task grant; no user, project, or
+//! local settings, hooks, or slash commands; an else.bot system prompt
+//! replacing Claude Code's. A summary gets no tools at all. The
+//! `system/init` event must report exactly the expected tools and server and
+//! the saved model; any other tool use, a permission request, a sub-agent's
+//! event (anything carrying a parent tool use), a task lifecycle event, or
+//! another model ends the turn as a policy failure. An empty custom-agent list is not taken as proof:
 //! the built-in agents are listed but unusable without the `Agent` tool.
 //!
 //! The owner's message carries a UUID chosen here; acceptance is its replayed
@@ -43,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::claude_home;
-use super::host::{HostSandbox, LaunchSpec, SANDBOX_PROVIDER_HOME, Supervised};
+use super::host::{Host, LaunchSpec, Supervised};
 use super::prompt;
 use crate::app::providers::{
     Availability, CheckpointRequest, Profile, Provider, SessionState, TurnInput, TurnOutcome,
@@ -52,7 +54,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "claude";
 /// Bump when the system prompt or packet format change.
-const PROMPT_VERSION: &str = "else-claude-v5";
+const PROMPT_VERSION: &str = "else-claude-v6";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -76,11 +78,9 @@ const MAX_LINE: u64 = 8 * 1024 * 1024;
 const STDERR_TAIL: usize = 4096;
 /// Writing the owner's message or a control line to the CLI.
 const PIPE_TIMEOUT: Duration = Duration::from_secs(30);
-const SANDBOX_SETTINGS: &str = "/var/lib/provider-home/else-settings.json";
-const SANDBOX_MCP: &str = "/var/lib/provider-home/elsebot-mcp.json";
 
 pub struct Claude {
-    sandbox: Option<HostSandbox>,
+    host: Option<Host>,
     program: Option<PathBuf>,
     credentials: Option<PathBuf>,
     account: String,
@@ -104,20 +104,20 @@ impl Session {
 
 impl Claude {
     /// Locate the CLI and the host login and check the CLI version inside
-    /// the sandbox. Anything missing makes the provider unavailable with a
+    /// the host. Anything missing makes the provider unavailable with a
     /// reason instead of failing startup.
     pub fn detect(
-        sandbox: Option<HostSandbox>,
+        host: Option<Host>,
         program: Option<PathBuf>,
         credentials: Option<PathBuf>,
         account: String,
     ) -> Self {
-        let version = match (&sandbox, &program) {
-            (Some(sandbox), Some(program)) => sandbox.probe(program, &["--version"]),
+        let version = match (&host, &program) {
+            (Some(host), Some(program)) => host.probe(program, &["--version"]),
             _ => None,
         };
-        let unavailable = if sandbox.is_none() {
-            Some("bubblewrap (bwrap) is required to run Claude Code.".to_owned())
+        let unavailable = if host.is_none() {
+            Some("Claude Code is not configured on this host.".to_owned())
         } else if program.is_none() {
             Some("Claude Code (`claude`) was not found on PATH.".to_owned())
         } else if !credentials
@@ -127,7 +127,7 @@ impl Claude {
             Some("Claude Code is not logged in on the host (run `claude` and log in).".to_owned())
         } else {
             match &version {
-                None => Some("Claude Code does not run inside the sandbox.".to_owned()),
+                None => Some("Claude Code does not run (`claude --version` failed).".to_owned()),
                 Some(v) if !VERIFIED_VERSIONS.iter().any(|ok| v.starts_with(ok)) => Some(format!(
                     "Claude Code {v} is not a verified version (verified: {}).",
                     VERIFIED_VERSIONS.join(", ")
@@ -136,7 +136,7 @@ impl Claude {
             }
         };
         Self {
-            sandbox,
+            host,
             program,
             credentials,
             account,
@@ -154,15 +154,19 @@ impl Claude {
     fn fingerprint(&self, profile: &Profile, input: &TurnInput) -> String {
         let mut hasher = Sha256::new();
         let registry = prompt::registry_text(input);
+        let runtime = self
+            .host
+            .as_ref()
+            .map_or_else(String::new, |h| h.runtime(input.bot_id));
         for part in [
             registry.as_str(),
             PROMPT_VERSION,
             &self.version,
-            "runtime:bwrap:/work:/var/lib/provider-home",
+            &runtime,
             if self.tool_url.is_some() {
-                "tools:elsebot-v2"
+                "tools:host+elsebot-v3"
             } else {
-                "tools:none"
+                "tools:host"
             },
             "agents:disabled",
             &self.account,
@@ -183,7 +187,20 @@ impl Claude {
             .collect()
     }
 
-    /// CLI arguments for one process. `tools` selects else.bot's MCP tools;
+    /// The tools a turn is offered: the host tools and else.bot's.
+    fn turn_tools(&self) -> Vec<String> {
+        let mut tools: Vec<String> = claude_home::HOST_TOOLS
+            .iter()
+            .map(|t| (*t).to_owned())
+            .collect();
+        if self.tool_url.is_some() {
+            tools.extend(claude_home::tool_names());
+        }
+        tools
+    }
+
+    /// CLI arguments for one process, apart from the files in the bot's
+    /// provider home (added at launch). `tools` selects a turn's tools;
     /// without them nothing at all can be called.
     fn args(
         &self,
@@ -192,6 +209,11 @@ impl Claude {
         system: &str,
         tools: bool,
     ) -> Vec<OsString> {
+        let host_tools = if tools {
+            claude_home::HOST_TOOLS.join(",")
+        } else {
+            String::new()
+        };
         let mut args: Vec<OsString> = [
             "-p",
             "--input-format",
@@ -206,12 +228,10 @@ impl Claude {
             "--effort",
             &profile.reasoning_effort,
             "--tools",
-            "",
+            &host_tools,
             "--strict-mcp-config",
             "--setting-sources",
             "",
-            "--settings",
-            SANDBOX_SETTINGS,
             "--permission-mode",
             "dontAsk",
             "--disable-slash-commands",
@@ -224,11 +244,7 @@ impl Claude {
         .map(OsString::from)
         .collect();
         if tools {
-            args.extend(["--mcp-config".into(), SANDBOX_MCP.into()]);
-            args.extend([
-                "--allowedTools".into(),
-                claude_home::tool_names().join(",").into(),
-            ]);
+            args.extend(["--allowedTools".into(), self.turn_tools().join(",").into()]);
         }
         match session {
             Session::New(id) => args.extend(["--session-id".into(), id.into()]),
@@ -246,19 +262,24 @@ impl Claude {
         tools: bool,
         grant: Option<&str>,
     ) -> Result<(Supervised, super::host::BotDirs), String> {
-        let (Some(sandbox), Some(program), Some(credentials)) =
-            (&self.sandbox, &self.program, &self.credentials)
+        let (Some(host), Some(program), Some(credentials)) =
+            (&self.host, &self.program, &self.credentials)
         else {
             return Err("Claude Code is not configured.".into());
         };
-        let dirs = sandbox.bot_dirs(bot_id, home).map_err(|e| e.to_string())?;
+        let dirs = host.bot_dirs(bot_id, home).map_err(|e| e.to_string())?;
         let tool_url = self.tool_url.as_deref().filter(|_| tools);
-        let login =
-            claude_home::prepare(&dirs, credentials, tool_url).map_err(|e| e.to_string())?;
+        claude_home::prepare(&dirs, credentials, tool_url, tools).map_err(|e| e.to_string())?;
+        let mut args = args;
+        let file = |name: &str| dirs.provider_home.join(name).into_os_string();
+        args.extend(["--settings".into(), file(claude_home::SETTINGS_FILE)]);
+        if tool_url.is_some() {
+            args.extend(["--mcp-config".into(), file(claude_home::MCP_FILE)]);
+        }
         let mut env = vec![
             (
                 "CLAUDE_CONFIG_DIR".to_owned(),
-                SANDBOX_PROVIDER_HOME.to_owned(),
+                dirs.provider_home.to_string_lossy().into_owned(),
             ),
             ("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()),
         ];
@@ -271,9 +292,8 @@ impl Claude {
             program: program.clone(),
             args,
             env,
-            extra_binds: vec![login],
         };
-        let mut command = sandbox.command(&spec).map_err(|e| e.to_string())?;
+        let mut command = host.command(&spec);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -726,10 +746,10 @@ impl Provider for Claude {
         if let Err(reason) = self.validate_profile(&profile) {
             return failed("invalid_profile", reason);
         }
-        let Some(sandbox) = &self.sandbox else {
+        let Some(host) = &self.host else {
             return failed("provider_unavailable", "Claude Code is not configured.");
         };
-        let dirs = match sandbox.bot_dirs(input.bot_id, ID) {
+        let dirs = match host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
@@ -766,8 +786,8 @@ impl Provider for Claude {
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let tools = self.tool_url.is_some();
-        let system = prompt::instructions(&input);
+        let tools = true;
+        let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
         let args = self.args(&profile, &session, &system, tools);
         let (mut child, _) = match self.launch(
             input.turn_id,
@@ -785,11 +805,7 @@ impl Provider for Claude {
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
         let mut events = Events::new(BufReader::new(stdout));
         let message_uuid = Uuid::new_v4().to_string();
-        let expected = if tools {
-            claude_home::tool_names()
-        } else {
-            Vec::new()
-        };
+        let expected = self.turn_tools();
         let mut tracker = Tracker::new(expected, &profile.model, &message_uuid);
 
         // From here a crash leaves delivery uncertain.
@@ -945,7 +961,7 @@ impl Provider for Claude {
                 break decide(&tracker, &info, interrupted, deadline_hit);
             }
         };
-        // Close input so the CLI exits, then reap the sandbox.
+        // Close input so the CLI exits, then reap its process group.
         drop(stdin);
         if tokio::time::timeout(EXIT_GRACE, child.child.wait())
             .await
@@ -953,7 +969,7 @@ impl Provider for Claude {
         {
             child.terminate(EXIT_GRACE).await;
         }
-        let observed = sandbox.live_processes(input.turn_id);
+        let observed = host.live_processes(input.turn_id);
         if !observed.is_empty() {
             tracing::warn!(turn = %input.turn_id, count = observed.len(), "Claude left processes; terminated");
             child.terminate(EXIT_GRACE).await;
@@ -1206,9 +1222,9 @@ mod tests {
         assert!(t.violation.is_none());
         t.on(
             &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
-            {"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}),
+            {"type":"tool_use","id":"t2","name":"WebFetch","input":{}}]}}),
         );
-        assert!(t.violation.as_ref().unwrap().1.contains("Bash"));
+        assert!(t.violation.as_ref().unwrap().1.contains("WebFetch"));
         let mut t = tracker();
         t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5"}}}));
         assert_eq!(t.violation.as_ref().unwrap().0, "profile_mismatch");
@@ -1276,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn arguments_disable_built_ins_and_resume_explicitly() {
+    fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         let claude = Claude::detect(None, None, None, String::new())
             .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
         let profile = Profile {
@@ -1290,18 +1306,22 @@ mod tests {
             .map(|a| a.into_string().unwrap())
             .collect();
         let after = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
-        assert_eq!(after("--tools"), "");
+        assert_eq!(after("--tools"), claude_home::HOST_TOOLS.join(","));
         assert_eq!(after("--model"), "claude-sonnet-5-5");
         assert_eq!(after("--effort"), "medium");
         assert_eq!(after("--resume"), "abc");
         assert_eq!(after("--setting-sources"), "");
         assert_eq!(after("--system-prompt"), "SYSTEM");
         assert!(after("--disallowedTools").contains("Agent"));
-        assert!(
-            after("--allowedTools")
-                .split(',')
-                .all(|t| t.starts_with("mcp__elsebot__"))
-        );
+        let allowed: Vec<String> = after("--allowedTools")
+            .split(',')
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(allowed, claude.turn_tools());
+        assert!(allowed.iter().all(|t| {
+            claude_home::HOST_TOOLS.contains(&t.as_str()) || t.starts_with("mcp__elsebot__")
+        }));
+        assert!(allowed.iter().any(|t| t == "Bash"));
         assert!(args.contains(&"--strict-mcp-config".to_owned()));
         assert!(
             !args

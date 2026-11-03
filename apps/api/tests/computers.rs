@@ -158,7 +158,9 @@ impl ComputerRuntime for Fake {
             }
             "read" => files.get(args[0]).cloned().unwrap_or_default(),
             // An image upgrade's archive and unpack steps.
-            "/bin/sh" if args[1].contains("tar --numeric-owner --sparse -cpf") => {
+            "/bin/sh"
+                if args[1].contains("tar --numeric-owner --sparse --one-file-system -cpf") =>
+            {
                 files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
                 use sha2::Digest;
                 format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")))
@@ -266,6 +268,52 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
     let read = |lease| manager.exec(lease, "read", &["/root/note"], second);
     assert_eq!(read(lease_a).await.unwrap().stdout, "A-only");
     assert_eq!(read(lease_b).await.unwrap().stdout, "B-only");
+}
+
+/// Each computer mounts its own bot's project directory, the one provider
+/// runs start in, at `~/work`, by its resolved path (Microsandbox refuses a
+/// path through a symlink).
+#[tokio::test(flavor = "multi_thread")]
+async fn computers_mount_their_bots_project_directory() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let linked = dir.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let manager = manager(
+        &app,
+        &fake,
+        ComputerConfig {
+            projects_dir: Some(linked.join("bots")),
+            ..config(2)
+        },
+    )
+    .await;
+    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    ready(&manager, a, "test:a").await;
+    ready(&manager, b, "test:b").await;
+    let specs = fake.specs.lock().unwrap().clone();
+    let resolved = real.canonicalize().unwrap().join("bots");
+    for (spec, bot) in specs.iter().zip([a, b]) {
+        assert_eq!(
+            spec.mounts,
+            vec![else_api::computers::Mount {
+                host: resolved.join(bot.to_string()),
+                // Without the desktop image, commands run as root.
+                guest: else_api::computers::ROOT_PROJECT.to_owned(),
+                uid: 0,
+            }]
+        );
+        let meta = std::fs::metadata(resolved.join(bot.to_string())).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
+            0o700
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

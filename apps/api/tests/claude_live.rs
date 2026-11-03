@@ -16,7 +16,7 @@ use else_api::providers::Registry;
 use else_api::providers::claude::Claude;
 use else_api::providers::claude_home;
 use else_api::providers::codex::Codex;
-use else_api::providers::host::HostSandbox;
+use else_api::providers::host::Host;
 use uuid::Uuid;
 
 fn live() -> bool {
@@ -46,7 +46,7 @@ fn installed(name: &str) -> PathBuf {
 fn claude(data: &Path, tool_url: &str) -> Claude {
     let home = std::env::var("HOME").ok();
     Claude::detect(
-        Some(HostSandbox::detect(data).unwrap()),
+        Some(Host::new(data, &data.join("bots"))),
         Some(installed("claude")),
         claude_home::host_credentials_file(None, home.as_deref()),
         claude_home::host_account(None, home.as_deref()),
@@ -131,7 +131,7 @@ fn provider_processes() -> usize {
                 exe.ends_with("/opt/else/provider") || exe.ends_with("/claude")
             }) && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|env| {
                 env.split(|b| *b == 0)
-                    .any(|v| v.starts_with(b"ELSE_BOT_SANDBOX="))
+                    .any(|v| v.starts_with(b"ELSE_BOT_PROCESS="))
             })
         })
         .count()
@@ -393,7 +393,7 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     )
     .unwrap();
     let codex = Codex::detect(
-        Some(HostSandbox::detect(&data).unwrap()),
+        Some(Host::new(&data, &data.join("bots"))),
         Some(installed("codex")),
         Some(auth),
     )

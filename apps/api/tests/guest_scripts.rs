@@ -3,7 +3,9 @@
 //! for real here, on this host in a private home, through a local runtime
 //! that kills a timed-out command's process group the way Microsandbox
 //! does. It checks what fakes cannot: exact secret values, filtered output
-//! and job files, timeouts, and descendants.
+//! and job files, timeouts, and descendants. The scripts expect the guest's
+//! Linux userland (`/usr/bin/setsid`, `/proc`), so these run only on Linux.
+#![cfg(target_os = "linux")]
 
 mod common;
 

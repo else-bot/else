@@ -1,6 +1,6 @@
 # Application architecture
 
-These are the current application choices. The first usable POC is implemented: the API (Axum, one in-process scheduler, PostgreSQL, sandboxed host Codex adapter) and the GPUI desktop. Implementation follows the [POC backlog](../TODO.md).
+These are the current application choices. The first usable POC is implemented: the API (Axum, one in-process scheduler, PostgreSQL, host Codex and Claude adapters) and the GPUI desktop. Implementation follows the [POC backlog](../TODO.md).
 
 The project should use a monorepo. Start with the Rust API and GPUI desktop client for one owner. Add the mobile app later.
 
@@ -32,6 +32,8 @@ The API should be written in Rust.
 The host is the personal computer, home server, or VPS running else.bot. It provides the installed `codex` and `claude` CLIs and manages provider authentication. The Rust API runs those CLIs through provider adapters on the host.
 
 Each bot's micro-VM is a task environment with a terminal, files, Chromium, and a desktop. Provider CLIs and subscription credentials stay on the host. The VM executes requested work and returns results through tools controlled by the Rust API.
+
+Each bot also has a project directory on the host, `<ELSE_BOTS_DIR>/<bot id>`. Its provider CLI starts there, with its own shell and file tools and the owner's access, and the bot's VM mounts the same directory at `~/work`. Bots work in their VM by default and on the host when the owner asks. See the [decision record](decisions/0001-providers-run-on-the-host.md) and [host provider processes](security.md#host-provider-processes).
 
 ```mermaid
 flowchart LR

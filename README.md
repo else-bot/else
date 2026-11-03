@@ -37,9 +37,11 @@ Messaging is the main entry point. The broader product should add mobile clients
 
 Each bot also has an isolated computer with Chromium, a desktop, and a terminal. You can open its desktop through VNC. Its files and browser state persist between tasks while idle computers can release system resources.
 
+Each bot has a project directory on the host (`~/.else/bots/<bot id>`), mounted as `~/work` in its computer. Bots work in their computers by default. When you ask, a bot can also work on your machine: edit the spreadsheets in a folder you name, or change your system's settings.
+
 ## Provider choice and ownership
 
-else.bot should work with AI providers through CLIs installed on the host and your existing subscriptions. Bots operate their isolated computers through scoped tools when a task needs them. You can switch providers during a task while keeping one conversation and handing over the context needed to continue.
+else.bot should work with AI providers through CLIs installed on the host and your existing subscriptions. The CLIs run on the host as your user, starting in the bot's project directory, with their own shell and file tools; bots operate their isolated computers through scoped tools. Keeping host work to what you ask for is up to the bot's instructions, not a sandbox: a bot can read and change what your user can. The [decision record](docs/decisions/0001-providers-run-on-the-host.md) explains this trade-off. You can switch providers during a task while keeping one conversation and handing over the context needed to continue.
 
 The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings are saved in PostgreSQL and can be updated by the owner. Provider-native sub-agents are disabled for the POC. See the [execution policy](docs/providers.md#saved-execution-profile).
 
@@ -54,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bas
 ```
 
 It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
-- build tools, bubblewrap, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
+- build tools, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
 - in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
 - PostgreSQL 18 as the Docker Compose project `else-bot` with a generated password;
 - the guest VM image (about 15 minutes the first time);
@@ -82,6 +84,7 @@ Messages queued during the update run afterwards; background jobs in the bot com
   bin/          elsebot, else-api, else-desktop
   config/       .env (settings and database password), readonly.env (elsebot db), both 0600; compose.yaml
   data/         credentials, bot computers, artifacts, backups
+  bots/         each bot's project directory (bots/<bot id>), mounted as ~/work in its computer
   toolchain/    Rust, only for building else.bot
   microsandbox/ the VM runtime
   build/        build cache
@@ -113,7 +116,7 @@ There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`
 
 ## Try the POC
 
-You need Rust, Docker, `bubblewrap`, and a logged-in `codex` CLI (`codex login`). From the repository root:
+You need Rust, Docker, and a logged-in `codex` CLI (`codex login`). From the repository root:
 
 ```sh
 test -e .env || cp .env.example .env
@@ -123,7 +126,7 @@ cargo run -p else-api -- serve     # leave running
 cargo run -p else-desktop          # in another terminal
 ```
 
-The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs in a bubblewrap sandbox with scoped else.bot tools, no native host shell, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
+The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs on the host in the bot's project directory, with its own shell and file tools, scoped else.bot tools, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
 
 ## Repository and local setup
 
@@ -143,7 +146,7 @@ docs/
 .env.example
 ```
 
-Check and test the workspace (the tests need the Compose PostgreSQL and `bwrap`; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
+Check and test the workspace (the tests need the Compose PostgreSQL; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
 
 ```sh
 cargo fmt --all -- --check

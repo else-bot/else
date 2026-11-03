@@ -81,7 +81,7 @@ pub async fn table_digests(conn: &mut sqlx::PgConnection) -> Result<Vec<TableDig
 }
 
 fn dump_version(pg_dump: &Path) -> Result<String, BackupError> {
-    let mut command = Command::new(pg_dump);
+    let mut command = Command::new(super::resolve_tool(pg_dump));
     command.arg("--version").env_clear();
     let (_, out, _) = super::run_bounded(command)
         .map_err(|e| BackupError::Producer(format!("{}: {e}", pg_dump.display())))?;
@@ -125,7 +125,7 @@ fn dump_and_seal(
     producer: &Producer,
 ) -> Result<super::Sealed, BackupError> {
     use std::sync::atomic::Ordering::SeqCst;
-    let mut child = Command::new(pg_dump)
+    let mut child = Command::new(super::resolve_tool(pg_dump))
         .args(["--format=custom", "--no-owner", "--no-acl"])
         .arg(format!("--snapshot={snapshot}"))
         .env_clear()

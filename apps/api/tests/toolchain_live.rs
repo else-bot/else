@@ -475,6 +475,7 @@ async fn toolchain_projects_persist_and_restore() {
             network: "public".into(),
             ports: Vec::new(),
             files: Vec::new(),
+            mounts: Vec::new(),
         },
     )
     .await

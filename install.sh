@@ -16,6 +16,8 @@
 #   bin/        elsebot, and else-api / else-desktop through current
 #   config/     .env (settings and database password, 0600), compose.yaml
 #   data/       the installation: credentials, bot computers, artifacts, backups
+#   bots/       each bot's project directory (bots/<bot id>), where its provider
+#               CLI starts on the host; mounted as ~/work in its computer
 #   toolchain/  Rust (rustup and cargo), only for building else.bot
 #   microsandbox/  the VM runtime (msb and libkrunfw)
 #   build/      the build cache
@@ -217,7 +219,7 @@ ensure_bootstrap_tools() {
 }
 
 apt_packages() {
-	local list="build-essential pkg-config curl ca-certificates git jq tar gzip bubblewrap"
+	local list="build-essential pkg-config curl ca-certificates git jq tar gzip"
 	if [ "$SERVER_ONLY" = 0 ]; then
 		list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
 	fi
@@ -225,7 +227,7 @@ apt_packages() {
 }
 
 pacman_packages() {
-	local list="base-devel pkgconf curl ca-certificates git jq tar gzip bubblewrap postgresql-libs"
+	local list="base-devel pkgconf curl ca-certificates git jq tar gzip postgresql-libs"
 	if [ "$SERVER_ONLY" = 0 ]; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
@@ -382,13 +384,6 @@ linux_access() {
 		fi
 	else
 		warn "/dev/kvm is not accessible to $USER"
-	fi
-	if have bwrap; then
-		if bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1; then
-			ok "bubblewrap sandboxes work"
-		else
-			warn "bubblewrap cannot create a sandbox here (unprivileged user namespaces are restricted); provider CLIs will not run. On Ubuntu see: sysctl kernel.apparmor_restrict_unprivileged_userns"
-		fi
 	fi
 }
 
@@ -638,6 +633,16 @@ EOF
 	ok "written (mode 0600)"
 }
 
+# The bots' project directories; set once (an owner's own choice is kept),
+# including for installations made before they existed.
+ensure_bots_dir() {
+	if ! grep -q '^ELSE_BOTS_DIR=' "$ENV_FILE"; then
+		config_set ELSE_BOTS_DIR "$ELSE_HOME/bots"
+	fi
+	mkdir -p "$ELSE_HOME/bots"
+	chmod 700 "$ELSE_HOME/bots"
+}
+
 # Provider CLIs found now; refreshed on every run (they move with updates).
 refresh_provider_paths() {
 	local codex claude
@@ -880,6 +885,7 @@ linux_stage2() {
 	ensure_msb
 	build_release "$target"
 	write_config
+	ensure_bots_dir
 	refresh_provider_paths
 	start_database
 	build_guest_image
