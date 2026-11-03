@@ -17,11 +17,12 @@
 //! Supervision: each run is its own process group, terminated with it, and
 //! every process carries an installation marker in its environment so a
 //! restarted API can find and terminate leftovers before dispatching new
-//! work (through `/proc`, so on Linux only).
+//! work (on Linux through `/proc` and pidfds, on macOS through libproc and
+//! `KERN_PROCARGS2`).
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -191,18 +192,17 @@ impl Host {
         let wanted = format!("{MARKER_VAR}={}:", self.marker_prefix);
         let mut killed = Vec::new();
         for pid in find_marked(&self.marker_prefix, None) {
-            let Some(fd) = pidfd_open(pid) else { continue };
-            // The pidfd now refers to one process; confirm it is ours.
-            if !has_marker(pid, &wanted) {
+            // Pinned, then confirmed to be ours.
+            let Some(process) = procs::pin(pid, &wanted) else {
                 continue;
-            }
-            if pidfd_kill(&fd) {
-                killed.push(fd);
+            };
+            if process.kill() {
+                killed.push(process);
             }
         }
         let count = killed.len();
-        for fd in killed {
-            if !pidfd_wait(&fd, Duration::from_secs(5)) {
+        for process in killed {
+            if !process.wait(Duration::from_secs(5)) {
                 return Err(HostError::Io(
                     "orphaned provider process".into(),
                     std::io::Error::other("did not exit after SIGKILL"),
@@ -247,84 +247,262 @@ fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
     })
 }
 
-fn has_marker(pid: i32, wanted: &str) -> bool {
-    fs::read(format!("/proc/{pid}/environ")).is_ok_and(|env| {
-        env.split(|b| *b == 0)
-            .any(|var| var.starts_with(wanted.as_bytes()))
-    })
-}
-
+/// Processes of this user whose environment holds `wanted` (a
+/// `NAME=value` prefix), and pinning one so a reused PID is never signalled.
 #[cfg(target_os = "linux")]
-fn pidfd_open(pid: i32) -> Option<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
-    // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    // SAFETY: a non-negative return is a fresh descriptor we now own.
-    (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
-}
+mod procs {
+    use std::fs;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-fn pidfd_kill(fd: &std::os::fd::OwnedFd) -> bool {
-    use std::os::fd::AsRawFd;
-    // SAFETY: signals exactly the process the pidfd refers to.
-    unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            libc::SIGKILL,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        ) == 0
+    fn environ_has(pid: i32, wanted: &str) -> bool {
+        fs::read(format!("/proc/{pid}/environ")).is_ok_and(|env| {
+            env.split(|b| *b == 0)
+                .any(|var| var.starts_with(wanted.as_bytes()))
+        })
+    }
+
+    /// Scan `/proc`.
+    pub fn marked(wanted: &str) -> Vec<i32> {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let own = std::process::id() as i32;
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|pid| *pid != own)
+            .filter(|pid| {
+                fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid)
+                    && environ_has(*pid, wanted)
+            })
+            .collect()
+    }
+
+    /// A pidfd: it refers to one process for its whole life.
+    pub struct Pinned(OwnedFd);
+
+    /// Pin `pid`, then confirm (through the pinned process) that it carries
+    /// the marker.
+    pub fn pin(pid: i32, wanted: &str) -> Option<Pinned> {
+        // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: a non-negative return is a fresh descriptor we now own.
+        let pinned = Pinned(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+        environ_has(pid, wanted).then_some(pinned)
+    }
+
+    impl Pinned {
+        pub fn kill(&self) -> bool {
+            // SAFETY: signals exactly the process the pidfd refers to.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.0.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                ) == 0
+            }
+        }
+
+        /// A pidfd becomes readable when its process exits.
+        pub fn wait(&self, timeout: Duration) -> bool {
+            let mut poll = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd for the duration of the call.
+            unsafe { libc::poll(&mut poll, 1, timeout.as_millis() as i32) > 0 }
+        }
     }
 }
 
-/// A pidfd becomes readable when its process exits.
-fn pidfd_wait(fd: &std::os::fd::OwnedFd, timeout: Duration) -> bool {
-    use std::os::fd::AsRawFd;
-    let mut poll = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one valid pollfd for the duration of the call.
-    unsafe { libc::poll(&mut poll, 1, timeout.as_millis() as i32) > 0 }
+/// macOS has neither `/proc` nor pidfds: processes are listed with
+/// `proc_listallpids`, their environment read with `KERN_PROCARGS2`, and a
+/// process is pinned by its PID and start time, checked again right before
+/// it is signalled and while waiting, so a reused PID is never hit outside
+/// that instant.
+#[cfg(target_os = "macos")]
+mod procs {
+    use std::time::{Duration, Instant};
+
+    /// Owner, start time, and whether it is a zombie.
+    fn info(pid: i32) -> Option<(libc::uid_t, (u64, u64), bool)> {
+        // SAFETY: proc_bsdinfo is plain data; zeroed is a valid value.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: the buffer is exactly one proc_bsdinfo.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        // SZOMB: exited, not yet reaped.
+        (read == size).then_some((
+            info.pbi_uid,
+            (info.pbi_start_tvsec, info.pbi_start_tvusec),
+            info.pbi_status == 5,
+        ))
+    }
+
+    /// The environment of `pid` (`KERN_PROCARGS2`: argc, the executable
+    /// path, padding, the arguments, then the environment), readable only
+    /// for this user's processes.
+    fn environ(pid: i32) -> Option<Vec<Vec<u8>>> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size: libc::size_t = 0;
+        // SAFETY: a size query with a null buffer.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        // SAFETY: `buf` holds `size` bytes, which sysctl updates.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return None;
+        }
+        buf.truncate(size);
+        let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
+        let mut strings = buf[4..].split(|b| *b == 0);
+        strings.next()?; // the executable path
+        let mut strings = strings.skip_while(|s| s.is_empty()).skip(argc);
+        Some(
+            strings
+                .by_ref()
+                .take_while(|s| !s.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
+    }
+
+    fn environ_has(pid: i32, wanted: &str) -> bool {
+        environ(pid).is_some_and(|env| env.iter().any(|v| v.starts_with(wanted.as_bytes())))
+    }
+
+    pub fn marked(wanted: &str) -> Vec<i32> {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        // SAFETY: a count query with a null buffer.
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if count <= 0 {
+            return Vec::new();
+        }
+        // Room for processes started meanwhile.
+        let mut pids = vec![0 as libc::pid_t; count as usize + 64];
+        let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer holds `bytes` bytes of pids.
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if n <= 0 {
+            return Vec::new();
+        }
+        pids.truncate(n as usize);
+        let own = std::process::id() as i32;
+        pids.into_iter()
+            .filter(|pid| *pid > 0 && *pid != own)
+            .filter(|pid| {
+                info(*pid).is_some_and(|(owner, _, zombie)| owner == uid && !zombie)
+                    && environ_has(*pid, wanted)
+            })
+            .collect()
+    }
+
+    pub struct Pinned {
+        pid: i32,
+        start: (u64, u64),
+    }
+
+    pub fn pin(pid: i32, wanted: &str) -> Option<Pinned> {
+        let (_, start, zombie) = info(pid)?;
+        // The marker is read after the start time: had the PID been reused
+        // in between, the start time below no longer matches.
+        (!zombie && environ_has(pid, wanted)).then_some(Pinned { pid, start })
+    }
+
+    impl Pinned {
+        fn alive(&self) -> bool {
+            info(self.pid).is_some_and(|(_, start, zombie)| start == self.start && !zombie)
+        }
+
+        pub fn kill(&self) -> bool {
+            // SAFETY: signals `pid`, checked to still be the pinned process.
+            self.alive() && unsafe { libc::kill(self.pid, libc::SIGKILL) } == 0
+        }
+
+        pub fn wait(&self, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            while self.alive() {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            true
+        }
+    }
 }
 
-// Without pidfds (or /proc) there is nothing to find or pin.
-#[cfg(not(target_os = "linux"))]
-fn pidfd_open(_pid: i32) -> Option<std::os::fd::OwnedFd> {
-    None
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod procs {
+    use std::time::Duration;
+
+    pub fn marked(_wanted: &str) -> Vec<i32> {
+        Vec::new()
+    }
+
+    pub struct Pinned;
+
+    pub fn pin(_pid: i32, _wanted: &str) -> Option<Pinned> {
+        None
+    }
+
+    impl Pinned {
+        pub fn kill(&self) -> bool {
+            false
+        }
+
+        pub fn wait(&self, _timeout: Duration) -> bool {
+            true
+        }
+    }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn pidfd_kill(_fd: &std::os::fd::OwnedFd) -> bool {
-    false
-}
-
-/// Scan `/proc` for processes owned by this user whose environment carries
-/// this installation's marker (optionally for one turn).
+/// This user's processes whose environment carries this installation's
+/// marker (optionally for one turn).
 fn find_marked(prefix: &str, turn: Option<Uuid>) -> Vec<i32> {
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
-    let wanted = match turn {
-        Some(turn) => format!("{MARKER_VAR}={prefix}:{turn}"),
-        None => format!("{MARKER_VAR}={prefix}:"),
-    };
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    let own = std::process::id() as i32;
-    entries
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| *pid != own)
-        .filter(|pid| {
-            fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid)
-                && fs::read(format!("/proc/{pid}/environ")).is_ok_and(|env| {
-                    env.split(|b| *b == 0)
-                        .any(|var| var.starts_with(wanted.as_bytes()))
-                })
-        })
-        .collect()
+    match turn {
+        Some(turn) => procs::marked(&format!("{MARKER_VAR}={prefix}:{turn}")),
+        None => procs::marked(&format!("{MARKER_VAR}={prefix}:")),
+    }
 }
 
 /// A running provider process: its process group is terminated on request

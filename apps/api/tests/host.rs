@@ -2,21 +2,21 @@
 //!
 //! The launch tests run a shell the way providers run. The Codex check uses
 //! the installed CLI and the owner's existing login without running
-//! inference. Process discovery reads `/proc`, so those tests run on Linux.
+//! inference. Process discovery runs on Linux and macOS.
 
 mod common;
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::TestApp;
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::codex_home;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use else_api::providers::host::Supervised;
 use else_api::providers::host::{Host, LaunchSpec, MARKER_VAR};
 use serde_json::json;
@@ -130,7 +130,7 @@ async fn runs_start_in_the_project_with_the_users_session_environment() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn termination_reaps_the_whole_process_group() {
     let fx = fixture();
@@ -152,7 +152,7 @@ async fn termination_reaps_the_whole_process_group() {
 
 /// A run whose supervisor vanished (as after an API crash) is found and
 /// terminated by the startup sweep.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn orphans_are_swept() {
     let fx = fixture();
