@@ -28,6 +28,8 @@ struct Fake {
     create_delay: Mutex<Duration>,
     /// An image upgrade's unpack step fails in the new computer.
     fail_unpack: std::sync::atomic::AtomicBool,
+    /// Every created computer's spec, in order.
+    specs: Mutex<Vec<Spec>>,
 }
 
 impl Fake {
@@ -70,6 +72,7 @@ impl ComputerRuntime for Fake {
             "create {} {}cpu {}MiB",
             spec.name, spec.cpus, spec.memory_mib
         ));
+        self.specs.lock().unwrap().push(spec.clone());
         let delay = *self.create_delay.lock().unwrap();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -155,12 +158,12 @@ impl ComputerRuntime for Fake {
             }
             "read" => files.get(args[0]).cloned().unwrap_or_default(),
             // An image upgrade's archive and unpack steps.
-            "sh" if args[1].contains("tar --numeric-owner -cpf") => {
+            "/bin/sh" if args[1].contains("tar --numeric-owner --sparse -cpf") => {
                 files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
                 use sha2::Digest;
                 format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")))
             }
-            "sh" if args[1].contains("sha256sum -c") => {
+            "/bin/sh" if args[1].contains("sha256sum -c") => {
                 if self.fail_unpack.load(std::sync::atomic::Ordering::SeqCst) {
                     return Ok(ExecOutput {
                         status: Some(4),
@@ -612,7 +615,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     let (lease, old_name) = ready(&manager, bot, "turn:a").await;
 
     // Held by a lease: refused, nothing changes.
-    let held = manager.upgrade_image(bot, "img:new").await;
+    let held = manager.upgrade_image(bot, "img:new", None).await;
     assert!(held.is_err(), "{held:?}");
     assert_eq!(
         computer(&app, bot).await,
@@ -627,7 +630,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     // The unpack fails in the replacement.
     fake.fail_unpack
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let failed = manager.upgrade_image(bot, "img:new").await;
+    let failed = manager.upgrade_image(bot, "img:new", None).await;
     assert!(
         failed
             .as_ref()
@@ -680,7 +683,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     .execute(&app.db.pool)
     .await
     .unwrap();
-    let report = manager.upgrade_image(bot, "img:new").await.unwrap();
+    let report = manager.upgrade_image(bot, "img:new", None).await.unwrap();
     assert!(
         !fake.computers.lock().unwrap().contains_key(&leftover),
         "leftover removed"
@@ -733,4 +736,119 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
             .contains_key(&report.to_runtime_name),
         "newer kept"
     );
+}
+
+/// POC-025 review: an upgrade keeps the computer's own network profile,
+/// needs an explicit one when it was never recorded, boots only within the
+/// budget, settles leases a stopped API left, and a restarted API stops a
+/// replacement an interrupted upgrade left running.
+#[tokio::test(flavor = "multi_thread")]
+async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let isolated = ComputerConfig {
+        network: "none".into(),
+        ..config(1)
+    };
+    let first = manager(&app, &fake, isolated).await;
+    let bot: Uuid = app.create_bot("Offline", "upgrade").await.parse().unwrap();
+    let (lease, old_name) = ready(&first, bot, "turn:gone").await;
+    drop(first);
+    let _ = lease;
+
+    // Restarted with another default network and a one-VM budget, with
+    // another bot's computer using it.
+    let manager = manager(&app, &fake, config(1)).await;
+    let other: Uuid = app.create_bot("Other", "busy").await.parse().unwrap();
+    // The stale lease of the stopped API's turn still holds the computer.
+    assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
+    manager.settle_offline(bot).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    let (other_lease, _) = ready(&manager, other, "turn:other").await;
+    let busy = manager.upgrade_image(bot, "img:new", None).await;
+    assert!(
+        busy.as_ref()
+            .is_err_and(|e| e.to_string().contains("budget")),
+        "{busy:?}"
+    );
+    assert_eq!(
+        fake.computers.lock().unwrap()[&old_name].0,
+        RuntimeState::Stopped,
+        "not booted"
+    );
+    manager.release(other_lease).await.unwrap();
+    manager.tick(&never()).await.unwrap();
+
+    let report = manager.upgrade_image(bot, "img:new", None).await.unwrap();
+    let spec = fake.specs.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        (spec.name.as_str(), spec.network.as_str()),
+        (report.to_runtime_name.as_str(), "none")
+    );
+    let network: Option<String> =
+        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = $1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(network.as_deref(), Some("none"));
+
+    // A computer whose profile was never recorded needs an explicit one.
+    sqlx::query("UPDATE bot_computers SET network = NULL WHERE bot_id = $1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let unknown = manager.upgrade_image(bot, "img:third", None).await;
+    assert!(
+        unknown
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("--network")),
+        "{unknown:?}"
+    );
+    let third = manager
+        .upgrade_image(bot, "img:third", Some("public"))
+        .await
+        .unwrap();
+    assert_eq!(fake.specs.lock().unwrap().last().unwrap().network, "public");
+    // Rollback restores the previous computer's (unrecorded) profile.
+    manager.rollback_upgrade(bot).await.unwrap();
+    let network: Option<String> =
+        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = $1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(network, None);
+
+    // An interrupted upgrade's replacement left running is stopped by the
+    // next startup and kept for the next attempt to remove.
+    let leftover = format!("{}-leftover", third.to_runtime_name);
+    fake.computers
+        .lock()
+        .unwrap()
+        .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
+    sqlx::query(
+        "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
+         VALUES ($1, $2, 'x', 'y', $3, 'z', 'started')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(&leftover)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    drop(manager);
+    let _restarted = self::manager(&app, &fake, config(1)).await;
+    assert_eq!(
+        fake.computers.lock().unwrap()[&leftover].0,
+        RuntimeState::Stopped
+    );
+}
+
+/// Stop a computer through the idle path once nothing holds it.
+async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: Uuid) {
+    manager.tick(&never()).await.unwrap();
+    let _ = fake;
+    assert_eq!(observed(app, bot).await, "stopped");
 }

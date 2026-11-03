@@ -27,27 +27,45 @@ use super::{ComputerError, ComputerManager, DESKTOP_GUEST_PORT, RuntimeState, Sp
 
 /// Archiving or unpacking a large home directory.
 const COPY_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Where the old computer writes its archive.
+const GUEST_STAGING: &str = "/var/tmp/else-upgrade.tar";
 /// Where the archive is copied into the new computer before it boots.
 const GUEST_ARCHIVE: &str = "/var/lib/elsebot-upgrade/data.tar";
 
 /// Archive the user's data on the old computer: print the archive size,
-/// SHA-256, and the user's numeric ID.
+/// SHA-256, and the user's numeric ID. It refuses unless the disk has room
+/// for the archive with a margin, and removes a partial archive on any
+/// failure, so the old computer never comes back with a full disk. Sparse
+/// files stay sparse.
 const PACK: &str = r#"set -e
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
+archive=/var/tmp/else-upgrade.tar
+trap 'rm -f "$archive"' EXIT
 paths=""
 for p in home/elsebot var/lib/elsebot; do [ -e "$p" ] && paths="$paths $p"; done
 [ -n "$paths" ] || { echo "no user data to copy" >&2; exit 3; }
-rm -f /var/tmp/else-upgrade.tar
-tar --numeric-owner -cpf /var/tmp/else-upgrade.tar $paths
-stat -c %s /var/tmp/else-upgrade.tar
-sha256sum /var/tmp/else-upgrade.tar | cut -d' ' -f1
-id -u elsebot 2>/dev/null || echo none"#;
+rm -f "$archive"
+need=$(du -skx $paths | awk '{s += $1} END {print s + 65536}')
+free=$(df -Pk /var/tmp | awk 'NR == 2 {print $4}')
+[ "$free" -ge "$need" ] || { echo "not enough free disk for the archive: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
+tar --numeric-owner --sparse -cpf "$archive" $paths
+stat -c %s "$archive"
+sha256sum "$archive" | cut -d' ' -f1
+id -u elsebot 2>/dev/null || echo none
+trap - EXIT"#;
 
 /// Verify and unpack the archive on the new computer as the same user ID,
-/// then print the new image's description.
+/// then print the new image's description. It refuses unless the disk has
+/// room for the unpacked data; the archive is removed either way.
 const UNPACK: &str = r#"set -e
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
+trap 'rm -f "$2"' EXIT
 [ "$(id -u elsebot 2>/dev/null || echo none)" = "$3" ] || { echo "the new image's elsebot user ID is not $3" >&2; exit 4; }
+need=$(( $(stat -c %s "$2") / 1024 + 65536 ))
+free=$(df -Pk / | awk 'NR == 2 {print $4}')
+[ "$free" -ge "$need" ] || { echo "not enough free disk to unpack: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
 echo "$1  $2" | sha256sum -c --quiet
 tar --numeric-owner -xpf "$2"
 rm -f "$2"
@@ -67,6 +85,17 @@ pub struct UpgradeReport {
     /// The new image's `/etc/elsebot/image.json`, when it has one.
     pub image_description: String,
 }
+
+/// A completed upgrade: id, previous runtime and image, data size and
+/// digest, previous network profile.
+type UpgradeRow = (
+    Uuid,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 fn refused(message: impl Into<String>) -> ComputerError {
     ComputerError::Refused(message.into())
@@ -99,6 +128,54 @@ impl ComputerManager {
         .bind(bot_id)
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    /// For the offline upgrade command (the caller holds the API's
+    /// singleton lock, so no turn, desktop, or tool call can be live): end
+    /// this bot's leases other than background jobs', and ask the guest
+    /// about each running job so a job that finished while the API was
+    /// down no longer blocks the upgrade. A job still running keeps its
+    /// lease, and the upgrade is refused.
+    pub async fn settle_offline(&self, bot_id: Uuid) -> Result<(), ComputerError> {
+        sqlx::query(
+            "UPDATE computer_leases SET released_at = now(), end_reason = 'expired'
+             WHERE bot_id = $1 AND released_at IS NULL AND holder NOT LIKE 'job:%'",
+        )
+        .bind(bot_id)
+        .execute(&self.pool)
+        .await?;
+        let running: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM guest_jobs WHERE bot_id = $1 AND status = 'running'",
+        )
+        .bind(bot_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for job in running {
+            self.job(bot_id, job).await?;
+        }
+        Ok(())
+    }
+
+    /// At startup (no upgrade can be in progress while the API runs): stop
+    /// any replacement an interrupted upgrade left running, so it holds no
+    /// resources or port. It stays on disk, recorded as `started`, until
+    /// the next upgrade attempt for that bot removes it.
+    pub(super) async fn stop_interrupted_replacements(&self) -> Result<(), ComputerError> {
+        let started: Vec<String> = sqlx::query_scalar(
+            "SELECT to_runtime_name FROM computer_upgrades WHERE state = 'started'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for name in started {
+            match self.runtime.state(&name).await? {
+                None | Some(RuntimeState::Stopped) => {}
+                Some(_) => {
+                    tracing::warn!(computer = %name, "stopping an interrupted upgrade's replacement");
+                    self.runtime.stop(&name).await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove replacements left by an upgrade whose process died: they were
@@ -135,6 +212,40 @@ impl ComputerManager {
         Ok(())
     }
 
+    /// Whether the budget admits booting this computer now (the upgrade's
+    /// one VM at a time counts like the computer itself would).
+    async fn admit(&self, bot_id: Uuid, row: &super::Row) -> Result<(), ComputerError> {
+        let mut tx = self.pool.begin().await?;
+        let admitted = self.admits(&mut tx, bot_id, row).await?;
+        tx.commit().await?;
+        if admitted {
+            Ok(())
+        } else {
+            Err(ComputerError::Busy(
+                "the computer budget is in use; stop another computer first".into(),
+            ))
+        }
+    }
+
+    /// Remove the old computer's archive if it is running (best effort; a
+    /// killed archive step cannot run its own cleanup).
+    async fn remove_guest_archive(&self, name: &str) {
+        if matches!(
+            self.runtime.state(name).await,
+            Ok(Some(RuntimeState::Running))
+        ) {
+            let _ = self
+                .runtime
+                .exec(
+                    name,
+                    "/bin/rm",
+                    &["-f", GUEST_STAGING],
+                    Duration::from_secs(60),
+                )
+                .await;
+        }
+    }
+
     /// Stop a computer the upgrade booted, confirming it is stopped.
     async fn stop_confirmed(&self, name: &str) -> Result<(), ComputerError> {
         if self.runtime.state(name).await? != Some(RuntimeState::Stopped) {
@@ -151,15 +262,26 @@ impl ComputerManager {
 
     /// Move a bot's computer to `image`, keeping its data. See the module
     /// documentation for the steps and guarantees.
+    ///
+    /// The computer keeps the network profile it was created with; `network`
+    /// is the owner's explicit choice of another, and is required for a
+    /// computer created before profiles were recorded.
     pub async fn upgrade_image(
         &self,
         bot_id: Uuid,
         image: &str,
+        network: Option<&str>,
     ) -> Result<UpgradeReport, ComputerError> {
         if !valid_image(image) {
             return Err(refused("the image reference is not valid"));
         }
+        if network.is_some_and(|n| n.is_empty() || !valid_image(n)) {
+            return Err(refused("the network profile is not valid"));
+        }
         let _op = self.op(bot_id).await;
+        // A replacement an interrupted attempt left is never used; it goes
+        // even when the bot was deleted since.
+        self.clear_interrupted_upgrades(bot_id).await?;
         let active: Option<bool> =
             sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1")
                 .bind(bot_id)
@@ -180,20 +302,26 @@ impl ComputerManager {
         if row.image == image {
             return Err(refused(format!("the computer already uses {image}")));
         }
+        let Some(network) = network.map(str::to_owned).or_else(|| row.network.clone()) else {
+            return Err(refused(
+                "this computer's network profile was not recorded; choose it explicitly \
+                 (--network public or --network none)",
+            ));
+        };
         if self.active_jobs(bot_id).await? > 0 {
             return Err(refused(
                 "a guest job is active; wait for it or cancel it first",
             ));
         }
-        self.clear_interrupted_upgrades(bot_id).await?;
         self.stop_for_disk(bot_id, &row).await?;
 
         let id = Uuid::new_v4();
         let to_runtime_name = format!("elsebot-{bot_id}-{}", &id.simple().to_string()[..12]);
         sqlx::query(
             "INSERT INTO computer_upgrades
-                 (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
-             VALUES ($1, $2, $3, $4, $5, $6, 'started')",
+                 (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state,
+                  from_network, to_network)
+             VALUES ($1, $2, $3, $4, $5, $6, 'started', $7, $8)",
         )
         .bind(id)
         .bind(bot_id)
@@ -201,6 +329,8 @@ impl ComputerManager {
         .bind(&row.image)
         .bind(&to_runtime_name)
         .bind(image)
+        .bind(&row.network)
+        .bind(&network)
         .execute(&self.pool)
         .await?;
 
@@ -210,14 +340,15 @@ impl ComputerManager {
             .join("upgrades")
             .join(bot_id.to_string());
         let copied = self
-            .copy_to_replacement(bot_id, &row, &to_runtime_name, image, &staging)
+            .copy_to_replacement(bot_id, &row, &to_runtime_name, image, &network, &staging)
             .await;
         let _ = std::fs::remove_dir_all(&staging);
         let (bytes, sha256, description) = match copied {
             Ok(done) => done,
             Err(err) => {
                 // The old computer stays the bot's; it was booted only to
-                // read its disk.
+                // read its disk, and keeps no archive.
+                self.remove_guest_archive(&row.runtime_name).await;
                 let _ = self.stop_confirmed(&row.runtime_name).await;
                 let discarded = self.discard_replacement(&to_runtime_name).await;
                 sqlx::query(
@@ -262,13 +393,15 @@ impl ComputerManager {
             ));
         }
         sqlx::query(
-            "UPDATE bot_computers SET runtime_name = $2, image = $3, observed_state = 'stopped',
-                 generation = generation + 1, services_generation = NULL, updated_at = now()
+            "UPDATE bot_computers SET runtime_name = $2, image = $3, network = $4,
+                 observed_state = 'stopped', generation = generation + 1,
+                 services_generation = NULL, updated_at = now()
              WHERE bot_id = $1",
         )
         .bind(bot_id)
         .bind(&to_runtime_name)
         .bind(image)
+        .bind(&network)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -301,6 +434,7 @@ impl ComputerManager {
         row: &super::Row,
         to_runtime_name: &str,
         image: &str,
+        network: &str,
         staging: &Path,
     ) -> Result<(u64, String, String), ComputerError> {
         use std::os::unix::fs::DirBuilderExt;
@@ -312,11 +446,13 @@ impl ComputerManager {
             .create(staging)
             .map_err(io)?;
 
-        // Read the old disk: booted without its desktop services.
+        // Read the old disk: booted without its desktop services, within
+        // the computer budget like any other start.
+        self.admit(bot_id, row).await?;
         self.runtime.start(&row.runtime_name).await?;
         let out = self
             .runtime
-            .exec(&row.runtime_name, "sh", &["-c", PACK], COPY_TIMEOUT)
+            .exec(&row.runtime_name, "/bin/sh", &["-c", PACK], COPY_TIMEOUT)
             .await?;
         if out.status != Some(0) {
             return Err(refused(format!(
@@ -336,18 +472,23 @@ impl ComputerManager {
             return Err(refused("the old computer's archive report was unreadable"));
         };
         let archive: PathBuf = staging.join("data.tar");
-        self.runtime
-            .copy_out(&row.runtime_name, "/var/tmp/else-upgrade.tar", &archive)
-            .await?;
-        let _ = self
-            .runtime
-            .exec(
-                &row.runtime_name,
-                "rm",
-                &["-f", "/var/tmp/else-upgrade.tar"],
-                Duration::from_secs(60),
-            )
-            .await;
+        // The copy is verified below; a cut-off transfer is retried.
+        let mut copied = Err(super::RuntimeError::Unavailable("not attempted".into()));
+        for attempt in 1..=3 {
+            let _ = std::fs::remove_file(&archive);
+            copied = self
+                .runtime
+                .copy_out(&row.runtime_name, GUEST_STAGING, &archive)
+                .await;
+            match &copied {
+                Ok(()) => break,
+                Err(err) => {
+                    tracing::warn!(attempt, error = %err, "copying the upgrade archive failed")
+                }
+            }
+        }
+        self.remove_guest_archive(&row.runtime_name).await;
+        copied?;
         self.stop_confirmed(&row.runtime_name).await?;
         let (host_size, host_sha) = sha256_file(&archive).map_err(io)?;
         if (host_size, host_sha.as_str()) != (size, sha256.as_str()) {
@@ -374,13 +515,14 @@ impl ComputerManager {
                 files.push((password, "/etc/elsebot/vnc.pass".into()));
             }
         }
+        self.admit(bot_id, row).await?;
         self.runtime
             .create(&Spec {
                 name: to_runtime_name.to_owned(),
                 image: image.to_owned(),
                 cpus: row.cpus as u32,
                 memory_mib: row.memory_mib as u32,
-                network: self.config.network.clone(),
+                network: network.to_owned(),
                 ports,
                 files,
             })
@@ -389,7 +531,7 @@ impl ComputerManager {
             .runtime
             .exec(
                 to_runtime_name,
-                "sh",
+                "/bin/sh",
                 &["-c", UNPACK, "sh", &sha256, GUEST_ARCHIVE, &uid],
                 COPY_TIMEOUT,
             )
@@ -416,8 +558,8 @@ impl ComputerManager {
         let Some(row) = row else {
             return Err(refused("the bot has no computer"));
         };
-        let last: Option<(Uuid, String, String, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT id, from_runtime_name, from_image, data_bytes, data_sha256
+        let last: Option<UpgradeRow> = sqlx::query_as(
+            "SELECT id, from_runtime_name, from_image, data_bytes, data_sha256, from_network
              FROM computer_upgrades
              WHERE bot_id = $1 AND state = 'completed' AND to_runtime_name = $2
              ORDER BY created_at DESC LIMIT 1",
@@ -426,7 +568,7 @@ impl ComputerManager {
         .bind(&row.runtime_name)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((id, from_name, from_image, bytes, sha256)) = last else {
+        let Some((id, from_name, from_image, bytes, sha256, from_network)) = last else {
             return Err(refused(
                 "the current computer is not the result of an upgrade",
             ));
@@ -450,13 +592,15 @@ impl ComputerManager {
             ));
         }
         sqlx::query(
-            "UPDATE bot_computers SET runtime_name = $2, image = $3, observed_state = 'stopped',
-                 generation = generation + 1, services_generation = NULL, updated_at = now()
+            "UPDATE bot_computers SET runtime_name = $2, image = $3, network = $4,
+                 observed_state = 'stopped', generation = generation + 1,
+                 services_generation = NULL, updated_at = now()
              WHERE bot_id = $1",
         )
         .bind(bot_id)
         .bind(&from_name)
         .bind(&from_image)
+        .bind(&from_network)
         .execute(&mut *tx)
         .await?;
         sqlx::query(

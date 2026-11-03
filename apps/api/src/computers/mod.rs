@@ -163,10 +163,12 @@ struct Row {
     desired_state: String,
     observed_state: String,
     generation: i64,
+    /// The network profile it was created with (unrecorded before POC-025).
+    network: Option<String>,
 }
 
 const ROW: &str =
-    "runtime_name, image, cpus, memory_mib, desired_state, observed_state, generation";
+    "runtime_name, image, cpus, memory_mib, desired_state, observed_state, generation, network";
 
 /// The runtime operation a start decision needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,14 +293,15 @@ impl ComputerManager {
                 return Ok(Acquire::BotInactive);
             }
             sqlx::query(
-                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
-                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
             )
             .bind(bot_id)
             .bind(Self::runtime_name(bot_id))
             .bind(&self.config.image)
             .bind(self.config.cpus as i32)
             .bind(self.config.memory_mib as i32)
+            .bind(&self.config.network)
             .execute(&mut *tx)
             .await?;
             let row = Self::row(&mut tx, bot_id).await?.expect("inserted");
@@ -384,7 +387,10 @@ impl ComputerManager {
                                     image: row.image.clone(),
                                     cpus: row.cpus as u32,
                                     memory_mib: row.memory_mib as u32,
-                                    network: self.config.network.clone(),
+                                    network: row
+                                        .network
+                                        .clone()
+                                        .unwrap_or_else(|| self.config.network.clone()),
                                     ports,
                                     files,
                                 })
@@ -983,8 +989,8 @@ impl ComputerManager {
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, desired_state)
-             VALUES ($1, $2, $3, $4, $5, 'stopped')
+            "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, desired_state, network)
+             VALUES ($1, $2, $3, $4, $5, 'stopped', $6)
              ON CONFLICT (bot_id) DO UPDATE SET desired_state = 'stopped', updated_at = now()",
         )
         .bind(bot_id)
@@ -992,6 +998,7 @@ impl ComputerManager {
         .bind(&self.config.image)
         .bind(self.config.cpus as i32)
         .bind(self.config.memory_mib as i32)
+            .bind(&self.config.network)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -1314,6 +1321,10 @@ impl ComputerManager {
             .bind(state)
             .execute(&self.pool)
             .await?;
+        }
+        if let Err(err) = self.stop_interrupted_replacements().await {
+            tracing::warn!(error = %err, "an interrupted upgrade's replacement was not stopped");
+            return Ok(());
         }
         // Work that survived (jobs in a still-running computer) keeps its
         // leases on the new generation; maintenance probes it from there.

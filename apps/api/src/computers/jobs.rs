@@ -29,10 +29,11 @@ const JOBS_DIR: &str = "/var/lib/elsebot/jobs";
 const STALE_START: Duration = Duration::from_secs(120);
 
 /// Run `$1` with its output in temporary files; print the exit code, both
-/// sizes, then the last bytes of each, separated by a NUL line.
+/// sizes, then the last bytes of each, separated by a NUL line. The user's
+/// own tool directories come first only for the user's command.
 const RUN: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"
 o=$(mktemp); e=$(mktemp)
-sh -c "$1" > "$o" 2> "$e"; c=$?
+PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$1" > "$o" 2> "$e"; c=$?
 printf '%s\n%s\n%s\n' "$c" "$(wc -c < "$o")" "$(wc -c < "$e")"
 tail -c "$2" "$o"; printf '\n\000\n'; tail -c "$2" "$e"
 rm -f "$o" "$e""#;
@@ -40,7 +41,7 @@ rm -f "$o" "$e""#;
 /// Launch `$2` detached in its own session (its pid is the process group),
 /// recording pid, exit status, and output in `$1`.
 const LAUNCH: &str = r#"mkdir -p "$1" && { cd "$HOME/work" 2>/dev/null || cd "$HOME"; }
-setsid sh -c 'sh -c "$2" > "$1/out" 2>&1; echo $? > "$1/exit"' sh "$1" "$2" > /dev/null 2>&1 < /dev/null &
+setsid /bin/sh -c 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" > "$1/out" 2>&1; echo $? > "$1/exit"' sh "$1" "$2" > /dev/null 2>&1 < /dev/null &
 echo $! > "$1/pid"; echo launched"#;
 
 /// Report a job: `done <code>`, `running`, or `lost`, then the output tail.
@@ -138,19 +139,23 @@ impl ComputerManager {
     fn as_guest_user(&self, script: &str) -> (String, Vec<String>) {
         if self.config.desktop {
             (
-                "runuser".into(),
+                // Absolute paths: root resolves nothing through a PATH.
+                "/usr/sbin/runuser".into(),
                 vec![
                     "-u".into(),
                     "elsebot".into(),
                     "--".into(),
-                    "sh".into(),
+                    "/bin/sh".into(),
                     "-c".into(),
                     script.into(),
                     "sh".into(),
                 ],
             )
         } else {
-            ("sh".into(), vec!["-c".into(), script.into(), "sh".into()])
+            (
+                "/bin/sh".into(),
+                vec!["-c".into(), script.into(), "sh".into()],
+            )
         }
     }
 
@@ -254,14 +259,15 @@ impl ComputerManager {
             // The computer row exists once a lease can be taken; create it
             // the way acquisition would if this is the first use.
             sqlx::query(
-                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
-                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
             )
             .bind(bot_id)
             .bind(Self::runtime_name(bot_id))
             .bind(&self.config.image)
             .bind(self.config.cpus as i32)
             .bind(self.config.memory_mib as i32)
+            .bind(&self.config.network)
             .execute(&mut *tx)
             .await?;
             sqlx::query(

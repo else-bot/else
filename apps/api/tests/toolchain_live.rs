@@ -385,10 +385,50 @@ async fn toolchain_projects_persist_and_restore() {
         .unwrap();
     manager.release(lease_id).await.unwrap();
 
+    // Executables the bot plants in its own PATH directories never run as
+    // root: not for the computer tools' privilege drop, the desktop's init
+    // and checkpoint, or a disk capture. Each shim records its user ID.
+    let lease_id = lease(&manager, bot, "test:shims").await;
+    for tool in [
+        "runuser",
+        "sh",
+        "tar",
+        "rm",
+        "chown",
+        "supervisord",
+        "supervisorctl",
+        "sync",
+        "kill",
+    ] {
+        let shim = format!(
+            "#!/bin/sh\nid -u > /home/elsebot/shadowed/{tool}-$$\nexec /usr/bin/{tool} \"$@\"\n"
+        );
+        for dir in [".cargo/bin", ".local/bin"] {
+            manager
+                .write_file(lease_id, &format!("/home/elsebot/{dir}/{tool}"), &shim)
+                .await
+                .unwrap();
+        }
+    }
+    manager.release(lease_id).await.unwrap();
+    let planted = run(
+        &manager,
+        bot,
+        "mkdir -p ~/shadowed && chmod +x ~/.cargo/bin/* ~/.local/bin/* && command -v tar",
+        60,
+    )
+    .await;
+    assert_eq!(
+        planted, "/home/elsebot/.cargo/bin/tar",
+        "the bot's own PATH comes first"
+    );
     // Stop and start: projects and environments still work.
     stop(&app, &manager, bot).await;
+    // The offline rebuild compiles from scratch, from the Cargo registry
+    // cache kept in the guest.
     let check = "node node-app/index.js && py-app/.venv/bin/python py-app/main.py && \
-                 rs-app/target/release/rs-app && cd rs-app && cargo build --release --offline -q && echo REBUILT";
+                 rs-app/target/release/rs-app && cd rs-app && cargo clean -q && \
+                 cargo build --release --offline -q && test -x target/release/rs-app && echo REBUILT";
     let after = run(&manager, bot, check, 240).await;
     assert!(
         after.contains("ms(2h)=7200000") && after.contains("venv=True"),
@@ -397,6 +437,11 @@ async fn toolchain_projects_persist_and_restore() {
     assert!(
         after.contains(r#"{"rust":true,"sum":55}"#) && after.ends_with("REBUILT"),
         "{after}"
+    );
+    let user = run(&manager, bot, "whoami; command -v cargo tar | head -1", 60).await;
+    assert_eq!(
+        user, "elsebot\n/usr/bin/cargo",
+        "real cargo; tools resolve normally"
     );
     run(&manager, bot, SERVE, 60).await;
     let lease_id = lease(&manager, bot, "test:browser").await;
@@ -417,6 +462,7 @@ async fn toolchain_projects_persist_and_restore() {
         "disk archive with image: {:.1} MiB ({captured:?})",
         size as f64 / 1048576.0
     );
+    // (The shims' own records are checked on the restored copy below.)
     let msb = Msb::detect(dir.path(), None).unwrap();
     let restored = format!("{}-restored", runtime_name(&app, bot).await.0);
     msb.restore_disk(
@@ -437,14 +483,14 @@ async fn toolchain_projects_persist_and_restore() {
     let out = msb
         .exec(
             &restored,
-            "runuser",
+            "/usr/sbin/runuser",
             &[
                 "-u",
                 "elsebot",
                 "--",
-                "sh",
+                "/bin/sh",
                 "-c",
-                &format!("cd ~/work && {check}"),
+                &format!("cd ~/work && PATH=$HOME/.cargo/bin:$PATH && {check}"),
             ],
             Duration::from_secs(240),
         )
@@ -453,6 +499,58 @@ async fn toolchain_projects_persist_and_restore() {
     assert_eq!(out.status, Some(0), "{} {}", out.stdout, out.stderr);
     assert!(out.stdout.contains("ms(2h)=7200000") && out.stdout.contains("venv=True"));
     assert!(out.stdout.trim().ends_with("REBUILT"), "{}", out.stdout);
+    let shims = msb
+        .exec(
+            &restored,
+            "/bin/sh",
+            &[
+                "-c",
+                "cat /home/elsebot/shadowed/* 2>/dev/null | sort | uniq -c",
+            ],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    eprintln!("planted shims ran as: {:?}", shims.stdout.trim());
+    assert!(
+        !shims.stdout.split_whitespace().any(|w| w == "0"),
+        "a planted executable ran as root: {}",
+        shims.stdout
+    );
+    // The restored desktop starts, and its browser profile kept the value.
+    let init = msb
+        .exec(
+            &restored,
+            "/usr/local/bin/else-init",
+            &[],
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(init.status, Some(0), "{}", init.stderr);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let read = msb
+        .exec(
+            &restored,
+            "/usr/sbin/runuser",
+            &[
+                "-u",
+                "elsebot",
+                "--",
+                "/bin/sh",
+                "-c",
+                &format!("cd ~/work && {SERVE} && DISPLAY=:99 /usr/local/bin/else-browser open http://127.0.0.1:8765/read.html"),
+            ],
+            Duration::from_secs(90),
+        )
+        .await
+        .unwrap();
+    assert!(
+        read.stdout.contains("KEPT=survives-25"),
+        "restored browser state: {} {}",
+        read.stdout,
+        read.stderr
+    );
     msb.stop(&restored).await.unwrap();
     msb.remove(&restored).await.unwrap();
     assert_eq!(msb.state(&restored).await.unwrap(), None);
@@ -534,7 +632,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     else {
         panic!("job did not start")
     };
-    let refused = manager.upgrade_image(bot, "else-guest:2").await;
+    let refused = manager.upgrade_image(bot, "else-guest:2", None).await;
     assert!(
         refused
             .as_ref()
@@ -543,14 +641,20 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     );
     manager.cancel_job(bot, job).await.unwrap();
     assert!(
-        manager.upgrade_image(bot, "else-guest:1").await.is_err(),
+        manager
+            .upgrade_image(bot, "else-guest:1", None)
+            .await
+            .is_err(),
         "same image"
     );
 
     // The upgrade, from a running idle computer.
     release_all(&app, &manager, bot).await;
     let started = Instant::now();
-    let report = manager.upgrade_image(bot, "else-guest:2").await.unwrap();
+    let report = manager
+        .upgrade_image(bot, "else-guest:2", None)
+        .await
+        .unwrap();
     eprintln!("upgrade in {:?}: {report:?}", started.elapsed());
     assert_eq!(report.from_runtime_name, old_name);
     let (new_name, image) = runtime_name(&app, bot).await;

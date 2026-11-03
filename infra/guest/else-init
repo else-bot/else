@@ -3,6 +3,7 @@
 # this after creating or starting the computer; running it again while the
 # services are up does nothing. The Microsandbox agent stays PID 1, so the
 # runtime's graceful stop works.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
 set -e
 mkdir -p /run/elsebot /var/log/elsebot
 # /run is on the persistent disk: a pid file from an earlier boot may name a

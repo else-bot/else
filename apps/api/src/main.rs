@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
 else-api restore <set-dir> <new-database> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n       \
-else-api upgrade-computer <bot-id> <image>\n       \
+else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
 else-api rollback-computer <bot-id>\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
@@ -27,7 +27,8 @@ restore  verify a backup set and restore it into a new database on the same\n   
 server; never changes an existing database or file\n  \
 restore-remote  download a completed set from the configured bucket, then restore it\n  \
 upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
-files, environments, and browser profile; the old computer is kept stopped\n  \
+files, environments, browser profile, and network profile (--network picks\n           \
+another); the old computer is kept stopped\n  \
 rollback-computer  switch a bot back to the computer its last upgrade replaced\n";
 
 fn main() -> ExitCode {
@@ -57,7 +58,7 @@ fn main() -> ExitCode {
     let command = args.first().map(String::as_str).unwrap_or("serve");
     let arity_ok = match command {
         "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
-        "upgrade-computer" => args.len() == 3,
+        "upgrade-computer" => args.len() == 3 || (args.len() == 5 && args[3] == "--network"),
         "rollback-computer" => args.len() == 2,
         _ => args.len() <= 1,
     };
@@ -70,8 +71,10 @@ fn main() -> ExitCode {
         "backup" => run_backup(),
         "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
         "restore-remote" => run_restore_remote(&args[1], &args[2], args.get(3).map(String::as_str)),
-        "upgrade-computer" => run_upgrade_computer(&args[1], Some(&args[2])),
-        "rollback-computer" => run_upgrade_computer(&args[1], None),
+        "upgrade-computer" => {
+            run_upgrade_computer(&args[1], Some(&args[2]), args.get(4).map(String::as_str))
+        }
+        "rollback-computer" => run_upgrade_computer(&args[1], None, None),
         "setup" => run_setup(),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
@@ -183,7 +186,11 @@ fn run_backup() -> anyhow::Result<()> {
 /// Upgrade (with an image) or roll back a bot's computer. The API must be
 /// stopped: its singleton lock is taken here, so nothing uses the computer
 /// meanwhile.
-fn run_upgrade_computer(bot: &str, image: Option<&str>) -> anyhow::Result<()> {
+fn run_upgrade_computer(
+    bot: &str,
+    image: Option<&str>,
+    network: Option<&str>,
+) -> anyhow::Result<()> {
     let bot_id: uuid::Uuid = bot.parse().context("the bot ID is not a UUID")?;
     let config = load_config()?;
     runtime()?.block_on(async {
@@ -201,8 +208,10 @@ fn run_upgrade_computer(bot: &str, image: Option<&str>) -> anyhow::Result<()> {
             config.computers.clone(),
         );
         manager.reconcile_startup().await?;
+        // Leases and job records the stopped API left behind.
+        manager.settle_offline(bot_id).await?;
         let report = match image {
-            Some(image) => manager.upgrade_image(bot_id, image).await?,
+            Some(image) => manager.upgrade_image(bot_id, image, network).await?,
             None => manager.rollback_upgrade(bot_id).await?,
         };
         println!(
