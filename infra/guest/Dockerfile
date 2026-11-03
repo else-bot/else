@@ -29,8 +29,11 @@ COPY else-browser /usr/local/bin/else-browser
 COPY else-init /usr/local/bin/else-init
 COPY else-checkpoint /usr/local/bin/else-checkpoint
 COPY else-capabilities /usr/local/bin/else-capabilities
+# CDP helpers and examples for bot scripts (POC-027).
+COPY cdp/ /usr/local/lib/elsebot/cdp/
 RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint \
-      /usr/local/bin/else-capabilities
+      /usr/local/bin/else-capabilities \
+ && chmod 0755 /usr/local/lib/elsebot/cdp && chmod 0644 /usr/local/lib/elsebot/cdp/*
 
 # The image's identity and the exact toolchain versions it was built with.
 ARG IMAGE_TAG=else-guest:2

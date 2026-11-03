@@ -4,7 +4,7 @@
 Usage: else-browser open URL | text | title | click SELECTOR | type SELECTOR TEXT
 Prints one JSON object. Runs inside the guest; nothing leaves the VM.
 """
-import json, sys, time, urllib.request
+import fcntl, json, os, sys, time, urllib.request
 import websocket
 
 DEVTOOLS = "http://127.0.0.1:9222"
@@ -43,9 +43,26 @@ class Tab:
                 return
             time.sleep(0.1)
 
+LOCK = "/var/lib/elsebot/browser.lock"
+
+def lock():
+    """The browser lock CDP scripts also take (one controller at a time)."""
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                raise SystemExit(json.dumps({"error": "BROWSER_BUSY: a script is controlling the browser "
+                                             "(see computer_job); wait for it or cancel it"}))
+            time.sleep(0.2)
+
 def main(argv):
     if not argv:
         raise SystemExit(json.dumps({"error": __doc__.strip()}))
+    _held = lock()
     tab = Tab()
     action, rest = argv[0], argv[1:]
     if action == "open":

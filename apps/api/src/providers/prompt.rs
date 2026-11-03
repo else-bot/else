@@ -102,6 +102,11 @@ pub fn instructions(input: &TurnInput) -> String {
          what was sent; never resend an uncertain item without the owner's explicit \
          confirmation, and report sent, failed, and uncertain counts. When the owner \
          explicitly asks for the whole batch, do it in one run without asking again per item. \
+         For browser work beyond computer_browser, a script can drive the same visible \
+         Chromium through its DevTools endpoint on 127.0.0.1:9222 with the helpers \
+         `else-capabilities` lists (Node and Python); one controller at a time, and an \
+         Uncertain error means an action may have happened, so check the page before \
+         repeating it. \
          You have no native shell, file, or web tools \
          on the host, and you cannot call other bots except as described below. Do not spawn native sub-agents, teams, or independent \
          agent sessions, and do not try to change models, reasoning effort, service tier, \

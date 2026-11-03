@@ -14,10 +14,17 @@ jq -n \
   --arg gcc "$(v gcc --version)" \
   --arg make "$(v make --version)" \
   --arg chromium "$(v chromium --version)" \
+  --argjson cdp_ready "$(curl -s -m 2 http://127.0.0.1:9222/json/version >/dev/null && echo true || echo false)" \
   '{image: $image,
     runtimes: {node: $node, npm: $npm, python: $python, pip: $pip, rustc: $rustc, cargo: $cargo},
     tools: {git: $git, gcc: $gcc, make: $make, chromium: $chromium,
             other: ["curl", "jq", "pkg-config", "tar", "gzip", "bzip2", "xz", "zip", "unzip", "time"]},
+    browser: {cdp: "http://127.0.0.1:9222 (guest loopback only; the visible Chromium the owner sees over VNC)",
+              ready: $cdp_ready,
+              node_helper: "/usr/local/lib/elsebot/cdp/cdp.mjs (import { connect } from it; no dependencies)",
+              python_helper: "/usr/local/lib/elsebot/cdp/elsecdp.py (sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp)",
+              examples: ["/usr/local/lib/elsebot/cdp/example.mjs", "/usr/local/lib/elsebot/cdp/example.py"],
+              rules: "one controller at a time (connect() takes the browser lock computer_browser also uses); run scripts with computer_run or computer_job_start; an Uncertain error means an action may have happened: check the page before repeating it"},
     notes: ["Python packages go in a virtual environment: python3 -m venv .venv && .venv/bin/pip install ...",
             "Projects live under /home/elsebot/work and survive stop and start.",
             "No provider CLI, provider credential, or host access is installed here."]}'

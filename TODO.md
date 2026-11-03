@@ -52,7 +52,7 @@ When asked to implement the next milestone, continue through its tasks without p
 
 - [x] [POC-025: Guest programming toolchain](docs/implementation/05-vm-automation-and-categories.md#poc-025-guest-programming-toolchain)
 - [x] [POC-026: Bot-authored scripts and batch jobs](docs/implementation/05-vm-automation-and-categories.md#poc-026-bot-authored-scripts-and-batch-jobs)
-- [ ] [POC-027: Guest-local Chromium CDP scripting](docs/implementation/05-vm-automation-and-categories.md#poc-027-guest-local-chromium-cdp-scripting)
+- [x] [POC-027: Guest-local Chromium CDP scripting](docs/implementation/05-vm-automation-and-categories.md#poc-027-guest-local-chromium-cdp-scripting)
 - [ ] [POC-028: Desktop screenshots delivered to the model](docs/implementation/05-vm-automation-and-categories.md#poc-028-desktop-screenshots-delivered-to-the-model)
 - [ ] [POC-029: Visual mouse and keyboard control](docs/implementation/05-vm-automation-and-categories.md#poc-029-visual-mouse-and-keyboard-control)
 - [ ] [POC-030: Persistent bot categories and API](docs/implementation/05-vm-automation-and-categories.md#poc-030-persistent-bot-categories-and-api)
