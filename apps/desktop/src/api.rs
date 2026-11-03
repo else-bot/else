@@ -72,6 +72,14 @@ pub struct Capabilities {
     /// What new bots start with.
     #[serde(default)]
     pub defaults: Option<ProfileChoice>,
+    /// The welcome screen is still to be completed.
+    #[serde(default)]
+    pub onboarding_required: bool,
+}
+
+#[derive(Deserialize)]
+struct Onboarded {
+    main_bot_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -493,6 +501,19 @@ impl Client {
         )
         .await
         .map(|(_, v)| v.bot)
+    }
+
+    /// Complete the welcome screen: name the main bot and set its provider
+    /// and model (also the defaults). Returns the main bot's ID.
+    pub async fn onboard(
+        self: Arc<Self>,
+        name: String,
+        profile: ProfileChoice,
+    ) -> Result<Uuid, ClientError> {
+        let body = json!({ "name": name, "profile": profile });
+        self.call::<Onboarded>(Method::POST, "/v1/onboarding".into(), Some(body))
+            .await
+            .map(|(_, done)| done.main_bot_id)
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {

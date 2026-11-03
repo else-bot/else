@@ -98,7 +98,19 @@ async fn set_defaults(
 ) -> Result<Json<Value>, ApiError> {
     let provider_id = validate_choice(&state, &body)?;
     let profile = body.profile();
-    let created = profiles::create(&state.db, provider_id, &profile, |_| Ok(()))
+    save_defaults(&state, provider_id, &profile).await?;
+    Ok(Json(
+        json!({ "defaults": choice_json(provider_id, &profile) }),
+    ))
+}
+
+/// Make `provider_id` the default provider with this (validated) profile.
+pub async fn save_defaults(
+    state: &AppState,
+    provider_id: &str,
+    profile: &crate::app::providers::Profile,
+) -> Result<(), ApiError> {
+    let created = profiles::create(&state.db, provider_id, profile, |_| Ok(()))
         .await
         .map_err(profile_error)?;
     if created.is_none() {
@@ -113,9 +125,7 @@ async fn set_defaults(
     }
     let mut conn = state.db.acquire().await?;
     crate::db::bot_profiles::set_default_provider(&mut conn, provider_id).await?;
-    Ok(Json(
-        json!({ "defaults": choice_json(provider_id, &profile) }),
-    ))
+    Ok(())
 }
 
 fn profile_error(err: ProfileError) -> ApiError {

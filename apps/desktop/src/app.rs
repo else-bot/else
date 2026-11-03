@@ -179,6 +179,8 @@ pub struct ElseApp {
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
     _create_enter: Option<Subscription>,
+    welcome: Option<Welcome>,
+    _welcome_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
     _category_enter: Option<Subscription>,
     /// Bots with a move in flight: one at a time per bot, so an earlier
@@ -190,6 +192,15 @@ pub struct ElseApp {
     live: Option<tokio::sync::mpsc::UnboundedSender<LiveCommand>>,
     _live: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The welcome screen, shown until the main bot is named and its provider
+/// and model chosen.
+struct Welcome {
+    name: Entity<InputState>,
+    picker: Entity<ProfilePicker>,
+    busy: bool,
+    error: Option<String>,
 }
 
 /// Holds the create-bot form so the dialog builder can re-render it.
@@ -240,6 +251,8 @@ impl ElseApp {
             notice: None,
             create: None,
             _create_enter: None,
+            welcome: None,
+            _welcome_enter: None,
             category_form: None,
             _category_enter: None,
             moving: HashSet::new(),
@@ -278,7 +291,7 @@ impl ElseApp {
                 }
                 if connected {
                     let caps = client.clone().capabilities().await;
-                    let _ = this.update_in(cx, |app, _, cx| app.apply_caps(caps, cx));
+                    let _ = this.update_in(cx, |app, window, cx| app.apply_caps(caps, window, cx));
                 }
             }
         }));
@@ -320,9 +333,21 @@ impl ElseApp {
         cx.notify();
     }
 
-    fn apply_caps(&mut self, caps: Result<Capabilities, ClientError>, cx: &mut Context<Self>) {
+    fn apply_caps(
+        &mut self,
+        caps: Result<Capabilities, ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match caps {
-            Ok(caps) => self.caps = Some(caps),
+            Ok(caps) => {
+                if !caps.onboarding_required {
+                    self.welcome = None;
+                } else if self.welcome.is_none() {
+                    self.open_welcome(&caps, window, cx);
+                }
+                self.caps = Some(caps);
+            }
             Err(ClientError::Unauthorized) => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
@@ -881,6 +906,146 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+
+    // ----- Welcome ----------------------------------------------------------
+
+    fn open_welcome(&mut self, caps: &Capabilities, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .default_bot_id
+            .and_then(|id| self.bots.iter().find(|b| b.id == id))
+            .map(|b| b.name.clone())
+            .unwrap_or_default();
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Your assistant's name, e.g. Jarvis")
+                .default_value(current)
+        });
+        let picker = cx.new(|cx| ProfilePicker::new(caps, caps.defaults.as_ref(), window, cx));
+        self._welcome_enter =
+            Some(
+                cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        app.submit_welcome(window, cx);
+                    }
+                }),
+            );
+        name.read(cx).focus_handle(cx).focus(window, cx);
+        self.welcome = Some(Welcome {
+            name,
+            picker,
+            busy: false,
+            error: None,
+        });
+    }
+
+    fn submit_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(client), Some(welcome)) = (self.client.clone(), self.welcome.as_mut()) else {
+            return;
+        };
+        if welcome.busy {
+            return;
+        }
+        let name = welcome.name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            welcome.error = Some("Give your assistant a name.".into());
+            cx.notify();
+            return;
+        }
+        let Some(profile) = welcome.picker.read(cx).choice(cx) else {
+            welcome.error = Some("Choose a provider and a model.".into());
+            cx.notify();
+            return;
+        };
+        welcome.busy = true;
+        welcome.error = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.clone().onboard(name, profile).await;
+            let caps = match result {
+                Ok(_) => Some(client.clone().capabilities().await),
+                Err(_) => None,
+            };
+            let _ = this.update_in(cx, |app, window, cx| {
+                match result {
+                    Ok(main) => {
+                        app.welcome = None;
+                        app._welcome_enter = None;
+                        if let Some(caps) = caps {
+                            app.apply_caps(caps, window, cx);
+                        }
+                        app.refresh_now(window, cx);
+                        app.select(Some(main), window, cx);
+                        app.composer.read(cx).focus_handle(cx).focus(window, cx);
+                    }
+                    Err(err) => {
+                        if let Some(welcome) = app.welcome.as_mut() {
+                            welcome.busy = false;
+                            welcome.error = Some(err.to_string());
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_welcome(&self, welcome: &Welcome, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let ready = welcome.picker.read(cx).any_available();
+        let mut card = v_flex()
+            .w(px(560.))
+            .gap_4()
+            .p_6()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(div().text_xl().child("Welcome to else.bot"))
+            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                "Your main assistant is your entry point: it knows you, remembers \
+                         what matters, and hands work to other bots. Name it and choose how \
+                         it thinks. New bots start with the same choice, and each bot can \
+                         have its own.",
+            ))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Name"),
+                    )
+                    .child(Input::new(&welcome.name)),
+            )
+            .child(welcome.picker.clone());
+        if let Some(error) = &welcome.error {
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(error.clone()),
+            );
+        }
+        card = card.child(
+            h_flex().justify_end().child(
+                Button::new("welcome-start")
+                    .label("Get started")
+                    .primary()
+                    .loading(welcome.busy)
+                    .disabled(welcome.busy || !ready)
+                    .on_click(cx.listener(|app, _, window, cx| app.submit_welcome(window, cx))),
+            ),
+        );
+        h_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(theme.muted)
+            .child(card)
+            .into_any_element()
     }
 
     fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2219,6 +2384,14 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
 
 impl Render for ElseApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(welcome) = &self.welcome {
+            let theme = cx.theme().foreground;
+            return div()
+                .size_full()
+                .text_color(theme)
+                .child(self.render_welcome(welcome, cx))
+                .into_any_element();
+        }
         let theme = cx.theme();
         h_flex()
             .key_context(APP_CONTEXT)
@@ -2258,5 +2431,6 @@ impl Render for ElseApp {
             .text_color(theme.foreground)
             .child(self.render_sidebar(cx))
             .child(self.render_main(cx))
+            .into_any_element()
     }
 }

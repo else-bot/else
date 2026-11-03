@@ -10,6 +10,7 @@ pub mod guest_tools;
 pub mod maintenance;
 pub mod mcp;
 pub mod memory;
+pub mod onboarding;
 pub mod settings;
 pub mod task_secrets;
 pub mod tools;
@@ -99,6 +100,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(settings::routes())
         .merge(task_secrets::routes())
         .merge(maintenance::routes())
+        .merge(onboarding::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
@@ -298,11 +300,14 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         })
         .collect();
     let defaults = settings::defaults(&state).await.ok().flatten();
+    let onboarding_required = onboarding::required(&state).await.unwrap_or(false);
     Json(json!({
         "api_version": "v1",
         "server_instance_id": state.server_instance_id,
         "default_provider_id": default_id,
         "defaults": defaults,
+        // The welcome screen: name the main bot and choose its model.
+        "onboarding_required": onboarding_required,
         "providers": providers,
         "limits": {
             "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,

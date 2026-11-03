@@ -104,6 +104,11 @@ impl ProfilePicker {
         })
     }
 
+    /// Whether any provider's CLI runs, i.e. whether a choice is possible.
+    pub fn any_available(&self) -> bool {
+        self.providers.iter().any(|p| p.cli_available)
+    }
+
     fn current(&self) -> Option<&ProviderInfo> {
         let id = self.provider.as_deref()?;
         self.providers.iter().find(|p| p.id == id)
