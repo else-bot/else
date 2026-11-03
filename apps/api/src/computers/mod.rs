@@ -31,7 +31,7 @@ use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub use runtime::{ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec};
+pub use runtime::{ComputerRuntime, ExecOutput, Mount, RuntimeError, RuntimeState, Spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleAction {
@@ -60,7 +60,19 @@ pub struct ComputerConfig {
     /// Host directory for per-computer secrets (VNC passwords) and the
     /// artifact store, private to the API.
     pub state_dir: std::path::PathBuf,
+    /// Root of the bots' host project directories; each computer created
+    /// here mounts `<projects_dir>/<bot id>` at the guest user's `~/work`.
+    pub projects_dir: Option<std::path::PathBuf>,
 }
+
+/// Where a bot's host project directory appears in a desktop computer: the
+/// `elsebot` user's working directory (see infra/guest). Commands there run
+/// as `elsebot` (the image's first user, ID 1000).
+pub const GUEST_PROJECT: &str = "/home/elsebot/work";
+const GUEST_UID: u32 = 1000;
+/// Without the desktop image commands run as root, so the project is root's
+/// `~/work`.
+pub const ROOT_PROJECT: &str = "/root/work";
 
 /// Guest port of the desktop's noVNC (see infra/guest).
 pub const DESKTOP_GUEST_PORT: u16 = 6080;
@@ -84,6 +96,7 @@ impl Default for ComputerConfig {
             network: "public".into(),
             desktop: false,
             state_dir: std::env::temp_dir().join("else-computers"),
+            projects_dir: None,
         }
     }
 }
@@ -409,8 +422,14 @@ impl ComputerManager {
                 // is retried with another one.
                 let mut outcome = Err(RuntimeError::Unavailable("not attempted".into()));
                 for _ in 0..3 {
-                    outcome = match self.desktop_resources(bot_id).await {
-                        Ok((ports, files)) => {
+                    let resources = match self.desktop_resources(bot_id).await {
+                        Ok((ports, files)) => self
+                            .project_mounts(bot_id)
+                            .map(|mounts| (ports, files, mounts)),
+                        Err(err) => Err(err),
+                    };
+                    outcome = match resources {
+                        Ok((ports, files, mounts)) => {
                             self.runtime
                                 .create(&Spec {
                                     name: row.runtime_name.clone(),
@@ -423,6 +442,7 @@ impl ComputerManager {
                                         .unwrap_or_else(|| self.config.network.clone()),
                                     ports,
                                     files,
+                                    mounts,
                                 })
                                 .await
                         }
@@ -515,6 +535,30 @@ impl ComputerManager {
             vec![(port, DESKTOP_GUEST_PORT)],
             vec![(password, "/etc/elsebot/vnc.pass".into())],
         ))
+    }
+
+    /// The bot's host project directory (created if missing), mounted at
+    /// `~/work` of the user that runs the bot's commands
+    /// ([`Self::as_guest_user`]), owned there by that user.
+    pub(crate) fn project_mounts(&self, bot_id: Uuid) -> Result<Vec<Mount>, RuntimeError> {
+        let Some(root) = &self.config.projects_dir else {
+            return Ok(Vec::new());
+        };
+        // Microsandbox refuses a host path through a symlink (macOS's /tmp,
+        // or an owner's linked directory), so the resolved path is mounted.
+        let dir = crate::providers::host::project_dir(root, bot_id)
+            .and_then(std::fs::canonicalize)
+            .map_err(|e| RuntimeError::Unavailable(format!("the bot's project directory: {e}")))?;
+        let (guest, uid) = if self.config.desktop {
+            (GUEST_PROJECT, GUEST_UID)
+        } else {
+            (ROOT_PROJECT, 0)
+        };
+        Ok(vec![Mount {
+            host: dir,
+            guest: guest.into(),
+            uid,
+        }])
     }
 
     fn secret_dir(&self, bot_id: Uuid) -> std::path::PathBuf {

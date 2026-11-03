@@ -74,6 +74,17 @@ pub struct Spec {
     pub ports: Vec<(u16, u16)>,
     /// Host files copied into the guest at creation: (host path, guest path).
     pub files: Vec<(PathBuf, String)>,
+    /// Host directories mounted live into the guest.
+    pub mounts: Vec<Mount>,
+}
+
+/// A host directory mounted live into a computer, its files presented there
+/// as owned by `uid` (and the group of the same ID).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    pub host: PathBuf,
+    pub guest: String,
+    pub uid: u32,
 }
 
 #[async_trait]
@@ -230,7 +241,8 @@ impl Msb {
                 }
             )));
         }
-        // The firmware ships next to the binary (`../lib/libkrunfw.so.*`).
+        // The firmware ships next to the binary (`../lib/libkrunfw.so.*`, or
+        // `libkrunfw.*.dylib` on macOS).
         let libkrunfw = program.parent().and_then(|bin| {
             let lib = bin.parent()?.join("lib");
             let mut found: Vec<PathBuf> = std::fs::read_dir(lib)
@@ -238,9 +250,10 @@ impl Msb {
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("libkrunfw.so."))
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        n.starts_with("libkrunfw.so.")
+                            || (n.starts_with("libkrunfw.") && n.ends_with(".dylib"))
+                    })
                 })
                 .collect();
             found.sort();
@@ -457,6 +470,22 @@ impl ComputerRuntime for Msb {
         for (host, guest) in &spec.files {
             args.push("--copy-file".into());
             args.push(format!("{}:{guest}", host.display()));
+        }
+        for Mount { host, guest, uid } in &spec.mounts {
+            // `SOURCE:DEST:OPTIONS`: a colon in the host path would shift
+            // the fields.
+            let host =
+                host.to_str()
+                    .filter(|h| !h.contains(':'))
+                    .ok_or_else(|| RuntimeError::Failed {
+                        operation: "create".into(),
+                        message: format!(
+                            "{} cannot be mounted (not UTF-8, or a ':')",
+                            host.display()
+                        ),
+                    })?;
+            args.push("--mount-dir".into());
+            args.push(format!("{host}:{guest}:uid={uid},gid={uid}"));
         }
         // `--` keeps the image a positional argument, never an option.
         args.push("--".into());

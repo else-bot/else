@@ -388,7 +388,7 @@ async fn load_and_check(
     let dump = dump.to_owned();
     let database = request.target_database.to_owned();
     let (status, _, stderr) = tokio::task::spawn_blocking(move || {
-        let mut command = Command::new(&pg_restore);
+        let mut command = Command::new(super::resolve_tool(&pg_restore));
         command
             .args([
                 "--single-transaction",
@@ -581,6 +581,9 @@ async fn restore_runtime(
                     .map(|p| vec![(p, crate::computers::DESKTOP_GUEST_PORT)])
                     .unwrap_or_default(),
                 files: Vec::new(),
+                // Project directories are not in backup sets yet, so a
+                // restored computer gets no project mount.
+                mounts: Vec::new(),
             };
             attempted.push(spec.name.clone());
             let result = target.runtime.restore_disk(&plain, &spec).await;

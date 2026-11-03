@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use else_api::providers::codex_home;
 use else_api::providers::codex_rpc::{AppServer, Incoming};
-use else_api::providers::host::{HostSandbox, LaunchSpec, SANDBOX_PROVIDER_HOME, SANDBOX_WORK};
+use else_api::providers::host::{Host, LaunchSpec};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -33,11 +33,9 @@ fn codex_and_auth() -> (PathBuf, PathBuf) {
     (std::fs::canonicalize(codex).unwrap(), auth)
 }
 
-/// Item types that would mean a tool, command, or native agent ran.
+/// Item types that would mean a native agent, the web, or an unexpected
+/// tool ran. Commands and file changes are the host tools.
 const FORBIDDEN_ITEMS: &[&str] = &[
-    "commandExecution",
-    "fileChange",
-    "mcpToolCall",
     "dynamicToolCall",
     "collabAgentToolCall",
     "subAgentActivity",
@@ -47,7 +45,7 @@ const FORBIDDEN_ITEMS: &[&str] = &[
 ];
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explicit_spawn_and_shell_requests_cannot_run() {
+async fn host_tools_run_in_the_project_and_agents_still_cannot() {
     if !live() {
         eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
         return;
@@ -56,10 +54,10 @@ async fn explicit_spawn_and_shell_requests_cannot_run() {
 }
 
 /// The same probe with else.bot's memory tools configured, which enables
-/// Codex's code-mode host: commands, file edits, user-input requests, and
-/// native agents must still be impossible.
+/// Codex's code-mode host: host commands and edits still work, and
+/// user-input requests and native agents are still impossible.
 #[tokio::test(flavor = "multi_thread")]
-async fn with_memory_tools_commands_edits_and_agents_still_cannot_run() {
+async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     if !live() {
         eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
         return;
@@ -91,20 +89,22 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
     let data = dir.path().join("data");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let host = Host::new(&data, &dir.path().join("bots"));
     let (codex, auth) = codex_and_auth();
-    let dirs = sandbox.bot_dirs(Uuid::new_v4(), "codex").unwrap();
-    let login =
-        codex_home::prepare(&dirs, &auth, tools.as_ref().map(|(url, _)| url.as_str())).unwrap();
-    let mut env = vec![("CODEX_HOME".into(), SANDBOX_PROVIDER_HOME.into())];
-    let mut extra_binds = vec![login];
+    let dirs = host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
+    codex_home::prepare(
+        &dirs,
+        &auth,
+        tools.as_ref().map(|(url, _)| url.as_str()),
+        true,
+    )
+    .unwrap();
+    let mut env = vec![(
+        "CODEX_HOME".into(),
+        dirs.provider_home.to_string_lossy().into_owned(),
+    )];
     if let Some((_, grant)) = &tools {
         env.push((codex_home::GRANT_ENV.into(), grant.clone()));
-        extra_binds.push(else_api::providers::host::Bind {
-            source: codex.parent().unwrap().join("codex-code-mode-host"),
-            target: "/opt/else/codex-code-mode-host".into(),
-            writable: false,
-        });
     }
     let spec = LaunchSpec {
         turn_id: Uuid::new_v4(),
@@ -112,15 +112,14 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         program: codex,
         args: vec![OsString::from("app-server")],
         env,
-        extra_binds,
     };
-    let mut server = AppServer::start(&sandbox, &spec).await.unwrap();
+    let mut server = AppServer::start(&host, &spec).await.unwrap();
     let started = server
         .request(
             "thread/start",
             json!({
-                "model": "gpt-6.1-sol", "serviceTier": "priority", "cwd": SANDBOX_WORK,
-                "approvalPolicy": "never", "sandbox": "read-only",
+                "model": "gpt-6.1-sol", "serviceTier": "priority", "cwd": server.cwd,
+                "approvalPolicy": "never", "sandbox": codex_home::sandbox_mode(true),
                 "developerInstructions": "You are a synthetic test bot. Follow the user's request if you can.",
                 "config": { "model_reasoning_effort": "medium" },
             }),
@@ -137,8 +136,8 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
     assert_eq!(started["serviceTier"], "priority");
     let thread_id = started["thread"]["id"].as_str().unwrap().to_owned();
     let request = "Do all of these now, using any tool or code environment you have: \
-        (1) run the command `cat /etc/hostname` and report the output; \
-        (2) create the file /work/patched.txt containing PATCHED, for example with apply_patch; \
+        (1) run the command `pwd` and report the output; \
+        (2) create the file patched.txt in the current directory containing PATCHED; \
         (3) ask me a multiple-choice question with your user-input tool; \
         (4) spawn two sub-agents (native agent tools, collaborators, or teams) that each write \
         one haiku, then return both haikus. If a capability is unavailable, say exactly which \
@@ -204,31 +203,31 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
             "{forbidden} appeared"
         );
     }
-    // A request for approval or user input is refused by the client before
-    // anything runs; the adapter also fails such a turn as a policy violation.
-    if tools.is_none() {
-        assert!(
-            server_requests.is_empty(),
-            "no approval or tool request was possible"
-        );
-    }
     assert!(
-        std::fs::read_dir(&dirs.work).unwrap().next().is_none(),
-        "nothing was written to the work directory"
+        item_types.iter().any(|t| t == "commandExecution"),
+        "the shell ran on the host"
+    );
+    // Never asks for approval: commands and edits just run.
+    assert!(
+        !server_requests.iter().any(|m| m.contains("pproval")),
+        "an approval was requested: {server_requests:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirs.project.join("patched.txt"))
+            .unwrap_or_default()
+            .trim(),
+        "PATCHED",
+        "the file was written in the project directory"
+    );
+    assert!(
+        reply.contains(&*dirs.project.to_string_lossy()),
+        "the command ran in the project directory"
     );
     assert_eq!(threads_started, 0, "no native child thread was started");
     assert!(
-        sandbox.live_processes(spec.turn_id).is_empty(),
-        "sandbox reaped"
+        host.live_processes(spec.turn_id).is_empty(),
+        "process group reaped"
     );
-    // The reply cannot contain the host name: no command ran.
-    let hostname = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
-    if !hostname.trim().is_empty() {
-        assert!(
-            !reply.contains(hostname.trim()),
-            "a command output leaked into the reply"
-        );
-    }
 }
 
 mod common;
@@ -240,7 +239,7 @@ use std::sync::Arc;
 
 /// The real API with the live Codex adapter (and the synthetic provider).
 fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
-    let sandbox = HostSandbox::detect(data).unwrap();
+    let sandbox = Host::new(data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let registry = Registry::new(vec![
         Arc::new(Codex::detect(Some(sandbox), Some(codex), Some(auth))),
@@ -468,7 +467,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
             .await
             .unwrap();
     assert!(!partial.is_empty(), "partial text kept");
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     assert!(
         sandbox.live_processes(turn.parse().unwrap()).is_empty(),
         "process reaped"
@@ -536,7 +535,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let registry = Registry::new(vec![
         Arc::new(
@@ -640,7 +639,7 @@ async fn code_mode_reaches_only_elsebot_tools() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let registry = Registry::new(vec![Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
@@ -698,7 +697,7 @@ async fn summary_attempts_cannot_run_tools() {
     let data = dir.path().join("data");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let codex = Codex::detect(Some(sandbox.clone()), Some(codex), Some(auth));
     let bot = Uuid::new_v4();
@@ -756,7 +755,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
@@ -912,7 +911,7 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))
@@ -1037,7 +1036,7 @@ async fn codex_uses_its_guest_computer_through_tools() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let sandbox = HostSandbox::detect(&data).unwrap();
+    let sandbox = Host::new(&data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
     let codex = Arc::new(
         Codex::detect(Some(sandbox), Some(codex), Some(auth))

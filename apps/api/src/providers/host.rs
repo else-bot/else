@@ -1,18 +1,23 @@
-//! Restricted host execution for provider CLIs.
+//! Provider CLIs on the host.
 //!
-//! Every provider process runs inside bubblewrap with its own PID, IPC, and
-//! UTS namespaces, a read-only view of system directories, a private tmpfs
-//! home, and only the bot's own directories bound read-write. The API's data
-//! directory (owner token, master key, other bots), the owner's home, the
-//! Docker socket, and the user session bus are not visible. The environment
-//! is cleared and rebuilt from an allowlist. Network access stays available
-//! because the provider talks to its service; database credentials and the
-//! owner token are never present to use with it.
+//! Codex and Claude Code run directly on the host as the API's user, so a
+//! bot can work with the owner's files and machine when the owner asks (see
+//! docs/security.md, "Host provider processes"). Every run starts in the
+//! bot's project directory (`<ELSE_BOTS_DIR>/<bot id>`), which is also
+//! mounted into the bot's computer: one workspace on the host and in its VM.
+//! Provider state (native sessions, settings, the shared login link) lives
+//! in a private per-bot home under the API's data directory, outside the
+//! project, so it never reaches the computer.
 //!
-//! Supervision: the sandbox is its own process group and session, bubblewrap
-//! kills the sandbox if the API dies (`--die-with-parent`), and every process
-//! carries an installation marker in its environment so a restarted API can
-//! find and terminate leftovers before dispatching new work.
+//! The environment is rebuilt from an allowlist of the API's own (the user's
+//! session variables), so the API's database URL, master key, and other
+//! settings are not handed to the CLI. That is hygiene, not isolation: the
+//! process can read and change anything the API's user can.
+//!
+//! Supervision: each run is its own process group, terminated with it, and
+//! every process carries an installation marker in its environment so a
+//! restarted API can find and terminate leftovers before dispatching new
+//! work (through `/proc`, so on Linux only).
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
@@ -24,129 +29,88 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Environment variable naming the installation and turn of a sandbox.
-pub const MARKER_VAR: &str = "ELSE_BOT_SANDBOX";
-/// Mount points inside the sandbox.
-pub const SANDBOX_HOME: &str = "/home/bot";
-/// Descriptor carrying bubblewrap's options in the child.
-const ARGS_FD: i32 = 3;
-pub const SANDBOX_WORK: &str = "/work";
-pub const SANDBOX_PROGRAM: &str = "/opt/else/provider";
-pub const SANDBOX_PROVIDER_HOME: &str = "/var/lib/provider-home";
+/// Environment variable naming the installation and turn of a provider run.
+pub const MARKER_VAR: &str = "ELSE_BOT_PROCESS";
 
-/// Files copied into the sandbox's otherwise empty /etc.
-const ETC_FILES: &[&str] = &[
-    "resolv.conf",
-    "hosts",
-    "host.conf",
-    "gai.conf",
-    "nsswitch.conf",
-    "passwd",
-    "group",
-    "localtime",
-    "ld.so.cache",
-    "ld.so.conf",
+/// Variables passed from the API's environment to provider CLIs (plus every
+/// `LC_*`): the user's session, so host work sees the owner's home, tools,
+/// and desktop session. Everything else, the API's own settings included,
+/// is dropped.
+const PASSED_ENV: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TMPDIR",
+    "TERM",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "SSH_AUTH_SOCK",
 ];
-/// Certificate stores (Arch, Debian, Fedora layouts).
-const ETC_DIRS: &[&str] = &["ssl", "ca-certificates", "pki"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
-    #[error("bubblewrap (bwrap) is required to run provider CLIs: {0}")]
-    Unavailable(String),
     #[error("{0}: {1}")]
     Io(String, std::io::Error),
 }
 
-/// Per-bot host directories. Kept when a bot is deleted.
+/// A bot's directories on the host. Kept when the bot is deleted.
 #[derive(Debug, Clone)]
 pub struct BotDirs {
+    /// Private to the API: `<data dir>/bots/<bot id>`.
     pub root: PathBuf,
-    pub work: PathBuf,
+    /// The bot's project directory, where every provider run starts; also
+    /// its computer's `~/work`.
+    pub project: PathBuf,
+    /// The provider's own home (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) under
+    /// `root`.
     pub provider_home: PathBuf,
-}
-
-/// A host file made visible inside the sandbox at `target` (absolute).
-#[derive(Debug, Clone)]
-pub struct Bind {
-    pub source: PathBuf,
-    pub target: String,
-    pub writable: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     pub turn_id: Uuid,
     pub dirs: BotDirs,
-    /// Host path of the provider executable; bound read-only.
     pub program: PathBuf,
     pub args: Vec<OsString>,
-    /// Extra environment, on top of the fixed allowlist.
+    /// Extra environment, on top of the passed session variables.
     pub env: Vec<(String, String)>,
-    pub extra_binds: Vec<Bind>,
 }
 
 #[derive(Clone)]
-pub struct HostSandbox {
-    bwrap: PathBuf,
+pub struct Host {
     data_dir: PathBuf,
+    bots_dir: PathBuf,
     marker_prefix: String,
 }
 
-impl HostSandbox {
-    /// Find bubblewrap and prove it can start a sandbox here.
-    pub fn detect(data_dir: &Path) -> Result<Self, HostError> {
-        let bwrap = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.is_file())
-            .ok_or_else(|| HostError::Unavailable("bwrap was not found in /usr/bin".into()))?;
+impl Host {
+    pub fn new(data_dir: &Path, bots_dir: &Path) -> Self {
         let digest = Sha256::digest(data_dir.as_os_str().as_encoded_bytes());
-        let marker_prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-        let sandbox = Self {
-            bwrap,
+        Self {
             data_dir: data_dir.to_owned(),
-            marker_prefix,
-        };
-        let status = std::process::Command::new(&sandbox.bwrap)
-            .args(sandbox.base_args())
-            .arg("--")
-            .arg("/usr/bin/true")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|err| HostError::Unavailable(err.to_string()))?;
-        if !status.status.success() {
-            return Err(HostError::Unavailable(format!(
-                "a test sandbox failed: {}",
-                String::from_utf8_lossy(&status.stderr).trim()
-            )));
+            bots_dir: bots_dir.to_owned(),
+            marker_prefix: digest[..8].iter().map(|b| format!("{b:02x}")).collect(),
         }
-        Ok(sandbox)
     }
 
-    /// Run `program args` in a minimal sandbox and return its stdout, or
-    /// `None` if it fails there.
+    /// Run `program args` with the passed environment and return its
+    /// stdout, or `None` if it fails.
     pub fn probe(&self, program: &Path, args: &[&str]) -> Option<String> {
-        let output = std::process::Command::new(&self.bwrap)
-            .args(self.base_args())
-            .args([
-                "--ro-bind".as_ref(),
-                program.as_os_str(),
-                SANDBOX_PROGRAM.as_ref(),
-            ])
-            .args([
-                "--clearenv",
-                "--setenv",
-                "HOME",
-                SANDBOX_HOME,
-                "--",
-                SANDBOX_PROGRAM,
-            ])
+        let output = std::process::Command::new(program)
             .args(args)
             .env_clear()
+            .envs(passed_env())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -162,16 +126,29 @@ impl HostSandbox {
         &self.marker_prefix
     }
 
-    /// Create (if missing) the bot's private directories under the data
-    /// directory, mode 0700.
+    /// The bot's project directory (not created).
+    pub fn project_path(&self, bot_id: Uuid) -> PathBuf {
+        self.bots_dir.join(bot_id.to_string())
+    }
+
+    /// Where a bot's provider runs start, part of session fingerprints: a
+    /// native session never resumes in another directory.
+    pub fn runtime(&self, bot_id: Uuid) -> String {
+        format!("runtime:host:{}", self.project_path(bot_id).display())
+    }
+
+    /// Create (if missing) the bot's project directory and its private
+    /// provider home, mode 0700.
     pub fn bot_dirs(&self, bot_id: Uuid, provider: &str) -> Result<BotDirs, HostError> {
         let root = self.data_dir.join("bots").join(bot_id.to_string());
+        let project = project_dir(&self.bots_dir, bot_id)
+            .map_err(|e| HostError::Io(self.project_path(bot_id).display().to_string(), e))?;
         let dirs = BotDirs {
-            work: root.join("work"),
             provider_home: root.join(format!("{provider}-home")),
+            project,
             root,
         };
-        for dir in [&dirs.root, &dirs.work, &dirs.provider_home] {
+        for dir in [&dirs.root, &dirs.provider_home] {
             DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -183,174 +160,28 @@ impl HostSandbox {
         Ok(dirs)
     }
 
-    /// Arguments shared by every sandbox: namespaces and read-only system.
-    fn base_args(&self) -> Vec<OsString> {
-        let mut args: Vec<OsString> = [
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--unshare-cgroup-try",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            // A minimal /etc: credentials or provider configuration placed
-            // under /etc (for example /etc/codex) are not visible.
-            "--tmpfs",
-            "/etc",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--tmpfs",
-            "/home",
-            "--dir",
-            SANDBOX_HOME,
-            "--tmpfs",
-            "/var",
-        ]
-        .iter()
-        .map(OsString::from)
-        .collect();
-        // Merged-/usr systems link these into /usr; others have directories.
-        for top in ["/bin", "/sbin", "/lib", "/lib64"] {
-            match fs::read_link(top) {
-                Ok(target) => {
-                    args.extend(["--symlink".into(), target.into_os_string(), top.into()]);
-                }
-                Err(_) if Path::new(top).is_dir() => {
-                    args.extend(["--ro-bind".into(), top.into(), top.into()]);
-                }
-                Err(_) => {}
-            }
-        }
-        // Only what name resolution, TLS, users, and the dynamic linker
-        // need. Symlinked files are bound by their resolved target, so no
-        // directory outside /etc (such as /run) becomes visible.
-        for name in ETC_FILES {
-            let path = Path::new("/etc").join(name);
-            if let Ok(target) = fs::canonicalize(&path) {
-                if target.is_file() {
-                    args.extend(["--ro-bind".into(), target.into(), path.into()]);
-                }
-            }
-        }
-        for name in ETC_DIRS {
-            let path = Path::new("/etc").join(name);
-            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-                args.extend(["--ro-bind".into(), path.clone().into(), path.into()]);
-            }
-        }
-        args
-    }
-
     fn marker(&self, turn_id: Uuid) -> String {
         format!("{}:{turn_id}", self.marker_prefix)
     }
 
-    /// The full bubblewrap argument list for a launch.
-    pub fn args(&self, spec: &LaunchSpec) -> Vec<OsString> {
-        let mut args = self.base_args();
-        let bind = |args: &mut Vec<OsString>, flag: &str, source: &Path, target: &str| {
-            args.extend([flag.into(), source.into(), target.into()]);
-        };
-        bind(&mut args, "--ro-bind", &spec.program, SANDBOX_PROGRAM);
-        bind(&mut args, "--bind", &spec.dirs.work, SANDBOX_WORK);
-        bind(
-            &mut args,
-            "--bind",
-            &spec.dirs.provider_home,
-            SANDBOX_PROVIDER_HOME,
-        );
-        for extra in &spec.extra_binds {
-            let flag = if extra.writable {
-                "--bind"
-            } else {
-                "--ro-bind"
-            };
-            bind(&mut args, flag, &extra.source, &extra.target);
-        }
-        args.extend(["--chdir".into(), SANDBOX_WORK.into(), "--clearenv".into()]);
-        let marker = self.marker(spec.turn_id);
-        let mut env: Vec<(String, String)> = vec![
-            ("HOME".into(), SANDBOX_HOME.into()),
-            ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
-            ("LANG".into(), "C.UTF-8".into()),
-            ("TMPDIR".into(), "/tmp".into()),
-            (MARKER_VAR.into(), marker),
-        ];
-        env.extend(spec.env.iter().cloned());
-        for (key, value) in env {
-            args.extend(["--setenv".into(), key.into(), value.into()]);
-        }
-        args.push("--".into());
-        args.push(SANDBOX_PROGRAM.into());
-        args.extend(spec.args.iter().cloned());
-        args
-    }
-
-    /// A command ready to spawn: no inherited environment, its own process
-    /// group, and the marker on bubblewrap itself for discovery.
-    ///
-    /// Bubblewrap's options (binds and `--setenv` values, which can carry a
-    /// task grant) go through an inherited memfd with `--args`, because any
-    /// local user can read a process's command line. Only the program and
-    /// its arguments stay on argv.
-    pub fn command(&self, spec: &LaunchSpec) -> std::io::Result<tokio::process::Command> {
-        use std::io::{Seek, Write};
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        use std::os::unix::ffi::OsStrExt;
-        let args = self.args(spec);
-        let split = args
-            .iter()
-            .position(|a| a == "--")
-            .expect("args end with -- and the program");
-        let (options, program) = args.split_at(split);
-        // SAFETY: memfd_create with a valid NUL-terminated name.
-        let raw = unsafe { libc::memfd_create(c"else-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
-        if raw < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `raw` is a new descriptor owned by nothing else.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let mut file = std::fs::File::from(fd);
-        for option in options {
-            file.write_all(option.as_bytes())?;
-            file.write_all(&[0])?;
-        }
-        file.rewind()?;
-        let fd = OwnedFd::from(file);
-        let mut command = tokio::process::Command::new(&self.bwrap);
+    /// A command ready to spawn: the program in the bot's project
+    /// directory, the passed environment plus the launch's own, its own
+    /// process group, and the marker for discovery.
+    pub fn command(&self, spec: &LaunchSpec) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(&spec.program);
         command
-            .arg("--args")
-            .arg(ARGS_FD.to_string())
-            .args(program)
+            .args(&spec.args)
+            .current_dir(&spec.dirs.project)
             .env_clear()
+            .envs(passed_env())
+            .envs(spec.env.iter().map(|(k, v)| (k, v)))
             .env(MARKER_VAR, self.marker(spec.turn_id))
             .process_group(0)
             .kill_on_drop(true);
-        // SAFETY: only async-signal-safe calls between fork and exec. The
-        // memfd moves to a fixed number without close-on-exec for bwrap.
-        unsafe {
-            command.pre_exec(move || {
-                let raw = fd.as_raw_fd();
-                if raw == ARGS_FD {
-                    if libc::fcntl(raw, libc::F_SETFD, 0) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                } else if libc::dup2(raw, ARGS_FD) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        Ok(command)
+        command
     }
 
-    /// Terminate every sandbox process of this installation left from an
+    /// Terminate every provider process of this installation left from an
     /// earlier API process and wait until they have exited. Each process is
     /// pinned with a pidfd before its marker is re-checked and it is
     /// signalled, so a reused PID can never be hit. Returns how many were
@@ -380,10 +211,39 @@ impl HostSandbox {
         Ok(count)
     }
 
-    /// Processes still alive for one turn's sandbox.
+    /// Processes still alive for one turn's run.
     pub fn live_processes(&self, turn_id: Uuid) -> Vec<i32> {
         find_marked(&self.marker_prefix, Some(turn_id))
     }
+}
+
+/// `<root>/<bot id>`, created with mode 0700 if missing. Shared by provider
+/// runs and the bot's computer, which mounts it.
+pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
+    let dir = root.join(bot_id.to_string());
+    DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    if !fs::symlink_metadata(&dir)?.is_dir() {
+        return Err(std::io::Error::other("not a directory"));
+    }
+    Ok(dir)
+}
+
+/// Point `dir/name` at the host login `source`, replacing whatever is there
+/// (an earlier link, or a placeholder file). The login is never copied, so
+/// token refreshes write through to the one file.
+pub fn link_login(dir: &Path, name: &str, source: &Path) -> std::io::Result<()> {
+    let temp = dir.join(format!(".{name}.{}.link", Uuid::new_v4()));
+    std::os::unix::fs::symlink(source, &temp)?;
+    fs::rename(&temp, dir.join(name)).inspect_err(|_| {
+        let _ = fs::remove_file(&temp);
+    })
+}
+
+fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
+    std::env::vars_os().filter(|(key, _)| {
+        key.to_str()
+            .is_some_and(|k| PASSED_ENV.contains(&k) || k.starts_with("LC_"))
+    })
 }
 
 fn has_marker(pid: i32, wanted: &str) -> bool {
@@ -393,6 +253,7 @@ fn has_marker(pid: i32, wanted: &str) -> bool {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn pidfd_open(pid: i32) -> Option<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
@@ -401,6 +262,7 @@ fn pidfd_open(pid: i32) -> Option<std::os::fd::OwnedFd> {
     (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
 }
 
+#[cfg(target_os = "linux")]
 fn pidfd_kill(fd: &std::os::fd::OwnedFd) -> bool {
     use std::os::fd::AsRawFd;
     // SAFETY: signals exactly the process the pidfd refers to.
@@ -425,6 +287,17 @@ fn pidfd_wait(fd: &std::os::fd::OwnedFd, timeout: Duration) -> bool {
     };
     // SAFETY: one valid pollfd for the duration of the call.
     unsafe { libc::poll(&mut poll, 1, timeout.as_millis() as i32) > 0 }
+}
+
+// Without pidfds (or /proc) there is nothing to find or pin.
+#[cfg(not(target_os = "linux"))]
+fn pidfd_open(_pid: i32) -> Option<std::os::fd::OwnedFd> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pidfd_kill(_fd: &std::os::fd::OwnedFd) -> bool {
+    false
 }
 
 /// Scan `/proc` for processes owned by this user whose environment carries
@@ -453,8 +326,8 @@ fn find_marked(prefix: &str, turn: Option<Uuid>) -> Vec<i32> {
         .collect()
 }
 
-/// A running sandbox: its process group is terminated on request and
-/// reaped before capacity is released.
+/// A running provider process: its process group is terminated on request
+/// and reaped before capacity is released.
 pub struct Supervised {
     pub child: tokio::process::Child,
     pgid: i32,
@@ -472,7 +345,7 @@ impl Supervised {
     }
 
     /// SIGTERM the process group, then SIGKILL after `grace`, and wait for
-    /// the sandbox to exit. Its namespace ends with it.
+    /// the process to exit.
     pub async fn terminate(&mut self, grace: Duration) {
         if self.pgid > 0 {
             // SAFETY: signalling our own child's process group.
@@ -497,7 +370,7 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        // A dropped handle must not leave a sandbox running.
+        // A dropped handle must not leave a provider process running.
         if self.pgid > 0 && self.child.try_wait().ok().flatten().is_none() {
             // SAFETY: signalling our own child's process group.
             unsafe {

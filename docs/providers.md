@@ -4,7 +4,7 @@ The provider choices below are requirements. The integration design is proposed.
 
 else.bot must let the owner use different AI providers through their installed, dedicated CLIs and existing subscriptions. Initial support is limited to the `codex` and `claude` CLI agents.
 
-The host running else.bot provides both CLIs. Provider processes, subscription authentication, and native session files live on the host. Bot VMs provide isolated task execution through else.bot's tools. They do not need provider CLIs or subscription credentials.
+The host running else.bot provides both CLIs. Provider processes, subscription authentication, and native session files live on the host. Each run starts in the bot's project directory, with the CLI's own shell and file tools (see [host provider processes](security.md#host-provider-processes)). Bot VMs provide isolated task execution through else.bot's tools. They do not need provider CLIs or subscription credentials.
 
 This is a core requirement for avoiding provider lock-in. Changing providers should preserve the assistant's memory, configuration, and conversations.
 
@@ -137,7 +137,7 @@ The computer skill should explain guest paths, file transfers, job tracking, can
 
 A provider switch reuses the same bot computer and recorded job IDs. The receiving CLI checks existing job status through tools before submitting more work. Switching providers does not itself restart the VM or rerun commands.
 
-Native CLI shell, file, browser, and unrestricted network tools must not bypass this route to operate on the host. The exact enforcement mechanism is an open integration requirement, described under [host provider processes](security.md#host-provider-processes).
+The CLIs' own shell and file tools run on the host with the owner's access; browser and web tools stay disabled. Guest work goes through this route, and the bot's instructions keep host work to its project directory unless the owner asks for work on their machine. The [decision record](decisions/0001-providers-run-on-the-host.md) explains why this is not enforced by a sandbox.
 
 ## Handoff prompts
 

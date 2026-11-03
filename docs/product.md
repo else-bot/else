@@ -63,6 +63,8 @@ One thing I like about Grok Bot is that each bot has its own micro-VM. I can con
 
 else.bot should give each bot an isolated computer so its environment does not leak into another bot's environment. The initial setup should include Chromium, a desktop, and a terminal. We can add other tools as needs become clearer.
 
+Bots work in their computers by default. Some work belongs on the owner's machine instead: a bot that keeps the spreadsheets in a folder the owner names, or one that changes the system's settings when asked. Each bot therefore also has a project directory on the host, shared with its computer as `~/work`, and its provider CLI runs on the host with shell and file tools. A bot acts outside its project directory only when the owner asks. See the [decision record](decisions/0001-providers-run-on-the-host.md).
+
 Bot memory is described in [memory and storage](memory.md). Scheduled and event-driven work is described in [routines and webhooks](routines.md). The bot computer lifecycle is described in [sandbox research](sandboxes.md).
 
 ## Next milestone after the assistant POC

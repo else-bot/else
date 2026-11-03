@@ -1,5 +1,5 @@
-//! A JSON-RPC client for `codex app-server` over stdio, running inside the
-//! host sandbox. Responses are matched to requests by ID; notifications are
+//! A JSON-RPC client for `codex app-server` over stdio, running on the
+//! host. Responses are matched to requests by ID; notifications are
 //! delivered in order through [`AppServer::next`].
 //!
 //! Server-initiated requests (approvals, tool calls, input requests) are
@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
-use super::host::{HostSandbox, LaunchSpec, Supervised};
+use super::host::{Host, LaunchSpec, Supervised};
 
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const MAX_QUEUED: usize = 4096;
@@ -60,6 +60,8 @@ pub enum Incoming {
 }
 
 pub struct AppServer {
+    /// The bot's project directory, for `cwd`.
+    pub cwd: String,
     process: Supervised,
     stdin: Stdin,
     pending: Pending,
@@ -104,11 +106,9 @@ async fn write_line(stdin: &Stdin, message: &Value) -> Result<(), RpcError> {
 }
 
 impl AppServer {
-    /// Start the server in the sandbox and complete the initialize handshake.
-    pub async fn start(sandbox: &HostSandbox, spec: &LaunchSpec) -> Result<Self, RpcError> {
-        let mut command = sandbox
-            .command(spec)
-            .map_err(|err| RpcError::Spawn(err.to_string()))?;
+    /// Start the server on the host and complete the initialize handshake.
+    pub async fn start(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
+        let mut command = host.command(spec);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -122,6 +122,7 @@ impl AppServer {
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
         tokio::spawn(read_loop(stdout, pending.clone(), stdin.clone(), tx));
         let server = Self {
+            cwd: spec.dirs.project.to_string_lossy().into_owned(),
             process,
             stdin,
             pending,
@@ -197,7 +198,7 @@ impl AppServer {
         self.process.pid()
     }
 
-    /// Terminate the sandbox and wait for it to exit.
+    /// Terminate the server's process group and wait for it to exit.
     pub async fn shutdown(mut self, grace: Duration) {
         self.process.terminate(grace).await;
     }

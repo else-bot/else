@@ -59,6 +59,15 @@ When asked to implement the next milestone, continue through its tasks without p
 - [x] [POC-031: Grouped sidebar and category controls](docs/implementation/05-vm-automation-and-categories.md#poc-031-grouped-sidebar-and-category-controls)
 - [x] [POC-032: Automation and categories acceptance](docs/implementation/05-vm-automation-and-categories.md#poc-032-automation-and-categories-acceptance)
 
+## Host execution follow-up
+
+Open work from [providers running on the host](docs/decisions/0001-providers-run-on-the-host.md):
+
+- [ ] Include bot project directories (`ELSE_BOTS_DIR`) in backup sets and restore them.
+- [ ] Mount the project directory into computers restored from a backup.
+- [ ] Claude Code login on macOS, where it lives in the Keychain instead of `~/.claude/.credentials.json`.
+- [ ] Startup sweep of leftover provider processes on macOS (it reads `/proc`, so it runs on Linux only).
+
 ## Outside this backlog
 
 The built-in email client, notes, kanban, routines and webhooks, mobile apps, push notifications, rich transcript rendering, remote desktop tabs, multi-user accounts, granular permission editors, provider-native sub-agents, data purge, and key-recovery screens remain later product work. Keep their existing research. Do not add them to complete a POC task.

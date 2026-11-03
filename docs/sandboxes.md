@@ -56,7 +56,7 @@ The Rust SDK test created a named VM, executed a command, stopped it, and reconn
 
 The SDK documents `connect_or_create()` for reusing a named environment. Existing configuration wins, and builder settings apply only when creating a new one. It also supports detached sandboxes that survive the creating process. `connect_or_create()` starts stopped environments, so else.bot must check the desired running state in PostgreSQL before calling it. Avoid the destructive `.replace()` option during normal startup. Validate detached operation and reconnection across API restarts with the pinned release. [SDK lifecycle reference](https://docs.microsandbox.dev/sdk/rust/sandbox).
 
-The target is one persistent micro-VM environment per bot, including the main assistant. Its identity and saved filesystem persist while its compute can pause or stop between uses. A provider switch should reuse that bot's computer. Provider CLIs run on the host and operate the VM through scoped else.bot tools. Conversation handoffs and native provider sessions remain on the host under else.bot's control.
+The target is one persistent micro-VM environment per bot, including the main assistant. Its identity and saved filesystem persist while its compute can pause or stop between uses. A provider switch should reuse that bot's computer. Provider CLIs run on the host and operate the VM through scoped else.bot tools. Conversation handoffs and native provider sessions remain on the host under else.bot's control. The bot's host project directory is mounted at `~/work` in its VM, so files are shared between the two (see [host provider processes](security.md#host-provider-processes)).
 
 ## First-version execution lifecycle
 
@@ -86,7 +86,7 @@ Configuration should set the maximum active VMs, total CPU and memory budgets, p
 
 The proposed guest image should include Chromium, a desktop, a terminal, a VNC server, noVNC, and task utilities. Provider CLIs and their subscription credentials stay on the host. We can reuse the desktop setup from the existing projects as a reference. Validate the complete image with the selected micro-VM runtime.
 
-The host agent uses the [computer skill and tools](providers.md#host-to-vm-tools-and-skills) to execute guest work and inspect results. The Rust API manages the guest-agent connection and VM lifecycle. Guest software receives only the task-specific credentials it needs. It receives no general access to the host or other bots.
+The host agent uses the [computer skill and tools](providers.md#host-to-vm-tools-and-skills) to execute guest work and inspect results. The Rust API manages the guest-agent connection and VM lifecycle. Guest software receives only the task-specific credentials it needs. It receives no general access to the host or other bots; its one host mount is its own bot's project directory.
 
 Validate provider login, token renewal, and saved CLI sessions separately on the host. An account-free VM runtime does not remove the need to authenticate with the chosen AI provider.
 

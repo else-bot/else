@@ -1,6 +1,7 @@
-//! The host Codex adapter, over `codex app-server` in the bot's sandbox.
+//! The host Codex adapter, over `codex app-server` on the host, started in
+//! the bot's project directory.
 //!
-//! One sandboxed app-server runs per turn and exits afterwards; the native
+//! One app-server runs per turn and exits afterwards; the native
 //! thread persists in the bot's `CODEX_HOME` and is resumed next time when
 //! its compatibility fingerprint (runtime, prompt version, tool policy,
 //! profile, native-agent policy) still matches. Otherwise a new thread is
@@ -9,10 +10,12 @@
 //! creation, resume, and turn start, and the values the server reports back
 //! must match: no silent substitution. Completion comes only from
 //! `turn/completed`; text alone never implies success. Reasoning is never
-//! stored. The only tools are else.bot's own (memory, over MCP, authorized by
-//! a per-turn task grant). Any other tool, command, file, or native-agent
-//! item, and any approval or tool request, is refused and ends the turn as a
-//! policy failure.
+//! stored. A turn's tools are Codex's shell and file tools with full host
+//! access, never asking for approval, and else.bot's own (memory, delegation,
+//! and the bot's computer, over MCP, authorized by a per-turn task grant).
+//! Any other tool, web, or native-agent item, and any approval or tool
+//! request, is refused and ends the turn as a policy failure. A memory
+//! summary gets no tools at all.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -25,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::codex_home;
 use super::codex_rpc::{AppServer, Incoming, RpcError};
-use super::host::{HostSandbox, LaunchSpec, SANDBOX_PROVIDER_HOME, SANDBOX_WORK};
+use super::host::{Host, LaunchSpec};
 use super::prompt;
 use crate::app::providers::{
     Availability, CheckpointRequest, Profile, Provider, SessionState, TurnInput, TurnOutcome,
@@ -34,7 +37,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v8";
+const PROMPT_VERSION: &str = "else-codex-v9";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
@@ -46,12 +49,11 @@ const TIERS: &[&str] = &["default", "priority"];
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
-const CODE_MODE_HOST_TARGET: &str = "/opt/else/codex-code-mode-host";
 
-/// Thread items that mean a tool, command, or native agent ran.
+/// Thread items a turn may not produce: tools other than the shell, files,
+/// and else.bot's, and native agents. (Commands and file changes are the
+/// host tools.)
 const FORBIDDEN_ITEMS: &[&str] = &[
-    "commandExecution",
-    "fileChange",
     "dynamicToolCall",
     "collabAgentToolCall",
     "subAgentActivity",
@@ -61,12 +63,12 @@ const FORBIDDEN_ITEMS: &[&str] = &[
 ];
 
 pub struct Codex {
-    sandbox: Option<HostSandbox>,
+    host: Option<Host>,
     program: Option<PathBuf>,
     auth: Option<PathBuf>,
     version: String,
     unavailable: Option<String>,
-    /// else.bot's MCP endpoint, reached from inside the sandbox.
+    /// else.bot's MCP endpoint, on loopback.
     tool_url: Option<String>,
 }
 
@@ -118,30 +120,24 @@ impl Codex {
     /// Locate the CLI and the host login and check the CLI version. A
     /// missing piece or an unverified version makes the provider unavailable
     /// with a reason instead of failing startup.
-    pub fn detect(
-        sandbox: Option<HostSandbox>,
-        program: Option<PathBuf>,
-        auth: Option<PathBuf>,
-    ) -> Self {
-        // Run the version check inside the sandbox: this both reads the
-        // version and proves the executable can run there (a launcher or
-        // shim that needs the host environment cannot).
-        let version = match (&sandbox, &program) {
-            (Some(sandbox), Some(program)) => {
-                sandbox.probe(program, &["--version"]).unwrap_or_default()
-            }
+    pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
+        // Run the version check the way turns run: this both reads the
+        // version and proves the executable starts with the passed
+        // environment.
+        let version = match (&host, &program) {
+            (Some(host), Some(program)) => host.probe(program, &["--version"]).unwrap_or_default(),
             _ => String::new(),
         };
         let allow_unverified = std::env::var("ELSE_CODEX_ALLOW_UNVERIFIED").as_deref() == Ok("1");
-        let unavailable = match (&sandbox, &program, &auth) {
-            (None, _, _) => Some("bubblewrap is not available on this host".to_owned()),
+        let unavailable = match (&host, &program, &auth) {
+            (None, _, _) => Some("Codex is not configured on this host".to_owned()),
             (_, None, _) => Some("the codex CLI was not found on the host".to_owned()),
             (_, _, Some(auth)) if !auth.is_file() => {
                 Some("Codex is not logged in on the host (run `codex login`)".to_owned())
             }
             (_, _, None) => Some("the Codex login location is unknown".to_owned()),
             _ if version.is_empty() => Some(
-                "the codex executable does not run inside the sandbox (a shim or launcher?); \
+                "the codex executable does not run (`codex --version` failed); \
                  set ELSE_CODEX_BIN to the native codex binary"
                     .to_owned(),
             ),
@@ -155,22 +151,13 @@ impl Codex {
             _ => None,
         };
         Self {
-            sandbox,
+            host,
             program,
             auth,
             version,
             unavailable,
             tool_url: None,
         }
-    }
-
-    fn code_mode_host(&self) -> Option<PathBuf> {
-        let host = self
-            .program
-            .as_ref()?
-            .parent()?
-            .join("codex-code-mode-host");
-        (self.tool_url.is_some() && host.is_file()).then_some(host)
     }
 
     /// Offer else.bot's tools (memory) at this MCP URL.
@@ -185,15 +172,19 @@ impl Codex {
         let mut hasher = Sha256::new();
         // The delegation role and the registry are part of the instructions.
         let registry = prompt::registry_text(input);
+        let runtime = self
+            .host
+            .as_ref()
+            .map_or_else(String::new, |h| h.runtime(input.bot_id));
         for part in [
             registry.as_str(),
             PROMPT_VERSION,
             &self.version,
-            "runtime:bwrap:/work:/var/lib/provider-home",
+            &runtime,
             if self.tool_url.is_some() {
-                "tools:elsebot-v2"
+                "tools:host+elsebot-v3"
             } else {
-                "tools:none"
+                "tools:host"
             },
             "agents:disabled",
             account,
@@ -317,7 +308,7 @@ impl Provider for Codex {
         if let Some(reason) = &self.unavailable {
             return failed("provider_unavailable", reason.clone());
         }
-        let (Some(sandbox), Some(program), Some(auth)) = (&self.sandbox, &self.program, &self.auth)
+        let (Some(host), Some(program), Some(auth)) = (&self.host, &self.program, &self.auth)
         else {
             return failed("provider_unavailable", "Codex is not configured.");
         };
@@ -330,41 +321,30 @@ impl Provider for Codex {
         if let Err(reason) = self.validate_profile(&profile) {
             return failed("invalid_profile", reason);
         }
-        let dirs = match sandbox.bot_dirs(input.bot_id, ID) {
+        let dirs = match host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
-        let login = match codex_home::prepare(&dirs, auth, self.tool_url.as_deref()) {
-            Ok(login) => login,
-            Err(err) => return failed("provider_unavailable", err.to_string()),
-        };
+        if let Err(err) = codex_home::prepare(&dirs, auth, self.tool_url.as_deref(), true) {
+            return failed("provider_unavailable", err.to_string());
+        }
         let spec = LaunchSpec {
             turn_id: input.turn_id,
-            dirs,
             program: program.clone(),
             args: vec![OsString::from("app-server")],
             env: {
-                let mut env = vec![("CODEX_HOME".into(), SANDBOX_PROVIDER_HOME.into())];
+                let mut env = vec![(
+                    "CODEX_HOME".into(),
+                    dirs.provider_home.to_string_lossy().into_owned(),
+                )];
                 if let (Some(_), Some(grant)) = (&self.tool_url, &input.tool_grant) {
                     env.push((codex_home::GRANT_ENV.into(), grant.into()));
                 }
                 env
             },
-            extra_binds: {
-                let mut binds = vec![login];
-                // Codex runs tool calls through this helper, found next to
-                // its own executable.
-                if let Some(host) = self.code_mode_host() {
-                    binds.push(super::host::Bind {
-                        source: host,
-                        target: CODE_MODE_HOST_TARGET.into(),
-                        writable: false,
-                    });
-                }
-                binds
-            },
+            dirs,
         };
-        let mut server = match AppServer::start(sandbox, &spec).await {
+        let mut server = match AppServer::start(host, &spec).await {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
@@ -466,10 +446,10 @@ impl Codex {
         let settings = json!({
             "model": profile.model,
             "serviceTier": profile.service_tier,
-            "cwd": SANDBOX_WORK,
+            "cwd": server.cwd,
             "approvalPolicy": "never",
-            "sandbox": "read-only",
-            "developerInstructions": prompt::instructions(input),
+            "sandbox": codex_home::sandbox_mode(true),
+            "developerInstructions": prompt::instructions(input, &server.cwd),
             "config": { "model_reasoning_effort": profile.reasoning_effort },
         });
         // Resume a compatible session; anything else starts a new one.
@@ -976,28 +956,30 @@ impl Codex {
         if let Some(reason) = &self.unavailable {
             return Err(reason.clone());
         }
-        let (Some(sandbox), Some(program), Some(auth)) = (&self.sandbox, &self.program, &self.auth)
+        let (Some(host), Some(program), Some(auth)) = (&self.host, &self.program, &self.auth)
         else {
             return Err("Codex is not configured.".into());
         };
         self.validate_profile(profile)?;
-        let dirs = sandbox
+        let dirs = host
             .bot_dirs(bot_id, "codex-summary")
             .map_err(|e| e.to_string())?;
-        let login = codex_home::prepare(&dirs, auth, None).map_err(|e| e.to_string())?;
+        codex_home::prepare(&dirs, auth, None, false).map_err(|e| e.to_string())?;
         let spec = LaunchSpec {
             turn_id: uuid::Uuid::new_v4(),
-            dirs,
             program: program.clone(),
             args: vec![OsString::from("app-server")],
-            env: vec![("CODEX_HOME".into(), SANDBOX_PROVIDER_HOME.into())],
-            extra_binds: vec![login],
+            env: vec![(
+                "CODEX_HOME".into(),
+                dirs.provider_home.to_string_lossy().into_owned(),
+            )],
+            dirs,
         };
-        let mut server = AppServer::start(sandbox, &spec)
+        let mut server = AppServer::start(host, &spec)
             .await
             .map_err(|e| e.to_string())?;
         // The deadline and cancellation cover the whole exchange; either
-        // way the sandbox is shut down and reaped before returning.
+        // way the process is shut down and reaped before returning.
         let result = tokio::select! {
             _ = cancel.cancelled() => Err("cancelled".to_owned()),
             outcome = tokio::time::timeout(
@@ -1027,7 +1009,7 @@ impl Codex {
                 json!({
                     "model": profile.model,
                     "serviceTier": profile.service_tier,
-                    "cwd": SANDBOX_WORK,
+                    "cwd": server.cwd,
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "ephemeral": true,
@@ -1128,7 +1110,7 @@ impl crate::memory_worker::Summarizer for Codex {
     }
 
     fn available(&self) -> bool {
-        self.unavailable.is_none() && self.sandbox.is_some()
+        self.unavailable.is_none() && self.host.is_some()
     }
 
     async fn summarize(

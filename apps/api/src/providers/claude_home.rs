@@ -1,10 +1,10 @@
-//! Per-bot Claude Code configuration directory and locked settings.
+//! Per-bot Claude Code configuration directory and its settings.
 //!
 //! Each bot gets its own `CLAUDE_CONFIG_DIR` (sessions, caches, and state
 //! stay separate, so one bot cannot resume another's session). The owner's
-//! subscription login is shared by bind-mounting the host
-//! `.credentials.json` over an empty placeholder: never copied, and token
-//! refreshes write through to the one file. Settings and the MCP
+//! subscription login is shared by a symlink to the host
+//! `.credentials.json`: never copied, and token refreshes write through to
+//! the one file. Settings and the MCP
 //! configuration are rewritten before every launch, and the CLI is started
 //! with `--setting-sources ""` and `--strict-mcp-config`, so user, project,
 //! and local settings, hooks, plugins' MCP servers, and anything a session
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::host::{Bind, BotDirs, SANDBOX_PROVIDER_HOME};
+use super::host::{BotDirs, link_login};
 
 /// Environment variable carrying the turn's task grant; the MCP
 /// configuration references it, so the grant is never written to disk.
@@ -59,9 +59,13 @@ pub fn host_account(config_dir: Option<&str>, home: Option<&str>) -> String {
 }
 
 /// Settings forced for every session: no hooks, no auto-memory, no
-/// co-author trailers, and native agents and host tools denied even if the
-/// tool set were widened.
-pub fn settings_json() -> String {
+/// co-author trailers, and native agents, web, and skills denied even if the
+/// tool set were widened; the host tools too unless `host_tools`.
+pub fn settings_json(host_tools: bool) -> String {
+    let mut deny = DENIED_TOOLS.to_vec();
+    if !host_tools {
+        deny.extend(HOST_TOOLS);
+    }
     json!({
         "disableAllHooks": true,
         "autoMemoryEnabled": false,
@@ -69,27 +73,33 @@ pub fn settings_json() -> String {
         "enableAllProjectMcpServers": false,
         "permissions": {
             "defaultMode": "dontAsk",
-            "deny": DENIED_TOOLS,
+            "deny": deny,
         },
     })
     .to_string()
 }
+
+/// Claude Code's built-in shell and file tools, offered to a turn so the bot
+/// can work on the host (the names `system/init` reports for them).
+pub const HOST_TOOLS: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+];
 
 /// Built-in tools that must never run, denied in settings as well as left
 /// out of the tool set.
 pub const DENIED_TOOLS: &[&str] = &[
     "Agent",
     "Task",
-    "Bash",
+    "TaskStop",
     "BashOutput",
     "KillShell",
-    "Read",
-    "Write",
-    "Edit",
     "MultiEdit",
-    "NotebookEdit",
-    "Glob",
-    "Grep",
     "WebFetch",
     "WebSearch",
     "Skill",
@@ -137,17 +147,18 @@ fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> 
 }
 
 /// Prepare the bot's Claude home: rewrite the locked settings and MCP
-/// configuration (removed when there are no tools) and reset the empty
-/// mount point for the login. Returns the bind for the login file.
+/// configuration (removed when there are no tools) and point
+/// `.credentials.json` at the host login.
 pub fn prepare(
     dirs: &BotDirs,
     host_credentials: &Path,
     tool_url: Option<&str>,
-) -> std::io::Result<Bind> {
+    host_tools: bool,
+) -> std::io::Result<()> {
     replace_file(
         &dirs.provider_home,
         SETTINGS_FILE,
-        settings_json().as_bytes(),
+        settings_json(host_tools).as_bytes(),
     )?;
     match tool_url {
         Some(url) => replace_file(&dirs.provider_home, MCP_FILE, mcp_json(url).as_bytes())?,
@@ -157,28 +168,28 @@ pub fn prepare(
         },
     }
     let path = dirs.provider_home.join(".credentials.json");
-    let placeholder = fs::symlink_metadata(&path);
-    if !placeholder.is_ok_and(|m| m.is_file() && m.len() == 0) {
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            fs::remove_dir_all(&path)?;
-        }
-        replace_file(&dirs.provider_home, ".credentials.json", b"")?;
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+        fs::remove_dir_all(&path)?;
     }
-    Ok(Bind {
-        source: host_credentials.to_owned(),
-        target: format!("{SANDBOX_PROVIDER_HOME}/.credentials.json"),
-        writable: true,
-    })
+    link_login(&dirs.provider_home, ".credentials.json", host_credentials)
 }
 
-/// Whether the bot's home holds the native session's transcript (the CLI
-/// runs in `/work`, so sessions live under `projects/-work`).
+/// Whether the bot's home holds the native session's transcript. Sessions
+/// live under `projects/` in a directory named for the CLI's working
+/// directory, the bot's project, every character but ASCII letters and
+/// digits replaced by `-` (`/a/b.c` gives `-a-b-c`).
 pub fn session_exists(dirs: &BotDirs, native_id: &str) -> bool {
+    let project: String = dirs
+        .project
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     uuid::Uuid::parse_str(native_id).is_ok()
         && fs::symlink_metadata(
             dirs.provider_home
                 .join("projects")
-                .join("-work")
+                .join(project)
                 .join(format!("{native_id}.jsonl")),
         )
         .is_ok_and(|m| m.is_file())
@@ -202,8 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn settings_deny_native_agents_and_host_tools() {
-        let value: serde_json::Value = serde_json::from_str(&settings_json()).unwrap();
+    fn settings_deny_native_agents_and_host_tools_unless_offered() {
+        let value: serde_json::Value = serde_json::from_str(&settings_json(true)).unwrap();
+        let deny: Vec<&str> = value["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for tool in ["Agent", "Task", "WebFetch"] {
+            assert!(deny.contains(&tool), "{tool}");
+        }
+        for tool in HOST_TOOLS {
+            assert!(!deny.contains(tool), "{tool}");
+        }
+        let value: serde_json::Value = serde_json::from_str(&settings_json(false)).unwrap();
         let deny: Vec<&str> = value["permissions"]["deny"]
             .as_array()
             .unwrap()
@@ -217,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_never_writes_through_planted_symlinks() {
+    fn prepare_never_writes_through_planted_symlinks_and_links_the_login() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("claude-home");
         fs::create_dir(&home).unwrap();
@@ -228,10 +252,12 @@ mod tests {
         }
         let dirs = BotDirs {
             root: dir.path().to_owned(),
-            work: dir.path().join("work"),
+            project: dir.path().join("project"),
             provider_home: home.clone(),
         };
-        prepare(&dirs, Path::new("/nonexistent/.credentials.json"), None).unwrap();
+        let login = dir.path().join("host-credentials.json");
+        fs::write(&login, "LOGIN").unwrap();
+        prepare(&dirs, &login, None, true).unwrap();
         assert_eq!(fs::read_to_string(&outside).unwrap(), "HOST FILE");
         assert!(
             fs::symlink_metadata(home.join(MCP_FILE)).is_err(),
@@ -239,10 +265,12 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(home.join(SETTINGS_FILE)).unwrap(),
-            settings_json()
+            settings_json(true)
         );
-        let creds = fs::symlink_metadata(home.join(".credentials.json")).unwrap();
-        assert!(creds.is_file() && creds.len() == 0);
+        assert_eq!(
+            fs::read_link(home.join(".credentials.json")).unwrap(),
+            login
+        );
     }
 
     #[test]
@@ -250,18 +278,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dirs = BotDirs {
             root: dir.path().to_owned(),
-            work: dir.path().join("work"),
+            project: PathBuf::from("/home/me/.else/bots/b0t.1"),
             provider_home: dir.path().join("home"),
         };
         let id = uuid::Uuid::new_v4().to_string();
         assert!(!session_exists(&dirs, &id));
-        fs::create_dir_all(dirs.provider_home.join("projects/-work")).unwrap();
-        fs::write(
-            dirs.provider_home
-                .join(format!("projects/-work/{id}.jsonl")),
-            "{}",
-        )
-        .unwrap();
+        let sessions = dirs
+            .provider_home
+            .join("projects/-home-me--else-bots-b0t-1");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join(format!("{id}.jsonl")), "{}").unwrap();
         assert!(session_exists(&dirs, &id));
         assert!(!session_exists(&dirs, "../../etc/passwd"));
     }

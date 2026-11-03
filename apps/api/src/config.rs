@@ -46,6 +46,9 @@ pub struct Config {
     /// Private runtime storage: credentials, the singleton lock, and bot
     /// session directories.
     pub data_dir: PathBuf,
+    /// Root of the bots' project directories (`<bots_dir>/<bot id>`): where
+    /// provider CLIs start on the host, mounted into each bot's computer.
+    pub bots_dir: PathBuf,
     pub owner_token_file: PathBuf,
     pub secret_key: SecretKeySource,
     pub max_body_bytes: usize,
@@ -102,6 +105,10 @@ impl Config {
         let data_dir = match source.get("ELSE_DATA_DIR") {
             Some(dir) => absolute_path("ELSE_DATA_DIR", dir)?,
             None => default_data_dir(source)?,
+        };
+        let bots_dir = match source.get("ELSE_BOTS_DIR") {
+            Some(dir) => absolute_path("ELSE_BOTS_DIR", dir)?,
+            None => default_bots_dir(source, &data_dir)?,
         };
         let owner_token_file = match source.get("OWNER_TOKEN_FILE") {
             Some(path) => absolute_path("OWNER_TOKEN_FILE", path)?,
@@ -261,6 +268,7 @@ impl Config {
             },
             desktop: parse_bool(source, "ELSE_VM_DESKTOP")?,
             state_dir: data_dir.clone(),
+            projects_dir: Some(bots_dir.clone()),
         };
         Ok(Self {
             msb_bin,
@@ -270,6 +278,7 @@ impl Config {
             backup,
             s3,
             synthetic_provider,
+            bots_dir,
             max_active_turns,
             database_url: database_url(source)?,
             bind,
@@ -345,6 +354,19 @@ fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
             "ELSE_DATA_DIR",
             "not set, and neither XDG_DATA_HOME nor HOME is available",
         )),
+    }
+}
+
+/// A development checkout's bots live under `~/.else-dev/bots`, apart from
+/// an installation's (`~/.else/bots`, which the installer configures);
+/// without a home, under the data directory.
+fn default_bots_dir(
+    source: &dyn Source,
+    data_dir: &std::path::Path,
+) -> Result<PathBuf, ConfigError> {
+    match source.get("HOME").filter(|v| !v.is_empty()) {
+        Some(home) => Ok(absolute_path("HOME", home)?.join(".else-dev/bots")),
+        None => Ok(data_dir.join("bots")),
     }
 }
 
@@ -431,6 +453,11 @@ pub mod tests {
             PathBuf::from("/home/x/.local/share/else-bot")
         );
         assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
+        assert_eq!(config.bots_dir, PathBuf::from("/home/x/.else-dev/bots"));
+        assert_eq!(
+            config.computers.projects_dir,
+            Some(PathBuf::from("/home/x/.else-dev/bots"))
+        );
     }
 
     #[test]
