@@ -77,14 +77,22 @@ process_pid() {
 	local pid
 	pid="$(cat "$(pid_file)" 2>/dev/null)" || return 1
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
-	case "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || ps -o command= -p "$pid" 2>/dev/null)" in
+	case "$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" || ps -o command= -p "$pid" 2>/dev/null)" in
 	*else-api*serve*) echo "$pid" ;;
 	*) return 1 ;;
 	esac
 }
 
+# The API binary, or why there is none.
+need_api() {
+	[ -x "$CURRENT/bin/else-api" ] && return 0
+	[ -x "$CURRENT/bin/else-desktop" ] &&
+		die "this installation in $ELSE_HOME has only the desktop client; install the API with: elsebot update"
+	die "else.bot is not installed in $ELSE_HOME"
+}
+
 start() {
-	[ -x "$CURRENT/bin/else-api" ] || die "else.bot is not installed in $ELSE_HOME"
+	need_api
 	if [ "$ELSEBOT_MANAGER" = systemd ]; then
 		systemctl --user start "$ELSEBOT_SERVICE.service"
 		return
@@ -93,7 +101,15 @@ start() {
 	mkdir -p "$RUN" "$LOGS"
 	(
 		cd "$CONFIG"
-		nohup setsid "$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+		# Its own session, detached from this terminal. macOS has no setsid
+		# command: perl (part of macOS) calls setsid(2) and execs the API, so
+		# the pid stays the API's.
+		if command -v setsid >/dev/null 2>&1; then
+			nohup setsid "$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+		else
+			nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+				"$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+		fi
 		echo $! >"$(pid_file)"
 	)
 }
@@ -167,7 +183,7 @@ logs)
 	fi
 	;;
 api)
-	[ -x "$CURRENT/bin/else-api" ] || die "else.bot is not installed in $ELSE_HOME"
+	need_api
 	cd "$CONFIG" && exec "$CURRENT/bin/else-api" "$@"
 	;;
 db)

@@ -6,8 +6,9 @@
 # Installs the latest release into ~/.else, or updates an existing
 # installation to it; running it again is how you update (`elsebot update`
 # does the same). Linux (Debian 12+, Ubuntu 24.04+, Arch Linux / Omarchy;
-# x86_64) gets the API, the desktop, and everything they need; macOS gets the
-# desktop client only (the API needs Linux; untested so far).
+# x86_64) and macOS (Apple silicon) get the API, the desktop, and everything
+# they need. macOS needs Xcode, a running Docker (OrbStack or Docker Desktop),
+# and Homebrew for the PostgreSQL client tools if they are missing.
 #
 # Everything it installs or keeps lives in ~/.else:
 #   src/        the release's source (a git checkout at the release tag)
@@ -22,10 +23,11 @@
 #   microsandbox/  the VM runtime (msb and libkrunfw)
 #   build/      the build cache
 #   logs/       install and update logs; the API log without systemd
-# Outside it: system packages (with sudo, only when missing), the Docker
-# volume of the database, the guest image in Docker, the systemd user unit
-# ~/.config/systemd/user/else-api.service, and the links ~/.local/bin/elsebot
-# and ~/.local/share/applications/else-bot.desktop.
+# Outside it: system packages (with sudo, only when missing; Homebrew's
+# postgresql@18 on macOS), the Docker volume of the database, the guest image
+# in Docker, the systemd user unit ~/.config/systemd/user/else-api.service
+# (Linux), and the links ~/.local/bin/elsebot and
+# ~/.local/share/applications/else-bot.desktop (Linux).
 #
 # An update builds the new release first, while the old one keeps running;
 # then it asks the API to stop taking work and refuses (changing nothing)
@@ -45,7 +47,7 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
 
   -y, --yes            do not ask for confirmation (sudo may still ask for a password)
   --version X.Y.Z      install or update to this release instead of the latest
-  --server-only        Linux: no desktop client (headless servers)
+  --server-only        no desktop client (headless servers)
   --skip-guest-image   do not build the guest VM image (bot computers then use a plain image)
   -h, --help           show this help
 EOF
@@ -277,7 +279,10 @@ PSQL=""
 pg_major() { "$1" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p' | head -1; }
 find_pg_tools() {
 	local dir major
-	for dir in "/usr/lib/postgresql/$PG_MAJOR/bin" /usr/bin /usr/local/bin; do
+	local dirs="/usr/lib/postgresql/$PG_MAJOR/bin /usr/bin /usr/local/bin"
+	# macOS: Homebrew's keg-only postgresql@18 or libpq (Apple silicon, Intel).
+	[ "$DISTRO" = macos ] && dirs="/opt/homebrew/opt/postgresql@$PG_MAJOR/bin /usr/local/opt/postgresql@$PG_MAJOR/bin /opt/homebrew/opt/libpq/bin /usr/local/opt/libpq/bin /opt/homebrew/bin /usr/local/bin"
+	for dir in $dirs; do
 		if [ -x "$dir/pg_dump" ] && [ -x "$dir/pg_restore" ]; then
 			major="$(pg_major "$dir/pg_dump")"
 			if [ -n "$major" ] && [ "$major" -ge "$PG_MAJOR" ]; then
@@ -418,23 +423,36 @@ ensure_msb() {
 	# The official installer always takes the latest release: install the
 	# verified one from the same bundle, checksum checked. msb finds its
 	# libkrunfw in ../lib, so the prefix can be anywhere.
-	local target="linux-$ARCH" base tmp lib abi
+	local target="linux-$ARCH" base tmp lib abi sha="sha256sum -c --quiet -"
+	if [ "$DISTRO" = macos ]; then
+		target="darwin-$ARCH"
+		sha="shasum -a 256 -c --quiet -"
+	fi
 	base="https://github.com/superradcompany/microsandbox/releases/download/v$MSB_VERSION"
 	tmp="$(mktemp -d)"
 	curl -fsSL "$base/microsandbox-$target.tar.gz" -o "$tmp/bundle.tar.gz"
 	curl -fsSL "$base/checksums.sha256" -o "$tmp/checksums.sha256"
-	(cd "$tmp" && grep -F " microsandbox-$target.tar.gz" checksums.sha256 | sed "s|microsandbox-$target.tar.gz|bundle.tar.gz|" | sha256sum -c --quiet -) ||
+	# shellcheck disable=SC2086
+	(cd "$tmp" && grep -F " microsandbox-$target.tar.gz" checksums.sha256 | sed "s|microsandbox-$target.tar.gz|bundle.tar.gz|" | $sha) ||
 		die "checksum verification of the Microsandbox bundle failed"
 	tar -xzf "$tmp/bundle.tar.gz" -C "$tmp"
-	lib="$(cd "$tmp" && find . -maxdepth 1 -name 'libkrunfw.so.*.*.*' | sed 's|^\./||' | head -1)"
-	[ -n "$lib" ] || die "the Microsandbox bundle has no libkrunfw library"
-	abi="${lib#libkrunfw.so.}"
-	abi="${abi%%.*}"
 	mkdir -p "$MSB_PREFIX/bin" "$MSB_PREFIX/lib"
 	install -m 755 "$tmp/msb" "$MSB"
-	install -m 644 "$tmp/$lib" "$MSB_PREFIX/lib/$lib"
-	ln -sf "$lib" "$MSB_PREFIX/lib/libkrunfw.so.$abi"
-	ln -sf "libkrunfw.so.$abi" "$MSB_PREFIX/lib/libkrunfw.so"
+	if [ "$DISTRO" = macos ]; then
+		# libkrunfw.<abi>.dylib; msb is signed with the Hypervisor entitlement.
+		lib="$(cd "$tmp" && find . -maxdepth 1 -name 'libkrunfw.*.dylib' | sed 's|^\./||' | head -1)"
+		[ -n "$lib" ] || die "the Microsandbox bundle has no libkrunfw library"
+		install -m 644 "$tmp/$lib" "$MSB_PREFIX/lib/$lib"
+		ln -sf "$lib" "$MSB_PREFIX/lib/libkrunfw.dylib"
+	else
+		lib="$(cd "$tmp" && find . -maxdepth 1 -name 'libkrunfw.so.*.*.*' | sed 's|^\./||' | head -1)"
+		[ -n "$lib" ] || die "the Microsandbox bundle has no libkrunfw library"
+		abi="${lib#libkrunfw.so.}"
+		abi="${abi%%.*}"
+		install -m 644 "$tmp/$lib" "$MSB_PREFIX/lib/$lib"
+		ln -sf "$lib" "$MSB_PREFIX/lib/libkrunfw.so.$abi"
+		ln -sf "libkrunfw.so.$abi" "$MSB_PREFIX/lib/libkrunfw.so"
+	fi
 	rm -rf "$tmp"
 	ok "msb $("$MSB" --version | awk '{print $2}')"
 }
@@ -485,7 +503,6 @@ source_version() {
 build_release() {
 	local version="$1" dest="$VERSIONS/$1"
 	local packages="else-api else-desktop"
-	[ "$DISTRO" = macos ] && packages="else-desktop"
 	[ "$SERVER_ONLY" = 1 ] && packages="else-api"
 	local pkg built=1
 	for pkg in $packages; do
@@ -861,7 +878,58 @@ check_providers() {
 
 # --- Stage 2: install or update from the release's own source ---------------
 
-linux_stage2() {
+# macOS: Xcode, a running Docker, and the PostgreSQL client tools. Docker
+# Desktop and OrbStack are apps the owner installs; nothing here uses sudo.
+macos_prerequisites() {
+	step "Xcode"
+	if ! xcode-select -p >/dev/null 2>&1; then
+		xcode-select --install >/dev/null 2>&1 || true
+		die "install the Xcode command line tools (a dialog was opened), then run the installer again"
+	fi
+	if [ "$SERVER_ONLY" = 0 ]; then
+		# GPUI compiles its Metal shaders at build time, which needs Xcode itself.
+		xcrun -sdk macosx -f metal >/dev/null 2>&1 ||
+			die "the Metal compiler is missing: install Xcode, run 'sudo xcode-select -s /Applications/Xcode.app' and 'xcodebuild -downloadComponent MetalToolchain', then run the installer again"
+		ok "Xcode with the Metal compiler"
+	else
+		ok "command line tools"
+	fi
+
+	step "PostgreSQL client tools $PG_MAJOR"
+	if ! find_pg_tools; then
+		have brew || die "pg_dump $PG_MAJOR or newer is missing (backups need it): install Homebrew (https://brew.sh) and run 'brew install postgresql@$PG_MAJOR', then run the installer again"
+		confirm "Install postgresql@$PG_MAJOR (pg_dump, pg_restore, psql) with Homebrew?" ||
+			die "pg_dump $PG_MAJOR or newer is required for backups"
+		brew install "postgresql@$PG_MAJOR" >"$LOGS/brew-postgresql.log" 2>&1 || {
+			tail -20 "$LOGS/brew-postgresql.log" >&2
+			die "brew install postgresql@$PG_MAJOR failed (log: $LOGS/brew-postgresql.log)"
+		}
+		find_pg_tools || die "pg_dump $PG_MAJOR or newer is still missing"
+	fi
+	ok "pg_dump: $PG_DUMP ($("$PG_DUMP" --version | head -1))"
+
+	step "Docker"
+	if [ -n "${ELSE_DATABASE_URL:-}" ] && [ "$SKIP_GUEST" = 1 ]; then
+		ok "not needed (external database, no guest image)"
+	elif ! have docker; then
+		die "Docker is missing: install OrbStack (https://orbstack.dev) or Docker Desktop, start it, then run the installer again"
+	elif ! docker compose version >/dev/null 2>&1; then
+		die "docker compose does not work: update OrbStack or Docker Desktop, then run the installer again"
+	elif ! docker info >/dev/null 2>&1; then
+		die "Docker is not running: start OrbStack or Docker Desktop, then run the installer again"
+	else
+		ok "Docker works ($(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo running))"
+	fi
+
+	if [ "$ARCH" != aarch64 ]; then
+		warn "bot computers need Apple silicon (Microsandbox has no Intel macOS build); they will report unavailable"
+		SKIP_GUEST=1
+		NO_MSB=1
+	fi
+}
+
+NO_MSB=0
+stage2() {
 	local target installed mode
 	target="$(source_version)"
 	[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
@@ -879,10 +947,14 @@ linux_stage2() {
 	current) info "else.bot $target is installed; checking the installation" ;;
 	esac
 
-	linux_packages
-	linux_access
+	if [ "$DISTRO" = macos ]; then
+		macos_prerequisites
+	else
+		linux_packages
+		linux_access
+	fi
 	ensure_rust
-	ensure_msb
+	[ "$NO_MSB" = 1 ] || ensure_msb
 	build_release "$target"
 	write_config
 	ensure_bots_dir
@@ -928,32 +1000,14 @@ linux_stage2() {
 		setup_readonly_access
 	fi
 	check_providers
-	[ "$SERVER_ONLY" = 0 ] && next "open the app: elsebot desktop (or else.bot in your launcher)"
-	return 0
-}
-
-macos_stage2() {
-	step "Xcode"
-	if ! xcode-select -p >/dev/null 2>&1; then
-		xcode-select --install >/dev/null 2>&1 || true
-		die "install the Xcode command line tools (a dialog was opened), then run the installer again"
+	if [ "$SERVER_ONLY" = 0 ]; then
+		if [ "$DISTRO" = macos ]; then
+			next "open the app: elsebot desktop"
+		else
+			next "open the app: elsebot desktop (or else.bot in your launcher)"
+		fi
 	fi
-	# GPUI compiles its Metal shaders at build time, which needs Xcode itself.
-	xcrun -sdk macosx -f metal >/dev/null 2>&1 ||
-		die "the Metal compiler is missing: install Xcode, run 'sudo xcode-select -s /Applications/Xcode.app' and 'xcodebuild -downloadComponent MetalToolchain', then run the installer again"
-	ok "Xcode with the Metal compiler"
-	SERVER_ONLY=0
-	ensure_rust
-	local target
-	target="$(source_version)"
-	build_release "$target"
-	switch_to "$target"
-	install_commands
-	mkdir -p "$DATA" "$CONFIG"
-	chmod 700 "$DATA" "$CONFIG"
-	next "copy the owner token from the Linux machine running the API: scp SERVER:.else/data/owner-token $DATA/owner-token && chmod 600 $DATA/owner-token"
-	next "open a tunnel to it (keep it running): ssh -N -L $API_PORT:127.0.0.1:$API_PORT SERVER"
-	next "start the desktop: elsebot desktop"
+	return 0
 }
 
 summary() {
@@ -991,7 +1045,7 @@ main() {
 	fi
 
 	mkdir -p "$LOGS"
-	if [ "$DISTRO" = macos ]; then macos_stage2; else linux_stage2; fi
+	stage2
 	summary
 }
 

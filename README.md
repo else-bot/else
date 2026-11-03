@@ -64,7 +64,12 @@ It installs the latest release into `~/.else`, asking once before it installs an
 
 Bot computers need `/dev/kvm`; the installer offers to add you to the `docker` and `kvm` groups (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
-On macOS the installer builds only the desktop client (it needs Xcode with the Metal toolchain) and prints how to reach an API on a Linux machine through an SSH tunnel. macOS and arm64 Linux are not tested yet.
+On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, PostgreSQL in Docker, Microsandbox, and the guest image. Before running it, install:
+- Xcode with the Metal toolchain (the desktop compiles Metal shaders);
+- OrbStack or Docker Desktop, running;
+- the PostgreSQL 18 client tools. If they are missing, the installer offers to run `brew install postgresql@18`.
+
+Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a background process that `elsebot` manages (`elsebot start`, `stop`, `logs`). It does not start at login yet; run `elsebot start` after a reboot. arm64 Linux is not tested yet.
 
 ### Update
 
