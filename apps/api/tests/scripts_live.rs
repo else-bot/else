@@ -108,7 +108,7 @@ impl Install {
             child: Some(child),
             base: format!("http://127.0.0.1:{port}"),
             token,
-            http: else_api::http_client::builder().build().unwrap(),
+            http: reqwest::Client::new(),
         };
         for _ in 0..600 {
             if api

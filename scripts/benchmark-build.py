@@ -65,8 +65,7 @@ def main():
 
     report = {
         "revision": capture("git", "rev-parse", "HEAD"),
-        "diff": capture("git", "diff", "HEAD", "--", "Cargo.toml", "Cargo.lock",
-                        "apps/api/Cargo.toml", "apps/desktop/Cargo.toml"),
+        "diff": capture("git", "diff", "HEAD", "--", "Cargo.toml", "Cargo.lock", "apps"),
         "baseline_revision": baseline_revision,
         "rustc": capture("rustc", "-Vv"),
         "cargo": capture("cargo", "-V"),

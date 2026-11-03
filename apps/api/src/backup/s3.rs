@@ -146,7 +146,7 @@ impl S3 {
         }
         // An idle timeout rather than a total one: a multi-gigabyte archive
         // streams for as long as data keeps arriving.
-        let http = crate::http_client::builder()
+        let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(120))
             .build()

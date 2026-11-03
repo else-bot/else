@@ -1240,7 +1240,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let client = else_api::http_client::builder().build().unwrap();
+        let client = reqwest::Client::new();
         let mut up = false;
         for _ in 0..400 {
             if client

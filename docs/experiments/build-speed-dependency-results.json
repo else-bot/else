@@ -1,0 +1,191 @@
+{
+  "revision": "84c3e223d0c98c0ef064adf05751df82ab182e2c",
+  "diff": "",
+  "baseline_revision": "fbb9f3a9517d12a4d4587793ec3e09808e987d30",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 18,
+  "packages": [
+    "else-api",
+    "else-desktop"
+  ],
+  "builds": [
+    {
+      "profile": "release",
+      "variant": "baseline",
+      "run": 1,
+      "seconds": 67.016,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--workspace"
+      ],
+      "source": "baseline",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 22114992,
+        "else-desktop": 32077792
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "current",
+      "run": 1,
+      "seconds": 64.496,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--workspace"
+      ],
+      "source": "current",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 20576960,
+        "else-desktop": 30537200
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "baseline",
+      "run": 1,
+      "seconds": 44.302,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--workspace"
+      ],
+      "source": "baseline",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 65839320,
+        "else-desktop": 127732192
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "current",
+      "run": 1,
+      "seconds": 58.923,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--workspace"
+      ],
+      "source": "current",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 61615432,
+        "else-desktop": 120680816
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "current",
+      "run": 2,
+      "seconds": 88.043,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--workspace"
+      ],
+      "source": "current",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 20576960,
+        "else-desktop": 30537200
+      }
+    },
+    {
+      "profile": "release",
+      "variant": "baseline",
+      "run": 2,
+      "seconds": 94.164,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "release",
+        "--workspace"
+      ],
+      "source": "baseline",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 22114992,
+        "else-desktop": 32077792
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "current",
+      "run": 2,
+      "seconds": 49.182,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--workspace"
+      ],
+      "source": "current",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 61615432,
+        "else-desktop": 120680816
+      }
+    },
+    {
+      "profile": "dev",
+      "variant": "baseline",
+      "run": 2,
+      "seconds": 55.669,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--timings",
+        "--profile",
+        "dev",
+        "--workspace"
+      ],
+      "source": "baseline",
+      "exit_code": 0,
+      "binary_bytes": {
+        "else-api": 65839320,
+        "else-desktop": 127732192
+      }
+    }
+  ]
+}

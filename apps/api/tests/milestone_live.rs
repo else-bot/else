@@ -202,7 +202,7 @@ impl Install {
             child: Some(child),
             base: format!("http://127.0.0.1:{port}"),
             token,
-            http: else_api::http_client::builder()
+            http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
                 .unwrap(),

@@ -83,33 +83,39 @@ cargo test --workspace --locked
 
 ### Build speed
 
-The workspace favors first-build speed for a local installation managing up to
-hundreds of bots. Release builds (including the installer) use basic optimization,
-256 codegen units, and no LTO. Provider inference runs in external processes;
-maximum LLVM optimization of the manager is a lower priority than installation
-time. This can produce larger binaries and slower CPU-heavy Rust code than
-Cargo's default release profile.
+Default checkout builds (`cargo build` / `cargo run`) skip debug information for
+the large desktop dependency graph. Runtime optimization, assertions, overflow
+checks, and incremental compilation keep Cargo's development defaults. Release
+builds keep Cargo's full default optimization. Application dependencies are
+unchanged.
 
-Development and test builds keep file/line backtraces without full type/variable
-debug information. For full debugger support, use
-`CARGO_PROFILE_DEV_DEBUG=2 cargo build --workspace --locked` (or
-`CARGO_PROFILE_TEST_DEBUG=2 cargo test --workspace --locked` for tests).
+For source-line backtraces and full debugger support, opt in when needed:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=2 cargo build --workspace --locked
+CARGO_PROFILE_DEV_DEBUG=2 cargo run -p else-api -- serve
+CARGO_PROFILE_TEST_DEBUG=2 cargo test --workspace --locked
+```
+
+Without that override, backtraces retain function names but omit debugger
+variable/type information and source-line tables.
 
 Reproduce the [clean-build benchmark](experiments/build-speed.md) with Python 3
 and the normal build prerequisites:
 
 ```sh
 cargo fetch --locked
-python3 scripts/benchmark-build.py --output /tmp/else-build-benchmark --runs 2
+python3 scripts/benchmark-build.py --baseline-ref fbb9f3a --output /tmp/else-build-benchmark --runs 2 --profiles dev
 ```
 
-The output directory must be new. The runner compares the previous Cargo profile
-defaults against the current manifest, alternates their order, uses a fresh target
-directory for every build, and disables compiler wrappers. It retains logs, Cargo
-HTML timings, binary sizes, and `results.json`. Downloads, Rust installation, and
-the guest image are excluded; registry sources and filesystem caches stay warm.
-It does not modify the manifests or the normal `target` directory. Use
-`--profiles release` or `--profiles dev` to measure just one path.
+The output directory must be new. The runner exports the baseline Git revision
+without changing this checkout, alternates build order, uses a fresh target
+directory for every build, and disables compiler wrappers. Each variant uses
+its own source, lockfile, and Cargo profiles. It retains logs, Cargo HTML timings,
+binary sizes, and `results.json`. Downloads, Rust installation, and the guest
+image are excluded; registry sources and filesystem caches stay warm.
+Use `--profiles release` to measure release builds, and `--packages else-api`
+to measure an API-only checkout.
 
 ## Run the API
 
