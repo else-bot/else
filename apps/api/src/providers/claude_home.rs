@@ -1,10 +1,12 @@
-//! Per-bot Claude Code configuration directory and its settings.
+//! Claude Code's configuration for bots.
 //!
-//! Each bot gets its own `CLAUDE_CONFIG_DIR` (sessions, caches, and state
-//! stay separate, so one bot cannot resume another's session). The owner's
-//! subscription login is shared by a symlink to the host
-//! `.credentials.json`: never copied, and token refreshes write through to
-//! the one file. Settings and the MCP
+//! Bots run Claude Code with the host's own configuration directory, the way
+//! `claude` runs in the owner's terminal, so the owner's subscription login
+//! works wherever Claude Code keeps it (`.credentials.json` on Linux, the
+//! Keychain on macOS, whose entry is keyed to the configuration directory).
+//! Native sessions live there too, under `projects/` in a directory named
+//! for the bot's project directory, so each bot resumes only its own; the
+//! adapter always names the session to resume. Settings and the MCP
 //! configuration are rewritten before every launch, and the CLI is started
 //! with `--setting-sources ""` and `--strict-mcp-config`, so user, project,
 //! and local settings, hooks, plugins' MCP servers, and anything a session
@@ -17,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::host::{BotDirs, link_login};
+use super::host::BotDirs;
 
 /// Environment variable carrying the turn's task grant; the MCP
 /// configuration references it, so the grant is never written to disk.
@@ -25,15 +27,49 @@ pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
 pub const SETTINGS_FILE: &str = "else-settings.json";
 pub const MCP_FILE: &str = "elsebot-mcp.json";
 
-/// Where the host's Claude Code login lives: `$CLAUDE_CONFIG_DIR`, else
-/// `~/.claude`.
-pub fn host_credentials_file(config_dir: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
-    let dir = match (config_dir, home) {
-        (Some(dir), _) if !dir.is_empty() => PathBuf::from(dir),
-        (_, Some(home)) if !home.is_empty() => Path::new(home).join(".claude"),
-        _ => return None,
-    };
-    Some(dir.join(".credentials.json"))
+/// The host's Claude Code configuration directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostConfig {
+    pub dir: PathBuf,
+    /// Given as `CLAUDE_CONFIG_DIR` to the API, so passed on to the CLI;
+    /// otherwise the CLI's default (`~/.claude`) is left implicit, as the
+    /// Keychain entry depends on it.
+    pub explicit: bool,
+}
+
+impl HostConfig {
+    /// The environment the CLI needs to use this directory.
+    pub fn env(&self) -> Vec<(String, String)> {
+        if self.explicit {
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                self.dir.to_string_lossy().into_owned(),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub fn host_config(config_dir: Option<&str>, home: Option<&str>) -> Option<HostConfig> {
+    match (config_dir, home) {
+        (Some(dir), _) if !dir.is_empty() => Some(HostConfig {
+            dir: PathBuf::from(dir),
+            explicit: true,
+        }),
+        (_, Some(home)) if !home.is_empty() => Some(HostConfig {
+            dir: Path::new(home).join(".claude"),
+            explicit: false,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `claude auth status` (JSON) reports a login.
+pub fn logged_in(status: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(status)
+        .is_ok_and(|v| v["loggedIn"].as_bool() == Some(true))
 }
 
 /// A stable, non-secret identity of the host login (its account and
@@ -146,15 +182,10 @@ fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> 
     fs::rename(&temp, dir.join(name))
 }
 
-/// Prepare the bot's Claude home: rewrite the locked settings and MCP
-/// configuration (removed when there are no tools) and point
-/// `.credentials.json` at the host login.
-pub fn prepare(
-    dirs: &BotDirs,
-    host_credentials: &Path,
-    tool_url: Option<&str>,
-    host_tools: bool,
-) -> std::io::Result<()> {
+/// Prepare the bot's private Claude files (passed to the CLI by path):
+/// rewrite the locked settings and MCP configuration (removed when there
+/// are no tools).
+pub fn prepare(dirs: &BotDirs, tool_url: Option<&str>, host_tools: bool) -> std::io::Result<()> {
     replace_file(
         &dirs.provider_home,
         SETTINGS_FILE,
@@ -167,27 +198,24 @@ pub fn prepare(
             _ => {}
         },
     }
-    let path = dirs.provider_home.join(".credentials.json");
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-        fs::remove_dir_all(&path)?;
-    }
-    link_login(&dirs.provider_home, ".credentials.json", host_credentials)
+    Ok(())
 }
 
-/// Whether the bot's home holds the native session's transcript. Sessions
-/// live under `projects/` in a directory named for the CLI's working
-/// directory, the bot's project, every character but ASCII letters and
-/// digits replaced by `-` (`/a/b.c` gives `-a-b-c`).
-pub fn session_exists(dirs: &BotDirs, native_id: &str) -> bool {
-    let project: String = dirs
-        .project
+/// Whether the host configuration holds the native session's transcript.
+/// Sessions live under `projects/` in a directory named for the CLI's
+/// working directory, the bot's project by its resolved path, every
+/// character but ASCII letters and digits replaced by `-` (`/a/b.c` gives
+/// `-a-b-c`).
+pub fn session_exists(config_dir: &Path, project: &Path, native_id: &str) -> bool {
+    let project = fs::canonicalize(project).unwrap_or_else(|_| project.to_owned());
+    let project: String = project
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     uuid::Uuid::parse_str(native_id).is_ok()
         && fs::symlink_metadata(
-            dirs.provider_home
+            config_dir
                 .join("projects")
                 .join(project)
                 .join(format!("{native_id}.jsonl")),
@@ -241,13 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn prepare_never_writes_through_planted_symlinks_and_links_the_login() {
+    fn prepare_never_writes_through_planted_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("claude-home");
         fs::create_dir(&home).unwrap();
         let outside = dir.path().join("outside.txt");
         fs::write(&outside, "HOST FILE").unwrap();
-        for name in [SETTINGS_FILE, MCP_FILE, ".credentials.json"] {
+        for name in [SETTINGS_FILE, MCP_FILE] {
             std::os::unix::fs::symlink(&outside, home.join(name)).unwrap();
         }
         let dirs = BotDirs {
@@ -255,9 +283,7 @@ mod tests {
             project: dir.path().join("project"),
             provider_home: home.clone(),
         };
-        let login = dir.path().join("host-credentials.json");
-        fs::write(&login, "LOGIN").unwrap();
-        prepare(&dirs, &login, None, true).unwrap();
+        prepare(&dirs, None, true).unwrap();
         assert_eq!(fs::read_to_string(&outside).unwrap(), "HOST FILE");
         assert!(
             fs::symlink_metadata(home.join(MCP_FILE)).is_err(),
@@ -267,28 +293,52 @@ mod tests {
             fs::read_to_string(home.join(SETTINGS_FILE)).unwrap(),
             settings_json(true)
         );
-        assert_eq!(
-            fs::read_link(home.join(".credentials.json")).unwrap(),
-            login
-        );
     }
 
     #[test]
-    fn sessions_are_found_only_in_the_bots_own_home() {
+    fn sessions_are_found_by_the_bots_resolved_project_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let dirs = BotDirs {
-            root: dir.path().to_owned(),
-            project: PathBuf::from("/home/me/.else/bots/b0t.1"),
-            provider_home: dir.path().join("home"),
-        };
+        let root = dir.path().canonicalize().unwrap();
+        let config = root.join("claude");
+        let project = root.join("bots").join("b0t.1");
+        fs::create_dir_all(&project).unwrap();
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(root.join("bots"), &linked).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        assert!(!session_exists(&dirs, &id));
-        let sessions = dirs
-            .provider_home
-            .join("projects/-home-me--else-bots-b0t-1");
+        assert!(!session_exists(&config, &project, &id));
+        let encoded: String = project
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        assert!(encoded.ends_with("-bots-b0t-1"));
+        let sessions = config.join("projects").join(&encoded);
         fs::create_dir_all(&sessions).unwrap();
         fs::write(sessions.join(format!("{id}.jsonl")), "{}").unwrap();
-        assert!(session_exists(&dirs, &id));
-        assert!(!session_exists(&dirs, "../../etc/passwd"));
+        assert!(session_exists(&config, &project, &id));
+        // The CLI names the directory for the resolved path.
+        assert!(session_exists(&config, &linked.join("b0t.1"), &id));
+        assert!(!session_exists(&config, &root.join("bots/other"), &id));
+        assert!(!session_exists(&config, &project, "../../etc/passwd"));
+    }
+
+    #[test]
+    fn the_host_configuration_is_explicit_only_when_given() {
+        let implicit = host_config(None, Some("/home/x")).unwrap();
+        assert_eq!(implicit.dir, PathBuf::from("/home/x/.claude"));
+        assert!(
+            implicit.env().is_empty(),
+            "the Keychain entry depends on it"
+        );
+        let explicit = host_config(Some("/srv/claude"), Some("/home/x")).unwrap();
+        assert_eq!(
+            explicit.env(),
+            vec![("CLAUDE_CONFIG_DIR".to_owned(), "/srv/claude".to_owned())]
+        );
+        assert!(logged_in(
+            r#"{"loggedIn": true, "authMethod": "claude.ai"}"#
+        ));
+        assert!(!logged_in(r#"{"loggedIn": false}"#));
+        assert!(!logged_in("not json"));
     }
 }

@@ -104,13 +104,14 @@ impl Host {
         }
     }
 
-    /// Run `program args` with the passed environment and return its
-    /// stdout, or `None` if it fails.
-    pub fn probe(&self, program: &Path, args: &[&str]) -> Option<String> {
+    /// Run `program args` with the passed environment plus `env` and return
+    /// its stdout, or `None` if it fails.
+    pub fn probe(&self, program: &Path, args: &[&str], env: &[(String, String)]) -> Option<String> {
         let output = std::process::Command::new(program)
             .args(args)
             .env_clear()
             .envs(passed_env())
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()

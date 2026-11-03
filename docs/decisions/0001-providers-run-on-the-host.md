@@ -35,5 +35,5 @@ Provider CLIs run directly on the host as the API's user, the way coding-agent d
 - The installer no longer installs or checks bubblewrap and sets `ELSE_BOTS_DIR` (kept if the owner changed it).
 - Backup sets do not include bot project directories yet, and a computer restored from a backup has no project mount.
 - Only computers created after this change get the mount. An image upgrade recreates the computer with the mount; files in an older computer's `~/work` are unpacked into the new computer's mount, which moves them into the host project directory.
-- On macOS, Claude Code keeps its login in the Keychain rather than `~/.claude/.credentials.json`, so the Claude provider reports that it is not logged in there. Codex works.
+- Claude Code runs with the host's own configuration directory, as in a terminal, so its login works on macOS too (the Keychain entry is tied to that directory). Its native sessions sit in `~/.claude/projects/`, one directory per bot project.
 - Native sessions created before this change do not resume: their fingerprint named the sandbox runtime. Conversations continue from PostgreSQL.

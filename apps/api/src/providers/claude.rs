@@ -82,7 +82,7 @@ const PIPE_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Claude {
     host: Option<Host>,
     program: Option<PathBuf>,
-    credentials: Option<PathBuf>,
+    config: Option<claude_home::HostConfig>,
     account: String,
     version: String,
     unavailable: Option<String>,
@@ -103,27 +103,32 @@ impl Session {
 }
 
 impl Claude {
-    /// Locate the CLI and the host login and check the CLI version inside
-    /// the host. Anything missing makes the provider unavailable with a
-    /// reason instead of failing startup.
+    /// Locate the CLI, check its version, and ask it whether the host login
+    /// works (`claude auth status`, with the configuration turns use).
+    /// Anything missing makes the provider unavailable with a reason instead
+    /// of failing startup.
     pub fn detect(
         host: Option<Host>,
         program: Option<PathBuf>,
-        credentials: Option<PathBuf>,
+        config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Self {
-        let version = match (&host, &program) {
-            (Some(host), Some(program)) => host.probe(program, &["--version"]),
+        let env = config
+            .as_ref()
+            .map(claude_home::HostConfig::env)
+            .unwrap_or_default();
+        let probe = |args: &[&str]| match (&host, &program) {
+            (Some(host), Some(program)) => host.probe(program, args, &env),
             _ => None,
         };
+        let version = probe(&["--version"]);
+        let logged_in = config.is_some()
+            && probe(&["auth", "status"]).is_some_and(|s| claude_home::logged_in(&s));
         let unavailable = if host.is_none() {
             Some("Claude Code is not configured on this host.".to_owned())
         } else if program.is_none() {
             Some("Claude Code (`claude`) was not found on PATH.".to_owned())
-        } else if !credentials
-            .as_ref()
-            .is_some_and(|c| std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.len() > 0))
-        {
+        } else if version.is_some() && !logged_in {
             Some("Claude Code is not logged in on the host (run `claude` and log in).".to_owned())
         } else {
             match &version {
@@ -138,7 +143,7 @@ impl Claude {
         Self {
             host,
             program,
-            credentials,
+            config,
             account,
             version: version.unwrap_or_default(),
             unavailable,
@@ -262,27 +267,21 @@ impl Claude {
         tools: bool,
         grant: Option<&str>,
     ) -> Result<(Supervised, super::host::BotDirs), String> {
-        let (Some(host), Some(program), Some(credentials)) =
-            (&self.host, &self.program, &self.credentials)
+        let (Some(host), Some(program), Some(config)) = (&self.host, &self.program, &self.config)
         else {
             return Err("Claude Code is not configured.".into());
         };
         let dirs = host.bot_dirs(bot_id, home).map_err(|e| e.to_string())?;
         let tool_url = self.tool_url.as_deref().filter(|_| tools);
-        claude_home::prepare(&dirs, credentials, tool_url, tools).map_err(|e| e.to_string())?;
+        claude_home::prepare(&dirs, tool_url, tools).map_err(|e| e.to_string())?;
         let mut args = args;
         let file = |name: &str| dirs.provider_home.join(name).into_os_string();
         args.extend(["--settings".into(), file(claude_home::SETTINGS_FILE)]);
         if tool_url.is_some() {
             args.extend(["--mcp-config".into(), file(claude_home::MCP_FILE)]);
         }
-        let mut env = vec![
-            (
-                "CLAUDE_CONFIG_DIR".to_owned(),
-                dirs.provider_home.to_string_lossy().into_owned(),
-            ),
-            ("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()),
-        ];
+        let mut env = config.env();
+        env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
         if let (Some(_), Some(grant)) = (tool_url, grant) {
             env.push((claude_home::GRANT_ENV.to_owned(), grant.to_owned()));
         }
@@ -757,7 +756,10 @@ impl Provider for Claude {
         // Resume only a compatible session whose transcript is still in
         // this bot's own home; otherwise start over from PostgreSQL.
         let resumed = input.session.as_ref().filter(|s| {
-            s.fingerprint == fingerprint && claude_home::session_exists(&dirs, &s.native_id)
+            s.fingerprint == fingerprint
+                && self.config.as_ref().is_some_and(|c| {
+                    claude_home::session_exists(&c.dir, &dirs.project, &s.native_id)
+                })
         });
         let (session, considered) = match resumed {
             Some(s) => (
