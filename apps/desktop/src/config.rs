@@ -10,7 +10,9 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_API_URL: &str = "http://127.0.0.1:7878";
+/// The development API's default (see the API's `DEFAULT_BIND`); `elsebot
+/// desktop` passes the installed API's address (7878) explicitly.
+pub const DEFAULT_API_URL: &str = "http://127.0.0.1:7879";
 
 /// A validated API origin such as `http://127.0.0.1:7878`.
 #[derive(Debug, Clone, PartialEq, Eq)]

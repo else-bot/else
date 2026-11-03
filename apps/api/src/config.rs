@@ -9,8 +9,10 @@ use std::time::Duration;
 
 use crate::credentials::SecretKeySource;
 
-/// Default loopback listener for the owner API.
-pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
+/// Default loopback listener for the owner API: the development port.
+/// Installations set `ELSE_API_BIND` to 127.0.0.1:7878 explicitly, so a
+/// development API and an installed one on the same machine do not collide.
+pub const DEFAULT_BIND: &str = "127.0.0.1:7879";
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 

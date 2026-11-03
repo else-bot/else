@@ -75,9 +75,9 @@ Start PostgreSQL, provision the installation once, then start the API from the r
 docker compose up -d --wait
 cargo run -p else-api -- setup
 cargo run -p else-api -- serve
-curl -s http://127.0.0.1:7878/healthz
+curl -s http://127.0.0.1:7879/healthz
 printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)" |
-	curl -s -H @- http://127.0.0.1:7878/v1/capabilities
+	curl -s -H @- http://127.0.0.1:7879/v1/capabilities
 ```
 
 `serve` is the default command. The process reads the root `.env` when present, and variables already set in the environment take precedence. A `.env` that exists but cannot be parsed fails startup without printing its contents. Configuration is validated before the API opens any file or listener. An invalid value exits with status 1 and names the variable without echoing secret values. Ctrl-C or `SIGTERM` stops accepting connections, drains requests, and closes any remaining connections after the grace period.
@@ -86,7 +86,7 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)"
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ELSE_API_BIND` | `127.0.0.1:7878` | Listener address. Only loopback addresses are accepted because the API serves plaintext HTTP. Use an SSH tunnel such as `ssh -L 7878:127.0.0.1:7878 host` for remote access. |
+| `ELSE_API_BIND` | `127.0.0.1:7879` | Listener address. The development default; an installation (`~/.else`) listens on 7878, so both can run on one machine. Only loopback addresses are accepted because the API serves plaintext HTTP. Use an SSH tunnel such as `ssh -L 7878:127.0.0.1:7878 host` for remote access. |
 | `DATABASE_URL` | built from `POSTGRES_*` | PostgreSQL connection URI. Never logged; connection errors omit it. |
 | `ELSE_DATA_DIR` | `$XDG_DATA_HOME/else-bot`, else `~/.local/share/else-bot` | Private runtime storage for credentials and later bot session data. Use a separate directory per checkout or test installation. |
 | `OWNER_TOKEN_FILE` | `$ELSE_DATA_DIR/owner-token` | Owner bearer token: 32 random bytes as unpadded base64url. |
@@ -133,7 +133,7 @@ Unknown or malformed IDs return `404 not_found`, always after authentication. A 
 printf 'Authorization: Bearer %s\n' "$(cat ~/.local/share/else-bot/owner-token)" |
 	curl -s -H @- -H 'Content-Type: application/json' \
 	-d "{\"request_id\":\"$(uuidgen)\",\"name\":\"Work\",\"role\":\"Help with my work\"}" \
-	http://127.0.0.1:7878/v1/bots
+	http://127.0.0.1:7879/v1/bots
 ```
 
 ### Sidebar categories
@@ -359,7 +359,7 @@ cargo run -p else-desktop
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ELSE_API_URL` | `http://127.0.0.1:7878` | API origin. Only `http://` loopback origins without a path, query, or credentials are accepted; this build has no TLS. For a remote server use `ssh -L 7878:127.0.0.1:7878 <server>`. |
+| `ELSE_API_URL` | `http://127.0.0.1:7879` | API origin (the development API; `elsebot desktop` uses the installation's 7878). Only `http://` loopback origins without a path, query, or credentials are accepted; this build has no TLS. For a remote server use `ssh -L 7878:127.0.0.1:7878 <server>`. |
 | `ELSE_OWNER_TOKEN_FILE` (or the API's `OWNER_TOKEN_FILE`) | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The owner token written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
 | `ELSE_OWNER_TOKEN` | unset | Token value for a development launcher. Takes precedence over the file. Prefer the file. |
 
