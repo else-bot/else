@@ -146,6 +146,10 @@ update)
 	;;
 desktop)
 	[ -x "$CURRENT/bin/else-desktop" ] || die "the desktop is not installed (server-only installation?)"
+	# From the configuration folder: the desktop also reads a `.env` in its
+	# working directory, and a checkout's (development settings) must not
+	# point it at another API or token.
+	cd "$CONFIG"
 	ELSE_API_URL="http://$(api_addr)" ELSE_OWNER_TOKEN_FILE="$ELSE_HOME/data/owner-token" \
 		exec "$CURRENT/bin/else-desktop" "$@"
 	;;
