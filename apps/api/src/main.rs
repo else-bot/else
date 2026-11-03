@@ -176,6 +176,7 @@ fn run_backup() -> anyhow::Result<()> {
             computers,
             drain: std::time::Duration::from_secs(0),
             exclusive: true,
+            projects_dir: Some(config.bots_dir.clone()),
         });
         if let Some(replicator) = replicator(&config, &pool)? {
             worker = worker.with_replicator(replicator);
@@ -323,11 +324,18 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
         }
     }
     let result = runtime()?.block_on(async {
+        // Without Microsandbox a set with computers is refused; one with
+        // only the database and host state still restores.
         let runtime: Option<Arc<dyn else_api::computers::ComputerRuntime>> = match &new_dir {
-            Some(dir) => Some(Arc::new(else_api::computers::runtime::Msb::detect(
-                dir,
-                config.msb_bin.clone(),
-            )?)),
+            Some(dir) => {
+                match else_api::computers::runtime::Msb::detect(dir, config.msb_bin.clone()) {
+                    Ok(msb) => Some(Arc::new(msb)),
+                    Err(err) => {
+                        eprintln!("bot computers cannot be restored here: {err}");
+                        None
+                    }
+                }
+            }
             None => None,
         };
         let report =
@@ -340,7 +348,7 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
                 staging_parent: &config.data_dir.join("restore-staging"),
                 max_bytes: config.backup.max_bytes,
                 computers: match (&runtime, &new_dir) {
-                    (Some(runtime), Some(dir)) => Some(else_api::backup::restore::ComputerTarget {
+                    (runtime, Some(dir)) => Some(else_api::backup::restore::ComputerTarget {
                         runtime: runtime.clone(),
                         data_dir: dir,
                     }),
@@ -351,6 +359,14 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
         println!("restored set {} into database {target}", report.set_id);
         if let Some(dir) = &new_dir {
             println!("new installation directory: {}", dir.display());
+            let projects = else_api::backup::restore::projects_dir(dir);
+            if projects.exists() {
+                println!(
+                    "bot project directories: {} (set ELSE_BOTS_DIR to it; restored computers \
+                     mount them from there)",
+                    projects.display()
+                );
+            }
         }
         println!("migration version: {}", report.migration_version);
         println!("coverage: {}", report.manifest.coverage.note);
@@ -529,6 +545,7 @@ fn run_serve() -> anyhow::Result<()> {
                     computers: state.computers.clone(),
                     drain: std::time::Duration::from_secs(300),
                     exclusive: false,
+                    projects_dir: Some(config.bots_dir.clone()),
                 });
                 match replicator(&config, &pool) {
                     Ok(Some(replicator)) => worker = worker.with_replicator(replicator),

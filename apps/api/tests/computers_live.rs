@@ -992,6 +992,8 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         computers: Some(manager.clone()),
         drain: Duration::from_secs(30),
         exclusive: false,
+
+        projects_dir: Some(dir.path().join("bots")),
     });
     let started = std::time::Instant::now();
     let summary = worker.run_once().await.unwrap();
@@ -1074,7 +1076,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         staging_parent: &dir.path().join("staging"),
         max_bytes: 8 << 30,
         computers: Some(backup::restore::ComputerTarget {
-            runtime: restored_runtime.clone(),
+            runtime: Some(restored_runtime.clone()),
             data_dir: &new_dir,
         }),
     })

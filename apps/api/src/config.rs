@@ -359,14 +359,15 @@ fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
 
 /// A development checkout's bots live under `~/.else-dev/bots`, apart from
 /// an installation's (`~/.else/bots`, which the installer configures);
-/// without a home, under the data directory.
+/// without a home, `<data dir>/projects` (not `bots/`, which holds the
+/// private provider homes; a restore uses the same place).
 fn default_bots_dir(
     source: &dyn Source,
     data_dir: &std::path::Path,
 ) -> Result<PathBuf, ConfigError> {
     match source.get("HOME").filter(|v| !v.is_empty()) {
         Some(home) => Ok(absolute_path("HOME", home)?.join(".else-dev/bots")),
-        None => Ok(data_dir.join("bots")),
+        None => Ok(data_dir.join("projects")),
     }
 }
 
@@ -510,6 +511,8 @@ pub mod tests {
         .unwrap();
         assert!(matches!(config.secret_key, SecretKeySource::Env(_)));
         assert!(!format!("{:?}", config).contains("canary-value"));
+        // Without a home, apart from the provider homes under `bots/`.
+        assert_eq!(config.bots_dir, PathBuf::from("/srv/else/projects"));
     }
 
     #[test]

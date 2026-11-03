@@ -17,7 +17,7 @@ use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
 use else_api::backup::{self, BackupError, PgParams};
 use else_api::computers::{
-    Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError,
+    Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, Mount, RuntimeError,
     RuntimeState, Spec,
 };
 use else_api::credentials::SecretKey;
@@ -33,6 +33,8 @@ struct Fake {
     execs: Mutex<Vec<String>>,
     fail_export: AtomicBool,
     restored: Mutex<Vec<Spec>>,
+    /// name -> the mounts it was created or restored with
+    mounts: Mutex<HashMap<String, Vec<Mount>>>,
     checkpoint_fails: AtomicBool,
     /// Restore boots the computer, then fails.
     restore_fails_running: AtomicBool,
@@ -89,7 +91,20 @@ impl ComputerRuntime for Fake {
             .lock()
             .unwrap()
             .insert(spec.name.clone(), (RuntimeState::Running, String::new()));
+        self.mounts
+            .lock()
+            .unwrap()
+            .insert(spec.name.clone(), spec.mounts.clone());
         Ok(())
+    }
+    async fn mounts(&self, name: &str) -> Result<Vec<Mount>, RuntimeError> {
+        Ok(self
+            .mounts
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn start(&self, name: &str) -> Result<(), RuntimeError> {
         self.starts.fetch_add(1, SeqCst);
@@ -177,6 +192,11 @@ struct Setup {
 }
 
 async fn setup() -> Setup {
+    setup_with(false).await
+}
+
+/// With `projects`, computers are created with their bot's project mount.
+async fn setup_with(projects: bool) -> Setup {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -188,6 +208,7 @@ async fn setup() -> Setup {
             desktop: true,
             state_dir: dir.path().join("state"),
             idle_after: Duration::from_secs(3600),
+            projects_dir: projects.then(|| dir.path().join("bots")),
             ..ComputerConfig::default()
         },
     ));
@@ -223,6 +244,8 @@ fn worker(s: &Setup, drain: Duration) -> BackupWorker {
         computers: Some(s.manager.clone()),
         drain,
         exclusive: false,
+
+        projects_dir: Some(s.dir.path().join("bots")),
     })
 }
 
@@ -379,7 +402,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
-            runtime: fresh.clone(),
+            runtime: Some(fresh.clone()),
             data_dir: &new_dir,
         }),
     })
@@ -719,7 +742,7 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
-            runtime: fresh,
+            runtime: Some(fresh),
             data_dir: &new_dir,
         }),
     })
@@ -768,7 +791,7 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
             staging_parent: &s.dir.path().join("staging"),
             max_bytes: 1 << 30,
             computers: Some(ComputerTarget {
-                runtime: fresh.clone(),
+                runtime: Some(fresh.clone()),
                 data_dir: &new_dir,
             }),
         })
@@ -800,5 +823,140 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
                 .await
                 .unwrap();
         assert!(!exists, "the new database was dropped");
+    }
+}
+
+/// Each bot's project directory is sealed into the set at the checkpoint
+/// and restored into the new installation's `projects/`, and a computer
+/// created with the project mount is restored bound to the restored copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
+    let s = setup_with(true).await;
+    let bots = s.dir.path().join("bots");
+    let a = s.app.create_bot("Alpha", "keeps notes").await;
+    let b = s.app.create_bot("Beta", "keeps sheets").await;
+    let (a_id, b_id): (Uuid, Uuid) = (a.parse().unwrap(), b.parse().unwrap());
+    chat(&s.app, &a, "Alpha's chat").await;
+    // Alpha's computer is created with the mount (and its project).
+    let Acquire::Ready {
+        lease_id,
+        runtime_name,
+        ..
+    } = s.manager.acquire(a_id, "test:use").await.unwrap()
+    else {
+        panic!()
+    };
+    s.fake.write(&runtime_name, "alpha disk");
+    s.manager.release(lease_id).await.unwrap();
+    let pa = bots.join(a_id.to_string());
+    std::fs::create_dir_all(pa.join("sub")).unwrap();
+    std::fs::write(pa.join("notes.md"), "alpha notes").unwrap();
+    std::fs::write(pa.join("sub/data.csv"), "a,b\n").unwrap();
+    std::os::unix::fs::symlink("sub/data.csv", pa.join("latest")).unwrap();
+    // Beta never used a computer but keeps files in its project.
+    let pb = bots.join(b_id.to_string());
+    std::fs::create_dir_all(&pb).unwrap();
+    std::fs::write(pb.join("sheet.csv"), "item,qty\n").unwrap();
+
+    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let manifest = &summary.manifest;
+    assert!(manifest.coverage.whole_assistant, "{:?}", manifest.coverage);
+    assert_eq!(manifest.coverage.projects, "included");
+    let entry = |id: Uuid| manifest.bots.iter().find(|e| e.id == id).unwrap().clone();
+    let (ea, eb) = (entry(a_id), entry(b_id));
+    assert_eq!(
+        (ea.project.as_str(), eb.project.as_str()),
+        ("included", "included")
+    );
+    assert_eq!((ea.vm.as_str(), eb.vm.as_str()), ("included", "none"));
+    let main = manifest
+        .bots
+        .iter()
+        .find(|e| e.name != "Alpha" && e.name != "Beta")
+        .unwrap();
+    assert_eq!(main.project, "none", "no directory, nothing to include");
+    let mount = ea.computer.as_ref().unwrap().project_mount.clone().unwrap();
+    assert_eq!(
+        (mount.guest.as_str(), mount.uid),
+        ("/home/elsebot/work", 1000),
+        "a desktop computer's elsebot user owns the project"
+    );
+    for bot in [a_id, b_id] {
+        let object = backup::projects::object(bot);
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|x| x.object == object && x.kind == "project")
+        );
+        let bytes = std::fs::read(summary.path.join(&object)).unwrap();
+        assert!(bytes.starts_with(b"age-encryption.org/v1"));
+        assert!(!bytes.windows(11).any(|w| w == b"alpha notes"));
+    }
+
+    let fresh = Arc::new(Fake::default());
+    let new_dir = s.dir.path().join("restored-installation");
+    std::fs::create_dir(&new_dir).unwrap();
+    let target = Target::new(&s.app);
+    restore(RestoreRequest {
+        set_dir: &summary.path,
+        key: &key(),
+        server: &target.params,
+        target_database: &target.name,
+        pg_restore: Path::new("pg_restore"),
+        staging_parent: &s.dir.path().join("staging"),
+        max_bytes: 1 << 30,
+        computers: Some(ComputerTarget {
+            runtime: Some(fresh.clone()),
+            data_dir: &new_dir,
+        }),
+    })
+    .await
+    .unwrap();
+    let projects = else_api::backup::restore::projects_dir(&new_dir);
+    let ra = projects.join(a_id.to_string());
+    assert_eq!(
+        std::fs::read_to_string(ra.join("notes.md")).unwrap(),
+        "alpha notes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ra.join("sub/data.csv")).unwrap(),
+        "a,b\n"
+    );
+    assert_eq!(
+        std::fs::read_link(ra.join("latest")).unwrap(),
+        Path::new("sub/data.csv")
+    );
+    assert_eq!(
+        std::fs::read_to_string(projects.join(b_id.to_string()).join("sheet.csv")).unwrap(),
+        "item,qty\n"
+    );
+    let spec = fresh.restored.lock().unwrap()[0].clone();
+    assert_eq!(
+        spec.mounts,
+        vec![Mount {
+            host: ra.canonicalize().unwrap(),
+            guest: "/home/elsebot/work".into(),
+            uid: 1000,
+        }],
+        "the restored computer binds the restored project"
+    );
+
+    // An entry that cannot be read is left out, and the set says so.
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = pb.join("locked.csv");
+        std::fs::write(&locked, "secret").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let partial = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+        let manifest = &partial.manifest;
+        assert_eq!(manifest.coverage.projects, "partial");
+        assert!(!manifest.coverage.whole_assistant);
+        assert_eq!(
+            manifest.bots.iter().find(|e| e.id == b_id).unwrap().project,
+            "partial"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 }

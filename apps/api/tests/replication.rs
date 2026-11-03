@@ -504,6 +504,8 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
             computers: Some(manager.clone()),
             drain: Duration::from_secs(5),
             exclusive: false,
+
+            projects_dir: Some(dir.path().join("bots")),
         })
         .run_once()
         .await
@@ -575,7 +577,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         staging_parent: &dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
-            runtime: fresh.clone(),
+            runtime: Some(fresh.clone()),
             data_dir: &new_dir,
         }),
     })
@@ -791,6 +793,8 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
             computers: Some(manager.clone()),
             drain: Duration::from_secs(5),
             exclusive: false,
+
+            projects_dir: Some(dir.path().join("bots")),
         })
         .run_once()
         .await

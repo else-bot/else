@@ -143,6 +143,12 @@ pub trait ComputerRuntime: Send + Sync {
         ))
     }
 
+    /// The host directories mounted into a computer, as it was created.
+    async fn mounts(&self, name: &str) -> Result<Vec<Mount>, RuntimeError> {
+        let _ = name;
+        Ok(Vec::new())
+    }
+
     /// Remove a stopped computer and its disk. Only used for a computer
     /// else.bot itself just created and never handed out (a failed image
     /// upgrade's replacement).
@@ -416,6 +422,43 @@ pub fn parse_state(status: &str) -> RuntimeState {
     }
 }
 
+/// `SOURCE:DEST:uid=N,gid=N` for `--mount-dir` and `-v`.
+fn mount_arg(mount: &Mount, operation: &str) -> Result<String, RuntimeError> {
+    // A colon in the host path would shift the fields.
+    let host = mount
+        .host
+        .to_str()
+        .filter(|h| !h.contains(':'))
+        .ok_or_else(|| RuntimeError::Failed {
+            operation: operation.into(),
+            message: format!(
+                "{} cannot be mounted (not UTF-8, or a ':')",
+                mount.host.display()
+            ),
+        })?;
+    let (guest, uid) = (&mount.guest, mount.uid);
+    Ok(format!("{host}:{guest}:uid={uid},gid={uid}"))
+}
+
+/// The bind mounts in `msb inspect --format json`.
+fn inspected_mounts(json: &str) -> Option<Vec<Mount>> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let mounts = value["config"]["mounts"].as_array()?;
+    Some(
+        mounts
+            .iter()
+            .filter(|m| m["type"] == "Bind")
+            .filter_map(|m| {
+                Some(Mount {
+                    host: PathBuf::from(m["host"].as_str()?),
+                    guest: m["guest"].as_str()?.to_owned(),
+                    uid: m["options"]["override_uid"].as_u64().unwrap_or(0) as u32,
+                })
+            })
+            .collect(),
+    )
+}
+
 #[async_trait]
 impl ComputerRuntime for Msb {
     async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
@@ -471,21 +514,9 @@ impl ComputerRuntime for Msb {
             args.push("--copy-file".into());
             args.push(format!("{}:{guest}", host.display()));
         }
-        for Mount { host, guest, uid } in &spec.mounts {
-            // `SOURCE:DEST:OPTIONS`: a colon in the host path would shift
-            // the fields.
-            let host =
-                host.to_str()
-                    .filter(|h| !h.contains(':'))
-                    .ok_or_else(|| RuntimeError::Failed {
-                        operation: "create".into(),
-                        message: format!(
-                            "{} cannot be mounted (not UTF-8, or a ':')",
-                            host.display()
-                        ),
-                    })?;
+        for mount in &spec.mounts {
             args.push("--mount-dir".into());
-            args.push(format!("{host}:{guest}:uid={uid},gid={uid}"));
+            args.push(mount_arg(mount, "create")?);
         }
         // `--` keeps the image a positional argument, never an option.
         args.push("--".into());
@@ -577,6 +608,12 @@ impl ComputerRuntime for Msb {
             args.push(format!("127.0.0.1:{host}:{guest}"));
         }
         args.extend(restore_network_args(&spec.network)?);
+        // A computer created with a mount is restored only with a binding
+        // for it (`msb` refuses otherwise).
+        for mount in &spec.mounts {
+            args.push("-v".into());
+            args.push(mount_arg(mount, "snapshot restore")?);
+        }
         args.push(group);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let restored = self.run_checked("snapshot restore", &args).await;
@@ -599,6 +636,26 @@ impl ComputerRuntime for Msb {
 
     async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
         self.control("remove", &["remove", "--quiet", name]).await
+    }
+
+    async fn mounts(&self, name: &str) -> Result<Vec<Mount>, RuntimeError> {
+        let out = self
+            .run(
+                "inspect",
+                &["inspect", name, "--format", "json"],
+                CONTROL_TIMEOUT,
+            )
+            .await?;
+        if out.status != Some(0) {
+            return Err(RuntimeError::Failed {
+                operation: "inspect".into(),
+                message: last_line(&out.stderr, &out.stdout),
+            });
+        }
+        inspected_mounts(&out.stdout).ok_or_else(|| RuntimeError::Failed {
+            operation: "inspect".into(),
+            message: "unreadable output".into(),
+        })
     }
 
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError> {
@@ -652,6 +709,50 @@ impl ComputerRuntime for Msb {
         ];
         all.extend_from_slice(args);
         self.run_input("exec", &all, Some(input), timeout).await
+    }
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+
+    #[test]
+    fn bind_mounts_are_read_from_inspect() {
+        let json = r#"{"config": {"mounts": [
+            {"type": "Bind", "guest": "/root/work", "host": "/p/bots/b",
+             "options": {"override_uid": 0, "override_gid": 0}},
+            {"type": "Bind", "guest": "/home/elsebot/work", "host": "/q",
+             "options": {"override_uid": 1000, "override_gid": 1000}},
+            {"type": "Named", "guest": "/data", "name": "v"}]}}"#;
+        assert_eq!(
+            inspected_mounts(json).unwrap(),
+            vec![
+                Mount {
+                    host: "/p/bots/b".into(),
+                    guest: "/root/work".into(),
+                    uid: 0
+                },
+                Mount {
+                    host: "/q".into(),
+                    guest: "/home/elsebot/work".into(),
+                    uid: 1000
+                },
+            ]
+        );
+        assert_eq!(
+            inspected_mounts(r#"{"config": {"mounts": []}}"#).unwrap(),
+            vec![]
+        );
+        assert!(inspected_mounts("not json").is_none());
+        let arg = mount_arg(
+            &Mount {
+                host: "/a:b".into(),
+                guest: "/root/work".into(),
+                uid: 0,
+            },
+            "create",
+        );
+        assert!(arg.is_err(), "a colon would shift the fields");
     }
 }
 
