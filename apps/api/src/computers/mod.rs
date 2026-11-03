@@ -615,13 +615,35 @@ impl ComputerManager {
             }
             "stopped" => {}
             "running" | "paused" => {
-                let held: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM computer_leases
-                                    WHERE bot_id = $1 AND released_at IS NULL)",
+                // A turn's lease outlives the turn until it expires; a turn
+                // or job that has ended holds nothing, so its lease ends
+                // here instead of deferring the operation for minutes. Any
+                // other holder (a desktop session) still counts.
+                let leases: Vec<(Uuid, String)> = sqlx::query_as(
+                    "SELECT id, holder FROM computer_leases
+                     WHERE bot_id = $1 AND released_at IS NULL",
                 )
                 .bind(bot_id)
-                .fetch_one(&self.pool)
+                .fetch_all(&self.pool)
                 .await?;
+                let mut held = false;
+                for (lease, holder) in leases {
+                    let ended = matches!(
+                        holder.split_once(':'),
+                        Some(("turn" | "job", id)) if id.parse::<Uuid>().is_ok()
+                    ) && !self.holder_is_live(&holder).await?;
+                    if !ended {
+                        held = true;
+                        continue;
+                    }
+                    sqlx::query(
+                        "UPDATE computer_leases SET released_at = now(), end_reason = 'expired'
+                         WHERE id = $1 AND released_at IS NULL",
+                    )
+                    .bind(lease)
+                    .execute(&self.pool)
+                    .await?;
+                }
                 if held {
                     return Err(ComputerError::Busy("in use".into()));
                 }

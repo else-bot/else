@@ -852,3 +852,29 @@ async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: 
     let _ = fake;
     assert_eq!(observed(app, bot).await, "stopped");
 }
+
+/// POC-032: a lease outlives its turn until it expires; a whole-disk
+/// operation right after the turn (a backup of a stopped API) must not wait
+/// minutes for it. Leases of live work and other holders still count.
+#[tokio::test(flavor = "multi_thread")]
+async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(2)).await;
+    let bot: Uuid = app.create_bot("After", "upgrade").await.parse().unwrap();
+    // A desktop session still holds the computer.
+    let (desktop, _) = ready(&manager, bot, &format!("desktop:{}", Uuid::new_v4())).await;
+    let (finished, _) = ready(&manager, bot, &format!("turn:{}", Uuid::new_v4())).await;
+    let held = manager.upgrade_image(bot, "img:new", None).await;
+    assert!(held.is_err(), "{held:?}");
+    manager.release(desktop).await.unwrap();
+    // Only the finished turn's lease is left: it ends and the upgrade runs.
+    manager.upgrade_image(bot, "img:new", None).await.unwrap();
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT end_reason FROM computer_leases WHERE id = $1")
+            .bind(finished)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("expired"));
+}
