@@ -462,7 +462,7 @@ impl ApiProcess {
             base: format!("http://127.0.0.1:{port}"),
             token,
         };
-        let client = reqwest::Client::new();
+        let client = else_api::http_client::builder().build().unwrap();
         for _ in 0..200 {
             if client
                 .get(format!("{}/readyz", process.base))
@@ -483,7 +483,9 @@ impl ApiProcess {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> (u16, serde_json::Value) {
-        let mut request = reqwest::Client::new()
+        let mut request = else_api::http_client::builder()
+            .build()
+            .unwrap()
             .request(method, format!("{}{path}", self.base))
             .bearer_auth(&self.token);
         if let Some(body) = body {

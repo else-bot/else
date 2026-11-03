@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare clean workspace builds against the original Cargo profile defaults.
+"""Compare clean builds of the current source with a committed baseline.
 
 Run `cargo fetch --locked` first. Each build gets a new target directory;
 downloads, toolchain installation, and the guest image are outside the timing.
@@ -16,10 +16,8 @@ import time
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULTS = {
-    "release": {"opt-level": "3", "codegen-units": "16", "lto": "false"},
-    "dev": {"debug": "2"},
-}
+PROFILES = ["release", "dev"]
+PACKAGES = ["else-api", "else-desktop"]
 
 
 def positive_int(value):
@@ -33,10 +31,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="new results directory")
     parser.add_argument("--runs", type=positive_int, default=2)
-    parser.add_argument("--profiles", nargs="+", choices=DEFAULTS, default=list(DEFAULTS))
+    parser.add_argument("--baseline-ref", help="Git commit/tag to export without changing this checkout")
+    parser.add_argument("--profiles", nargs="+", choices=PROFILES, default=PROFILES)
+    parser.add_argument("--packages", nargs="+", choices=PACKAGES, help="default: whole workspace")
     parser.add_argument("--variants", nargs="+", choices=["baseline", "current"],
                         default=["baseline", "current"])
     args = parser.parse_args()
+    if "baseline" in args.variants and not args.baseline_ref:
+        parser.error("--baseline-ref is required when measuring the baseline")
     overrides = [key for key in os.environ if key.startswith("CARGO_PROFILE_")]
     if overrides:
         parser.error("unset profile overrides first: " + ", ".join(sorted(overrides)))
@@ -50,14 +52,27 @@ def main():
     def capture(*command):
         return subprocess.check_output(command, cwd=ROOT, text=True).strip()
 
+    baseline = output / "source-baseline"
+    baseline_revision = None
+    if args.baseline_ref:
+        baseline_revision = capture("git", "rev-parse", f"{args.baseline_ref}^{{commit}}")
+        baseline.mkdir()
+        archive = output / "baseline.tar"
+        with archive.open("wb") as stream:
+            subprocess.run(["git", "archive", baseline_revision], cwd=ROOT, stdout=stream, check=True)
+        subprocess.run(["tar", "-xf", str(archive), "-C", str(baseline)], check=True)
+        archive.unlink()
+
     report = {
         "revision": capture("git", "rev-parse", "HEAD"),
-        "diff": capture("git", "diff", "HEAD", "--", "Cargo.toml", "Cargo.lock"),
+        "diff": capture("git", "diff", "HEAD", "--", "Cargo.toml", "Cargo.lock",
+                        "apps/api/Cargo.toml", "apps/desktop/Cargo.toml"),
+        "baseline_revision": baseline_revision,
         "rustc": capture("rustc", "-Vv"),
         "cargo": capture("cargo", "-V"),
         "platform": platform.platform(),
         "logical_cpus": os.cpu_count(),
-        "baseline_overrides": DEFAULTS,
+        "packages": args.packages or PACKAGES,
         "builds": [],
     }
 
@@ -75,26 +90,30 @@ def main():
                 # Fail rather than accidentally benchmark a warm target if a
                 # profile or variant was passed twice.
                 target.mkdir()
-                command = ["cargo", "build", "--workspace", "--locked", "--offline",
+                source = baseline if variant == "baseline" else ROOT
+                command = ["cargo", "build", "--locked", "--offline",
                            "--timings", "--profile", profile]
-                if variant == "baseline":
-                    for key, value in DEFAULTS[profile].items():
-                        command += ["--config", f"profile.{profile}.{key}={value}"]
+                if args.packages:
+                    for package in args.packages:
+                        command += ["--package", package]
+                else:
+                    command += ["--workspace"]
                 print(f"Building {label}; log: {output / (label + '.log')}", flush=True)
                 start = time.perf_counter()
                 with (output / (label + ".log")).open("w") as log:
-                    result = subprocess.run(command, cwd=ROOT,
+                    result = subprocess.run(command, cwd=source,
                                             env=dict(env, CARGO_TARGET_DIR=str(target)),
                                             stdout=log, stderr=subprocess.STDOUT)
                 elapsed = time.perf_counter() - start
                 build = {"profile": profile, "variant": variant, "run": run,
                          "seconds": round(elapsed, 3), "command": command,
+                         "source": "baseline" if variant == "baseline" else "current",
                          "exit_code": result.returncode}
                 if result.returncode == 0:
                     directory = target / ("debug" if profile == "dev" else profile)
                     build["binary_bytes"] = {
                         name: (directory / name).stat().st_size
-                        for name in ["else-api", "else-desktop"]
+                        for name in args.packages or PACKAGES
                     }
                 report["builds"].append(build)
                 save()

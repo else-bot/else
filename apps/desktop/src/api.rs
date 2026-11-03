@@ -342,6 +342,9 @@ pub struct Client {
 
 impl Client {
     pub fn new(origin: Origin, token: &OwnerToken, runtime: tokio::runtime::Handle) -> Self {
+        // A workspace build shares reqwest's Rustls features with the API.
+        // The provider must be installed even for our loopback HTTP client.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             // Never route the owner token through an environment proxy.

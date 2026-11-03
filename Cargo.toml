@@ -9,13 +9,10 @@ resolver = "3"
 version = "0.0.5"
 edition = "2024"
 
-# Local installs manage hundreds of bots, with provider work in external
-# processes. Prefer a quick first build over maximum LLVM optimization.
-[profile.release]
-opt-level = 1
-codegen-units = 256
-# `false` still enables thin local LTO; `"off"` skips that work too.
-lto = "off"
+[workspace.dependencies]
+# ring avoids AWS-LC's large native build; choose the provider explicitly in
+# each process before constructing reqwest clients.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Keep file/line backtraces without generating full variable/type debug info
 # for the desktop's large dependency graph. Use CARGO_PROFILE_DEV_DEBUG=2 for
