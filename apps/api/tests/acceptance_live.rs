@@ -48,6 +48,7 @@ impl Install {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"));
         // The owner's real HOME: the host provider logins live there.
         command
+            .current_dir(common::without_dotenv(self.data.parent().unwrap()))
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", std::env::var("HOME").unwrap())

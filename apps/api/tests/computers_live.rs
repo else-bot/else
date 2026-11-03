@@ -1222,6 +1222,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     for start in 1..=2 {
         let port = common::free_port();
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
+            .current_dir(common::without_dotenv(new_dir.parent().unwrap()))
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &new_dir)

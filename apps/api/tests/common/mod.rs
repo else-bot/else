@@ -404,6 +404,16 @@ pub struct ApiProcess {
     pub token: String,
 }
 
+/// A working directory for a spawned `else-api` that stops `.env` lookup:
+/// the binary loads the first `.env` found from its working directory
+/// upward, and the repository's (or the owner's) must never configure a
+/// test installation. Writes an empty `.env` into `dir` and returns it.
+#[allow(dead_code)]
+pub fn without_dotenv(dir: &std::path::Path) -> &std::path::Path {
+    std::fs::write(dir.join(".env"), "").unwrap();
+    dir
+}
+
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()

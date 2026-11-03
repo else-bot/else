@@ -59,22 +59,22 @@ docker compose up -d --wait
 ELSE_LIVE_MILESTONE=1 cargo test -p else-api --test milestone_live -- --nocapture
 ```
 
-Its working directory is under `/var/tmp` (on disk: two installations and a 1.3 GB backup set do not fit the `/tmp` tmpfs quota, and the runtime's socket paths must stay short). Output goes to `target/acceptance/milestone.log`.
+Its working directory is under `/var/tmp` (on disk: two installations and a 1.3 GB backup set do not fit the `/tmp` tmpfs quota, and the runtime's socket paths must stay short). Every `else-api` it starts runs from that directory, which holds an empty `.env`, so the binary's `.env` lookup never reaches the repository's or the owner's configuration; the backup directory is set explicitly inside the installation. Every process it runs has a deadline (killed and reaped past it), every HTTP request a 120-second timeout, and every turn a 15-minute limit. Output goes to `target/acceptance/milestone.log`.
 
 ### Scenario and what it checks
 
 1. Setup; Codex effort `low`, Claude `claude-haiku-5-5`/`low`/`default`. Scripter and Hands are created, categories Automation and Visual are created and each bot assigned.
 2. Scripter (Codex) writes a multi-file Python project (`data.py`, `report.py`, `main.py`), runs it, and fetches `report.csv` as an artifact; the reply names the registered artifact ID.
-3. In Scripter's guest the capture fixture runs with authentication and drops the acknowledgment for `r07@example.test`; the SMTP settings are stored as the task secret `smtp`. Scripter (Codex) writes a Node.js sender as its own project and sends to r01 through r10 in one run. Checked: exactly ten captured messages, one per recipient, with the right sender and body; the reply reports r07 as uncertain. Asked to make sure everyone has it, Scripter sends nothing more (still ten): no blind retransmission.
+3. In Scripter's guest the capture fixture runs with authentication and drops the acknowledgment for `r07@example.test`; the SMTP settings are stored as the task secret `smtp`. Scripter (Codex) writes a Node.js sender as its own project and sends to r01 through r10 in one run. Checked: exactly ten captured messages, one per recipient, with the right sender and body; asked which recipients have an unknown delivery outcome, Scripter names exactly r07 (from its own records; its first reply may only count "Uncertain: 1"). Asked to make sure everyone has it, Scripter sends nothing more (still ten): no blind retransmission.
 4. Scripter (Claude) writes a Python script under `~/work/cdp-search` that uses the guest CDP helper to search "lanterns" on the local site in the visible browser. Checked: the reply contains the result only the page produces, the visible window title (`xwininfo`) is the results page, and the script uses the helper.
-5. On Hands (Codex), a local page with a random button position, word, and code is opened in the visible browser. Using only `computer_screenshot` and `computer_input` (every tool call in the turn is one of them), Hands clicks the button, types the requested word, scrolls to the bottom, and reports the random code. Then, outside Chromium, it clicks into an `xterm` and types `echo VISUAL-n > ~/work/visual.txt`; the file holds the random value.
+5. On Hands (Codex), a local page with a random button position, word, and code is opened in the visible browser. Using only `computer_screenshot` and `computer_input` (every tool call in the turn is one of them), Hands clicks the button, types the requested word (the page's own log must hold exactly that word), scrolls to the bottom, and reports the random code. Then, outside Chromium, it clicks into an `xterm` and types `echo VISUAL-n > ~/work/visual.txt`; the file holds the random value.
 6. Isolation and the host boundary: neither guest sees the other's files; neither has `codex`, `claude`, `msb`, or `docker`; each has its own DevTools browser.
-7. Scripter (Codex) starts a 60-second background job; during it, Scripter moves from Automation to Visual; the API is stopped (SIGTERM) and served again. Bot, conversation, and category IDs and the category list are identical, and the job and its lease are still running.
+7. Scripter (Codex) starts a 60-second background job; the bot list is recorded; during the job, Scripter moves from Automation to Visual; the API is stopped (SIGTERM) and served again. Checked: right after the move only Scripter's category changed, to Visual; after the restart every bot, conversation, and category ID equals that, the category list is unchanged, and the same job is still running with the same unreleased lease.
 8. The owner stops Hands' computer; a screenshot turn completes with the tool reporting the stop and the runtime still reports Hands `Stopped`. A sub-agent challenge completes without running any agent.
-9. After the job completes, a `localStorage` marker is written in Scripter's browser; the tooling check (project files, the mailer's `package.json`, Node version, a fresh venv, an offline `cargo new` build, and the CSV's SHA-256) is recorded; the API stops and `else-api backup` captures a whole-assistant set.
-10. The original computers are stopped and `else-api restore <set> <new database> <new directory>` restores into a new installation, which is served. Checked: categories (IDs, names), assignments, conversations, and the main-bot pointer are identical; after one Codex turn the same tooling check gives identical output; the browser shows the marker from the restored profile; the CDP example runs again with a fresh connection (no CDP or input session is carried over).
+9. After the job completes, a `localStorage` marker is written in Scripter's browser; the tooling check (project files, the mailer's `package.json`, Node version, a fresh venv, an offline `cargo new` build, and the CSV's SHA-256) is recorded. Environments that must survive as they are get created: a venv inside the project (`~/work/inventory/.venv`) and a built Cargo project (`~/work/tally`); both are used once (the venv runs `main.py`, the build runs), and a manifest of `~/work` is recorded: one digest over every file's SHA-256 (sources, `node_modules`, the venv, build output), the file count, and the list of source files. The API stops and `else-api backup` captures a whole-assistant set.
+10. The original computers are stopped and `else-api restore <set> <new database> <new directory>` restores into a new installation, which is served. Checked: categories (IDs, names), assignments, conversations, and the main-bot pointer are identical; after one Codex turn, and before anything runs in `~/work`, its manifest is identical; then the restored venv runs `main.py` and the restored Cargo project builds and runs with output identical to before; the fresh-tooling check gives identical output; the browser shows the marker from the restored profile; the CDP example runs again with a fresh connection (no CDP or input session is carried over).
 
-Finally no turn failed with `policy_violation` or `profile_mismatch`. A cleanup guard removes every computer in both runtime homes and drops the restored database even when an assertion fails; the temporary directories go with it.
+Finally no turn failed with `policy_violation` or `profile_mismatch`. Before the run reports success it removes every computer in both runtime homes and drops the restored database, and fails unless both runtimes then list nothing and the database is gone. After a failed assertion a guard does the same; when removal cannot be confirmed, the temporary directory (runtime homes included) is kept and its path printed instead of deleted.
 
 ### Through the desktop
 
@@ -82,19 +82,19 @@ In an omabox desktop (never the owner's session), against a disposable `scripts/
 
 ### Observed run (2026-11-03)
 
-`ELSE_LIVE_MILESTONE=1 … milestone_live` passed in 896 s with Codex CLI 0.166.0 (`gpt-6.1-sol`), Claude Code 2.1.316 (`claude-haiku-5-5`), msb 0.7.13, and `else-guest:2` (`sha256:2bb1f17f…`, 2.70 GB image). Turns: Codex 9, Claude 1.
+`ELSE_LIVE_MILESTONE=1 … milestone_live` passed in 875 s (after the review fixes; an earlier run of the previous version passed in 896 s) with Codex CLI 0.166.0 (`gpt-6.1-sol`), Claude Code 2.1.316 (`claude-haiku-5-5`), msb 0.7.13, and `else-guest:2` (`sha256:2bb1f17f…`, 2.70 GB image). Turns: Codex 10, Claude 1.
 
 | Measurement | Value |
 |---|---|
-| Multi-file project and artifact (Codex) | 33 s |
-| Ten-message send (Codex, one turn) | 35 s; follow-up that sent nothing, 8 s |
-| CDP search script (Claude) | 31 s |
-| Visual browser task (Codex) | 29 s, 4 screenshots of 15.5 to 30.5 KB |
-| Terminal task outside Chromium (Codex) | 23 s |
-| Owner-stopped screenshot turn | 11 s |
-| Backup with the API stopped | 287 s |
-| Backup set | 1.30 GB: VM disks 674 MB and 630 MB (encrypted), database dump 124 KB |
-| First turn after restore | 19 s |
+| Multi-file project and artifact (Codex) | 23 s |
+| Ten-message send (Codex, one turn) | 31 s; "which outcome is unknown" answered `r07@example.test` in 5 s; the follow-up that sent nothing, 8 s |
+| CDP search script (Claude) | 33 s |
+| Visual browser task (Codex) | 27 s, 4 screenshots of 15.5 to 30.8 KB |
+| Terminal task outside Chromium (Codex) | 20 s |
+| Backup with the API stopped | 284 s |
+| Backup set | 1.29 GB: VM disks 644 MB and 647 MB (encrypted), database dump 126 KB |
+| `~/work` manifest compared after restore | 1,078 files, one digest |
+| First turn after restore | 22 s |
 
 Earlier runs found two problems, both fixed before this one: a backup taken right after the API stopped was deferred because a finished turn's lease lasts until it expires (5 minutes); whole-disk operations now end leases whose turn or job has ended (other holders, such as desktop sessions, still count). And a working directory under `target/` made the runtime's socket path too long (the bot reported that its computer failed to start).
 

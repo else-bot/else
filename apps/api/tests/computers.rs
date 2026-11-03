@@ -855,26 +855,94 @@ async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: 
 
 /// POC-032: a lease outlives its turn until it expires; a whole-disk
 /// operation right after the turn (a backup of a stopped API) must not wait
-/// minutes for it. Leases of live work and other holders still count.
+/// minutes for it. Leases of live work (a running turn or job) and of other
+/// holders (a desktop session) still count.
 #[tokio::test(flavor = "multi_thread")]
 async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot: Uuid = app.create_bot("After", "upgrade").await.parse().unwrap();
-    // A desktop session still holds the computer.
-    let (desktop, _) = ready(&manager, bot, &format!("desktop:{}", Uuid::new_v4())).await;
-    let (finished, _) = ready(&manager, bot, &format!("turn:{}", Uuid::new_v4())).await;
-    let held = manager.upgrade_image(bot, "img:new", None).await;
-    assert!(held.is_err(), "{held:?}");
-    manager.release(desktop).await.unwrap();
-    // Only the finished turn's lease is left: it ends and the upgrade runs.
-    manager.upgrade_image(bot, "img:new", None).await.unwrap();
-    let reason: Option<String> =
-        sqlx::query_scalar("SELECT end_reason FROM computer_leases WHERE id = $1")
-            .bind(finished)
-            .fetch_one(&app.db.pool)
+    let bot = app.create_bot("After", "upgrade").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let refused = |r: &Result<_, else_api::computers::ComputerError>| r.is_err();
+
+    // A running turn, a running job, a finished job, a finished (unknown)
+    // turn, and a desktop session each hold a lease.
+    let sent = app
+        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&turn, &["running"]).await;
+    let (live_turn, _) = ready(&manager, bot_id, &format!("turn:{turn}")).await;
+    let (live_job, done_job) = (Uuid::new_v4(), Uuid::new_v4());
+    for (job, status) in [(live_job, "running"), (done_job, "completed")] {
+        sqlx::query(
+            "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
+             VALUES ($1, $2, 'sleep 60', $3, now() + interval '1 hour')",
+        )
+        .bind(job)
+        .bind(bot_id)
+        .bind(status)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    }
+    let (live_job_lease, _) = ready(&manager, bot_id, &format!("job:{live_job}")).await;
+    let (done_job_lease, _) = ready(&manager, bot_id, &format!("job:{done_job}")).await;
+    let (finished, _) = ready(&manager, bot_id, &format!("turn:{}", Uuid::new_v4())).await;
+    let (desktop, _) = ready(&manager, bot_id, &format!("desktop:{}", Uuid::new_v4())).await;
+
+    let ended = |lease: Uuid| {
+        let pool = app.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT end_reason FROM computer_leases WHERE id = $1",
+            )
+            .bind(lease)
+            .fetch_one(&pool)
             .await
-            .unwrap();
-    assert_eq!(reason.as_deref(), Some("expired"));
+            .unwrap()
+        }
+    };
+    // An active job refuses before any disk work: nothing ends.
+    assert!(refused(
+        &manager.upgrade_image(bot_id, "img:new", None).await
+    ));
+    for lease in [finished, done_job_lease, live_turn, live_job_lease, desktop] {
+        assert_eq!(ended(lease).await, None);
+    }
+    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = now() WHERE id = $1")
+        .bind(live_job)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    // The running turn and the desktop still hold the computer; the leases
+    // of the finished turn and jobs end on the way.
+    assert!(refused(
+        &manager.upgrade_image(bot_id, "img:new", None).await
+    ));
+    for lease in [finished, done_job_lease, live_job_lease] {
+        assert_eq!(ended(lease).await.as_deref(), Some("expired"));
+    }
+    for lease in [live_turn, desktop] {
+        assert_eq!(ended(lease).await, None, "a live holder keeps its lease");
+    }
+    manager.release(desktop).await.unwrap();
+    assert!(refused(
+        &manager.upgrade_image(bot_id, "img:new", None).await
+    ));
+    assert_eq!(ended(live_turn).await, None, "the running turn still holds");
+    app.owner(
+        "POST",
+        &format!("/v1/bots/{bot}/cancel"),
+        Some(serde_json::json!({ "request_id": Uuid::new_v4() })),
+    )
+    .await;
+    app.wait_turn(&turn, &["interrupted"]).await;
+    // Only finished holders are left: they end and the upgrade runs.
+    manager
+        .upgrade_image(bot_id, "img:new", None)
+        .await
+        .unwrap();
+    assert_eq!(ended(live_turn).await.as_deref(), Some("expired"));
 }

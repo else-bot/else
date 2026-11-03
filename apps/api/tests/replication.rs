@@ -905,6 +905,7 @@ async fn restore_remote_works_without_the_source_database() {
     let target = format!("else_restore_{}", Uuid::new_v4().simple());
     let config = s3.config().clone();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
+        .current_dir(common::without_dotenv(dir.path()))
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &data)

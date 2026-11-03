@@ -57,6 +57,80 @@ fn note(text: &str) {
     }
 }
 
+/// Run a process to completion within `limit`: past it the process is
+/// killed and reaped and an error returned, so no step can hang the run.
+fn bounded(
+    command: std::process::Command,
+    limit: Duration,
+) -> Result<std::process::Output, String> {
+    bounded_with(command, None, limit)
+}
+
+/// `bounded`, writing `input` to the process's standard input first.
+fn bounded_with(
+    mut command: std::process::Command,
+    input: Option<&str>,
+    limit: Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::{Read, Write};
+    let what = format!("{:?}", command.get_args().take(4).collect::<Vec<_>>());
+    let mut child = command
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{what}: {e}"))?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        let input = input.to_owned();
+        // A writer thread: a process that never reads cannot block us.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
+    let stdout = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("{what}: {e}"))? {
+            break status;
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{what} did not finish within {limit:?}; killed"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 struct Install {
     data: PathBuf,
     database_url: String,
@@ -67,6 +141,7 @@ impl Install {
     fn command(&self, args: &[&str]) -> std::process::Command {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"));
         command
+            .current_dir(common::without_dotenv(self.data.parent().unwrap()))
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", std::env::var("HOME").unwrap())
@@ -77,13 +152,15 @@ impl Install {
             .env("ELSE_VM_IMAGE", IMAGE)
             .env("ELSE_VM_DESKTOP", "1")
             .env("ELSE_BACKUP_INTERVAL_SECS", "0")
+            .env("ELSE_BACKUP_DIR", self.data.join("backups"))
             .env("RUST_LOG", "info,sqlx=warn")
             .args(args);
         command
     }
 
+    /// Operator commands (setup, backup, restore) get 15 minutes.
     fn run(&self, args: &[&str]) {
-        let out = self.command(args).output().unwrap();
+        let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
         assert!(
             out.status.success(),
             "else-api {args:?}: {}",
@@ -93,7 +170,7 @@ impl Install {
 
     /// Run an operator command and return its output.
     fn run_output(&self, args: &[&str]) -> String {
-        let out = self.command(args).output().unwrap();
+        let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -125,7 +202,10 @@ impl Install {
             child: Some(child),
             base: format!("http://127.0.0.1:{port}"),
             token,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap(),
         };
         for _ in 0..600 {
             if api
@@ -183,7 +263,18 @@ impl Api {
         if let Some(mut child) = self.child.take() {
             // SAFETY: signalling our own child.
             unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-            let status = child.wait().unwrap();
+            let started = Instant::now();
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if started.elapsed() > Duration::from_secs(60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the API did not stop within 60 s of SIGTERM; killed");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
             assert!(status.success(), "the API exited with {status}");
         }
     }
@@ -203,54 +294,148 @@ impl Drop for Api {
     }
 }
 
-/// Removes every computer in each runtime home and the restored database,
-/// even when an assertion fails.
+/// Removes every computer in each runtime home and the restored database.
+/// `finish` does it before the run reports success and fails unless the
+/// runtime lists nothing and the database is gone; `Drop` repeats it after
+/// a failed assertion. When removal cannot be confirmed the temporary
+/// directory (runtime homes included) is kept for inspection.
 struct Cleanup {
     homes: Vec<PathBuf>,
     databases: std::sync::Mutex<Vec<String>>,
     admin: String,
+    dir: std::sync::Mutex<Option<tempfile::TempDir>>,
+    done: std::sync::atomic::AtomicBool,
 }
 
-impl Drop for Cleanup {
-    fn drop(&mut self) {
+fn listed(home: &Path) -> Result<Vec<String>, String> {
+    let mut command = std::process::Command::new(msb());
+    command
+        .env("MSB_HOME", home)
+        .args(["list", "--format", "json"]);
+    let out = bounded(command, Duration::from_secs(60))?;
+    if !out.status.success() {
+        return Err(format!(
+            "msb list in {}: {}",
+            home.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let list: Vec<Value> = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("msb list in {}: {e}", home.display()))?;
+    Ok(list
+        .iter()
+        .filter_map(|l| l["name"].as_str().map(str::to_owned))
+        .collect())
+}
+
+impl Cleanup {
+    /// Remove, then confirm; returns what could not be confirmed.
+    fn clean(&self) -> Vec<String> {
+        let mut problems = Vec::new();
         for home in &self.homes {
-            let Ok(out) = std::process::Command::new(msb())
-                .env("MSB_HOME", home)
-                .args(["list", "--format", "json"])
-                .output()
-            else {
+            if !home.exists() {
                 continue;
-            };
-            let listed: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
-            for name in listed.iter().filter_map(|l| l["name"].as_str()) {
-                for args in [["stop", "--force"].as_slice(), ["rm"].as_slice()] {
-                    let _ = std::process::Command::new(msb())
-                        .env("MSB_HOME", home)
-                        .args(args)
-                        .arg(name)
-                        .output();
+            }
+            match listed(home) {
+                Err(e) => problems.push(e),
+                Ok(names) => {
+                    for name in names {
+                        for args in [["stop", "--force"].as_slice(), ["rm"].as_slice()] {
+                            let mut command = std::process::Command::new(msb());
+                            command.env("MSB_HOME", home).args(args).arg(&name);
+                            if let Err(e) = bounded(command, Duration::from_secs(120)) {
+                                problems.push(e);
+                            }
+                        }
+                    }
                 }
+            }
+            match listed(home) {
+                Ok(left) if left.is_empty() => {}
+                Ok(left) => problems.push(format!("{} still lists {left:?}", home.display())),
+                Err(e) => problems.push(e),
             }
         }
         let admin = self.admin.clone();
         let databases = self.databases.lock().unwrap().clone();
-        let _ = std::thread::spawn(move || {
+        let result = std::thread::spawn(move || {
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(async move {
                     use sqlx::Connection;
-                    if let Ok(mut conn) = sqlx::PgConnection::connect(&admin).await {
-                        for db in databases {
-                            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                                "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"
-                            )))
-                            .execute(&mut conn)
-                            .await;
-                        }
+                    let connect = sqlx::PgConnection::connect(&admin);
+                    let mut conn = tokio::time::timeout(Duration::from_secs(30), connect)
+                        .await
+                        .map_err(|_| "connecting to drop databases timed out".to_owned())?
+                        .map_err(|e| format!("connecting to drop databases: {e}"))?;
+                    for db in &databases {
+                        sqlx::query(sqlx::AssertSqlSafe(format!(
+                            "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"
+                        )))
+                        .execute(&mut conn)
+                        .await
+                        .map_err(|e| format!("dropping {db}: {e}"))?;
+                    }
+                    let left: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_database WHERE datname = ANY($1)",
+                    )
+                    .bind(&databases)
+                    .fetch_one(&mut conn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    if left == 0 {
+                        Ok(())
+                    } else {
+                        Err(format!("{left} databases remain"))
                     }
                 })
         })
         .join();
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => problems.push(e),
+            Err(_) => problems.push("the database cleanup panicked".into()),
+        }
+        problems
+    }
+
+    /// Keep the directory when removal was not confirmed.
+    fn settle(&self, problems: &[String]) -> Option<PathBuf> {
+        let dir = self.dir.lock().unwrap().take()?;
+        if problems.is_empty() {
+            drop(dir);
+            None
+        } else {
+            Some(dir.keep())
+        }
+    }
+
+    /// Checked cleanup before the run reports success.
+    fn finish(&self) {
+        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let problems = self.clean();
+        if let Some(kept) = self.settle(&problems) {
+            panic!(
+                "cleanup not confirmed (kept {}): {problems:?}",
+                kept.display()
+            );
+        }
+        note("cleanup confirmed: no computer in either runtime home, restored database dropped");
+    }
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if self.done.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let problems = self.clean();
+        if let Some(kept) = self.settle(&problems) {
+            eprintln!(
+                "cleanup not confirmed; kept {} for inspection: {problems:?}",
+                kept.display()
+            );
+        }
     }
 }
 
@@ -288,7 +473,6 @@ async fn finish(db: &sqlx::PgPool, turn: Uuid, timeout: Duration) -> (String, St
 /// Run a command in the guest directly (the test's own fixture setup and
 /// inspection, not the bot's tools), as `elsebot` unless `root`.
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
-    use std::io::Write;
     let mut command = std::process::Command::new(msb());
     command
         .env("MSB_HOME", home)
@@ -306,24 +490,8 @@ fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool)
             script,
         ]);
     }
-    command
-        .stdin(if input.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn().unwrap();
-    if let Some(input) = input {
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-    }
-    let out = child.wait_with_output().unwrap();
+    // msb's own limit is 120 s; the process gets a little more.
+    let out = bounded_with(command, input, Duration::from_secs(150)).unwrap();
     assert!(
         out.status.success(),
         "guest {script}: {}",
@@ -380,19 +548,17 @@ async fn turn_activity(db: &sqlx::PgPool, bot: &str, turn: Uuid) -> Vec<String> 
 }
 
 fn version(program: &str) -> String {
-    std::process::Command::new(program)
-        .arg("--version")
-        .output()
+    let mut command = std::process::Command::new(program);
+    command.arg("--version");
+    bounded(command, Duration::from_secs(30))
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_default()
 }
 
 fn dir_size(path: &Path) -> u64 {
-    let out = std::process::Command::new("du")
-        .args(["-sb"])
-        .arg(path)
-        .output()
-        .unwrap();
+    let mut command = std::process::Command::new("du");
+    command.args(["-sb"]).arg(path);
+    let out = bounded(command, Duration::from_secs(60)).unwrap();
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .next()
@@ -427,13 +593,14 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     // On disk, not tmpfs (two installations and a 1.3 GB set do not fit),
     // and short: the runtime's socket paths live under it.
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    let tmp = dir.path().to_path_buf();
     let log = evidence.join("milestone.log");
     let _ = std::fs::remove_file(&log);
     LOG.set(log.clone()).unwrap();
     let db = common::TestDb::empty().await;
     let params = else_api::backup::PgParams::parse(db.url.expose()).unwrap();
-    let data = dir.path().join("installation");
-    let restored_dir = dir.path().join("restored");
+    let data = tmp.as_path().join("installation");
+    let restored_dir = tmp.as_path().join("restored");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let home = data.join("microsandbox");
@@ -446,34 +613,36 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         params.host(),
         params.port()
     );
-    let _cleanup = Cleanup {
+    let cleanup = Cleanup {
         homes: vec![home.clone(), restored_dir.join("microsandbox")],
         databases: std::sync::Mutex::new(vec![target.clone()]),
         admin,
+        dir: std::sync::Mutex::new(Some(dir)),
+        done: std::sync::atomic::AtomicBool::new(false),
     };
-    let tar = dir.path().join("guest.tar");
+    let tar = tmp.as_path().join("guest.tar");
+    let mut save = std::process::Command::new("docker");
+    save.args(["save", IMAGE, "-o"]).arg(&tar);
     assert!(
-        std::process::Command::new("docker")
-            .args(["save", IMAGE, "-o"])
-            .arg(&tar)
-            .status()
+        bounded(save, Duration::from_secs(600))
             .unwrap()
+            .status
             .success()
     );
+    let mut load = std::process::Command::new(msb());
+    load.env("MSB_HOME", &home)
+        .args(["load", "-q", "-t", IMAGE, "-i"])
+        .arg(&tar);
     assert!(
-        std::process::Command::new(msb())
-            .env("MSB_HOME", &home)
-            .args(["load", "-q", "-t", IMAGE, "-i"])
-            .arg(&tar)
-            .status()
+        bounded(load, Duration::from_secs(600))
             .unwrap()
+            .status
             .success()
     );
     std::fs::remove_file(&tar).unwrap();
-    let image_id = std::process::Command::new("docker")
-        .args(["image", "inspect", "--format", "{{.Id}} {{.Size}}", IMAGE])
-        .output()
-        .unwrap();
+    let mut inspect = std::process::Command::new("docker");
+    inspect.args(["image", "inspect", "--format", "{{.Id}} {{.Size}}", IMAGE]);
+    let image_id = bounded(inspect, Duration::from_secs(60)).unwrap();
     note(&format!(
         "versions: {} | {} | {} | image {IMAGE} {}",
         version("codex"),
@@ -626,9 +795,26 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         sent.iter()
             .all(|(_, from, data)| from == "owner@example.test" && data.contains("Riverside Park"))
     );
-    assert!(
-        reply.to_lowercase().contains("r07"),
-        "the uncertain one is reported: {reply}"
+    // r07's outcome is unknown (the server may have taken the message).
+    // Asked plainly, the bot must name exactly r07, from its own records.
+    let (_, status, unknown) = ask(
+        &api,
+        &pool,
+        &scripter,
+        "codex",
+        "Which recipients of that announcement, if any, have an unknown delivery outcome? \
+         Name them exactly, or say none.",
+    )
+    .await;
+    assert_eq!(status, "completed", "{unknown}");
+    let named: Vec<&String> = recipients
+        .iter()
+        .filter(|r| unknown.contains(r.split('@').next().unwrap()))
+        .collect();
+    assert_eq!(
+        named,
+        vec![&recipients[6]],
+        "only r07 is reported uncertain: {unknown}"
     );
     let (_, status, reply) = ask(
         &api,
@@ -749,6 +935,17 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         "{used:?}"
     );
     assert!(reply.contains(&code), "{reply} (expected {code})");
+    let submitted = guest(
+        &home,
+        &hname,
+        "curl -s --max-time 10 http://127.0.0.1:8421/log",
+        None,
+        false,
+    );
+    assert!(
+        submitted.lines().any(|l| l.trim() == word),
+        "the page received the requested word {word}: {submitted:?}"
+    );
     let screenshot_bytes: Vec<u64> = used
         .iter()
         .filter_map(|a| a.split(" bytes").next()?.rsplit(' ').next()?.parse().ok())
@@ -856,21 +1053,24 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     .await;
     assert_eq!(status, "completed", "{reply}");
     let job: (Uuid, Uuid) = sqlx::query_as(
-        "SELECT id, lease_id FROM guest_jobs WHERE bot_id = $1 AND command LIKE 'sleep 60%'",
+        "SELECT id, lease_id FROM guest_jobs
+         WHERE bot_id = $1 AND command LIKE 'sleep 60%' AND status = 'running'",
     )
     .bind(scripter.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (status, _) = api
+    // Identities before the move, while the job runs.
+    let before = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
+    let (status, body) = api
         .call(
             reqwest::Method::PATCH,
             &format!("/v1/bots/{scripter}/category"),
             Some(json!({ "category_id": categories[1] })),
         )
         .await;
-    assert_eq!(status, 200);
-    let before = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
+    assert_eq!(status, 200, "{body}");
+    let moved = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
     api.stop();
     let mut api = install.serve().await;
     let after = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
@@ -888,23 +1088,33 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
             })
             .collect()
     };
+    // The move changed exactly Scripter's category, to the one requested.
+    let mut expected = project(&before);
+    for bot in expected.iter_mut().filter(|b| b.0 == scripter) {
+        assert_eq!(bot.2, categories[0], "Scripter started in Automation");
+        bot.2 = categories[1].clone();
+    }
+    assert_eq!(project(&moved), expected, "only the category moved");
     assert_eq!(
-        project(&before),
         project(&after),
-        "bot, conversation, and category identity"
+        expected,
+        "bot, conversation, and category identity across the restart"
     );
-    assert_eq!(before["categories"], after["categories"]);
-    let (status, released): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
-        "SELECT j.status, l.released_at FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id WHERE j.id = $1",
-    )
-    .bind(job.0)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    assert_eq!(before["categories"], moved["categories"]);
+    assert_eq!(moved["categories"], after["categories"]);
+    let (status, lease, released): (String, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT j.status, j.lease_id, l.released_at
+             FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id WHERE j.id = $1",
+        )
+        .bind(job.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
-        (status.as_str(), released),
-        ("running", None),
-        "the job and its lease survived"
+        (status.as_str(), lease, released),
+        ("running", Some(job.1), None),
+        "the same job and lease survived the move and the restart"
     );
 
     note("== 8. owner stop holds, and native sub-agents stay disabled");
@@ -920,15 +1130,11 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         "Take a screenshot of your desktop with computer_screenshot and tell me what the tool said.").await;
     assert_eq!(status, "completed", "{reply}");
     assert!(reply.to_lowercase().contains("stop"), "{reply}");
-    let states: Value = serde_json::from_slice(
-        &std::process::Command::new(msb())
-            .env("MSB_HOME", &home)
-            .args(["list", "--format", "json"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
+    let mut list = std::process::Command::new(msb());
+    list.env("MSB_HOME", &home)
+        .args(["list", "--format", "json"]);
+    let states: Value =
+        serde_json::from_slice(&bounded(list, Duration::from_secs(60)).unwrap().stdout).unwrap();
     let hands_state = states
         .as_array()
         .unwrap()
@@ -978,6 +1184,32 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
                   sha256sum ~/work/inventory/report.csv | cut -d' ' -f1";
     let tooling_before = guest(&home, &sname, checks, None, false);
     note(&format!("tooling before backup:\n{tooling_before}"));
+    // Environments that must survive as they are: a venv inside the
+    // project and a built Cargo project, used once, then the whole tree of
+    // ~/work recorded (every file's SHA-256, plus the source file list).
+    guest(
+        &home,
+        &sname,
+        "set -e; cd ~/work && python3 -m venv inventory/.venv && cargo new -q tally && \
+         cd tally && cargo build -q --offline",
+        None,
+        false,
+    );
+    let use_project = "set -e; cd ~/work/inventory; \
+                       .venv/bin/python -c 'import sys; print(\"venv\", sys.prefix != sys.base_prefix)'; \
+                       .venv/bin/python main.py > /dev/null; sha256sum report.csv | cut -d' ' -f1; \
+                       cd ~/work/tally && cargo build -q --offline && ./target/debug/tally";
+    let used_before = guest(&home, &sname, use_project, None, false);
+    let manifest = "set -e; cd ~/work; \
+                    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1; \
+                    find . -type f | wc -l; \
+                    find . -type f -not -path '*/node_modules/*' -not -path '*/.venv/*' \
+                      -not -path '*/target/*' -not -path '*/__pycache__/*' | LC_ALL=C sort";
+    let manifest_before = guest(&home, &sname, manifest, None, false);
+    note(&format!(
+        "project use before backup:\n{used_before}\n~/work manifest:\n{manifest_before}"
+    ));
+    assert!(used_before.starts_with("venv True"), "{used_before}");
     let saved_categories = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
     api.stop();
     let started = Instant::now();
@@ -1014,10 +1246,9 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     );
     // The original computers stop for good (no ports or names collide).
     for name in [&sname, &hname] {
-        let _ = std::process::Command::new(msb())
-            .env("MSB_HOME", &home)
-            .args(["stop", name.as_str()])
-            .output();
+        let mut stop = std::process::Command::new(msb());
+        stop.env("MSB_HOME", &home).args(["stop", name.as_str()]);
+        let _ = bounded(stop, Duration::from_secs(120));
     }
     install.run(&["restore", &set, &target, restored_dir.to_str().unwrap()]);
     let restored = Install {
@@ -1052,6 +1283,14 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     assert_eq!(status, "completed");
     let rhome = restored_dir.join("microsandbox");
     tokio::time::sleep(Duration::from_secs(4)).await;
+    // Nothing in ~/work has run yet: every file is exactly as backed up.
+    let manifest_after = guest(&rhome, &sname, manifest, None, false);
+    assert_eq!(manifest_after, manifest_before, "the whole ~/work tree");
+    let used_after = guest(&rhome, &sname, use_project, None, false);
+    assert_eq!(
+        used_after, used_before,
+        "the restored venv and Cargo build work as they are"
+    );
     let tooling_after = guest(&rhome, &sname, checks, None, false);
     note(&format!("tooling after restore:\n{tooling_after}"));
     assert_eq!(
@@ -1108,6 +1347,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     .unwrap();
     note(&format!("turns per provider: {providers:?}"));
     api.stop();
+    cleanup.finish();
     note(&format!(
         "POC-032 milestone run passed in {:?}",
         run_started.elapsed()
