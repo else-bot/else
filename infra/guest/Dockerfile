@@ -1,6 +1,10 @@
-# else.bot guest computer image (POC-018): a desktop with Chromium for
-# each bot's micro-VM. Built by scripts/build-guest-image.sh and loaded into
-# else.bot's private Microsandbox home. The base is pinned by digest.
+# else.bot guest computer image: a desktop with Chromium for each bot's
+# micro-VM (POC-018) and a programming toolchain (POC-025): Node.js and npm,
+# Python 3 with pip and venv, Rust with Cargo, Git, a C/C++ compiler, and
+# task utilities. Built by scripts/build-guest-image.sh and loaded into
+# else.bot's private Microsandbox home. The base is pinned by digest and
+# every package comes from one Debian snapshot, so a rebuild installs the
+# same versions; /etc/elsebot/image.json records them.
 FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
 # Packages come from a fixed Debian snapshot, so a fresh build installs
@@ -11,6 +15,8 @@ RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuit
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates chromium curl fonts-dejavu-core novnc openbox procps \
       python3 python3-websocket supervisor websockify x11vnc xterm xvfb \
+      bzip2 cargo g++ gcc git jq libc6-dev make nodejs npm pkg-config \
+      python3-pip python3-venv rustc time unzip xz-utils zip \
  && rm -rf /var/lib/apt/lists/*
 
 # Desktop work runs as an unprivileged user; Chromium keeps its sandbox.
@@ -22,7 +28,21 @@ COPY supervisord.conf /etc/elsebot/supervisord.conf
 COPY else-browser /usr/local/bin/else-browser
 COPY else-init /usr/local/bin/else-init
 COPY else-checkpoint /usr/local/bin/else-checkpoint
-RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint
+COPY else-capabilities /usr/local/bin/else-capabilities
+RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint \
+      /usr/local/bin/else-capabilities
+
+# The image's identity and the exact toolchain versions it was built with.
+ARG IMAGE_TAG=else-guest:2
+RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n' \
+      cargo chromium g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
+      python3-venv rustc \
+    | jq -R -s --arg tag "$IMAGE_TAG" --arg snapshot "$SNAPSHOT" \
+      '{image: $tag, debian_snapshot: $snapshot, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}' \
+      > /etc/elsebot/image.json
 
 ENV DISPLAY=:99
+# Plain commands find every tool without a login shell; Cargo and npm keep
+# their caches and installed binaries under the user's home.
+ENV PATH=/home/elsebot/.cargo/bin:/home/elsebot/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /home/elsebot/work

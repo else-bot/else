@@ -19,6 +19,7 @@
 
 pub mod jobs;
 pub mod runtime;
+pub mod upgrade;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,6 +121,9 @@ pub enum ComputerError {
     /// The computer holds live work or is mid-transition (a backup defers).
     #[error("the computer is busy: {0}")]
     Busy(String),
+    /// An explicit owner operation that does not apply (POC-025 upgrades).
+    #[error("{0}")]
+    Refused(String),
 }
 
 /// What a backup found for one bot's computer.
@@ -542,6 +546,37 @@ impl ComputerManager {
         match row.observed_state.as_str() {
             "absent" => return Ok(DiskCapture::NoComputer),
             "missing" => return Ok(DiskCapture::Missing),
+            _ => self.stop_for_disk(bot_id, &row).await?,
+        }
+        self.runtime.export_disk(&row.runtime_name, archive).await?;
+        let (port, browser_checkpoint): (Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = $1",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(DiskCapture::Exported {
+            runtime_name: row.runtime_name,
+            image: row.image,
+            cpus: row.cpus as u32,
+            memory_mib: row.memory_mib as u32,
+            desired_state: row.desired_state,
+            desktop_port: port.map(|p| p as u16),
+            was_running,
+            browser_checkpoint,
+        })
+    }
+
+    /// Stop an idle computer for a whole-disk operation (a backup capture
+    /// or an image upgrade), through the normal stop so a desktop
+    /// checkpoints Chromium first; a stopped one is left as it is. A held
+    /// or transitioning computer is `Busy`. Returns once the runtime
+    /// confirms it stopped. The caller holds the bot's operation lock.
+    async fn stop_for_disk(&self, bot_id: Uuid, row: &Row) -> Result<(), ComputerError> {
+        match row.observed_state.as_str() {
+            "absent" | "missing" => {
+                return Err(ComputerError::Busy(format!("state {}", row.observed_state)));
+            }
             "stopped" => {}
             "running" | "paused" => {
                 let held: bool = sqlx::query_scalar(
@@ -591,23 +626,7 @@ impl ComputerManager {
                 "the runtime does not report it stopped".into(),
             ));
         }
-        self.runtime.export_disk(&row.runtime_name, archive).await?;
-        let (port, browser_checkpoint): (Option<i32>, Option<String>) = sqlx::query_as(
-            "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = $1",
-        )
-        .bind(bot_id)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(DiskCapture::Exported {
-            runtime_name: row.runtime_name,
-            image: row.image,
-            cpus: row.cpus as u32,
-            memory_mib: row.memory_mib as u32,
-            desired_state: row.desired_state,
-            desktop_port: port.map(|p| p as u16),
-            was_running,
-            browser_checkpoint,
-        })
+        Ok(())
     }
 
     /// Owner access to a desktop: hold the computer with a renewable

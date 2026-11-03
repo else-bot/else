@@ -41,7 +41,10 @@ pub fn tool_list() -> Vec<Value> {
             "description": "Run a shell command in YOUR OWN computer (a Linux VM with Chromium), in \
                 its work directory, and wait for it (at most timeout_secs, default 60, max 300). \
                 Returns exit code, stdout, stderr (cut to 6 KB each, marked). Use computer_job_start \
-                for anything longer. This never runs on the owner's machine.",
+                for anything longer. This never runs on the owner's machine. The computer has \
+                Node.js and npm, Python 3 (pip inside a venv: python3 -m venv .venv), Rust and \
+                Cargo, Git, gcc/g++, make, curl, and jq; run `else-capabilities` for the exact \
+                versions.",
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300 } },

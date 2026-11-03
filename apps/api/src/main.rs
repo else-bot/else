@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
 else-api restore <set-dir> <new-database> [<new-data-dir>]\n       \
-else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n\n\
+else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n       \
+else-api upgrade-computer <bot-id> <image>\n       \
+else-api rollback-computer <bot-id>\n\n\
 commands:\n  \
 serve    apply pending migrations and run the API (default)\n  \
 setup    provision missing credentials, apply migrations, and create the main\n           \
@@ -23,7 +25,10 @@ migrate  apply pending versioned migrations only\n  \
 backup   capture one encrypted database backup set now\n  \
 restore  verify a backup set and restore it into a new database on the same\n           \
 server; never changes an existing database or file\n  \
-restore-remote  download a completed set from the configured bucket, then restore it\n";
+restore-remote  download a completed set from the configured bucket, then restore it\n  \
+upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
+files, environments, and browser profile; the old computer is kept stopped\n  \
+rollback-computer  switch a bot back to the computer its last upgrade replaced\n";
 
 fn main() -> ExitCode {
     // A local `.env` is a development convenience. Existing process variables
@@ -52,6 +57,8 @@ fn main() -> ExitCode {
     let command = args.first().map(String::as_str).unwrap_or("serve");
     let arity_ok = match command {
         "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
+        "upgrade-computer" => args.len() == 3,
+        "rollback-computer" => args.len() == 2,
         _ => args.len() <= 1,
     };
     if !arity_ok {
@@ -63,6 +70,8 @@ fn main() -> ExitCode {
         "backup" => run_backup(),
         "restore" => run_restore(&args[1], &args[2], args.get(3).map(String::as_str)),
         "restore-remote" => run_restore_remote(&args[1], &args[2], args.get(3).map(String::as_str)),
+        "upgrade-computer" => run_upgrade_computer(&args[1], Some(&args[2])),
+        "rollback-computer" => run_upgrade_computer(&args[1], None),
         "setup" => run_setup(),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
@@ -166,6 +175,54 @@ fn run_backup() -> anyhow::Result<()> {
             Some(Ok(stats)) => println!("remote: {} sets replicated", stats.completed.len()),
             Some(Err(err)) => println!("remote: failed ({err}); the local set is complete"),
             None => {}
+        }
+        Ok(())
+    })
+}
+
+/// Upgrade (with an image) or roll back a bot's computer. The API must be
+/// stopped: its singleton lock is taken here, so nothing uses the computer
+/// meanwhile.
+fn run_upgrade_computer(bot: &str, image: Option<&str>) -> anyhow::Result<()> {
+    let bot_id: uuid::Uuid = bot.parse().context("the bot ID is not a UUID")?;
+    let config = load_config()?;
+    runtime()?.block_on(async {
+        let url = config.require_database().context("invalid configuration")?;
+        let pool = db::connect(url).await?;
+        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool)
+            .await
+            .context("the API is running; stop it before changing a computer's image")?;
+        db::migrate(&pool).await?;
+        let msb =
+            else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone())?;
+        let manager = else_api::computers::ComputerManager::new(
+            pool.clone(),
+            Arc::new(msb),
+            config.computers.clone(),
+        );
+        manager.reconcile_startup().await?;
+        let report = match image {
+            Some(image) => manager.upgrade_image(bot_id, image).await?,
+            None => manager.rollback_upgrade(bot_id).await?,
+        };
+        println!(
+            "{} {} -> {} ({} -> {})",
+            if image.is_some() {
+                "upgraded"
+            } else {
+                "rolled back"
+            },
+            report.from_runtime_name,
+            report.to_runtime_name,
+            report.from_image,
+            report.to_image,
+        );
+        if image.is_some() {
+            println!(
+                "copied {} bytes (SHA-256 {}); the previous computer is kept stopped",
+                report.data_bytes, report.data_sha256
+            );
+            println!("image: {}", report.image_description);
         }
         Ok(())
     })

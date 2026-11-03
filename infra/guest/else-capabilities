@@ -1,0 +1,23 @@
+#!/bin/sh
+# Report this computer's installed tools and their versions as JSON, for the
+# bot to discover what it can use (POC-025). Read-only and quick.
+v() { "$@" 2>/dev/null | head -n 1 | tr -d '\r'; }
+jq -n \
+  --argjson image "$(cat /etc/elsebot/image.json 2>/dev/null || echo null)" \
+  --arg node "$(v node --version)" \
+  --arg npm "$(v npm --version)" \
+  --arg python "$(v python3 --version)" \
+  --arg pip "$(v python3 -m pip --version)" \
+  --arg rustc "$(v rustc --version)" \
+  --arg cargo "$(v cargo --version)" \
+  --arg git "$(v git --version)" \
+  --arg gcc "$(v gcc --version)" \
+  --arg make "$(v make --version)" \
+  --arg chromium "$(v chromium --version)" \
+  '{image: $image,
+    runtimes: {node: $node, npm: $npm, python: $python, pip: $pip, rustc: $rustc, cargo: $cargo},
+    tools: {git: $git, gcc: $gcc, make: $make, chromium: $chromium,
+            other: ["curl", "jq", "pkg-config", "tar", "gzip", "bzip2", "xz", "zip", "unzip", "time"]},
+    notes: ["Python packages go in a virtual environment: python3 -m venv .venv && .venv/bin/pip install ...",
+            "Projects live under /home/elsebot/work and survive stop and start.",
+            "No provider CLI, provider credential, or host access is installed here."]}'

@@ -4,10 +4,10 @@
 # DATA_DIR defaults to $ELSE_DATA_DIR or ~/.local/share/else-bot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-TAG="else-guest:1"
+TAG="${ELSE_GUEST_TAG:-else-guest:2}"
 DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.local/share/else-bot}}"
 MSB="${ELSE_MSB_BIN:-$(command -v msb || echo "$HOME/.microsandbox/bin/msb")}"
-docker build --pull=false -t "$TAG" infra/guest
+docker build --pull=false --build-arg IMAGE_TAG="$TAG" -t "$TAG" infra/guest
 ARCHIVE="$(mktemp -d)/else-guest.tar"
 docker save "$TAG" -o "$ARCHIVE"
 mkdir -p "$DATA_DIR/microsandbox"

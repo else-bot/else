@@ -116,6 +116,14 @@ pub trait ComputerRuntime: Send + Sync {
         ))
     }
 
+    /// Remove a stopped computer and its disk. Only used for a computer
+    /// else.bot itself just created and never handed out (a failed image
+    /// upgrade's replacement).
+    async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+        let _ = name;
+        Err(RuntimeError::Unavailable("remove is not supported".into()))
+    }
+
     async fn state(&self, name: &str) -> Result<Option<RuntimeState>, RuntimeError> {
         Ok(self
             .list()
@@ -514,6 +522,10 @@ impl ComputerRuntime for Msb {
                 message: format!("the restored computer is {other:?}, not stopped"),
             }),
         }
+    }
+
+    async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+        self.control("remove", &["remove", "--quiet", name]).await
     }
 
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError> {

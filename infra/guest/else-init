@@ -13,6 +13,12 @@ if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = supervisord ]; th
     exit 0
 fi
 rm -f /run/elsebot/supervisord.pid /run/elsebot/supervisor.sock /tmp/.X99-lock /tmp/.X11-unix/X99
+# Chromium is not running yet. Its profile lock names the host it last ran
+# on; a computer whose data came from another one (an image upgrade or a
+# restore under another name) has a different hostname, and Chromium would
+# refuse the profile as in use elsewhere. The lock is stale here.
+rm -f /home/elsebot/.config/chromium/SingletonLock /home/elsebot/.config/chromium/SingletonCookie \
+      /home/elsebot/.config/chromium/SingletonSocket
 # Only the desktop user may read the VNC password.
 if [ -f /etc/elsebot/vnc.pass ]; then
     chown elsebot:elsebot /etc/elsebot/vnc.pass

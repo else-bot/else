@@ -26,6 +26,8 @@ struct Fake {
     fail_list: std::sync::atomic::AtomicBool,
     /// Creation takes this long.
     create_delay: Mutex<Duration>,
+    /// An image upgrade's unpack step fails in the new computer.
+    fail_unpack: std::sync::atomic::AtomicBool,
 }
 
 impl Fake {
@@ -118,6 +120,20 @@ impl ComputerRuntime for Fake {
         self.log(format!("resume {name}"));
         self.set(name, RuntimeState::Running)
     }
+    async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+        self.log(format!("remove {name}"));
+        let mut computers = self.computers.lock().unwrap();
+        match computers.get(name) {
+            Some((RuntimeState::Stopped, _)) => {
+                computers.remove(name);
+                Ok(())
+            }
+            _ => Err(RuntimeError::Failed {
+                operation: "remove".into(),
+                message: "not stopped".into(),
+            }),
+        }
+    }
     async fn exec(
         &self,
         name: &str,
@@ -138,6 +154,23 @@ impl ComputerRuntime for Fake {
                 String::new()
             }
             "read" => files.get(args[0]).cloned().unwrap_or_default(),
+            // An image upgrade's archive and unpack steps.
+            "sh" if args[1].contains("tar --numeric-owner -cpf") => {
+                files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
+                use sha2::Digest;
+                format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")))
+            }
+            "sh" if args[1].contains("sha256sum -c") => {
+                if self.fail_unpack.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(ExecOutput {
+                        status: Some(4),
+                        stdout: String::new(),
+                        stderr: "the new image's elsebot user ID is not 1000".into(),
+                        truncated: false,
+                    });
+                }
+                "{\"image\":\"new\"}".into()
+            }
             _ => String::new(),
         };
         Ok(ExecOutput {
@@ -554,4 +587,150 @@ async fn nothing_is_used_until_the_runtime_has_been_inspected() {
         .store(false, std::sync::atomic::Ordering::SeqCst);
     manager.tick(&never()).await.unwrap();
     ready(&manager, bot, "test:w").await;
+}
+
+async fn computer(app: &TestApp, bot: Uuid) -> (String, String, String) {
+    sqlx::query_as(
+        "SELECT runtime_name, image, observed_state FROM bot_computers WHERE bot_id = $1",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+/// POC-025: a failed image upgrade leaves the bot on its old computer and
+/// removes only the replacement it created; an interrupted one's leftover
+/// replacement is removed by the next attempt; a held computer is refused;
+/// a completed upgrade keeps the old computer for a rollback.
+#[tokio::test(flavor = "multi_thread")]
+async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let manager = manager(&app, &fake, config(2)).await;
+    let bot: Uuid = app.create_bot("Old", "upgrade").await.parse().unwrap();
+    let (lease, old_name) = ready(&manager, bot, "turn:a").await;
+
+    // Held by a lease: refused, nothing changes.
+    let held = manager.upgrade_image(bot, "img:new").await;
+    assert!(held.is_err(), "{held:?}");
+    assert_eq!(
+        computer(&app, bot).await,
+        (
+            old_name.clone(),
+            "python:3.12-slim".into(),
+            "running".into()
+        )
+    );
+    manager.release(lease).await.unwrap();
+
+    // The unpack fails in the replacement.
+    fake.fail_unpack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = manager.upgrade_image(bot, "img:new").await;
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("user ID")),
+        "{failed:?}"
+    );
+    assert_eq!(
+        computer(&app, bot).await,
+        (
+            old_name.clone(),
+            "python:3.12-slim".into(),
+            "stopped".into()
+        )
+    );
+    let names: Vec<String> = fake.computers.lock().unwrap().keys().cloned().collect();
+    assert_eq!(
+        names,
+        vec![old_name.clone()],
+        "only the old computer is left"
+    );
+    assert_eq!(
+        fake.computers.lock().unwrap()[&old_name].0,
+        RuntimeState::Stopped
+    );
+    let (state, error): (String, String) =
+        sqlx::query_as("SELECT state, error FROM computer_upgrades WHERE bot_id = $1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    assert!(error.contains("user ID"));
+
+    // An interrupted attempt left a replacement nobody uses.
+    fake.fail_unpack
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let leftover = format!("{old_name}-leftover");
+    fake.computers
+        .lock()
+        .unwrap()
+        .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
+    sqlx::query(
+        "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
+         VALUES ($1, $2, $3, 'python:3.12-slim', $4, 'img:new', 'started')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bot)
+    .bind(&old_name)
+    .bind(&leftover)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let report = manager.upgrade_image(bot, "img:new").await.unwrap();
+    assert!(
+        !fake.computers.lock().unwrap().contains_key(&leftover),
+        "leftover removed"
+    );
+    assert_eq!(
+        computer(&app, bot).await,
+        (
+            report.to_runtime_name.clone(),
+            "img:new".into(),
+            "stopped".into()
+        )
+    );
+    assert_eq!(report.data_bytes, 4);
+    assert_eq!(
+        fake.computers.lock().unwrap()[&old_name].0,
+        RuntimeState::Stopped,
+        "old kept"
+    );
+    assert_eq!(
+        fake.computers.lock().unwrap()[&report.to_runtime_name].0,
+        RuntimeState::Stopped
+    );
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT state, count(*) FROM computer_upgrades WHERE bot_id = $1 GROUP BY state ORDER BY state",
+    )
+    .bind(bot)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![("completed".into(), 1), ("failed".into(), 2)]);
+
+    // The upgraded computer is used normally, then rolled back.
+    let (lease, name) = ready(&manager, bot, "turn:b").await;
+    assert_eq!(name, report.to_runtime_name);
+    manager.release(lease).await.unwrap();
+    let back = manager.rollback_upgrade(bot).await.unwrap();
+    assert_eq!(back.to_runtime_name, old_name);
+    assert_eq!(
+        computer(&app, bot).await,
+        (
+            old_name.clone(),
+            "python:3.12-slim".into(),
+            "stopped".into()
+        )
+    );
+    assert!(
+        fake.computers
+            .lock()
+            .unwrap()
+            .contains_key(&report.to_runtime_name),
+        "newer kept"
+    );
 }
