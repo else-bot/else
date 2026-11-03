@@ -25,7 +25,7 @@ pub struct Group<'a> {
 
 pub fn groups<'a>(categories: &'a [Category], bots: &'a [Bot]) -> Vec<Group<'a>> {
     let mut sorted: Vec<&Category> = categories.iter().collect();
-    sorted.sort_by(|a, b| (fold(&a.name), a.id).cmp(&(fold(&b.name), b.id)));
+    sorted.sort_by_key(|c| (fold(&c.name), c.id));
     let known = |id: Option<Uuid>| id.filter(|id| categories.iter().any(|c| c.id == *id));
     let mut out: Vec<Group> = sorted
         .into_iter()
@@ -45,9 +45,7 @@ pub fn groups<'a>(categories: &'a [Category], bots: &'a [Bot]) -> Vec<Group<'a>>
             .collect(),
     });
     for group in &mut out {
-        group
-            .bots
-            .sort_by(|a, b| (fold(&a.name), a.id).cmp(&(fold(&b.name), b.id)));
+        group.bots.sort_by_key(|b| (fold(&b.name), b.id));
     }
     out
 }

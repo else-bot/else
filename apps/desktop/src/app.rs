@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -154,6 +155,13 @@ pub struct CategoryFormHolder {
     form: CategoryForm,
 }
 
+/// The Move dialog's pending choice for one bot.
+pub struct MoveHolder {
+    bot: Uuid,
+    current: Option<Uuid>,
+    choice: Option<Uuid>,
+}
+
 pub struct ElseApp {
     client: Option<Arc<Client>>,
     connection: Connection,
@@ -173,6 +181,11 @@ pub struct ElseApp {
     _create_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
     _category_enter: Option<Subscription>,
+    /// Bots with a move in flight: one at a time per bot, so an earlier
+    /// choice can never land after a later one.
+    moving: HashSet<Uuid>,
+    /// The last category operation's failure, shown in the sidebar.
+    category_notice: Option<String>,
     sidebar_focus: FocusHandle,
     live: Option<tokio::sync::mpsc::UnboundedSender<LiveCommand>>,
     _live: Option<Task<()>>,
@@ -230,6 +243,8 @@ impl ElseApp {
             _create_enter: None,
             category_form: None,
             _category_enter: None,
+            moving: HashSet::new(),
+            category_notice: None,
             sidebar_focus,
             live: None,
             _live: None,
@@ -965,40 +980,43 @@ impl ElseApp {
                 .gap_3()
                 .child(Input::new(&form.name))
                 .child(Textarea::new(&form.role));
-            // Which category the new bot goes into (keyboard: Tab, Enter).
+            // Which category the new bot goes into: a radio group (Tab to
+            // one and Space to choose; Enter still creates).
             let categories = app
                 .upgrade()
                 .map(|app| app.read(cx).categories.clone())
                 .unwrap_or_default();
             if !categories.is_empty() {
-                let mut choices = h_flex().gap_1().flex_wrap().child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Category:"),
+                let options: Vec<(Option<Uuid>, String)> =
+                    std::iter::once((None, "None".to_owned()))
+                        .chain(categories.iter().map(|c| (Some(c.id), c.name.clone())))
+                        .collect();
+                let selected = options.iter().position(|(id, _)| *id == form.category);
+                let ids: Vec<Option<Uuid>> = options.iter().map(|(id, _)| *id).collect();
+                let choose = holder.clone();
+                body = body.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Category"),
+                        )
+                        .child(
+                            RadioGroup::horizontal("create-category")
+                                .children(options.into_iter().map(|(_, label)| label))
+                                .selected_index(selected)
+                                .on_change(move |ix, window, cx| {
+                                    let pick = ids[*ix];
+                                    choose.update(cx, |h, cx| {
+                                        h.form.category = pick;
+                                        cx.notify();
+                                    });
+                                    window.refresh();
+                                }),
+                        ),
                 );
-                let options = std::iter::once((None, "None".to_owned()))
-                    .chain(categories.iter().map(|c| (Some(c.id), c.name.clone())));
-                for (ix, (id, label)) in options.enumerate() {
-                    let chosen = form.category == id;
-                    let holder = holder.clone();
-                    let button = Button::new(SharedString::from(format!("create-category-{ix}")))
-                        .label(label)
-                        .xsmall();
-                    let button = if chosen {
-                        button.primary()
-                    } else {
-                        button.ghost()
-                    };
-                    choices = choices.child(button.on_click(move |_, window, cx| {
-                        holder.update(cx, |h, cx| {
-                            h.form.category = id;
-                            cx.notify();
-                        });
-                        window.refresh();
-                    }));
-                }
-                body = body.child(choices);
             }
             if let Some(error) = &form.error {
                 body = body.child(
@@ -1011,9 +1029,19 @@ impl ElseApp {
             let app_create = app.clone();
             let busy = form.busy;
             let app_ok = app.clone();
+            let app_close = app.clone();
+            let mine = holder.clone();
             dialog
                 .title("Create bot")
                 .w(px(460.))
+                // Dismissed: a late result must not close another dialog.
+                .on_close(move |_, _, cx| {
+                    let _ = app_close.update(cx, |app, _| {
+                        if app.create.as_ref() == Some(&mine) {
+                            app.create = None;
+                        }
+                    });
+                })
                 .on_ok(move |_, window, cx| {
                     let _ = app_ok.update(cx, |app, cx| app.submit_create(window, cx));
                     false
@@ -1117,8 +1145,9 @@ impl ElseApp {
 
     // ----- Categories (POC-031) ---------------------------------------------
 
-    /// Assign (or with `None` unassign) a bot. The server's snapshot then
-    /// moves it; selection, draft, and conversation are untouched.
+    /// Assign (or with `None` unassign) a bot. One move per bot at a time.
+    /// The list itself changes only from the server's `bots` snapshots (the
+    /// one ordered source), never from this response or an extra fetch.
     fn assign_category(
         &mut self,
         bot: Uuid,
@@ -1129,18 +1158,18 @@ impl ElseApp {
         let Some(client) = self.client.clone() else {
             return;
         };
+        if !self.moving.insert(bot) {
+            return;
+        }
+        cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_category(bot, category).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update_in(cx, |app, _, cx| {
+                app.moving.remove(&bot);
                 match result {
-                    Ok(updated) => {
-                        if let Some(existing) = app.bots.iter_mut().find(|b| b.id == bot) {
-                            existing.category_id = updated.category_id;
-                        }
-                    }
-                    Err(err) => app.notice = Some(format!("Moving the bot failed: {err}")),
+                    Ok(_) => app.category_notice = None,
+                    Err(err) => app.category_notice = Some(format!("Moving the bot failed: {err}")),
                 }
-                app.refresh_now(window, cx);
                 cx.notify();
             });
         })
@@ -1211,12 +1240,22 @@ impl ElseApp {
             let busy = form.busy;
             let app_ok = app.clone();
             let app_submit = app.clone();
+            let app_close = app.clone();
+            let mine = holder.clone();
             dialog
                 .title(title)
                 .w(px(420.))
                 .on_ok(move |_, window, cx| {
                     let _ = app_ok.update(cx, |app, cx| app.submit_category(window, cx));
                     false
+                })
+                // Dismissed: a late result must not close another dialog.
+                .on_close(move |_, _, cx| {
+                    let _ = app_close.update(cx, |app, _| {
+                        if app.category_form.as_ref() == Some(&mine) {
+                            app.category_form = None;
+                        }
+                    });
                 })
                 .child(body)
                 .footer(
@@ -1276,12 +1315,9 @@ impl ElseApp {
                         app.category_form = None;
                         window.close_dialog(cx);
                     }
-                    // Shown at once; the snapshot confirms it.
-                    match app.categories.iter_mut().find(|c| c.id == category.id) {
-                        Some(existing) => *existing = category,
-                        None => app.categories.push(category),
-                    }
-                    app.refresh_now(window, cx);
+                    // The `bots` snapshot shows it.
+                    let _ = category;
+                    app.category_notice = None;
                     cx.notify();
                 }
                 Err(err) => {
@@ -1379,66 +1415,89 @@ impl ElseApp {
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_category(id).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                match result {
-                    Ok(()) => {
-                        app.categories.retain(|c| c.id != id);
-                        for bot in app.bots.iter_mut().filter(|b| b.category_id == Some(id)) {
-                            bot.category_id = None;
-                        }
-                    }
-                    Err(err) => app.notice = Some(format!("Deleting the category failed: {err}")),
-                }
-                app.refresh_now(window, cx);
+            let _ = this.update_in(cx, |app, _, cx| {
+                // The `bots` snapshot shows the result; a failure is shown
+                // in the sidebar, where it is visible with or without a
+                // selected bot.
+                app.category_notice = match result {
+                    Ok(()) => None,
+                    Err(err) => Some(format!("Deleting the category failed: {err}")),
+                };
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// Move the selected bot: one button per category and Unassigned.
+    /// Move the selected bot: a radio group of every category and
+    /// Unassigned (Tab and Space, or a click, choose; Enter or Move applies).
     fn open_move_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
             return;
         };
+        if self.moving.contains(&bot.id) {
+            return;
+        }
         let categories = self.categories.clone();
+        let current = bot
+            .category_id
+            .filter(|c| categories.iter().any(|k| k.id == *c));
+        let holder = cx.new(|_| MoveHolder {
+            bot: bot.id,
+            current,
+            choice: current,
+        });
         let app = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let mut choices = v_flex().gap_1();
-            let options = categories
+            let options: Vec<(Option<Uuid>, String)> = categories
                 .iter()
                 .map(|c| (Some(c.id), c.name.clone()))
-                .chain(std::iter::once((None, "Unassigned".to_owned())));
-            for (ix, (id, label)) in options.enumerate() {
-                let current = bot
-                    .category_id
-                    .filter(|c| categories.iter().any(|k| k.id == *c))
-                    == id;
-                let app = app.clone();
-                let bot_id = bot.id;
-                let button = Button::new(SharedString::from(format!("move-to-{ix}")))
-                    .label(if current {
+                .chain(std::iter::once((None, "Unassigned".to_owned())))
+                .collect();
+            let state = holder.read(cx);
+            let selected = options.iter().position(|(id, _)| *id == state.choice);
+            let unchanged = state.choice == state.current;
+            let ids: Vec<Option<Uuid>> = options.iter().map(|(id, _)| *id).collect();
+            let choose = holder.clone();
+            let group = RadioGroup::vertical("move-choice")
+                .children(options.iter().map(|(id, label)| {
+                    if *id == state.current {
                         format!("{label} (current)")
                     } else {
-                        label
-                    })
-                    .w_full()
-                    .disabled(current);
-                let button = if current {
-                    button.ghost()
-                } else {
-                    button.outline()
-                };
-                choices = choices.child(button.on_click(move |_, window, cx| {
-                    window.close_dialog(cx);
-                    let _ = app.update(cx, |app, cx| app.assign_category(bot_id, id, window, cx));
-                }));
-            }
+                        label.clone()
+                    }
+                }))
+                .selected_index(selected)
+                .on_change(move |ix, window, cx| {
+                    let pick = ids[*ix];
+                    choose.update(cx, |h, cx| {
+                        h.choice = pick;
+                        cx.notify();
+                    });
+                    window.refresh();
+                });
+            let apply = {
+                let app = app.clone();
+                let holder = holder.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let (bot, choice, current) = {
+                        let h = holder.read(cx);
+                        (h.bot, h.choice, h.current)
+                    };
+                    if choice != current {
+                        let _ =
+                            app.update(cx, |app, cx| app.assign_category(bot, choice, window, cx));
+                    }
+                }
+            };
+            let apply_ok = apply.clone();
             dialog
                 .title(format!("Move {}", bot.name))
-                .w(px(360.))
-                // Enter would confirm (close) the dialog; choosing is Space.
-                .on_ok(|_, _, _| false)
+                .w(px(380.))
+                .on_ok(move |_, window, cx| {
+                    apply_ok(window, cx);
+                    true
+                })
                 .child(
                     v_flex()
                         .gap_2()
@@ -1448,10 +1507,31 @@ impl ElseApp {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
                                     "Only its place in the sidebar changes. Tab to a category, \
-                                     Space to choose, Esc to close.",
+                                     Space to choose, Enter moves, Esc closes.",
                                 ),
                         )
-                        .child(choices),
+                        .child(group),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("move-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("move-apply")
+                                .label("Move")
+                                .primary()
+                                .disabled(unchanged)
+                                .on_click(move |_, window, cx| {
+                                    apply(window, cx);
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
         });
     }
@@ -1661,6 +1741,11 @@ impl ElseApp {
                                 theme.muted_foreground
                             })
                             .child(status),
+                    )
+                    .children(
+                        self.category_notice
+                            .clone()
+                            .map(|notice| div().text_xs().text_color(theme.danger).child(notice)),
                     ),
             )
             .child(list)
@@ -1797,10 +1882,14 @@ impl ElseApp {
             .unwrap_or_else(|| "Unassigned".to_owned());
         actions = actions.child(
             Button::new("move-bot")
-                .label(format!("Category: {category}"))
+                .label(if self.moving.contains(&bot.id) {
+                    "Moving…".to_owned()
+                } else {
+                    format!("Category: {category}")
+                })
                 .small()
                 .ghost()
-                .disabled(self.connection != Connection::Connected)
+                .disabled(self.connection != Connection::Connected || self.moving.contains(&bot.id))
                 .on_click(cx.listener(|app, _, window, cx| app.open_move_dialog(window, cx))),
         );
         actions = actions.child(
