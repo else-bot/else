@@ -1,0 +1,2 @@
+- Keep `AGENTS.md` as bullet points, with one rule per bullet.
+- When adding a rule, apply it to the current codebase and commit the resulting changes using `chore(scope): scope`.
