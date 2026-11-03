@@ -31,7 +31,7 @@ Provider CLIs run directly on the host as the API's user, the way coding-agent d
 
 - A provider process can read and change anything the API's user can, including the API's data directory (owner token, master key file, credentials), the owner's files, and other bots' project directories. A bot that follows an injected instruction can act with the owner's access; what limits it is the model and its instructions. See [security](../security.md#host-provider-processes).
 - else.bot's task grants still bound its own tools, but they are no longer a boundary against a misbehaving provider process, which could read the owner token.
-- Leftover provider processes from a crashed API are swept at startup only on Linux (through `/proc`); nothing ends a run when the API dies.
+- Nothing ends a provider run when the API dies; leftovers are swept at the next startup (Linux through `/proc` and pidfds, macOS through libproc, pinned by start time).
 - The installer no longer installs or checks bubblewrap and sets `ELSE_BOTS_DIR` (kept if the owner changed it).
 - Backup sets do not include bot project directories yet, and a computer restored from a backup has no project mount.
 - Only computers created after this change get the mount. An image upgrade recreates the computer with the mount; files in an older computer's `~/work` are unpacked into the new computer's mount, which moves them into the host project directory.

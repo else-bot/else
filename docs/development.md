@@ -26,7 +26,7 @@ brew install postgresql@18 && brew link --force postgresql@18   # pg_dump, pg_re
 
 Use any Docker with Compose (Docker Desktop or OrbStack) for `docker compose up -d --wait`. The backup tools are looked up on the API's `PATH`, or set `ELSE_PG_DUMP` and `ELSE_PG_RESTORE` to absolute paths. The desktop builds with the Command Line Tools; Xcode is not required. Use `ELSE_SYNTHETIC_PROVIDER=1` to chat without a host provider.
 
-Codex needs the verified version (0.166; `brew upgrade --cask codex`) and `codex login`. Claude Code needs the verified version (2.1.316; `claude install 2.1.316`) and a login, as in a terminal: bots use the host's Claude configuration, so the Keychain login works. Leftover provider processes from a crashed API are swept at startup only on Linux.
+Codex needs the verified version (0.166; `brew upgrade --cask codex`) and `codex login`. Claude Code needs the verified version (2.1.316; `claude install 2.1.316`) and a login, as in a terminal: bots use the host's Claude configuration, so the Keychain login works. Leftover provider processes from a crashed API are swept at startup on macOS too (through libproc; see [security](security.md#host-provider-processes)).
 
 ## Configure the development services
 
