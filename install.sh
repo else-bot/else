@@ -987,7 +987,7 @@ main() {
 		resolve_release
 		fetch_source
 		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
-		exec bash "$SRC/install.sh" "${ARGS[@]}"
+		exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
 	fi
 
 	mkdir -p "$LOGS"
