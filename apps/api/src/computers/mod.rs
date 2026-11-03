@@ -227,6 +227,8 @@ pub struct ComputerManager {
     killing: std::sync::Mutex<std::collections::HashSet<Uuid>>,
     /// The master key, to decrypt a job's task secrets for redaction.
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
+    /// Input batches per turn (POC-029), to bound unattended iterations.
+    input_batches: std::sync::Mutex<HashMap<Uuid, u32>>,
 }
 
 impl ComputerManager {
@@ -240,7 +242,19 @@ impl ComputerManager {
             foreground: std::sync::Mutex::new(HashMap::new()),
             killing: std::sync::Mutex::new(std::collections::HashSet::new()),
             secret_key: None,
+            input_batches: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Count one input batch for a turn; returns the count including it.
+    pub fn count_input(&self, turn_id: Uuid) -> u32 {
+        let mut batches = self.input_batches.lock().unwrap_or_else(|p| p.into_inner());
+        if batches.len() > 10_000 {
+            batches.clear();
+        }
+        let n = batches.entry(turn_id).or_insert(0);
+        *n += 1;
+        *n
     }
 
     pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {

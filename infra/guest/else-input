@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Pointer and keyboard input on the desktop (X display :99, the one VNC serves).
+
+Usage: else-input BASE64_JSON
+The JSON is {"frame": [WIDTH, HEIGHT], "actions": [...]}, coordinates in screen
+pixels. Actions:
+  {"move": [x, y]}
+  {"click": [x, y], "button": "left"|"middle"|"right", "count": 1-3}
+  {"drag": [x1, y1, x2, y2]}
+  {"scroll": [x, y], "dy": -10..10, "dx": -10..10}   (positive dy scrolls down)
+  {"key": "ctrl+l"}            a key or chord, pressed together then released
+  {"type": "text"}             literal text, character by character
+  {"wait": 0.1-5}              seconds
+The whole batch is checked before anything happens: the display must still be
+WIDTH x HEIGHT (else SCREEN_CHANGED: take a new screenshot) and every point
+inside it. Prints one JSON line per completed action, then a final result.
+Whatever it pressed is released at the end, on an error, and on SIGTERM. Takes
+the desktop lock that browser scripts and computer_browser also take. Uses
+libX11 and libXtst through ctypes; nothing touches any other display.
+"""
+import base64
+import ctypes
+import ctypes.util
+import fcntl
+import json
+import os
+import signal
+import sys
+import time
+
+LOCK = "/var/lib/elsebot/browser.lock"
+NAMES = {
+    "ctrl": "Control_L", "control": "Control_L", "shift": "Shift_L", "alt": "Alt_L",
+    "super": "Super_L", "meta": "Super_L", "win": "Super_L", "enter": "Return",
+    "return": "Return", "esc": "Escape", "escape": "Escape", "tab": "Tab",
+    "backspace": "BackSpace", "delete": "Delete", "del": "Delete", "insert": "Insert",
+    "space": "space", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    "home": "Home", "end": "End", "pageup": "Prior", "pagedown": "Next",
+    **{f"f{i}": f"F{i}" for i in range(1, 13)},
+}
+BUTTONS = {"left": 1, "middle": 2, "right": 3}
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+def fail(code, message, status=3):
+    emit({"error": f"{code}: {message}"})
+    sys.exit(status)
+
+
+class Input:
+    def __init__(self):
+        try:
+            self.x = ctypes.cdll.LoadLibrary(ctypes.util.find_library("X11") or "libX11.so.6")
+            self.t = ctypes.cdll.LoadLibrary(ctypes.util.find_library("Xtst") or "libXtst.so.6")
+        except OSError as e:
+            fail("DISPLAY_UNAVAILABLE", f"X libraries are missing ({e})")
+        x, t = self.x, self.t
+        x.XOpenDisplay.restype = ctypes.c_void_p
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        for name in ("XDefaultScreen", "XFlush", "XCloseDisplay"):
+            getattr(x, name).argtypes = [ctypes.c_void_p]
+        x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x.XDisplayWidth.argtypes = x.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x.XStringToKeysym.restype = ctypes.c_ulong
+        x.XStringToKeysym.argtypes = [ctypes.c_char_p]
+        x.XKeysymToKeycode.restype = ctypes.c_ubyte
+        x.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x.XKeycodeToKeysym.restype = ctypes.c_ulong
+        x.XKeycodeToKeysym.argtypes = [ctypes.c_void_p, ctypes.c_ubyte, ctypes.c_int]
+        x.XChangeKeyboardMapping.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                             ctypes.POINTER(ctypes.c_ulong), ctypes.c_int]
+        x.XDisplayKeycodes.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+        t.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        t.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+        t.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+        self.d = x.XOpenDisplay(b":99")
+        if not self.d:
+            fail("DISPLAY_UNAVAILABLE", "the desktop display is not running")
+        screen = x.XDefaultScreen(self.d)
+        self.size = (x.XDisplayWidth(self.d, screen), x.XDisplayHeight(self.d, screen))
+        self.keys, self.buttons = set(), set()
+        self.spare = None
+        self.remapped = False
+
+    def sync(self):
+        self.x.XSync(self.d, 0)
+
+    def move(self, px, py):
+        self.t.XTestFakeMotionEvent(self.d, -1, int(px), int(py), 0)
+        self.sync()
+
+    def button(self, b, down):
+        self.t.XTestFakeButtonEvent(self.d, b, 1 if down else 0, 0)
+        (self.buttons.add if down else self.buttons.discard)(b)
+        self.sync()
+
+    def key(self, code, down):
+        self.t.XTestFakeKeyEvent(self.d, code, 1 if down else 0, 0)
+        (self.keys.add if down else self.keys.discard)(code)
+        self.sync()
+
+    def release_all(self):
+        for code in list(self.keys):
+            self.key(code, False)
+        for b in list(self.buttons):
+            self.button(b, False)
+        if self.remapped and self.spare:
+            # Leave the spare keycode as unmapped as it was.
+            none = (ctypes.c_ulong * 1)(0)
+            self.x.XChangeKeyboardMapping(self.d, self.spare, 1, none, 1)
+            self.sync()
+
+    def keysym(self, name):
+        sym = self.x.XStringToKeysym(name.encode())
+        if not sym:
+            fail("INVALID_KEY", f"unknown key {name!r}", 2)
+        return sym
+
+    def code_for(self, sym):
+        """A keycode for a keysym, and whether Shift is needed; a keysym the
+        keyboard lacks is put on a spare keycode."""
+        code = self.x.XKeysymToKeycode(self.d, sym)
+        if code:
+            if self.x.XKeycodeToKeysym(self.d, code, 0) == sym:
+                return code, False
+            if self.x.XKeycodeToKeysym(self.d, code, 1) == sym:
+                return code, True
+        if self.spare is None:
+            lo, hi = ctypes.c_int(), ctypes.c_int()
+            self.x.XDisplayKeycodes(self.d, ctypes.byref(lo), ctypes.byref(hi))
+            for c in range(hi.value, lo.value - 1, -1):
+                if not self.x.XKeycodeToKeysym(self.d, c, 0):
+                    self.spare = c
+                    break
+            if self.spare is None:
+                fail("INVALID_TEXT", "no spare keycode to type this character", 2)
+        syms = (ctypes.c_ulong * 1)(sym)
+        self.x.XChangeKeyboardMapping(self.d, self.spare, 1, syms, 1)
+        self.remapped = True
+        self.sync()
+        time.sleep(0.05)
+        return self.spare, False
+
+    def chord(self, text):
+        parts = [p for p in text.replace(" ", "").split("+") if p]
+        if not parts:
+            fail("INVALID_KEY", "an empty key", 2)
+        codes = []
+        for p in parts:
+            name = NAMES.get(p.lower(), p if len(p) > 1 else p)
+            sym = self.keysym(name) if len(name) > 1 else (ord(name.lower()) if name.isalpha() else ord(name))
+            codes.append(self.code_for(sym)[0])
+        for c in codes:
+            self.key(c, True)
+        for c in reversed(codes):
+            self.key(c, False)
+
+    def type(self, text):
+        shift = self.x.XKeysymToKeycode(self.d, self.keysym("Shift_L"))
+        for ch in text:
+            if ch == "\n":
+                sym = self.keysym("Return")
+            elif ch == "\t":
+                sym = self.keysym("Tab")
+            else:
+                cp = ord(ch)
+                sym = cp if 0x20 <= cp <= 0x7E or 0xA0 <= cp <= 0xFF else 0x01000000 + cp
+            code, needs_shift = self.code_for(sym)
+            if needs_shift:
+                self.key(shift, True)
+            self.key(code, True)
+            self.key(code, False)
+            if needs_shift:
+                self.key(shift, False)
+            time.sleep(0.008)
+
+
+def point(name, values, size, count=2):
+    if not isinstance(values, list) or len(values) != count or not all(isinstance(v, (int, float)) for v in values):
+        fail("INVALID_ACTION", f"{name} needs {count} numbers", 2)
+    for i in range(0, count, 2):
+        if not (0 <= values[i] < size[0] and 0 <= values[i + 1] < size[1]):
+            fail("OUT_OF_BOUNDS", f"{name} {values[i]},{values[i + 1]} is outside the {size[0]}x{size[1]} screen", 2)
+
+
+def check(batch, size):
+    frame = batch.get("frame")
+    if not (isinstance(frame, list) and len(frame) == 2):
+        fail("INVALID_ACTION", "frame [width, height] from the latest screenshot is required", 2)
+    if tuple(frame) != tuple(size):
+        fail("SCREEN_CHANGED", f"the screen is now {size[0]}x{size[1]}, not {frame[0]}x{frame[1]}; take a new screenshot", 2)
+    actions = batch.get("actions")
+    if not isinstance(actions, list) or not 1 <= len(actions) <= 20:
+        fail("INVALID_ACTION", "1 to 20 actions", 2)
+    for a in actions:
+        if not isinstance(a, dict) or len([k for k in a if k in ("move", "click", "drag", "scroll", "key", "type", "wait")]) != 1:
+            fail("INVALID_ACTION", f"one action per entry: {a}", 2)
+        if "move" in a:
+            point("move", a["move"], size)
+        elif "click" in a:
+            point("click", a["click"], size)
+            if a.get("button", "left") not in BUTTONS or a.get("count", 1) not in (1, 2, 3):
+                fail("INVALID_ACTION", "button left|middle|right, count 1-3", 2)
+        elif "drag" in a:
+            point("drag", a["drag"], size, 4)
+        elif "scroll" in a:
+            point("scroll", a["scroll"], size)
+            for k in ("dx", "dy"):
+                if not isinstance(a.get(k, 0), int) or abs(a.get(k, 0)) > 10:
+                    fail("INVALID_ACTION", f"{k} is -10 to 10", 2)
+        elif "key" in a:
+            if not isinstance(a["key"], str) or not 0 < len(a["key"]) <= 64:
+                fail("INVALID_ACTION", "key is a key name or chord such as ctrl+l", 2)
+        elif "type" in a:
+            if not isinstance(a["type"], str) or not 0 < len(a["type"]) <= 2000:
+                fail("INVALID_ACTION", "type is 1 to 2000 characters", 2)
+        elif "wait" in a:
+            if not isinstance(a["wait"], (int, float)) or not 0 < a["wait"] <= 5:
+                fail("INVALID_ACTION", "wait is up to 5 seconds", 2)
+    return actions
+
+
+def run(inp, actions):
+    for i, a in enumerate(actions):
+        if "move" in a:
+            inp.move(*a["move"])
+        elif "click" in a:
+            inp.move(*a["click"])
+            b = BUTTONS[a.get("button", "left")]
+            for _ in range(a.get("count", 1)):
+                inp.button(b, True)
+                inp.button(b, False)
+                time.sleep(0.05)
+        elif "drag" in a:
+            x1, y1, x2, y2 = a["drag"]
+            inp.move(x1, y1)
+            inp.button(1, True)
+            for step in range(1, 11):
+                inp.move(x1 + (x2 - x1) * step / 10, y1 + (y2 - y1) * step / 10)
+                time.sleep(0.02)
+            inp.button(1, False)
+        elif "scroll" in a:
+            inp.move(*a["scroll"])
+            for b, n in ((5 if a.get("dy", 0) > 0 else 4, abs(a.get("dy", 0))),
+                         (7 if a.get("dx", 0) > 0 else 6, abs(a.get("dx", 0)))):
+                for _ in range(n):
+                    inp.button(b, True)
+                    inp.button(b, False)
+                    time.sleep(0.03)
+        elif "key" in a:
+            inp.chord(a["key"])
+        elif "type" in a:
+            inp.type(a["type"])
+        elif "wait" in a:
+            time.sleep(a["wait"])
+        time.sleep(0.08)
+        emit({"done": i})
+
+
+def main(argv):
+    if len(argv) != 1:
+        fail("USAGE", __doc__.strip(), 2)
+    try:
+        batch = json.loads(base64.b64decode(argv[0]))
+    except Exception:  # noqa: BLE001
+        fail("INVALID_ACTION", "the batch is not base64 JSON", 2)
+    inp = Input()
+    actions = check(batch, inp.size)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                fail("DESKTOP_BUSY", "a script controls the browser or desktop; wait for it or cancel its job")
+            time.sleep(0.2)
+
+    def stop(*_):
+        inp.release_all()
+        emit({"error": "STOPPED: the input was stopped; what is listed as done happened"})
+        os._exit(143)
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        run(inp, actions)
+    finally:
+        inp.release_all()
+    emit({"ok": True, "actions": len(actions)})
+
+
+main(sys.argv[1:])

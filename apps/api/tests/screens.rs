@@ -35,6 +35,10 @@ struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
     mode: Mutex<Mode>,
     files: Mutex<Vec<String>>,
+    /// Input batches the guest received, decoded.
+    inputs: Mutex<Vec<Value>>,
+    /// How the guest input helper ends: (exit code, stdout lines).
+    input_reply: Mutex<(i32, Vec<String>)>,
 }
 
 fn png() -> Vec<u8> {
@@ -97,6 +101,28 @@ impl ComputerRuntime for Guest {
         args: &[&str],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
+        if let Some(command) = args
+            .iter()
+            .find(|a| a.contains("/usr/local/bin/else-input "))
+        {
+            let encoded = command.rsplit(' ').next().unwrap();
+            let batch: Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+            )
+            .unwrap();
+            self.inputs.lock().unwrap().push(batch);
+            let (code, lines) = self.input_reply.lock().unwrap().clone();
+            let out = lines.join("\n");
+            // The RUN wrapper's reply: code, sizes, stdout, NUL line, stderr.
+            return Ok(ExecOutput {
+                status: Some(0),
+                stdout: format!("{code}\n{}\n0\n{out}\n\0\n", out.len()),
+                stderr: String::new(),
+                truncated: false,
+            });
+        }
         let script = args.iter().find(|a| a.contains("else-screenshot")).copied();
         let stdout = match (script, *self.mode.lock().unwrap()) {
             (None, _) => String::new(),
@@ -139,6 +165,15 @@ async fn setup(desktop: bool) -> Setup {
         state: Mutex::default(),
         mode: Mutex::new(Mode::Ok),
         files: Mutex::default(),
+        inputs: Mutex::default(),
+        input_reply: Mutex::new((
+            0,
+            vec![
+                r#"{"done": 0}"#.into(),
+                r#"{"done": 1}"#.into(),
+                r#"{"ok": true, "actions": 2}"#.into(),
+            ],
+        )),
     });
     let manager = Arc::new(ComputerManager::new(
         db.pool.clone(),
@@ -193,6 +228,20 @@ async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
         vec![Tool::Computer],
         DEFAULT_TTL,
     )
+}
+
+async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
+    let reply = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": name, "arguments": arguments } })),
+            Some(token),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    reply.body["result"].clone()
 }
 
 async fn shot(app: &TestApp, token: &str, arguments: Value) -> Value {
@@ -357,4 +406,112 @@ async fn computers_without_a_desktop_say_so() {
     let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
     let refused = error(&shot(&app, &token, json!({})).await);
     assert!(refused.contains("no desktop"), "{refused}");
+}
+
+/// POC-029: the input tool's outcomes. The guest helper validates and acts
+/// (checked live); here: what reaches it, typed text kept out of memory, the
+/// owner's open desktop, the per-turn bound, and uncertain or refused
+/// batches reported without replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
+    let Setup {
+        app,
+        guest,
+        manager,
+        ..
+    } = setup(true).await;
+    let bot = app.create_bot("Hands", "clicks").await;
+    let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
+    let batch = json!({ "frame": [1280, 800],
+        "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });
+    let done = tool(&app, &token, "computer_input", batch.clone()).await;
+    assert_ne!(done["isError"], true, "{done}");
+    let result: Value = serde_json::from_str(done["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        (result["done"].clone(), result["of"].clone()),
+        (json!(2), json!(2))
+    );
+    assert_eq!(
+        guest.inputs.lock().unwrap()[0],
+        batch,
+        "the batch reached the guest as sent"
+    );
+    let logged: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'",
+    )
+    .bind(bot.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        logged
+            .iter()
+            .any(|l| l.contains("click([100,200])") && l.contains("type(16 chars)")),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().all(|l| !l.contains("hunter2")),
+        "typed text never enters memory"
+    );
+
+    // A batch the helper refused did nothing; a cut-off one is uncertain.
+    *guest.input_reply.lock().unwrap() = (2, vec![r#"{"error": "SCREEN_CHANGED: the screen is now 1024x768, not 1280x800; take a new screenshot"}"#.into()]);
+    let refused = tool(&app, &token, "computer_input", batch.clone()).await;
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("SCREEN_CHANGED") && text.ends_with("Nothing was done."),
+        "{text}"
+    );
+    *guest.input_reply.lock().unwrap() = (
+        143,
+        vec![
+            r#"{"done": 0}"#.into(),
+            r#"{"error": "STOPPED: the input was stopped; what is listed as done happened"}"#
+                .into(),
+        ],
+    );
+    let cut = tool(&app, &token, "computer_input", batch.clone()).await;
+    let text = cut["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
+    let sent = guest.inputs.lock().unwrap().len();
+    assert_eq!(sent, 3, "nothing was replayed");
+
+    // The owner's open desktop session has the desktop.
+    *guest.input_reply.lock().unwrap() = (0, vec![r#"{"ok": true, "actions": 2}"#.into()]);
+    let desktop = manager.desktop(bot.parse().unwrap()).await.unwrap();
+    assert!(desktop.is_ok());
+    let busy = tool(&app, &token, "computer_input", batch.clone()).await;
+    assert!(
+        busy["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("OWNER_USING_DESKTOP")
+    );
+    assert_eq!(
+        guest.inputs.lock().unwrap().len(),
+        sent,
+        "nothing sent while the owner is in"
+    );
+    manager.close_desktop(bot.parse().unwrap()).await.unwrap();
+
+    // A bounded number of batches per turn.
+    let mut limited = None;
+    for _ in 0..60 {
+        let r = tool(&app, &token, "computer_input", batch.clone()).await;
+        if r["isError"] == true {
+            limited = Some(r["content"][0]["text"].as_str().unwrap().to_owned());
+            break;
+        }
+    }
+    assert!(
+        limited
+            .as_deref()
+            .is_some_and(|t| t.starts_with("INPUT_LIMIT")),
+        "{limited:?}"
+    );
+    assert_eq!(
+        guest.inputs.lock().unwrap().len(),
+        40,
+        "40 batches per turn, refused or not"
+    );
 }

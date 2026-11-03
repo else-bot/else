@@ -46,6 +46,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_browser",
     "computer_secrets",
     "computer_screenshot",
+    "computer_input",
 ];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
@@ -395,7 +396,14 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         _ => return tool_error("Unknown tool."),
     };
     if let Some(log) = log {
-        record(state, grant, name, args, &log).await;
+        // Typed text never enters memory (it may be a password).
+        let logged = if name == "computer_input" {
+            json!({ "frame": args["frame"], "actions": super::guest_tools::summarize_input(
+                args["actions"].as_array().map(Vec::as_slice).unwrap_or_default()) })
+        } else {
+            args.clone()
+        };
+        record(state, grant, name, &logged, &log).await;
     }
     result
 }
