@@ -84,6 +84,19 @@ ARGS=("$@")
 
 SRC="$ELSE_HOME/src"
 BUILD="$ELSE_HOME/build"
+LINK_PREFIX="$HOME/.local"
+TOOLCHAIN="$ELSE_HOME/toolchain"
+MSB_PREFIX="$ELSE_HOME/microsandbox"
+# The native E2E lanes keep immutable prerequisites/build artifacts between
+# disposable installations. Normal installations keep their original layout.
+TEST_CACHE="${ELSE_INSTALL_TEST_CACHE:-}"
+BUILD_PROFILE="${ELSE_INSTALL_TEST_PROFILE:-release}"
+if [ -n "$TEST_CACHE" ]; then
+	BUILD="$TEST_CACHE/build"
+	TOOLCHAIN="$TEST_CACHE/toolchain"
+	MSB_PREFIX="$TEST_CACHE/microsandbox"
+	LINK_PREFIX="$ELSE_HOME/links"
+fi
 VERSIONS="$ELSE_HOME/versions"
 CURRENT="$ELSE_HOME/current"
 BIN="$ELSE_HOME/bin"
@@ -91,9 +104,8 @@ CONFIG="$ELSE_HOME/config"
 DATA="$ELSE_HOME/data"
 LOGS="$ELSE_HOME/logs"
 ENV_FILE="$CONFIG/.env"
-export RUSTUP_HOME="$ELSE_HOME/toolchain/rustup"
-export CARGO_HOME="$ELSE_HOME/toolchain/cargo"
-MSB_PREFIX="$ELSE_HOME/microsandbox"
+export RUSTUP_HOME="$TOOLCHAIN/rustup"
+export CARGO_HOME="$TOOLCHAIN/cargo"
 MSB="$MSB_PREFIX/bin/msb"
 USER="${USER:-$(id -un)}"
 
@@ -416,7 +428,7 @@ linux_access() {
 # --- Rust (scoped to ~/.else/toolchain) -------------------------------------
 
 ensure_rust() {
-	step "Rust toolchain ($ELSE_HOME/toolchain)"
+	step "Rust toolchain ($TOOLCHAIN)"
 	export PATH="$CARGO_HOME/bin:$PATH"
 	if [ -x "$CARGO_HOME/bin/rustc" ]; then
 		local current
@@ -526,6 +538,10 @@ build_release() {
 	local packages="else-api else-desktop"
 	[ "$SERVER_ONLY" = 1 ] && packages="else-api"
 	local pkg built=1
+	local built_profile output="$BUILD_PROFILE"
+	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
+	[ "$built_profile" = "$BUILD_PROFILE" ] || built=0
+	[ "$BUILD_PROFILE" != dev ] || output=debug
 	for pkg in $packages; do
 		if ! [ -x "$dest/bin/$pkg" ] || [ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
 			built=0
@@ -536,18 +552,19 @@ build_release() {
 		ok "already built ($dest)"
 		return
 	fi
-	info "Building ${packages}; the first build takes several minutes"
+	info "Building ${packages} ($BUILD_PROFILE); the first build takes several minutes"
 	local args="" log="$LOGS/build-$version.log"
 	for pkg in $packages; do args="$args -p $pkg"; done
 	# shellcheck disable=SC2086
-	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --release --locked $args) >"$log" 2>&1; then
+	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
 		tail -20 "$log" >&2
 		die "the build failed; the full log is $log"
 	fi
 	mkdir -p "$dest/bin"
 	for pkg in $packages; do
-		install -m 755 "$BUILD/release/$pkg" "$dest/bin/$pkg"
+		install -m 755 "$BUILD/$output/$pkg" "$dest/bin/$pkg"
 	done
+	printf '%s\n' "$BUILD_PROFILE" >"$dest/.build-profile"
 	ok "built into $dest"
 }
 
@@ -572,7 +589,7 @@ prune_versions() {
 }
 
 install_commands() {
-	mkdir -p "$BIN" "$HOME/.local/bin" "$CONFIG"
+	mkdir -p "$BIN" "$LINK_PREFIX/bin" "$CONFIG"
 	install -m 755 "$SRC/scripts/elsebot" "$BIN/elsebot"
 	# How elsebot runs the API here: a systemd user unit (Linux), a launchd
 	# agent (macOS), or a process it manages itself where there is neither.
@@ -607,13 +624,13 @@ install_commands() {
 		"$SERVICE" "$manager" "$AUTOSTART" "$PSQL" >"$CONFIG/elsebot.env"
 	ln -sfn ../current/bin/else-api "$BIN/else-api"
 	[ "$SERVER_ONLY" = 1 ] || ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"
-	if [ ! -e "$HOME/.local/bin/elsebot" ] || [ -L "$HOME/.local/bin/elsebot" ]; then
-		ln -sfn "$BIN/elsebot" "$HOME/.local/bin/elsebot"
+	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
+		ln -sfn "$BIN/elsebot" "$LINK_PREFIX/bin/elsebot"
 	fi
-	case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) next "add ~/.local/bin to your PATH to use the elsebot command" ;; esac
+	case ":$PATH:" in *":$LINK_PREFIX/bin:"*) ;; *) next "add $LINK_PREFIX/bin to your PATH to use the elsebot command" ;; esac
 	if [ "$DISTRO" != macos ] && [ "$SERVER_ONLY" = 0 ]; then
-		mkdir -p "$HOME/.local/share/applications"
-		cat >"$HOME/.local/share/applications/else-bot.desktop" <<EOF
+		mkdir -p "$LINK_PREFIX/share/applications"
+		cat >"$LINK_PREFIX/share/applications/else-bot.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=else.bot
@@ -1106,6 +1123,12 @@ summary() {
 # --- Main -------------------------------------------------------------------
 
 main() {
+	case "$BUILD_PROFILE" in dev | release) ;; *) die "ELSE_INSTALL_TEST_PROFILE must be dev or release" ;; esac
+	if [ -n "$TEST_CACHE" ]; then
+		case "$TEST_CACHE" in /*) ;; *) die "ELSE_INSTALL_TEST_CACHE must be an absolute path" ;; esac
+	elif [ "$BUILD_PROFILE" != release ]; then
+		die "ELSE_INSTALL_TEST_PROFILE requires ELSE_INSTALL_TEST_CACHE"
+	fi
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		-y | --yes) ASSUME_YES=1 ;;

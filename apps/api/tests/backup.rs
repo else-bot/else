@@ -605,6 +605,9 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |args: &[&str]| {
         let out = common::api_command(&db, &data, common::free_port())
+            // Exercise the database/project-only operator path consistently,
+            // including on machines where Microsandbox happens to be installed.
+            .env("ELSE_MSB_BIN", data.join("unavailable-msb"))
             .env("RUST_LOG", "info")
             .args(args)
             .stdout(std::process::Stdio::piped())
@@ -622,10 +625,8 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     assert!(ok, "{out}");
     let (ok, out) = run(&["backup"]);
     assert!(ok, "{out}");
-    // With the API stopped the command coordinates the whole assistant
-    // (no bot has used a computer here, so nothing is omitted).
     assert!(
-        out.contains("Whole assistant") || out.contains("Database only"),
+        out.contains("coverage: The database and the bots' project directories only:"),
         "{out}"
     );
     let key = std::fs::read_to_string(data.join("secret-key")).unwrap();
@@ -635,6 +636,11 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
         .find_map(|l| l.strip_prefix("backup set: "))
         .unwrap()
         .to_owned();
+    let complete: backup::Completion = serde_json::from_slice(
+        &std::fs::read(data.join("backups").join(&set).join("complete.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(!complete.whole_assistant);
     let app = TestApp::with_db(db);
     let target = Target::new(&app);
     let db = app.db.clone();

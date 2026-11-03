@@ -1,0 +1,44 @@
+# Disposable services for the native E2E lanes. The runner always supplies a
+# unique project name; Cargo tests still create and drop their own databases.
+services:
+  postgres:
+    image: postgres:18.6
+    platform: linux/arm64
+    environment:
+      POSTGRES_DB: else
+      POSTGRES_USER: else
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:?}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U else -d else"]
+      interval: 250ms
+      start_interval: 250ms
+      timeout: 2s
+      retries: 120
+      start_period: 3s
+    stop_grace_period: 1s
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.50
+    platform: linux/arm64
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-volume.max=0", "-master.volumeSizeLimitMB=64"]
+    environment:
+      AWS_ACCESS_KEY_ID: elsetestaccess01
+      AWS_SECRET_ACCESS_KEY: elsetestsecret0123456789abcdef
+    ports:
+      - "127.0.0.1:${ELSE_TEST_S3_PORT:?}:8333"
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || wget -q -S -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 250ms
+      start_interval: 250ms
+      timeout: 2s
+      retries: 120
+      start_period: 3s
+    stop_grace_period: 1s
+volumes:
+  postgres_data:
+  seaweedfs_data:

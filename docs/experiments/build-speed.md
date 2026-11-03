@@ -2,8 +2,10 @@
 
 The target is the first `cargo build` or `cargo run` in a development checkout.
 The baseline is the original `fbb9f3a` source, exported from Git with its own
-lockfile and default Cargo profiles. The final change sets `[profile.dev]
-debug = 0`; application source and `Cargo.lock` exactly match the baseline.
+lockfile and default Cargo profiles. The build-only snapshot `8da0b5f` sets
+`[profile.dev] debug = 0`; its application source and `Cargo.lock` match the
+baseline. Subsequent test-fixture and runner work is measured separately in
+the [ARM64 E2E benchmark](e2e-speed.md).
 
 ## Results
 
