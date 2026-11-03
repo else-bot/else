@@ -25,7 +25,7 @@ pub fn registry(config: &Config) -> Registry {
 pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker::Summarizer>>) {
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
     let sandbox = host::HostSandbox::detect(&config.data_dir).ok();
-    let program = config.codex_bin.clone().or_else(|| find_on_path("codex"));
+    let program = executable(config.codex_bin.as_deref(), "codex");
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
@@ -45,7 +45,7 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
     let home = std::env::var("HOME").ok();
     let claude = claude::Claude::detect(
         sandbox,
-        config.claude_bin.clone().or_else(|| find_on_path("claude")),
+        executable(config.claude_bin.as_deref(), "claude"),
         claude_home::host_credentials_file(config_dir.as_deref(), home.as_deref()),
         claude_home::host_account(config_dir.as_deref(), home.as_deref()),
     )
@@ -60,25 +60,36 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
     (Registry::new(providers), Some(summarizer))
 }
 
-/// An executable on `PATH`, resolved to its real file. Version-manager
-/// shims (such as mise's, which resolve to the `mise` binary) cannot run in
-/// the sandbox, so a shim is resolved through `mise which` to the native
-/// executable.
-fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
-    let found = std::env::var_os("PATH")?
-        .to_str()?
-        .split(':')
-        .map(|dir| std::path::Path::new(dir).join(name))
-        .find(|path| path.is_file())
-        .and_then(|path| std::fs::canonicalize(path).ok())?;
-    if found.file_name().is_some_and(|f| f == name) {
-        return Some(found);
+/// A provider CLI: the configured path, else `name` on `PATH`, resolved
+/// to the native executable. Version-manager shims (such as mise's, which
+/// are links to the `mise` binary) cannot run in the sandbox, so a shim is
+/// resolved through `mise which` (with this process's environment, so the
+/// version mise selects now). A configured path that cannot be resolved is
+/// kept, and the provider reports why it does not run.
+fn executable(configured: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {
+    match configured {
+        Some(path) => Some(resolve_native(path, name).unwrap_or_else(|| path.to_path_buf())),
+        None => {
+            let found = std::env::var_os("PATH")?
+                .to_str()?
+                .split(':')
+                .map(|dir| std::path::Path::new(dir).join(name))
+                .find(|path| path.is_file())?;
+            resolve_native(&found, name)
+        }
     }
+}
+
+/// The real file behind `path`; for a mise shim, the executable mise
+/// selects for `name`.
+fn resolve_native(path: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let found = std::fs::canonicalize(path).ok()?;
     if found.file_name().is_some_and(|f| f == "mise") {
         let out = std::process::Command::new(&found)
             .args(["which", name])
             .output()
-            .ok()?;
+            .ok()
+            .filter(|out| out.status.success())?;
         let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
         return std::fs::canonicalize(path).ok().filter(|p| p.is_file());
     }
@@ -129,5 +140,41 @@ impl Registry {
             .iter()
             .find(|p| p.availability() == Availability::Available)
             .map(|p| p.id())
+    }
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_configured_mise_shim_is_resolved_to_the_native_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = dir.path().join("installs/codex/1.0/bin/codex");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, "native").unwrap();
+        // A stand-in for mise: `mise which codex` prints the native path.
+        let mise = dir.path().join("bin/mise");
+        std::fs::create_dir_all(mise.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mise,
+            format!(
+                "#!/bin/sh\n[ \"$1 $2\" = \"which codex\" ] && echo {}\n",
+                native.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mise, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shim = dir.path().join("shims/codex");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&mise, &shim).unwrap();
+
+        let native = std::fs::canonicalize(&native).unwrap();
+        assert_eq!(executable(Some(&shim), "codex"), Some(native.clone()));
+        // A real binary stays itself; an unresolvable path is kept as given.
+        assert_eq!(executable(Some(&native), "codex"), Some(native));
+        let missing = dir.path().join("nope/codex");
+        assert_eq!(executable(Some(&missing), "codex"), Some(missing));
     }
 }
