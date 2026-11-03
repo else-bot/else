@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# elsebot: manage the else.bot installation in ~/.else (installed by
+# install.sh as ~/.else/bin/elsebot, linked from ~/.local/bin).
+set -euo pipefail
+
+usage() {
+	cat <<'EOF'
+Usage: elsebot <command>
+
+  status            the installed and running versions, and whether the API is up
+  version           the installed version
+  update [options]  install the latest release (options: install.sh --help)
+  desktop           open the desktop app
+  start | stop | restart
+                    the API service (stop is graceful: running turns end as Stopped)
+  logs              follow the API log
+  api <args>        run else-api with this installation's settings, e.g. elsebot api backup
+  paths             where everything is
+EOF
+}
+
+# ~/.else from this script's own location (bin/elsebot), unless ELSE_HOME.
+self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+ELSE_HOME="${ELSE_HOME:-$(cd "$(dirname "$self")/.." && pwd -P)}"
+CONFIG="$ELSE_HOME/config"
+CURRENT="$ELSE_HOME/current"
+LOGS="$ELSE_HOME/logs"
+RUN="$ELSE_HOME/run"
+ELSEBOT_SERVICE=else-api
+ELSEBOT_MANAGER=process
+# shellcheck disable=SC1091
+[ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
+
+die() { echo "elsebot: $1" >&2; exit 1; }
+setting() { [ -f "$CONFIG/.env" ] && sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1; }
+api_addr() { local bind; bind="$(setting ELSE_API_BIND)"; echo "${bind:-127.0.0.1:7878}"; }
+installed() { [ -x "$CURRENT/bin/$1" ] && "$CURRENT/bin/$1" --version 2>/dev/null | awk '{print $2}'; }
+running_version() {
+	curl -fsS --max-time 3 "http://$(api_addr)/healthz" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+}
+
+# --- The API service ---------------------------------------------------------
+
+unit_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$ELSEBOT_SERVICE.service"; }
+
+service_install() {
+	[ "$ELSEBOT_MANAGER" = systemd ] || return 0
+	local unit
+	unit="$(unit_file)"
+	mkdir -p "$(dirname "$unit")"
+	cat >"$unit" <<EOF
+[Unit]
+Description=else.bot API
+After=network-online.target
+
+[Service]
+WorkingDirectory=$CONFIG
+ExecStart=$CURRENT/bin/else-api serve
+Environment=PATH=$ELSE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
+EOF
+	systemctl --user daemon-reload
+	systemctl --user enable "$ELSEBOT_SERVICE.service" >/dev/null 2>&1
+}
+
+pid_file() { echo "$RUN/$ELSEBOT_SERVICE.pid"; }
+
+# The pid of the API this script started, if it still runs.
+process_pid() {
+	local pid
+	pid="$(cat "$(pid_file)" 2>/dev/null)" || return 1
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+	case "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || ps -o command= -p "$pid" 2>/dev/null)" in
+	*else-api*serve*) echo "$pid" ;;
+	*) return 1 ;;
+	esac
+}
+
+start() {
+	[ -x "$CURRENT/bin/else-api" ] || die "else.bot is not installed in $ELSE_HOME"
+	if [ "$ELSEBOT_MANAGER" = systemd ]; then
+		systemctl --user start "$ELSEBOT_SERVICE.service"
+		return
+	fi
+	process_pid >/dev/null && return 0
+	mkdir -p "$RUN" "$LOGS"
+	(
+		cd "$CONFIG"
+		nohup setsid "$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+		echo $! >"$(pid_file)"
+	)
+}
+
+# Graceful: SIGTERM, then the API's own shutdown (up to 90 s).
+stop() {
+	if [ "$ELSEBOT_MANAGER" = systemd ]; then
+		systemctl --user stop "$ELSEBOT_SERVICE.service"
+		return
+	fi
+	local pid _
+	pid="$(process_pid)" || { rm -f "$(pid_file)"; return 0; }
+	kill -TERM "$pid"
+	for _ in $(seq 1 90); do
+		kill -0 "$pid" 2>/dev/null || { rm -f "$(pid_file)"; return 0; }
+		sleep 1
+	done
+	echo "elsebot: the API did not stop within 90 s; killing it" >&2
+	kill -KILL "$pid" 2>/dev/null || true
+	rm -f "$(pid_file)"
+}
+
+is_active() {
+	if [ "$ELSEBOT_MANAGER" = systemd ]; then
+		systemctl --user is-active --quiet "$ELSEBOT_SERVICE.service"
+	else
+		process_pid >/dev/null
+	fi
+}
+
+# --- Commands ----------------------------------------------------------------
+
+cmd="${1:-status}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+status)
+	echo "installed: $(installed else-api || installed else-desktop || echo none) ($ELSE_HOME)"
+	if is_active; then
+		echo "API:       running on http://$(api_addr), version $(running_version || echo unknown) ($ELSEBOT_MANAGER)"
+	else
+		echo "API:       stopped ($ELSEBOT_MANAGER)"
+	fi
+	;;
+version) installed else-api || installed else-desktop || die "not installed" ;;
+update)
+	[ -f "$ELSE_HOME/src/install.sh" ] || die "no source in $ELSE_HOME/src; run the curl installer again"
+	# A copy: the update replaces the checkout it runs from.
+	tmp="$(mktemp)"
+	trap 'rm -f "$tmp"' EXIT
+	cp "$ELSE_HOME/src/install.sh" "$tmp"
+	ELSE_HOME="$ELSE_HOME" bash "$tmp" "$@"
+	;;
+desktop)
+	[ -x "$CURRENT/bin/else-desktop" ] || die "the desktop is not installed (server-only installation?)"
+	ELSE_API_URL="http://$(api_addr)" ELSE_OWNER_TOKEN_FILE="$ELSE_HOME/data/owner-token" \
+		exec "$CURRENT/bin/else-desktop" "$@"
+	;;
+start) start ;;
+stop) stop ;;
+restart) stop && start ;;
+service-install) service_install ;;
+logs)
+	if [ "$ELSEBOT_MANAGER" = systemd ]; then
+		exec journalctl --user -u "$ELSEBOT_SERVICE.service" -f "$@"
+	else
+		exec tail -n 100 -f "$LOGS/else-api.log"
+	fi
+	;;
+api)
+	[ -x "$CURRENT/bin/else-api" ] || die "else.bot is not installed in $ELSE_HOME"
+	cd "$CONFIG" && exec "$CURRENT/bin/else-api" "$@"
+	;;
+paths)
+	where="$(pid_file)"
+	[ "$ELSEBOT_MANAGER" = systemd ] && where="$(unit_file)"
+	cat <<EOF
+home:        $ELSE_HOME
+source:      $ELSE_HOME/src
+release:     $(readlink "$CURRENT" 2>/dev/null || echo none)
+settings:    $CONFIG/.env
+data:        $ELSE_HOME/data
+logs:        $LOGS
+service:     $ELSEBOT_MANAGER ($where)
+EOF
+	;;
+-h | --help | help) usage ;;
+*) usage >&2; exit 2 ;;
+esac

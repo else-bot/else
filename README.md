@@ -45,28 +45,68 @@ The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings a
 
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
-## Install on a host
+## Install
 
-On Linux (Debian 12 or newer, Ubuntu 24.04 or newer, Arch Linux / Omarchy; x86_64), from a checkout of this repository:
+On Linux (Debian 12 or newer, Ubuntu 24.04 or newer, Arch Linux / Omarchy; x86_64):
 
 ```sh
-./install.sh            # --help lists the options, e.g. --server-only for a headless machine
+curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash
 ```
 
-It asks before installing anything with sudo, then sets up only what is missing:
-- system packages: build tools, bubblewrap, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
-- Rust through rustup when no Rust 1.94 or newer is present;
-- Microsandbox 0.7.13 in `~/.microsandbox` (checksum-verified);
-- release builds of `else-api` and `else-desktop` in `~/.local/bin`;
-- PostgreSQL 18 as the Docker Compose project `else-bot`, with a generated password, configured in `~/.config/else-bot/.env` (mode 0600);
-- the guest VM image `else-guest:2` (about 15 minutes the first time);
+It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
+- build tools, bubblewrap, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
+- in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
+- PostgreSQL 18 as the Docker Compose project `else-bot` with a generated password;
+- the guest VM image (about 15 minutes the first time);
 - `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`.
 
-It needs `/dev/kvm` for bot computers and adds you to the `docker` and `kvm` groups if needed (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the script checks for them but does not install them. Running it again keeps the existing configuration, database, and installation. Operator commands read the same configuration from its directory, for example `cd ~/.config/else-bot && else-api backup`.
+Bot computers need `/dev/kvm`; the installer offers to add you to the `docker` and `kvm` groups (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
-On macOS the script builds only the desktop client (it needs Xcode with the Metal toolchain) and prints how to reach an API on a Linux machine through an SSH tunnel. The macOS path and arm64 Linux are not tested yet.
+On macOS the installer builds only the desktop client (it needs Xcode with the Metal toolchain) and prints how to reach an API on a Linux machine through an SSH tunnel. macOS and arm64 Linux are not tested yet.
 
-`scripts/test-install.sh [--quick] [debian-12|debian-13|ubuntu-24.04|ubuntu-26.04|arch]` runs the installer in fresh containers as an unprivileged sudo user and checks the result and a second, idempotent run. Containers have no systemd, Docker daemon, or KVM, so the database, guest image, and service steps only run on a real host.
+### Update
+
+Run the same command again, or `elsebot update`. It builds the new release while the current one keeps running, then:
+- refuses, changing nothing, while a bot is working (a turn running or a command running in a bot computer); run it again later;
+- otherwise stops the API from taking new work, stops it, backs up first when the release changes the database, switches to the new release, and starts it; if it does not come up, it switches back;
+- keeps the previous release in `~/.else/versions`.
+
+Messages queued during the update run afterwards; background jobs in the bot computers keep running. `elsebot update --version 0.0.1` (or `ELSE_VERSION=0.0.1`) installs a given release.
+
+### Where things are
+
+```text
+~/.else/
+  src/          the release's source (git checkout at the release tag)
+  versions/     built releases; current -> versions/<version>
+  bin/          elsebot, else-api, else-desktop
+  config/       .env (settings and database password, 0600), compose.yaml
+  data/         credentials, bot computers, artifacts, backups
+  toolchain/    Rust, only for building else.bot
+  microsandbox/ the VM runtime
+  build/        build cache
+  logs/         install, update, and build logs
+```
+
+Outside `~/.else`: the system packages, the database's Docker volume and the guest image in Docker, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
+
+### elsebot
+
+| Command | What it does |
+| --- | --- |
+| `elsebot status` | Installed and running versions; whether the API is up |
+| `elsebot desktop` | Open the app |
+| `elsebot update` | Install the latest release (see above) |
+| `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
+| `elsebot logs` | Follow the API log |
+| `elsebot api backup` | Any `else-api` command with this installation's settings |
+| `elsebot paths` | Where everything is |
+
+### Versions and releases
+
+There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`; both binaries report it (`else-api version`, `else-desktop --version`, and `/healthz`). A release is a `vX.Y.Z` tag: `scripts/release.sh 0.0.2` sets the version, refreshes `Cargo.lock`, commits `chore: release v0.0.2`, and tags it; `git push origin HEAD v0.0.2` publishes it, and installations pick it up on their next update.
+
+`scripts/test-install.sh [debian-12|debian-13|ubuntu-24.04|ubuntu-26.04|arch]` installs and updates in fresh containers through a pipe, as an unprivileged sudo user, against releases built from the working tree (see its header).
 
 ## Try the POC
 

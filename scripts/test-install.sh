@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
-# Run install.sh in fresh distribution containers, as an unprivileged user
-# with sudo, and check what it installed. Nothing touches this host's
-# installation: each run gets a disposable container and a copy of the
-# checkout (without target/ and .git/).
+# Install and update else.bot in fresh distribution containers, as an
+# unprivileged user with sudo, the way a person would: `curl … | bash`.
+# Nothing touches this host's installation.
 #
-#   scripts/test-install.sh [--quick] [DISTRO...]
+#   scripts/test-install.sh [DISTRO...]
 #
 # DISTRO: debian-12, debian-13, ubuntu-24.04, ubuntu-26.04, arch (default: all)
-# --quick  skip the release build (packages, Rust, Microsandbox, config only)
 #
-# Containers have no systemd, Docker daemon, or KVM, so the database, guest
-# image, and service steps are skipped (--skip-database); their logic runs
-# only on a real host. Cargo's registry and each distribution's target
-# directory are cached in Docker volumes (else-install-*), so a second full
-# run rebuilds quickly; remove them with: docker volume rm $(docker volume ls -q -f name=else-install-)
+# Releases come from a throwaway git repository built from the working tree:
+# v0.0.1 is the tree as it is, v0.0.2 bumps the version and adds a no-op
+# migration (so the update backs up first). Each container installs v0.0.1
+# through a pipe, checks the layout and the running API, is refused an update
+# while a bot works (which keeps working, and work is accepted again),
+# updates to v0.0.2 once idle (history kept, new messages answered), and
+# runs the installer once more,
+# which changes nothing. PostgreSQL runs in a sidecar container; containers
+# have no systemd, Docker daemon, or KVM, so the API runs as a managed
+# process and there is no guest image or bot computer.
+#
+# The Rust toolchain and build caches stay in Docker volumes
+# (else-install-*); remove them with:
+#   docker volume rm $(docker volume ls -q -f name=else-install-)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-QUICK=0
-DISTROS=()
-for arg in "$@"; do
-	case "$arg" in
-	--quick) QUICK=1 ;;
-	-h | --help) sed -n '2,16p' "$0"; exit 0 ;;
-	*) DISTROS+=("$arg") ;;
-	esac
-done
+DISTROS=("$@")
 [ ${#DISTROS[@]} -gt 0 ] || DISTROS=(debian-12 debian-13 ubuntu-24.04 ubuntu-26.04 arch)
 
 image_for() {
@@ -39,8 +38,46 @@ image_for() {
 	esac
 }
 
-# Runs as root in the container: a sudo-capable user and a copy of the repo.
-read -r -d '' PREPARE <<'EOF' || true
+work="$(mktemp -d)"
+network="else-install-net-$$"
+containers=()
+cleanup() {
+	local c
+	for c in "${containers[@]}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+	docker network rm "$network" >/dev/null 2>&1 || true
+	rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# --- Releases v0.0.1 and v0.0.2 from the working tree ------------------------
+
+echo "== releases v0.0.1 and v0.0.2 from the working tree"
+mkdir -p "$work/tree"
+tar --exclude=./target --exclude=./.git -cf - . | tar -C "$work/tree" -xf -
+(
+	cd "$work/tree"
+	commit() { git -c user.name=test -c user.email=test@example.invalid commit -q -m "$1"; }
+	git init -q -b main
+	git add -A
+	commit "release 0.0.1"
+	git tag v0.0.1
+	sed -i '/^\[workspace.package\]/,/^\[/s/^version = ".*"/version = "0.0.2"/' Cargo.toml
+	awk '/^name = "else-(api|desktop)"$/{print; getline; print "version = \"0.0.2\""; next} {print}' Cargo.lock >Cargo.lock.new
+	mv Cargo.lock.new Cargo.lock
+	last="$(find apps/api/migrations -name '[0-9]*.sql' -printf '%f\n' | sort | tail -1)"
+	next="$(printf '%04d' $((10#${last%%_*} + 1)))"
+	printf -- '-- A test release: changes nothing.\nSELECT 1;\n' >"apps/api/migrations/${next}_test_release.sql"
+	git add -A
+	commit "release 0.0.2"
+	git tag v0.0.2
+)
+git clone -q --bare "$work/tree" "$work/repo.git"
+chmod -R a+rX "$work"
+
+# --- The scenario, inside each container -------------------------------------
+
+cat >"$work/prepare.sh" <<'EOF'
 set -eu
 if command -v apt-get >/dev/null; then
 	apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null
@@ -49,94 +86,130 @@ else
 fi
 useradd -m -s /bin/bash tester
 echo 'tester ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/tester
-mkdir -p /home/tester/else /home/tester/.cargo/registry
-tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /home/tester/else -xf -
+# The test repository belongs to another user (older git reads this only
+# from the global configuration; git itself is installed later).
+printf '[safe]\n\tdirectory = *\n' >/home/tester/.gitconfig
 chown -R tester:tester /home/tester
 EOF
 
-# Runs as the tester: install, check, install again.
-read -r -d '' CHECK <<'EOF' || true
+cat >"$work/scenario.sh" <<'EOF'
 set -euo pipefail
-cd ~/else
 fail() { echo "CHECK FAILED: $*" >&2; exit 1; }
-echo "--- install.sh as root is refused"
-if sudo ./install.sh --yes >/tmp/root.log 2>&1; then fail "ran as root"; fi
-grep -q "not as root" /tmp/root.log || fail "no root refusal message"
+export ELSE_REPO=/repo.git ELSE_DATABASE_URL ELSE_INSTALL_NO_SYSTEMD=1
+H=~/.else
+URL=http://127.0.0.1:7878
+uuid() { cat /proc/sys/kernel/random/uuid; }
+api() { curl -fsS --max-time 10 -H "Authorization: Bearer $(cat $H/data/owner-token)" -H 'content-type: application/json' "$@"; }
+health() { curl -fsS --max-time 5 $URL/healthz 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
+wait_health() { local _; for _ in $(seq 1 60); do [ "$(health)" = "$1" ] && return 0; sleep 1; done; fail "the API does not run $1"; }
+send() { api -X POST "$URL/v1/bots/$bot/turns" -d "{\"request_id\":\"$(uuid)\",\"text\":\"$1\",\"provider_id\":\"synthetic\"}" | jq -r .turn.id; }
+turn_status() { api "$URL/v1/bots/$bot/conversation" | jq -r --arg t "$1" '.turns[] | select(.id == $t) | .status'; }
+wait_status() {
+	local _
+	for _ in $(seq 1 60); do [ "$(turn_status "$1")" = "$2" ] && return 0; sleep 1; done
+	fail "turn $1 is $(turn_status "$1"), not $2"
+}
 
-echo "--- first run"
-./install.sh --yes --skip-database $INSTALL_ARGS 2>&1 | tee /tmp/first.log
+echo "--- the installer refuses root"
+if sudo bash /src/install.sh --yes >/tmp/root.log 2>&1; then fail "ran as root"; fi
+grep -q "not as root" /tmp/root.log || fail "no root refusal"
 
-echo "--- checks"
-. ~/.cargo/env
-rustc --version
-command -v bwrap >/dev/null || fail "bubblewrap missing"
-command -v docker >/dev/null || fail "docker missing"
-docker compose version >/dev/null 2>&1 || fail "docker compose plugin missing"
-[ "$(~/.microsandbox/bin/msb --version)" = "msb 0.7.13" ] || fail "msb is not 0.7.13"
-env=~/.config/else-bot/.env
-[ "$(stat -c %a "$env")" = 600 ] || fail ".env is not 0600"
-grep -q '^DATABASE_URL=postgresql://else:' "$env" || fail "no DATABASE_URL"
-pg_dump=$(sed -n 's/^ELSE_PG_DUMP=//p' "$env")
-"$pg_dump" --version | grep -Eq ' (1[89]|[2-9][0-9])\.' || fail "pg_dump is older than 18: $("$pg_dump" --version)"
-if [ "$QUICK" = 0 ]; then
-	for bin in else-api else-desktop; do
-		[ -x ~/.local/bin/$bin ] || fail "$bin not installed"
-		if ldd ~/.local/bin/$bin | grep -q 'not found'; then
-			ldd ~/.local/bin/$bin | grep 'not found'
-			fail "$bin has unresolved libraries"
-		fi
-	done
-	# An extra argument makes it print its usage and exit (no args = serve).
-	usage="$(~/.local/bin/else-api serve extra 2>&1 || true)"
-	grep -q "usage: else-api" <<<"$usage" || fail "else-api does not run: $usage"
+echo "--- install v0.0.1 through a pipe"
+cat /src/install.sh | ELSE_VERSION=0.0.1 bash -s -- --yes --skip-guest-image 2>&1 | tee /tmp/install.log
+[ "$(readlink $H/current)" = versions/0.0.1 ] || fail "current is $(readlink $H/current)"
+for f in $H/versions/0.0.1/bin/else-api $H/versions/0.0.1/bin/else-desktop $H/bin/elsebot \
+	$H/microsandbox/bin/msb $H/toolchain/cargo/bin/cargo $H/data/owner-token; do
+	[ -e "$f" ] || fail "$f missing"
+done
+[ "$($H/microsandbox/bin/msb --version)" = "msb 0.7.13" ] || fail "msb is not 0.7.13"
+[ "$(stat -c %a $H/config/.env)" = 600 ] || fail ".env is not 0600"
+[ "$(readlink ~/.local/bin/elsebot)" = "$H/bin/elsebot" ] || fail "no elsebot link"
+for outside in ~/.cargo ~/.rustup ~/.microsandbox ~/.config/else-bot ~/.local/share/else-bot; do
+	[ ! -e "$outside" ] || fail "$outside was created outside ~/.else"
+done
+for bin in else-api else-desktop; do
+	if ldd $H/current/bin/$bin | grep -q 'not found'; then fail "$bin has unresolved libraries"; fi
+done
+wait_health 0.0.1
+~/.local/bin/elsebot status | tee /tmp/status
+grep -q "running on" /tmp/status || fail "elsebot status"
+
+echo "--- an update is refused while a bot works"
+echo "ELSE_SYNTHETIC_PROVIDER=1" >>$H/config/.env
+~/.local/bin/elsebot restart
+wait_health 0.0.1
+bot="$(api -X POST $URL/v1/bots -d "{\"request_id\":\"$(uuid)\",\"name\":\"Worker\",\"role\":\"works\"}" | jq -r .bot.id)"
+busy="$(send '[synthetic:hang]')"
+wait_status "$busy" running
+if ~/.local/bin/elsebot update --yes --skip-guest-image >/tmp/refused.log 2>&1; then
+	cat /tmp/refused.log
+	fail "updated while busy"
 fi
+cat /tmp/refused.log
+grep -q "not updating" /tmp/refused.log || fail "no refusal message"
+[ "$(readlink $H/current)" = versions/0.0.1 ] || fail "current changed"
+[ "$(health)" = 0.0.1 ] || fail "0.0.1 no longer runs"
+[ "$(turn_status "$busy")" = running ] || fail "the busy turn was disturbed"
+queued="$(send 'after the refusal')"
+[ -n "$queued" ] && [ "$queued" != null ] || fail "work is not accepted after the refusal"
 
-echo "--- second run is idempotent"
-./install.sh --yes --skip-database $INSTALL_ARGS 2>&1 | tee /tmp/second.log
-grep -q "all present" /tmp/second.log || fail "the second run installed packages again"
-grep -q "kept the existing configuration" /tmp/second.log || fail "the second run rewrote the configuration"
-grep -q "msb 0.7.13" /tmp/second.log || fail "msb not detected on the second run"
+echo "--- update to v0.0.2 once idle"
+# Stop work is bot-wide: it also ends the message queued behind the busy turn.
+api -X POST "$URL/v1/bots/$bot/cancel" -d "{\"request_id\":\"$(uuid)\"}" >/dev/null
+wait_status "$busy" interrupted
+done_before="$(send 'before the update')"
+wait_status "$done_before" completed
+~/.local/bin/elsebot update --yes --skip-guest-image 2>&1 | tee /tmp/update.log
+[ "$(readlink $H/current)" = versions/0.0.2 ] || fail "current is $(readlink $H/current)"
+wait_health 0.0.2
+[ -d $H/versions/0.0.1 ] || fail "the previous release was not kept"
+grep -q "Backup before the database changes" /tmp/update.log || fail "no backup before the migration"
+ls $H/data/backups/*/complete.json >/dev/null || fail "no completed backup set"
+[ "$(turn_status "$done_before")" = completed ] || fail "history was lost"
+[ "$(api $URL/v1/bots | jq '[.bots[] | select(.name == "Worker")] | length')" = 1 ] || fail "the bot was lost"
+after="$(send 'on the new version')"
+wait_status "$after" completed
+
+echo "--- running it again changes nothing"
+~/.local/bin/elsebot update --yes --skip-guest-image 2>&1 | tee /tmp/again.log
+grep -q "0.0.2 is installed; checking" /tmp/again.log || fail "not detected as current"
+grep -q "already built" /tmp/again.log || fail "rebuilt"
+grep -q "all present" /tmp/again.log || fail "installed packages again"
+wait_health 0.0.2
+~/.local/bin/elsebot stop
 echo "ALL CHECKS PASSED"
 EOF
+chmod 644 "$work"/*.sh
 
-harness="$(mktemp -d)"
-# On any exit, including Ctrl+C: remove this run's container and files.
-container=""
-cleanup() {
-	[ -n "$container" ] && docker rm -f "$container" >/dev/null 2>&1
-	rm -rf "$harness"
-}
-trap cleanup EXIT
-trap 'exit 130' INT TERM
-printf '%s\n' "$PREPARE" \
-	'mkdir -p /cache/registry /cache/target' \
-	'chown tester:tester /cache/registry /cache/target' \
-	'rmdir /home/tester/.cargo/registry && ln -s /cache/registry /home/tester/.cargo/registry' \
-	'ln -s /cache/target /home/tester/else/target' >"$harness/prepare.sh"
-printf '%s\n' "$CHECK" >"$harness/check.sh"
-chmod 755 "$harness" && chmod 644 "$harness"/*.sh
+# --- Run ---------------------------------------------------------------------
 
-results=()
+docker network create "$network" >/dev/null
 mkdir -p target/install-tests
+results=()
 for distro in "${DISTROS[@]}"; do
 	image="$(image_for "$distro")"
 	log="target/install-tests/$distro.log"
-	args=""
-	[ "$QUICK" = 1 ] && args="--skip-build"
+	pg="else-install-pg-$distro-$$"
+	box="else-install-test-$distro-$$"
+	containers+=("$pg" "$box")
 	echo "== $distro ($image) -> $log"
 	started=$(date +%s)
-	container="else-install-test-$distro-$$"
-	if timeout 3600 docker run --rm --name "$container" --platform linux/amd64 \
-		-v "$PWD:/src:ro" -v "$harness:/harness:ro" \
-		-v else-install-cargo-registry:/cache/registry \
-		-v "else-install-target-$distro:/cache/target" \
-		"$image" bash -c "bash /harness/prepare.sh && su - tester -c 'INSTALL_ARGS=\"$args\" QUICK=$QUICK bash /harness/check.sh'" \
+	password="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+	docker run -d --name "$pg" --network "$network" -e POSTGRES_USER=else -e POSTGRES_DB=else \
+		-e POSTGRES_PASSWORD="$password" postgres:18.6 >/dev/null
+	for _ in $(seq 1 60); do docker exec "$pg" pg_isready -U else -d else >/dev/null 2>&1 && break; sleep 1; done
+	if timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
+		-v "$PWD:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
+		-v "else-install-toolchain:/home/tester/.else/toolchain" \
+		-v "else-install-build-$distro:/home/tester/.else/build" \
+		-e ELSE_DATABASE_URL="postgresql://else:$password@$pg:5432/else" \
+		"$image" bash -c "bash /harness/prepare.sh && su - tester -c \"ELSE_DATABASE_URL='\$ELSE_DATABASE_URL' bash /harness/scenario.sh\"" \
 		>"$log" 2>&1; then
 		results+=("$distro: PASS ($(($(date +%s) - started)) s)")
 	else
 		results+=("$distro: FAIL ($(($(date +%s) - started)) s), see $log")
 	fi
-	container=""
+	docker rm -f "$pg" >/dev/null 2>&1 || true
 	echo "   ${results[${#results[@]}-1]}"
 done
 
