@@ -22,12 +22,42 @@ use crate::model::{Item, Snapshot, Turn};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // Read again by the bot model pickers.
 pub struct ProviderInfo {
     pub id: String,
     pub label: String,
-    pub available: bool,
-    pub unavailable_reason: Option<String>,
+    /// Whether the provider's CLI runs on the API's host (older APIs do
+    /// not say: assume it does).
+    #[serde(default = "yes")]
+    pub cli_available: bool,
+    #[serde(default)]
+    pub cli_unavailable_reason: Option<String>,
+    /// The exact models, efforts, and tiers it applies; empty for a
+    /// provider without models (it is not offered in the pickers).
+    #[serde(default)]
+    pub catalog: Catalog,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Catalog {
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(default)]
+    pub tiers: Vec<String>,
+}
+
+/// A provider and an exact profile for it, as the API takes and reports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct ProfileChoice {
+    pub provider_id: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub service_tier: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,11 +66,12 @@ pub struct Limits {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // Read again by the bot model pickers.
 pub struct Capabilities {
-    pub default_provider_id: Option<String>,
     pub providers: Vec<ProviderInfo>,
     pub limits: Limits,
+    /// What new bots start with.
+    #[serde(default)]
+    pub defaults: Option<ProfileChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -409,8 +440,12 @@ impl Client {
         request_id: Uuid,
         name: String,
         role: String,
+        profile: Option<ProfileChoice>,
     ) -> Result<Bot, ClientError> {
-        let body = json!({ "request_id": request_id, "name": name, "role": role });
+        let mut body = json!({ "request_id": request_id, "name": name, "role": role });
+        if let Some(profile) = profile {
+            body["profile"] = json!(profile);
+        }
         self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(body))
             .await
             .map(|(_, v)| v.bot)

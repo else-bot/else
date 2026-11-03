@@ -18,10 +18,11 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::{
-    Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
-    StreamMessage,
+    Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent,
+    ProfileChoice, Sent, StreamMessage,
 };
 use crate::model::{Applied, Conversation, Snapshot};
+use crate::profile_picker::ProfilePicker;
 
 actions!(
     else_desktop,
@@ -128,9 +129,11 @@ struct CreateForm {
     /// The exact payload of a request whose outcome is unknown. Retries
     /// resend it unchanged under the same request ID, whatever the fields
     /// now say, until the server gives a definite answer.
-    in_doubt: Option<(String, String)>,
+    in_doubt: Option<(String, String, Option<ProfileChoice>)>,
     name: Entity<InputState>,
     role: Entity<TextareaState>,
+    /// The new bot's provider and model, starting from the defaults.
+    profile: Option<Entity<ProfilePicker>>,
     error: Option<String>,
     busy: bool,
     /// The category the new bot goes into (POC-031).
@@ -887,12 +890,17 @@ impl ElseApp {
                 .placeholder("Role: what this bot helps with")
                 .auto_grow(3, 8)
         });
+        let profile = self
+            .caps
+            .clone()
+            .map(|caps| cx.new(|cx| ProfilePicker::new(&caps, caps.defaults.as_ref(), window, cx)));
         let holder = cx.new(|_| CreateFormHolder {
             form: CreateForm {
                 request_id: Uuid::new_v4(),
                 in_doubt: None,
                 name: name.clone(),
                 role,
+                profile,
                 error: None,
                 busy: false,
                 category: None,
@@ -918,6 +926,9 @@ impl ElseApp {
                 .gap_3()
                 .child(Input::new(&form.name))
                 .child(Textarea::new(&form.role));
+            if let Some(profile) = &form.profile {
+                body = body.child(profile.clone());
+            }
             // Which category the new bot goes into: a radio group (Tab to
             // one and Space to choose; Enter still creates).
             let categories = app
@@ -971,7 +982,7 @@ impl ElseApp {
             let mine = holder.clone();
             dialog
                 .title("Create bot")
-                .w(px(460.))
+                .w(px(520.))
                 // Dismissed: a late result must not close another dialog.
                 .on_close(move |_, _, cx| {
                     let _ = app_close.update(cx, |app, _| {
@@ -1018,15 +1029,16 @@ impl ElseApp {
             return;
         }
         let category = holder.read(cx).form.category;
-        let (request_id, name, role) = {
+        let (request_id, name, role, profile) = {
             let form = &holder.read(cx).form;
-            let (name, role) = form.in_doubt.clone().unwrap_or_else(|| {
+            let (name, role, profile) = form.in_doubt.clone().unwrap_or_else(|| {
                 (
                     form.name.read(cx).value().to_string(),
                     form.role.read(cx).value().to_string(),
+                    form.profile.as_ref().and_then(|p| p.read(cx).choice(cx)),
                 )
             });
-            (form.request_id, name, role)
+            (form.request_id, name, role, profile)
         };
         holder.update(cx, |h, cx| {
             h.form.busy = true;
@@ -1034,9 +1046,9 @@ impl ElseApp {
             cx.notify();
         });
         window.refresh();
-        let payload = (name.clone(), role.clone());
+        let payload = (name.clone(), role.clone(), profile.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.create_bot(request_id, name, role).await;
+            let result = client.create_bot(request_id, name, role, profile).await;
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(bot) => {
                     // Close only the dialog this request came from.
