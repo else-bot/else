@@ -8,9 +8,11 @@ The first usable POC is a GPUI desktop app where one owner can create two bots, 
 
 The assistant POC extends that checkpoint with persistent memory, delegation, isolated task computers, provider switching, and encrypted recovery. It keeps the same small messaging UI.
 
-Both targets disable provider-native sub-agents. App-managed delegation between registered bots remains a separate API operation. The initial saved Codex profile is GPT 6.1 Sol Medium Fast. See the [provider settings and policy](docs/providers.md#saved-execution-profile).
+All delivery targets disable provider-native sub-agents. App-managed delegation between registered bots remains a separate API operation. The initial saved Codex profile is GPT 6.1 Sol Medium Fast. See the [provider settings and policy](docs/providers.md#saved-execution-profile).
 
-Use the first usable POC as the default target. If the implementation request includes the full assistant POC, continue through the second milestone without a new checkpoint approval. Stop when the assigned target's acceptance checks pass.
+POC-001 through POC-024 are marked complete. The next delivery target is VM automation and sidebar categories, POC-025 through POC-032. It adds guest toolchains and scripts, visual desktop control, guest-local CDP scripting, and database-backed sidebar groups. The built-in email client remains deferred; sending an authorized email through a guest script is a task workflow.
+
+When asked to implement the next milestone, continue through its tasks without per-task confirmation. Stop when the assigned target's acceptance checks pass. Adding tasks to this queue does not itself start implementation.
 
 ## Completed setup
 
@@ -46,6 +48,17 @@ Use the first usable POC as the default target. If the implementation request in
 - [x] [POC-023: Automatic R2 or S3 replication](docs/implementation/04-recovery.md#poc-023-automatic-r2-or-s3-replication)
 - [x] [POC-024: Assistant POC acceptance](docs/implementation/04-recovery.md#poc-024-assistant-poc-acceptance)
 
+## VM automation and sidebar categories
+
+- [ ] [POC-025: Guest programming toolchain](docs/implementation/05-vm-automation-and-categories.md#poc-025-guest-programming-toolchain)
+- [ ] [POC-026: Bot-authored scripts and batch jobs](docs/implementation/05-vm-automation-and-categories.md#poc-026-bot-authored-scripts-and-batch-jobs)
+- [ ] [POC-027: Guest-local Chromium CDP scripting](docs/implementation/05-vm-automation-and-categories.md#poc-027-guest-local-chromium-cdp-scripting)
+- [ ] [POC-028: Desktop screenshots delivered to the model](docs/implementation/05-vm-automation-and-categories.md#poc-028-desktop-screenshots-delivered-to-the-model)
+- [ ] [POC-029: Visual mouse and keyboard control](docs/implementation/05-vm-automation-and-categories.md#poc-029-visual-mouse-and-keyboard-control)
+- [ ] [POC-030: Persistent bot categories and API](docs/implementation/05-vm-automation-and-categories.md#poc-030-persistent-bot-categories-and-api)
+- [ ] [POC-031: Grouped sidebar and category controls](docs/implementation/05-vm-automation-and-categories.md#poc-031-grouped-sidebar-and-category-controls)
+- [ ] [POC-032: Automation and categories acceptance](docs/implementation/05-vm-automation-and-categories.md#poc-032-automation-and-categories-acceptance)
+
 ## Outside this backlog
 
-Email, notes, kanban, routines and webhooks, mobile apps, push notifications, rich transcript rendering, remote desktop tabs, multi-user accounts, granular permission editors, provider-native sub-agents, data purge, and key-recovery screens remain later product work. Keep their existing research. Do not add them to complete a POC task.
+The built-in email client, notes, kanban, routines and webhooks, mobile apps, push notifications, rich transcript rendering, remote desktop tabs, multi-user accounts, granular permission editors, provider-native sub-agents, data purge, and key-recovery screens remain later product work. Keep their existing research. Do not add them to complete a POC task.

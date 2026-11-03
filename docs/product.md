@@ -64,3 +64,13 @@ One thing I like about Grok Bot is that each bot has its own micro-VM. I can con
 else.bot should give each bot an isolated computer so its environment does not leak into another bot's environment. The initial setup should include Chromium, a desktop, and a terminal. We can add other tools as needs become clearer.
 
 Bot memory is described in [memory and storage](memory.md). Scheduled and event-driven work is described in [routines and webhooks](routines.md). The bot computer lifecycle is described in [sandbox research](sandboxes.md).
+
+## Next milestone after the assistant POC
+
+Bots should have Node.js/npm, Python/pip/venv, Rust/Cargo, and common build and shell tools in their own computers. They can write source files, run scripts or compiled programs, and inspect artifacts through managed guest jobs. An explicitly requested email batch is one example; it does not require a built-in email client.
+
+Bots should receive screenshots of the same desktop visible through VNC and use scoped mouse and keyboard operations to work in it. This includes visually browsing a site and finding information. Guest scripts should also connect to the existing Chromium CDP endpoint for structured browser work, with the debugger kept inside that bot's VM.
+
+The owner should be able to create flat sidebar categories, assign or move bots, rename groups, and remove a group without deleting its bots. Store category definitions and assignments in PostgreSQL. Grouping does not change permissions, roles, memories, or computers.
+
+[POC-025 through POC-032](implementation/05-vm-automation-and-categories.md) define the implementation and acceptance tasks.
