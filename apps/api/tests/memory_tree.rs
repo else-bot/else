@@ -167,13 +167,17 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        bot_id,
-        conversation,
-        turn,
-        vec![Tool::ReadMemory],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot_id,
+            conversation,
+            turn,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
     let call = |name: &'static str, args: Value| {
         let token = token.clone();
         let app = &app;
@@ -424,13 +428,17 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        bot_id,
-        conversation,
-        turn,
-        vec![Tool::ReadMemory],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot_id,
+            conversation,
+            turn,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
     let reply = app
         .call(
             "POST",

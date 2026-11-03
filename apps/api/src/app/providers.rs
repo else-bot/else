@@ -192,8 +192,8 @@ pub enum TurnOutcome {
 #[error("turn is no longer active")]
 pub struct Fenced;
 
-/// Durable progress reporting for one turn. Every method persists before
-/// returning, so a crash cannot lose a state the provider already acted on.
+/// Durable progress reporting for one turn. Lifecycle transitions persist
+/// before returning; assistant text is batched in a bounded buffer.
 /// Adapters must await each call to completion and never race it in a
 /// `select!` that could drop it midway.
 #[async_trait]
@@ -212,8 +212,9 @@ pub trait TurnSink: Send + Sync {
     async fn sending(&self) -> Result<(), Fenced>;
     /// The provider acknowledged the input.
     async fn running(&self) -> Result<(), Fenced>;
-    /// Append assistant text. It is buffered and persisted by the scheduler
-    /// within about 100 ms; this call performs no I/O.
+    /// Append assistant text through a bounded actor mailbox. Small chunks
+    /// are batched for about 100 ms; reaching the flush threshold waits for
+    /// persistence, applying backpressure to the provider.
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.

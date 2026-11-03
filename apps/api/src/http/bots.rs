@@ -139,9 +139,9 @@ async fn delete(
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Response, ApiError> {
     let deleted = bots::delete(&state.db, bot_id).await?;
-    state.scheduler.grants().revoke_bot(bot_id);
+    state.scheduler.grants().revoke_bot(bot_id).await;
     if let Some(turn_id) = deleted.interrupt {
-        state.scheduler.interrupt(turn_id);
+        state.scheduler.interrupt(turn_id).await;
     }
     let bot = deleted.bot;
     let status = match bot.status {

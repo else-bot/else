@@ -50,7 +50,7 @@ pub struct AppState {
     /// The installation's master key, for task secrets (POC-026).
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     /// Held while an update is prepared: the gate stays closed until exit.
-    pub update_hold: tokio::sync::Mutex<Option<crate::maintenance::Closed>>,
+    pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
 }
 
 impl AppState {
@@ -69,7 +69,7 @@ impl AppState {
             auth_failures: auth::FailureLimiter::default(),
             computers: None,
             secret_key: None,
-            update_hold: tokio::sync::Mutex::new(None),
+            update_hold: crate::actor::Actor::default(),
         }
     }
 
@@ -193,7 +193,7 @@ async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: 
 async fn fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let path = request.uri().path();
     if path == "/v1" || path.starts_with("/v1/") {
-        if let Err(response) = auth::authenticate(&state, request.headers()) {
+        if let Err(response) = auth::authenticate(&state, request.headers()).await {
             return response;
         }
     }

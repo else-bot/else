@@ -185,9 +185,61 @@ pub enum LiveCommand {
     Unsubscribe { bot: Uuid },
 }
 
+/// A capacity-one mailbox of desired subscriptions. Intermediate UI changes
+/// coalesce while the socket is busy or disconnected; the latest state wins.
+#[derive(Clone)]
+pub struct LiveCommands(tokio::sync::watch::Sender<HashMap<Uuid, String>>);
+
+impl LiveCommands {
+    pub fn send(
+        &self,
+        command: LiveCommand,
+    ) -> Result<(), tokio::sync::watch::error::SendError<LiveCommand>> {
+        if self.0.is_closed() {
+            return Err(tokio::sync::watch::error::SendError(command));
+        }
+        self.0.send_modify(|wanted| match command {
+            LiveCommand::Subscribe { bot, cursor } => {
+                wanted.insert(bot, cursor);
+            }
+            LiveCommand::Unsubscribe { bot } => {
+                wanted.remove(&bot);
+            }
+        });
+        Ok(())
+    }
+}
+
+fn subscriptions(
+    wanted: &mut HashMap<Uuid, String>,
+    applied: &mut HashMap<Uuid, String>,
+    desired: HashMap<Uuid, String>,
+) -> Vec<LiveCommand> {
+    let mut changes = Vec::new();
+    wanted.retain(|bot, _| {
+        if desired.contains_key(bot) {
+            true
+        } else {
+            changes.push(LiveCommand::Unsubscribe { bot: *bot });
+            false
+        }
+    });
+    for (bot, cursor) in &desired {
+        if applied.get(bot) != Some(cursor) || !wanted.contains_key(bot) {
+            wanted.insert(*bot, cursor.clone());
+            changes.push(LiveCommand::Subscribe {
+                bot: *bot,
+                cursor: cursor.clone(),
+            });
+        }
+    }
+    *applied = desired;
+    changes
+}
+
 /// Handles to the live connection; dropping `events` ends it.
 pub struct Live {
-    pub commands: tokio::sync::mpsc::UnboundedSender<LiveCommand>,
+    pub commands: LiveCommands,
     pub events: tokio::sync::mpsc::Receiver<LiveEvent>,
 }
 
@@ -526,14 +578,17 @@ impl Client {
     /// and any `bot:<id>` channels the UI subscribes to. It reconnects with
     /// backoff and resubscribes every channel from its last delivered cursor.
     pub fn live(self: Arc<Self>) -> Live {
-        let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (commands, command_rx) = tokio::sync::watch::channel(HashMap::new());
         // Bounded: a slow UI applies backpressure to the socket instead of
         // buffering an unbounded backlog in memory.
         let (event_tx, events) = tokio::sync::mpsc::channel(256);
         let this = self.clone();
         self.runtime
             .spawn(async move { this.run_live(command_rx, event_tx).await });
-        Live { commands, events }
+        Live {
+            commands: LiveCommands(commands),
+            events,
+        }
     }
 
     fn ws_request(&self) -> tokio_tungstenite::tungstenite::handshake::client::Request {
@@ -551,7 +606,7 @@ impl Client {
 
     async fn run_live(
         &self,
-        mut commands: tokio::sync::mpsc::UnboundedReceiver<LiveCommand>,
+        mut commands: tokio::sync::watch::Receiver<HashMap<Uuid, String>>,
         events: tokio::sync::mpsc::Sender<LiveEvent>,
     ) {
         use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -562,6 +617,7 @@ impl Client {
         const STABLE: Duration = Duration::from_secs(30);
         // Wanted `bot:<id>` channels and the cursor to resume from.
         let mut wanted: HashMap<Uuid, String> = HashMap::new();
+        let mut applied = HashMap::new();
         let mut backoff = Duration::from_millis(500);
         macro_rules! deliver {
             ($event:expr) => {
@@ -620,6 +676,11 @@ impl Client {
                         .into(),
                 )
             };
+            subscriptions(
+                &mut wanted,
+                &mut applied,
+                commands.borrow_and_update().clone(),
+            );
             let mut ok = socket.send(subscribe("bots".into(), None)).await.is_ok();
             for (bot, cursor) in &wanted {
                 ok = ok
@@ -637,25 +698,29 @@ impl Client {
                 }
                 tokio::select! {
                     _ = events.closed() => return,
-                    command = commands.recv() => {
-                        let Some(command) = command else { return };
-                        let message = match command {
-                            LiveCommand::Subscribe { bot, cursor } => {
-                                let message = subscribe(format!("bot:{bot}"), Some(&cursor));
-                                wanted.insert(bot, cursor);
-                                message
+                    changed = commands.changed() => {
+                        if changed.is_err() { return; }
+                        let desired = commands.borrow_and_update().clone();
+                        for command in subscriptions(&mut wanted, &mut applied, desired) {
+                            let message = match command {
+                                LiveCommand::Subscribe { bot, cursor } => {
+                                    let message = subscribe(format!("bot:{bot}"), Some(&cursor));
+                                    wanted.insert(bot, cursor);
+                                    message
+                                }
+                                LiveCommand::Unsubscribe { bot } => {
+                                    wanted.remove(&bot);
+                                    Message::Text(
+                                        json!({ "op": "unsubscribe", "channel": format!("bot:{bot}") })
+                                            .to_string()
+                                            .into(),
+                                    )
+                                }
+                            };
+                            if socket.send(message).await.is_err() {
+                                ok = false;
+                                break;
                             }
-                            LiveCommand::Unsubscribe { bot } => {
-                                wanted.remove(&bot);
-                                Message::Text(
-                                    json!({ "op": "unsubscribe", "channel": format!("bot:{bot}") })
-                                        .to_string()
-                                        .into(),
-                                )
-                            }
-                        };
-                        if socket.send(message).await.is_err() {
-                            break "The live connection failed.";
                         }
                     }
                     incoming = tokio::time::timeout(INACTIVITY, socket.next()) => {
@@ -785,6 +850,46 @@ mod tests {
     }
 
     #[test]
+    fn subscription_mailbox_coalesces_and_preserves_delivered_cursors() {
+        let (tx, mut rx) = tokio::sync::watch::channel(HashMap::new());
+        let commands = LiveCommands(tx);
+        let old = Uuid::new_v4();
+        let current = Uuid::new_v4();
+        commands
+            .send(LiveCommand::Subscribe {
+                bot: old,
+                cursor: "1".into(),
+            })
+            .unwrap();
+        commands
+            .send(LiveCommand::Unsubscribe { bot: old })
+            .unwrap();
+        commands
+            .send(LiveCommand::Subscribe {
+                bot: current,
+                cursor: "2".into(),
+            })
+            .unwrap();
+        let mut wanted = HashMap::new();
+        let mut applied = HashMap::new();
+        let changes = subscriptions(&mut wanted, &mut applied, rx.borrow_and_update().clone());
+        assert!(matches!(&changes[..], [LiveCommand::Subscribe { bot, .. }] if *bot == current));
+        assert!(!wanted.contains_key(&old));
+        wanted.insert(current, "3".into());
+        assert!(subscriptions(&mut wanted, &mut applied, rx.borrow().clone()).is_empty());
+        assert_eq!(
+            wanted[&current], "3",
+            "reconnect keeps the latest delivered cursor"
+        );
+        commands
+            .send(LiveCommand::Unsubscribe { bot: current })
+            .unwrap();
+        let changes = subscriptions(&mut wanted, &mut applied, rx.borrow_and_update().clone());
+        assert!(matches!(&changes[..], [LiveCommand::Unsubscribe { bot }] if *bot == current));
+        assert!(wanted.is_empty());
+    }
+
+    #[test]
     fn routing_tracks_cursors_and_maps_channel_errors() {
         let bot = Uuid::new_v4();
         let mut wanted = HashMap::from([(bot, "i:b:1".to_owned())]);
@@ -834,7 +939,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let bot = Uuid::new_v4();
-        let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (seen_tx, mut seen) = tokio::sync::mpsc::channel::<String>(16);
         tokio::spawn(async move {
             for round in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -847,7 +952,7 @@ mod tests {
                             .to_str()
                             .unwrap()
                             .to_owned();
-                        let _ = seen_tx.send(format!("auth {auth}"));
+                        let _ = seen_tx.try_send(format!("auth {auth}"));
                         Ok(response)
                     },
                 )
@@ -857,7 +962,7 @@ mod tests {
                 while let Ok(Some(Ok(Message::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(300), socket.next()).await
                 {
-                    let _ = seen_tx.send(text.to_string());
+                    let _ = seen_tx.send(text.to_string()).await;
                 }
                 if round == 0 {
                     let frame = json!({ "channel": format!("bot:{bot}"), "id": "i:b:7", "event": "turn.updated", "data": {} });

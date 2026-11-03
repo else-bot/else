@@ -238,13 +238,16 @@ async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.scheduler.grants().issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::Computer],
-        DEFAULT_TTL,
-    )
+    app.scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::Computer],
+            DEFAULT_TTL,
+        )
+        .await
 }
 
 async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value {
@@ -390,15 +393,18 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert_eq!(guest.files.lock().unwrap().len(), before);
 
     // A revoked grant gets no capture at all.
-    app.scheduler.grants().revoke_turn(
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM turns WHERE bot_id = $1 AND status = 'running' LIMIT 1",
+    app.scheduler
+        .grants()
+        .revoke_turn(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM turns WHERE bot_id = $1 AND status = 'running' LIMIT 1",
+            )
+            .bind(other.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap(),
         )
-        .bind(other.parse::<Uuid>().unwrap())
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap(),
-    );
+        .await;
     let revoked = app
         .call(
             "POST",

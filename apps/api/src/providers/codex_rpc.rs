@@ -11,14 +11,13 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::ChildStdin;
-use tokio::sync::{mpsc, oneshot};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use super::host::{Host, LaunchSpec, Supervised};
 
@@ -42,8 +41,23 @@ pub enum RpcError {
 }
 
 type Waiter = oneshot::Sender<Result<Value, (i64, String)>>;
-type Pending = Arc<Mutex<HashMap<i64, Waiter>>>;
-type Stdin = Arc<tokio::sync::Mutex<Option<ChildStdin>>>;
+const MAX_REQUESTS: usize = 64;
+struct Pending {
+    reply: Waiter,
+    _slot: OwnedSemaphorePermit,
+}
+enum Command {
+    Request {
+        id: i64,
+        message: Value,
+        reply: Waiter,
+        slot: OwnedSemaphorePermit,
+    },
+    Notify {
+        message: Value,
+        reply: oneshot::Sender<Result<(), RpcError>>,
+    },
+}
 
 /// A message from the server that is not a response to our request.
 #[derive(Debug, Clone)]
@@ -63,46 +77,25 @@ pub struct AppServer {
     /// The bot's project directory, for `cwd`.
     pub cwd: String,
     process: Supervised,
-    stdin: Stdin,
-    pending: Pending,
+    commands: mpsc::Sender<Command>,
+    slots: Arc<Semaphore>,
     next_id: AtomicI64,
     incoming: mpsc::Receiver<Incoming>,
 }
 
-/// Removes a pending entry however the request ends, including when the
-/// calling future is dropped.
-struct PendingGuard<'a> {
-    pending: &'a Pending,
-    id: i64,
-}
-
-impl Drop for PendingGuard<'_> {
-    fn drop(&mut self) {
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&self.id);
-    }
-}
-
-async fn write_line(stdin: &Stdin, message: &Value) -> Result<(), RpcError> {
+async fn write_line(
+    stdin: &mut (impl AsyncWrite + Unpin),
+    message: &Value,
+) -> Result<(), RpcError> {
     let mut line = message.to_string();
     line.push('\n');
-    let mut guard = stdin.lock().await;
-    let Some(pipe) = guard.as_mut() else {
-        return Err(RpcError::Closed);
-    };
-    let written = async {
-        pipe.write_all(line.as_bytes()).await?;
-        pipe.flush().await
-    }
-    .await;
-    if written.is_err() {
-        // A partial write leaves the stream unusable; close it.
-        *guard = None;
-        return Err(RpcError::Closed);
-    }
-    Ok(())
+    tokio::time::timeout(Duration::from_secs(10), async {
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await
+    })
+    .await
+    .map_err(|_| RpcError::Closed)?
+    .map_err(|_| RpcError::Closed)
 }
 
 impl AppServer {
@@ -116,16 +109,16 @@ impl AppServer {
             .stderr(Stdio::null());
         let mut process =
             Supervised::spawn(command).map_err(|err| RpcError::Spawn(err.to_string()))?;
-        let stdin: Stdin = Arc::new(tokio::sync::Mutex::new(process.child.stdin.take()));
+        let stdin = process.child.stdin.take().ok_or(RpcError::Closed)?;
         let stdout = process.child.stdout.take().ok_or(RpcError::Closed)?;
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
-        tokio::spawn(read_loop(stdout, pending.clone(), stdin.clone(), tx));
+        let (commands, command_rx) = mpsc::channel(MAX_REQUESTS);
+        tokio::spawn(io_loop(stdout, stdin, command_rx, tx));
         let server = Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
             process,
-            stdin,
-            pending,
+            commands,
+            slots: Arc::new(Semaphore::new(MAX_REQUESTS)),
             next_id: AtomicI64::new(1),
             incoming,
         };
@@ -148,22 +141,24 @@ impl AppServer {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, tx);
-        let _guard = PendingGuard {
-            pending: &self.pending,
-            id,
-        };
         let exchange = async {
-            write_line(
-                &self.stdin,
-                &json!({ "id": id, "method": method, "params": params }),
-            )
-            .await?;
+            let slot = self
+                .slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| RpcError::Closed)?;
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = oneshot::channel();
+            self.commands
+                .send(Command::Request {
+                    id,
+                    message: json!({ "id": id, "method": method, "params": params }),
+                    reply: tx,
+                    slot,
+                })
+                .await
+                .map_err(|_| RpcError::Closed)?;
             match rx.await {
                 Ok(Ok(result)) => Ok(result),
                 Ok(Err((code, message))) => Err(RpcError::Remote {
@@ -180,10 +175,17 @@ impl AppServer {
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), RpcError> {
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            write_line(&self.stdin, &json!({ "method": method, "params": params })),
-        )
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (tx, rx) = oneshot::channel();
+            self.commands
+                .send(Command::Notify {
+                    message: json!({ "method": method, "params": params }),
+                    reply: tx,
+                })
+                .await
+                .map_err(|_| RpcError::Closed)?;
+            rx.await.map_err(|_| RpcError::Closed)?
+        })
         .await
         .map_err(|_| RpcError::Timeout(method.to_owned()))?
     }
@@ -204,59 +206,64 @@ impl AppServer {
     }
 }
 
-async fn read_loop(
-    stdout: tokio::process::ChildStdout,
-    pending: Pending,
-    stdin: Stdin,
+// Only this actor owns stdin and the response registry. The reader has a
+// bounded mailbox too; neither cancelled calls nor a noisy provider can
+// grow the pending map or output backlog without limit.
+async fn io_loop(
+    stdout: impl AsyncRead + Unpin + Send + 'static,
+    mut stdin: impl AsyncWrite + Unpin,
+    mut commands: mpsc::Receiver<Command>,
     tx: mpsc::Sender<Incoming>,
 ) {
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
+    let (wire_tx, mut wire) = mpsc::channel(MAX_QUEUED);
+    let reader = tokio::spawn(read_loop(stdout, wire_tx));
+    let mut pending = HashMap::<i64, Pending>::new();
+    let mut cleanup = tokio::time::interval(Duration::from_millis(100));
     loop {
-        line.clear();
-        let read = (&mut reader)
-            .take(MAX_LINE + 1)
-            .read_until(b'\n', &mut line)
-            .await;
-        match read {
-            Ok(0) | Err(_) => break,
-            Ok(_) if line.len() as u64 > MAX_LINE => {
-                tracing::warn!("provider sent an oversized message; closing it");
-                break;
+        pending.retain(|_, waiter| !waiter.reply.is_closed());
+        let message = tokio::select! {
+            _ = tx.closed() => break,
+            _ = cleanup.tick() => continue,
+            command = commands.recv() => {
+                match command {
+                    None => break,
+                    Some(Command::Request { id, message, reply, slot }) => {
+                        if reply.is_closed() { continue; }
+                        pending.insert(id, Pending { reply, _slot: slot });
+                        if write_line(&mut stdin, &message).await.is_err() { break; }
+                    }
+                    Some(Command::Notify { message, reply }) => {
+                        if reply.is_closed() { continue; }
+                        let result = write_line(&mut stdin, &message).await;
+                        let failed = result.is_err();
+                        let _ = reply.send(result);
+                        if failed { break; }
+                    }
+                }
+                continue;
             }
-            Ok(_) => {}
-        }
-        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-            continue;
+            message = wire.recv() => match message { Some(message) => message, None => break },
         };
         let method = message.get("method").and_then(Value::as_str);
         let delivered = match (message.get("id"), method) {
             (Some(id), None) => {
-                if let Some(id) = id.as_i64() {
-                    let waiter = pending
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .remove(&id);
-                    if let Some(waiter) = waiter {
-                        let result = match message.get("error") {
-                            Some(error) => Err((
-                                error["code"].as_i64().unwrap_or_default(),
-                                error["message"].as_str().unwrap_or_default().to_owned(),
-                            )),
-                            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
-                        };
-                        let _ = waiter.send(result);
-                    }
+                if let Some(waiter) = id.as_i64().and_then(|id| pending.remove(&id)) {
+                    let result = match message.get("error") {
+                        Some(error) => Err((
+                            error["code"].as_i64().unwrap_or_default(),
+                            error["message"].as_str().unwrap_or_default().to_owned(),
+                        )),
+                        None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                    };
+                    let _ = waiter.reply.send(result);
                 }
                 true
             }
             (Some(id), Some(method)) => {
-                // Nothing the server can ask for is offered: refuse at once.
-                let refusal = json!({
-                    "id": id,
-                    "error": { "code": -32000, "message": "not available in else.bot" },
-                });
-                let _ = write_line(&stdin, &refusal).await;
+                let refusal = json!({ "id": id, "error": { "code": -32000, "message": "not available in else.bot" } });
+                if write_line(&mut stdin, &refusal).await.is_err() {
+                    break;
+                }
                 tx.try_send(Incoming::Refused {
                     method: method.to_owned(),
                 })
@@ -275,7 +282,122 @@ async fn read_loop(
             break;
         }
     }
-    // Closing fails every outstanding request with `Closed`.
-    pending.lock().unwrap_or_else(|p| p.into_inner()).clear();
-    *stdin.lock().await = None;
+    reader.abort();
+    // Dropping pending fails outstanding requests and releases their slots;
+    // dropping stdin closes any partially written stream.
+}
+
+async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader)
+            .take(MAX_LINE + 1)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) if line.len() as u64 > MAX_LINE => {
+                tracing::warn!("provider sent an oversized message; closing it");
+                break;
+            }
+            Ok(_) => {}
+        }
+        if let Ok(message) = serde_json::from_slice::<Value>(&line) {
+            if tx.try_send(message).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn actor_refuses_server_requests_while_waiting_for_a_response() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (input, output) = tokio::io::split(client);
+        let (commands, rx) = mpsc::channel(MAX_REQUESTS);
+        let (events, mut incoming) = mpsc::channel(MAX_QUEUED);
+        let actor = tokio::spawn(io_loop(input, output, rx, events));
+        let slots = Arc::new(Semaphore::new(1));
+        let (reply, response) = oneshot::channel();
+        commands
+            .send(Command::Request {
+                id: 1,
+                message: json!({"id": 1, "method": "test"}),
+                reply,
+                slot: slots.clone().acquire_owned().await.unwrap(),
+            })
+            .await
+            .unwrap_or_else(|_| panic!("actor running"));
+        let (read, mut write) = tokio::io::split(server);
+        let mut read = BufReader::new(read).lines();
+        let sent: Value = serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(sent["id"], 1);
+        write
+            .write_all(b"{\"id\":99,\"method\":\"approval\"}\n")
+            .await
+            .unwrap();
+        let refusal = tokio::time::timeout(Duration::from_secs(1), read.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&refusal).unwrap()["error"]["code"],
+            -32000
+        );
+        write
+            .write_all(b"{\"id\":1,\"result\":\"ok\"}\n")
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap().unwrap(), json!("ok"));
+        assert!(
+            matches!(incoming.recv().await, Some(Incoming::Refused { method }) if method == "approval")
+        );
+        assert_eq!(slots.available_permits(), 1);
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(1), actor)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_requests_release_in_flight_capacity_without_a_response() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (input, output) = tokio::io::split(client);
+        let (commands, rx) = mpsc::channel(MAX_REQUESTS);
+        let (events, _incoming) = mpsc::channel(MAX_QUEUED);
+        let actor = tokio::spawn(io_loop(input, output, rx, events));
+        let slots = Arc::new(Semaphore::new(1));
+        let (reply, response) = oneshot::channel();
+        commands
+            .send(Command::Request {
+                id: 1,
+                message: json!({"id": 1, "method": "never_answers"}),
+                reply,
+                slot: slots.clone().acquire_owned().await.unwrap(),
+            })
+            .await
+            .unwrap_or_else(|_| panic!("actor running"));
+        let mut read = BufReader::new(server).lines();
+        read.next_line().await.unwrap().unwrap();
+        assert!(
+            slots.try_acquire().is_err(),
+            "outstanding request holds capacity"
+        );
+        drop(response);
+        let permit = tokio::time::timeout(Duration::from_secs(1), slots.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        drop(commands);
+        actor.await.unwrap();
+    }
 }

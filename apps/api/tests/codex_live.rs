@@ -70,13 +70,17 @@ async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     // Listing tools needs only a valid grant; calls would also need a turn.
-    let grant = app.scheduler.grants().issue(
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        vec![else_api::grants::Tool::ReadMemory],
-        else_api::grants::DEFAULT_TTL,
-    );
+    let grant = app
+        .scheduler
+        .grants()
+        .issue(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            vec![else_api::grants::Tool::ReadMemory],
+            else_api::grants::DEFAULT_TTL,
+        )
+        .await;
     probe_native_tools(Some((
         format!("http://127.0.0.1:{port}/tools/v1/mcp"),
         grant,

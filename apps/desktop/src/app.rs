@@ -189,7 +189,7 @@ pub struct ElseApp {
     /// The last category operation's failure, shown in the sidebar.
     category_notice: Option<String>,
     sidebar_focus: FocusHandle,
-    live: Option<tokio::sync::mpsc::UnboundedSender<LiveCommand>>,
+    live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }

@@ -367,16 +367,20 @@ async fn task_grants_cannot_change_categories() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![
-            else_api::grants::Tool::Computer,
-            else_api::grants::Tool::Delegate,
-        ],
-        else_api::grants::DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![
+                else_api::grants::Tool::Computer,
+                else_api::grants::Tool::Delegate,
+            ],
+            else_api::grants::DEFAULT_TTL,
+        )
+        .await;
     for (method, path, body) in [
         (
             "POST",

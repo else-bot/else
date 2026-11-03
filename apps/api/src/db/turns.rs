@@ -5,8 +5,10 @@
 //! transactions; provider progress is persisted through [`PgSink`], whose
 //! writes are fenced on the turn still being active and the bot still active.
 
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::actor::Actor;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -493,65 +495,79 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     Ok(input)
 }
 
-/// State owned by whoever holds the flush lock.
+/// Assistant item tracked by the turn actor.
 struct Buffer {
     assistant_item: Option<Uuid>,
 }
 
 /// Persists one turn's progress. Writes succeed only while the turn is in
 /// an active status and its bot is active.
-pub struct PgSink {
+struct SinkState {
     pool: PgPool,
     turn_id: Uuid,
     bot_id: Uuid,
     conversation_id: Uuid,
     provider_id: String,
-    /// Held across each text write, serializing flushes and `finish`.
-    buffer: tokio::sync::Mutex<Buffer>,
-    /// Text not yet committed. Appended by `text()` without any I/O and
+    /// Only the actor touches text and serializes writes with `finish`.
+    buffer: Buffer,
+    /// Text not yet committed. Bounded by the flush threshold and
     /// drained only after the transaction that wrote it commits.
-    pending: Mutex<String>,
-    flush_wanted: tokio::sync::Notify,
-    fenced: Mutex<bool>,
+    pending: String,
+    flush_wanted: Arc<tokio::sync::Notify>,
+    fenced: bool,
     attempt: i32,
     /// Child outcomes this attempt's input carried.
     delivered: Vec<Uuid>,
 }
 
+pub struct PgSink {
+    state: Actor<SinkState>,
+    flush_wanted: Arc<tokio::sync::Notify>,
+}
+
 impl PgSink {
     pub fn new(pool: PgPool, input: &TurnInput, provider_id: &str) -> Self {
+        let flush_wanted = Arc::new(tokio::sync::Notify::new());
         Self {
-            pool,
-            turn_id: input.turn_id,
-            bot_id: input.bot_id,
-            conversation_id: input.conversation_id,
-            provider_id: provider_id.to_owned(),
-            buffer: tokio::sync::Mutex::new(Buffer {
-                assistant_item: None,
+            state: Actor::new(SinkState {
+                pool,
+                turn_id: input.turn_id,
+                bot_id: input.bot_id,
+                conversation_id: input.conversation_id,
+                provider_id: provider_id.to_owned(),
+                buffer: Buffer {
+                    assistant_item: None,
+                },
+                pending: String::new(),
+                flush_wanted: flush_wanted.clone(),
+                fenced: false,
+                attempt: input.attempt,
+                delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
             }),
-            pending: Mutex::new(String::new()),
-            flush_wanted: tokio::sync::Notify::new(),
-            fenced: Mutex::new(false),
-            attempt: input.attempt,
-            delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
+            flush_wanted,
         }
     }
 
-    fn pending(&self) -> std::sync::MutexGuard<'_, String> {
-        self.pending.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Resolves when enough text is buffered to flush before the interval.
     pub async fn flush_wanted(&self) {
         self.flush_wanted.notified().await;
     }
-
-    fn is_fenced(&self) -> bool {
-        *self.fenced.lock().unwrap_or_else(|p| p.into_inner())
+    pub async fn flush(&self) -> Result<(), Fenced> {
+        self.state.call_async(|state| Box::pin(state.flush())).await
     }
+    pub async fn finish(&self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
+        let outcome = outcome.clone();
+        self.state
+            .call_async(move |state| Box::pin(async move { state.finish(&outcome).await }))
+            .await
+    }
+}
 
-    fn fence(&self) -> Fenced {
-        *self.fenced.lock().unwrap_or_else(|p| p.into_inner()) = true;
+impl SinkState {
+    fn is_fenced(&self) -> bool {
+        self.fenced
+    }
+    fn fence(&mut self) -> Fenced {
+        self.fenced = true;
         Fenced
     }
 
@@ -583,7 +599,7 @@ impl PgSink {
         Ok(turn_ok.then_some(last_seq))
     }
 
-    async fn transition(&self, from: &str, to: &str) -> Result<(), Fenced> {
+    async fn transition(&mut self, from: &str, to: &str) -> Result<(), Fenced> {
         if self.is_fenced() {
             return Err(Fenced);
         }
@@ -692,13 +708,12 @@ impl PgSink {
     /// Persist buffered text. Called by the adapter path, a periodic timer,
     /// and before the terminal outcome. Buffered text is removed only after
     /// its transaction commits, so a rolled-back write keeps it for the next
-    /// attempt. Not cancellation safe: callers must await it to completion.
-    pub async fn flush(&self) -> Result<(), Fenced> {
-        let mut buffer = self.buffer.lock().await;
+    /// attempt. The actor completes accepted writes even when the caller is cancelled.
+    pub async fn flush(&mut self) -> Result<(), Fenced> {
         if self.is_fenced() {
             return Err(Fenced);
         }
-        let chunk = self.pending().clone();
+        let chunk = self.pending.clone();
         if chunk.is_empty() {
             return Ok(());
         }
@@ -713,7 +728,7 @@ impl PgSink {
                 return Ok(None);
             };
             let item = self
-                .write_text(&mut tx, buffer.assistant_item, last_seq, &chunk)
+                .write_text(&mut tx, self.buffer.assistant_item, last_seq, &chunk)
                 .await?;
             tx.commit().await?;
             Ok(Some(item))
@@ -721,9 +736,8 @@ impl PgSink {
         .await;
         match result {
             Ok(Some(item_id)) => {
-                buffer.assistant_item = Some(item_id);
-                // Text appended during the write stays for the next flush.
-                self.pending().drain(..chunk.len());
+                self.buffer.assistant_item = Some(item_id);
+                self.pending.drain(..chunk.len());
                 Ok(())
             }
             Ok(None) => Err(self.fence()),
@@ -740,7 +754,7 @@ impl PgSink {
     /// The turn status is internal state and is recorded even if the bot was
     /// deleted; visible history is not appended in that case. On error
     /// nothing is lost and the call can be retried.
-    pub async fn finish(&self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
+    pub async fn finish(&mut self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
         let (status, code, message, uncertain) = match outcome {
             TurnOutcome::Completed => ("completed", None, None, false),
             TurnOutcome::Interrupted => ("interrupted", None, None, false),
@@ -754,14 +768,13 @@ impl PgSink {
                 true,
             ),
         };
-        let mut buffer = self.buffer.lock().await;
-        let chunk = self.pending().clone();
+        let chunk = self.pending.clone();
         let mut tx = self.pool.begin().await?;
         let mut wrote_item = None;
         if !chunk.is_empty() && !self.is_fenced() {
             if let Some(last_seq) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
                 wrote_item = Some(
-                    self.write_text(&mut tx, buffer.assistant_item, last_seq, &chunk)
+                    self.write_text(&mut tx, self.buffer.assistant_item, last_seq, &chunk)
                         .await?,
                 );
             }
@@ -842,17 +855,16 @@ impl PgSink {
         crate::db::stop::settle(&mut tx, self.bot_id).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
-            buffer.assistant_item = Some(item_id);
+            self.buffer.assistant_item = Some(item_id);
         }
-        self.pending().drain(..chunk.len());
+        self.pending.drain(..chunk.len());
         Ok(())
     }
 }
 
-#[async_trait]
-impl TurnSink for PgSink {
+impl SinkState {
     async fn packet(
-        &self,
+        &mut self,
         selection: &crate::app::providers::Selection,
         payload: &str,
     ) -> Result<(), Fenced> {
@@ -873,7 +885,7 @@ impl TurnSink for PgSink {
         Ok(())
     }
 
-    async fn retire_session(&self) {
+    async fn retire_session(&mut self) {
         if let Err(err) = sqlx::query(
             "UPDATE provider_sessions SET status = 'retired', updated_at = now()
              WHERE id = (SELECT provider_session_id FROM turns WHERE id = $1)
@@ -887,11 +899,11 @@ impl TurnSink for PgSink {
         }
     }
 
-    async fn sending(&self) -> Result<(), Fenced> {
+    async fn sending(&mut self) -> Result<(), Fenced> {
         self.transition("preparing", "sending").await
     }
 
-    async fn running(&self) -> Result<(), Fenced> {
+    async fn running(&mut self) -> Result<(), Fenced> {
         // A stop may already have moved the turn to `cancelling`; the turn
         // was still accepted and must be drained, so that is not a fence.
         match self.transition("sending", "running").await {
@@ -926,7 +938,7 @@ impl TurnSink for PgSink {
                 .fetch_one(&self.pool)
                 .await;
                 if matches!(cancelling, Ok(true)) {
-                    *self.fenced.lock().unwrap_or_else(|p| p.into_inner()) = false;
+                    self.fenced = false;
                     // Accepted all the same.
                     let accepted = async {
                         let mut conn = self.pool.acquire().await?;
@@ -951,7 +963,7 @@ impl TurnSink for PgSink {
         }
     }
 
-    async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
+    async fn session(&mut self, state: &SessionState) -> Result<(), Fenced> {
         if self.is_fenced() {
             return Err(Fenced);
         }
@@ -1036,7 +1048,7 @@ impl TurnSink for PgSink {
     }
 
     async fn reported(
-        &self,
+        &mut self,
         settings: &serde_json::Value,
         native_turn_id: &str,
     ) -> Result<(), Fenced> {
@@ -1057,16 +1069,95 @@ impl TurnSink for PgSink {
         Ok(())
     }
 
-    async fn text(&self, chunk: &str) -> Result<(), Fenced> {
+    async fn text(&mut self, chunk: &str) -> Result<(), Fenced> {
         if self.is_fenced() {
             return Err(Fenced);
         }
-        // Buffer only. Database writes belong to the scheduler's flusher, so
-        // abandoning an adapter future can never interrupt a commit.
-        let mut pending = self.pending();
-        pending.push_str(chunk);
-        if pending.len() >= FLUSH_BYTES {
+        // The actor completes commits even if the adapter future is dropped.
+        // Flush at the threshold to apply backpressure to a fast provider.
+        // A failed previous write must drain before any more text is admitted.
+        if self.pending.len() >= FLUSH_BYTES {
+            self.flush().await?;
+            if self.pending.len() >= FLUSH_BYTES {
+                return Err(Fenced);
+            }
+        }
+        self.pending.push_str(chunk);
+        if self.pending.len() >= FLUSH_BYTES {
             self.flush_wanted.notify_one();
+            self.flush().await?;
+            if self.pending.len() >= FLUSH_BYTES {
+                // Stop accepting output after a failed flush. Keep the
+                // buffer unfenced so finish can retry its final transaction.
+                return Err(Fenced);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TurnSink for PgSink {
+    async fn packet(
+        &self,
+        selection: &crate::app::providers::Selection,
+        payload: &str,
+    ) -> Result<(), Fenced> {
+        let selection = selection.clone();
+        let payload = payload.to_owned();
+        self.state
+            .call_async(move |state| {
+                Box::pin(async move { state.packet(&selection, &payload).await })
+            })
+            .await
+    }
+    async fn retire_session(&self) {
+        self.state
+            .call_async(|state| Box::pin(state.retire_session()))
+            .await;
+    }
+    async fn sending(&self) -> Result<(), Fenced> {
+        self.state
+            .call_async(|state| Box::pin(state.sending()))
+            .await
+    }
+    async fn running(&self) -> Result<(), Fenced> {
+        self.state
+            .call_async(|state| Box::pin(state.running()))
+            .await
+    }
+    async fn session(&self, session: &SessionState) -> Result<(), Fenced> {
+        let session = session.clone();
+        self.state
+            .call_async(move |state| Box::pin(async move { state.session(&session).await }))
+            .await
+    }
+    async fn reported(
+        &self,
+        settings: &serde_json::Value,
+        native_turn_id: &str,
+    ) -> Result<(), Fenced> {
+        let settings = settings.clone();
+        let native_turn_id = native_turn_id.to_owned();
+        self.state
+            .call_async(move |state| {
+                Box::pin(async move { state.reported(&settings, &native_turn_id).await })
+            })
+            .await
+    }
+    async fn text(&self, chunk: &str) -> Result<(), Fenced> {
+        // Bound the bytes in each mailbox entry as well as the number of entries.
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            let mut end = remaining.len().min(FLUSH_BYTES);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            let chunk = remaining[..end].to_owned();
+            self.state
+                .call_async(move |state| Box::pin(async move { state.text(&chunk).await }))
+                .await?;
+            remaining = &remaining[end..];
         }
         Ok(())
     }

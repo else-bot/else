@@ -700,3 +700,25 @@ async fn retry_succeeds_after_provider_removed_and_patch_needs_adapter() {
     let get = app.owner("GET", "/v1/settings/providers/codex", None).await;
     assert_eq!(get.body["profile"]["reasoning_effort"], "medium");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_turn_actor_preserves_utf8_across_repeated_flushes() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let message = "é🙂終".repeat(900);
+    let sent = app
+        .send(&bot, Uuid::new_v4(), &message, Some("synthetic"))
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    assert_eq!(
+        app.wait_turn(turn, &["completed", "failed", "interrupted"])
+            .await,
+        "completed"
+    );
+    let history = items(&app, &bot).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[1].2,
+        format!("Synthetic reply ✓ from Assistant (turn 1): {message}")
+    );
+}

@@ -53,10 +53,10 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
     .fetch_optional(&state.db)
     .await?;
     if live != Some(true) {
-        state.scheduler.grants().revoke_turn(grant.turn_id);
+        state.scheduler.grants().revoke_turn(grant.turn_id).await;
         return Err(revoked());
     }
-    if state.scheduler.grants().is_parked(grant.turn_id) {
+    if state.scheduler.grants().is_parked(grant.turn_id).await {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "attempt_parked",

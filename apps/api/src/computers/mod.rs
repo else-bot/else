@@ -26,6 +26,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::actor::Actor;
 
 use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
@@ -233,18 +236,18 @@ pub struct ComputerManager {
     runtime: Arc<dyn ComputerRuntime>,
     config: ComputerConfig,
     /// One runtime operation at a time per bot.
-    ops: std::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    ops: Actor<HashMap<Uuid, std::sync::Weak<Semaphore>>>,
     /// The startup inspection succeeded; until then nothing is used.
     inspected: AtomicBool,
     /// Foreground commands while they run (POC-026), so Stop work can end
     /// them.
-    foreground: std::sync::Mutex<HashMap<Uuid, jobs::Foreground>>,
+    foreground: Actor<HashMap<Uuid, jobs::Foreground>>,
     /// Foreground commands being killed now (each kill once at a time).
-    killing: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    killing: Actor<std::collections::HashSet<Uuid>>,
     /// The master key, to decrypt a job's task secrets for redaction.
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     /// Input batches per turn (POC-029), to bound unattended iterations.
-    input_batches: std::sync::Mutex<HashMap<Uuid, u32>>,
+    input_batches: Actor<HashMap<Uuid, u32>>,
 }
 
 impl ComputerManager {
@@ -253,24 +256,27 @@ impl ComputerManager {
             pool,
             runtime,
             config,
-            ops: std::sync::Mutex::new(HashMap::new()),
+            ops: Actor::default(),
             inspected: AtomicBool::new(false),
-            foreground: std::sync::Mutex::new(HashMap::new()),
-            killing: std::sync::Mutex::new(std::collections::HashSet::new()),
+            foreground: Actor::default(),
+            killing: Actor::default(),
             secret_key: None,
-            input_batches: std::sync::Mutex::new(HashMap::new()),
+            input_batches: Actor::default(),
         }
     }
 
     /// Count one input batch for a turn; returns the count including it.
-    pub fn count_input(&self, turn_id: Uuid) -> u32 {
-        let mut batches = self.input_batches.lock().unwrap_or_else(|p| p.into_inner());
-        if batches.len() > 10_000 {
-            batches.clear();
-        }
-        let n = batches.entry(turn_id).or_insert(0);
-        *n += 1;
-        *n
+    pub async fn count_input(&self, turn_id: Uuid) -> u32 {
+        self.input_batches
+            .call(move |batches| {
+                if batches.len() > 10_000 {
+                    batches.clear();
+                }
+                let n = batches.entry(turn_id).or_insert(0);
+                *n += 1;
+                *n
+            })
+            .await
     }
 
     pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {
@@ -297,15 +303,23 @@ impl ComputerManager {
         format!("elsebot-{bot_id}")
     }
 
-    async fn op(&self, bot_id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = self
+    async fn op(&self, bot_id: Uuid) -> OwnedSemaphorePermit {
+        let semaphore = self
             .ops
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entry(bot_id)
-            .or_default()
-            .clone();
-        lock.lock_owned().await
+            .call(move |ops| {
+                ops.retain(|_, weak| weak.strong_count() > 0);
+                if let Some(semaphore) = ops.get(&bot_id).and_then(std::sync::Weak::upgrade) {
+                    return semaphore;
+                }
+                let semaphore = Arc::new(Semaphore::new(1));
+                ops.insert(bot_id, Arc::downgrade(&semaphore));
+                semaphore
+            })
+            .await;
+        semaphore
+            .acquire_owned()
+            .await
+            .expect("computer operation semaphore stays open")
     }
 
     async fn row(conn: &mut PgConnection, bot_id: Uuid) -> Result<Option<Row>, sqlx::Error> {
@@ -1056,7 +1070,7 @@ impl ComputerManager {
     pub(crate) async fn checked(
         &self,
         lease_id: Uuid,
-    ) -> Result<(Uuid, String, tokio::sync::OwnedMutexGuard<()>), ComputerError> {
+    ) -> Result<(Uuid, String, OwnedSemaphorePermit), ComputerError> {
         let bot: Option<Uuid> =
             sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = $1")
                 .bind(lease_id)

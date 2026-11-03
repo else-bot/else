@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{TestApp, TestDb};
@@ -44,8 +44,8 @@ async fn say(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, Str
     (turn.parse().unwrap(), status)
 }
 
-fn last(packets: &Arc<Mutex<Vec<String>>>) -> String {
-    packets.lock().unwrap().last().cloned().unwrap_or_default()
+fn last(packets: &[String]) -> String {
+    packets.last().cloned().unwrap_or_default()
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -86,7 +86,7 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         "same provider, no handoff"
     );
     assert_eq!(
-        last(&a.packets()),
+        last(&a.packets().await),
         "Second message on A.",
         "a resumed session gets no history"
     );
@@ -94,7 +94,7 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     // Switch to B: a checkpoint from A plus the history B never saw.
     let (t3, status) = say(&app, &bot, B, "Third, on B: what is the code word?").await;
     assert_eq!(status, "completed");
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(packet.contains("[else.bot handoff]"), "{packet}");
     assert!(packet.contains("Synthetic checkpoint from synthetic covering 4 recorded messages."));
     assert!(packet.contains("[turn 1] Owner: Owner fact: the code word is PURPLE-7."));
@@ -123,13 +123,13 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     // B again: its session has seen everything.
     let (t4, _) = say(&app, &bot, B, "Fourth, still B.").await;
     assert!(handoff(&app, t4).await.is_none());
-    assert_eq!(last(&b.packets()), "Fourth, still B.");
+    assert_eq!(last(&b.packets().await), "Fourth, still B.");
 
     // Back to A: only what A's session missed (turns 3 and 4).
-    let a_before = a.packets().lock().unwrap().len();
+    let a_before = a.packets().await.len();
     let (t5, _) = say(&app, &bot, A, "Fifth, back on A.").await;
-    assert_eq!(a.packets().lock().unwrap().len(), a_before + 1);
-    let packet = last(&a.packets());
+    assert_eq!(a.packets().await.len(), a_before + 1);
+    let packet = last(&a.packets().await);
     assert!(
         packet.contains("Synthetic checkpoint from synthetic-b"),
         "{packet}"
@@ -162,14 +162,14 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     let bot = app.create_bot("Planner", "plans trips").await;
     say(&app, &bot, A, "Remember BLUE-3.").await;
     // The outgoing provider cannot produce a verified checkpoint.
-    a.fail_checkpoints(Some("cannot prove a no-tool run"));
+    a.fail_checkpoints(Some("cannot prove a no-tool run")).await;
     let (t2, status) = say(&app, &bot, B, "On B now.").await;
     assert_eq!(status, "completed");
     let h = handoff(&app, t2).await.unwrap();
     assert_eq!(h.kind, "fallback");
     assert_eq!(h.reason.as_deref(), Some("cannot prove a no-tool run"));
     assert!(h.checkpoint.is_none());
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(
         packet.contains("Task checkpoint: unavailable (cannot prove a no-tool run)"),
         "{packet}"
@@ -192,7 +192,7 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     assert!(h.reason.unwrap().contains("not configured"));
     // A new process has no session state in memory, but B's recorded
     // session is resumed: it gets only turn 3 (A's) and not 1 and 2 again.
-    let packet = last(&b2.packets());
+    let packet = last(&b2.packets().await);
     assert!(
         packet.contains("[turn 3] Owner: Back to A once."),
         "{packet}"
@@ -215,10 +215,10 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
-    b.forget_sessions(&natives);
+    b.forget_sessions(&natives).await;
     let (t3, status) = say(&app, &bot, B, "B again after losing its session.").await;
     assert_eq!(status, "completed");
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(
         packet.contains("[turn 1] Owner: First on B."),
         "rebuilt from the start: {packet}"
@@ -281,7 +281,7 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     // and only the owner's new message is the request.
     let (t4, status) = say(&app, &bot, B, "What happened so far?").await;
     assert_eq!(status, "completed");
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(
         packet.contains("[turn 2, interrupted] Owner: Long work [synthetic:hang]"),
         "{packet}"
@@ -297,10 +297,10 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
         vec![1, 2, 3]
     );
     // A's session that may hold the uncertain delivery is not resumed.
-    let a_before = a.packets().lock().unwrap().len();
+    let a_before = a.packets().await.len();
     say(&app, &bot, A, "And on A?").await;
-    assert_eq!(a.packets().lock().unwrap().len(), a_before + 1);
-    let packet = last(&a.packets());
+    assert_eq!(a.packets().await.len(), a_before + 1);
+    let packet = last(&a.packets().await);
     assert!(
         packet.contains("[turn 1] Owner: Plain first turn."),
         "a fresh session: {packet}"
@@ -308,8 +308,7 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     // Its earlier sessions were each sent the uncertain message once only.
     let sends = a
         .packets()
-        .lock()
-        .unwrap()
+        .await
         .iter()
         .filter(|p| p.ends_with("Pay the invoice [synthetic:stall-send]"))
         .count();
@@ -339,7 +338,7 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     // message is history, never resent as the request.
     let (_, status) = say(&app, &bot, B, "Next on B.").await;
     assert_eq!(status, "completed");
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(packet.contains("[turn 1] Owner: On A."), "{packet}");
     assert!(packet.contains("[turn 2, uncertain] Owner: On B [synthetic:stall-send]"));
     assert!(packet.ends_with("Next on B."));
@@ -448,7 +447,7 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     let (_, status) = say(&app, &bot, B, "Switching to B.").await;
     assert_eq!(status, "completed");
     assert_eq!(app.wait_turn(&hung, &["interrupted"]).await, "interrupted");
-    let packet = last(&b.packets());
+    let packet = last(&b.packets().await);
     assert!(
         packet.contains("[turn 1, interrupted] Owner: Working [synthetic:hang]"),
         "{packet}"

@@ -344,13 +344,17 @@ async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadMemory],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
     (turn, token)
 }
 
@@ -596,13 +600,15 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .await
         .unwrap();
     let grants = app.scheduler.grants();
-    let token = grants.issue(
-        me.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadMemory],
-        DEFAULT_TTL,
-    );
+    let token = grants
+        .issue(
+            me.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
 
     let init = rpc(
         &app,
@@ -734,13 +740,15 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     assert_eq!(owner_read.status, StatusCode::GONE);
 
     // A grant without the memory tool, the owner token, and a forged grant are refused.
-    let history_only = grants.issue(
-        me.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadHistory],
-        DEFAULT_TTL,
-    );
+    let history_only = grants
+        .issue(
+            me.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await;
     let refused = rpc(
         &app,
         &history_only,

@@ -34,44 +34,52 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let mut hold = state.update_hold.lock().await;
-    if hold.is_none() {
-        let closed = match state.scheduler.gate().close(ADMITTED_GRACE).await {
-            Ok(Some(closed)) => closed,
-            Ok(None) => {
-                return Err(busy("A backup is running; update once it has finished."));
-            }
-            Err(admitted) => {
-                return Err(busy(format!(
-                    "{admitted} requests or steps were still running after {} s.",
-                    ADMITTED_GRACE.as_secs()
-                )));
-            }
-        };
-        // Admission has stopped: what runs now can only finish, not start.
-        let work = work(&state).await?;
-        if work.turns > 0 || work.commands > 0 {
-            drop(closed);
-            return Err(busy(format!(
-                "Bots are working ({} active turns, {} running commands); \
+    let owner = state.clone();
+    state
+        .update_hold
+        .call_async(move |hold| {
+            Box::pin(async move {
+                let state = owner;
+                if hold.is_none() {
+                    let closed = match state.scheduler.gate().close(ADMITTED_GRACE).await {
+                        Ok(Some(closed)) => closed,
+                        Ok(None) => {
+                            return Err(busy("A backup is running; update once it has finished."));
+                        }
+                        Err(admitted) => {
+                            return Err(busy(format!(
+                                "{admitted} requests or steps were still running after {} s.",
+                                ADMITTED_GRACE.as_secs()
+                            )));
+                        }
+                    };
+                    // Admission has stopped: what runs now can only finish, not start.
+                    let work = work(&state).await?;
+                    if work.turns > 0 || work.commands > 0 {
+                        drop(closed);
+                        return Err(busy(format!(
+                            "Bots are working ({} active turns, {} running commands); \
                  nothing was changed. Update once they have finished.",
-                work.turns, work.commands
-            )));
-        }
-        *hold = Some(closed);
-        tracing::info!("prepared for an update; new work is refused until exit");
-    }
-    let work = work(&state).await?;
-    Ok(Json(json!({
-        "ready": true,
-        "version": crate::VERSION,
-        "queued_turns": work.queued,
-        "background_jobs": work.jobs,
-    })))
+                            work.turns, work.commands
+                        )));
+                    }
+                    *hold = Some(closed);
+                    tracing::info!("prepared for an update; new work is refused until exit");
+                }
+                let work = work(&state).await?;
+                Ok(Json(json!({
+                    "ready": true,
+                    "version": crate::VERSION,
+                    "queued_turns": work.queued,
+                    "background_jobs": work.jobs,
+                })))
+            })
+        })
+        .await
 }
 
 async fn reopen(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let reopened = state.update_hold.lock().await.take().is_some();
+    let reopened = state.update_hold.call(|hold| hold.take().is_some()).await;
     if reopened {
         tracing::info!("update abandoned; accepting work again");
     }
@@ -106,7 +114,7 @@ async fn work(state: &AppState) -> Result<Work, ApiError> {
     .await
     .map_err(|_| unavailable())?;
     // A turn this process still runs counts even before its row says so.
-    let turns = turns.max(state.scheduler.running_count() as i64);
+    let turns = turns.max(state.scheduler.running_count().await as i64);
     Ok(Work {
         turns,
         commands,

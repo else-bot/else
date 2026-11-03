@@ -3,11 +3,14 @@
 //! outcomes. Handlers only write requests and call [`Scheduler::wake`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::actor::Actor;
+
 use sqlx::PgPool;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
@@ -28,39 +31,31 @@ pub struct Scheduler {
     registry: Registry,
     wake: Notify,
     /// Cancellation handles of turns running in this process, by turn ID.
-    running: Mutex<HashMap<Uuid, CancellationToken>>,
-    max_active: usize,
+    running: Actor<HashMap<Uuid, CancellationToken>>,
     cancel_grace: Duration,
     tasks: TaskTracker,
     grants: Arc<Grants>,
     /// Provider slots in use: turns (reserved before their claim) and
     /// memory summaries share one count, so together they never exceed
     /// `max_active`.
-    slots: Mutex<Slots>,
+    slots: Arc<Semaphore>,
+    summaries: AtomicUsize,
     /// Closed while a coordinated backup runs: no turn is claimed.
     gate: Arc<crate::maintenance::Gate>,
-}
-
-#[derive(Default)]
-struct Slots {
-    used: usize,
-    summaries: usize,
 }
 
 /// A provider slot held by one memory summary. Released on drop.
 pub struct SummaryPermit {
     scheduler: Arc<Scheduler>,
+    slot: Option<OwnedSemaphorePermit>,
     /// A summary is admitted work: a backup waits for it.
     _admission: crate::maintenance::Admission,
 }
 
 impl Drop for SummaryPermit {
     fn drop(&mut self) {
-        {
-            let mut slots = self.scheduler.slots();
-            slots.used -= 1;
-            slots.summaries -= 1;
-        }
+        self.scheduler.summaries.fetch_sub(1, Ordering::AcqRel);
+        drop(self.slot.take());
         self.scheduler.wake();
     }
 }
@@ -83,19 +78,19 @@ impl Scheduler {
             pool,
             registry,
             wake: Notify::new(),
-            running: Mutex::new(HashMap::new()),
-            max_active,
+            running: Actor::default(),
             cancel_grace,
             grants: Arc::new(Grants::default()),
             tasks: TaskTracker::new(),
-            slots: Mutex::new(Slots::default()),
+            slots: Arc::new(Semaphore::new(max_active)),
+            summaries: AtomicUsize::new(0),
             gate: Arc::default(),
         })
     }
 
     /// Turns this process is running now.
-    pub fn running_count(&self) -> usize {
-        self.running().len()
+    pub async fn running_count(&self) -> usize {
+        self.running.call(|running| running.len()).await
     }
 
     /// The maintenance gate shared with the HTTP layer.
@@ -108,7 +103,7 @@ impl Scheduler {
     pub async fn drain(&self, timeout: Duration) -> Result<bool, sqlx::Error> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let local = self.running().is_empty();
+            let local = self.running.call(|running| running.is_empty()).await;
             let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
                 crate::db::turns::ACTIVE_STATUSES
@@ -139,34 +134,17 @@ impl Scheduler {
     /// and at most `limit` run at once.
     pub fn try_begin_summary(self: &Arc<Self>, limit: usize) -> Option<SummaryPermit> {
         let admission = self.gate.enter()?;
-        let mut slots = self.slots();
-        if slots.summaries >= limit || slots.used >= self.max_active {
-            return None;
-        }
-        slots.used += 1;
-        slots.summaries += 1;
+        let slot = self.slots.clone().try_acquire_owned().ok()?;
+        self.summaries
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .ok()?;
         Some(SummaryPermit {
             scheduler: self.clone(),
+            slot: Some(slot),
             _admission: admission,
         })
-    }
-
-    fn slots(&self) -> std::sync::MutexGuard<'_, Slots> {
-        self.slots.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Reserve a slot for a turn before claiming it from the database.
-    fn reserve_turn(&self) -> bool {
-        let mut slots = self.slots();
-        if slots.used >= self.max_active {
-            return false;
-        }
-        slots.used += 1;
-        true
-    }
-
-    fn release_turn(&self) {
-        self.slots().used -= 1;
     }
 
     /// Hint that new work may be eligible. Rows remain authoritative.
@@ -174,23 +152,23 @@ impl Scheduler {
         self.wake.notify_one();
     }
 
-    fn running(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, CancellationToken>> {
-        self.running.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     /// Request interruption of a turn running in this process.
-    pub fn interrupt(&self, turn_id: Uuid) -> bool {
-        match self.running().get(&turn_id) {
-            Some(token) => {
-                token.cancel();
-                true
-            }
-            None => false,
-        }
+    pub async fn interrupt(&self, turn_id: Uuid) -> bool {
+        self.running
+            .call(move |running| match running.get(&turn_id) {
+                Some(token) => {
+                    token.cancel();
+                    true
+                }
+                None => false,
+            })
+            .await
     }
 
-    pub fn is_running(&self, turn_id: Uuid) -> bool {
-        self.running().contains_key(&turn_id)
+    pub async fn is_running(&self, turn_id: Uuid) -> bool {
+        self.running
+            .call(move |running| running.contains_key(&turn_id))
+            .await
     }
 
     /// Run until `shutdown` fires, then interrupt running turns and wait up
@@ -206,9 +184,13 @@ impl Scheduler {
                 _ = tokio::time::sleep(SCAN_INTERVAL) => {}
             }
         }
-        for token in self.running().values() {
-            token.cancel();
-        }
+        self.running
+            .call(|running| {
+                for token in running.values() {
+                    token.cancel();
+                }
+            })
+            .await;
         self.tasks.close();
         if tokio::time::timeout(grace, self.tasks.wait())
             .await
@@ -222,11 +204,14 @@ impl Scheduler {
         // Redeliver interruption: a stop or deletion committed even if its
         // request never reached `interrupt` (for example, a lost response).
         for turn_id in turns::cancelling(&self.pool).await? {
-            self.interrupt(turn_id);
+            self.interrupt(turn_id).await;
         }
         // Claims below insert into `running` before the next scan, so every
         // turn missing from it here has no provider task.
-        let live: Vec<Uuid> = self.running().keys().copied().collect();
+        let live: Vec<Uuid> = self
+            .running
+            .call(|running| running.keys().copied().collect())
+            .await;
         let orphaned = turns::settle_orphans(&self.pool, &live).await?;
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
@@ -239,33 +224,41 @@ impl Scheduler {
             let Some(_admission) = self.gate.enter() else {
                 break;
             };
-            if !self.reserve_turn() {
+            let Ok(slot) = self.slots.clone().try_acquire_owned() else {
                 break;
-            }
+            };
             let claimed = turns::claim_next(&self.pool, &[]).await;
             let turn_id = match claimed {
                 Ok(Some(turn_id)) => turn_id,
                 Ok(None) => {
-                    self.release_turn();
                     break;
                 }
                 Err(err) => {
-                    self.release_turn();
                     return Err(err);
                 }
             };
             // Start each claim before the next query, so an error in a later
             // claim cannot strand this one.
             let token = CancellationToken::new();
-            self.running().insert(turn_id, token.clone());
             let this = self.clone();
-            self.tasks.spawn(async move {
-                this.execute(turn_id, token).await;
-                this.grants.revoke_turn(turn_id);
-                this.running().remove(&turn_id);
-                this.release_turn();
-                this.wake();
-            });
+            // Registration and task creation are one accepted operation.
+            // Cancelling the dispatcher cannot leave a registered turn
+            // without its provider task (or release its slot too early).
+            self.running
+                .call(move |running| {
+                    running.insert(turn_id, token.clone());
+                    let tasks = this.tasks.clone();
+                    tasks.spawn(async move {
+                        this.execute(turn_id, token).await;
+                        this.grants.revoke_turn(turn_id).await;
+                        this.running
+                            .call(move |running| running.remove(&turn_id))
+                            .await;
+                        drop(slot);
+                        this.wake();
+                    });
+                })
+                .await;
         }
         Ok(())
     }
@@ -319,23 +312,27 @@ impl Scheduler {
             _ => None,
         };
         // Tools for this turn only; revoked when it ends (see dispatch).
-        input.tool_grant = Some(self.grants.issue_scoped(
-            input.bot_id,
-            input.conversation_id,
-            turn_id,
-            if input.delegation.can_delegate {
-                vec![
-                    Tool::ReadHistory,
-                    Tool::ReadMemory,
-                    Tool::Computer,
-                    Tool::Delegate,
-                ]
-            } else {
-                vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]
-            },
-            memory_scope,
-            TOOL_GRANT_TTL,
-        ));
+        input.tool_grant = Some(
+            self.grants
+                .issue_scoped(
+                    input.bot_id,
+                    input.conversation_id,
+                    turn_id,
+                    if input.delegation.can_delegate {
+                        vec![
+                            Tool::ReadHistory,
+                            Tool::ReadMemory,
+                            Tool::Computer,
+                            Tool::Delegate,
+                        ]
+                    } else {
+                        vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]
+                    },
+                    memory_scope,
+                    TOOL_GRANT_TTL,
+                )
+                .await,
+        );
         // A provider switch: freeze settled history and prepare the
         // checkpoint before anything is sent.
         if self.registry.get(&provider_id).is_some() {
@@ -359,9 +356,9 @@ impl Scheduler {
             Some(provider) => {
                 let provider = provider.clone();
                 let done = CancellationToken::new();
-                // The adapter only buffers text; it never writes it. That
-                // lets the watchdog abandon an adapter that ignores
-                // interruption without cutting a database commit short.
+                // The turn actor completes accepted persistence operations,
+                // so abandoning an adapter that ignores interruption never
+                // cuts a database commit short.
                 let run = async {
                     let watchdog = async {
                         cancel.cancelled().await;
@@ -380,8 +377,8 @@ impl Scheduler {
                     done.cancel();
                     outcome
                 };
-                // The flusher owns every text write and always finishes the
-                // flush it started; it stops only between flushes.
+                // Request periodic flushes from the turn actor. Stop only
+                // between requests, after the last accepted flush completes.
                 let flusher = async {
                     loop {
                         tokio::select! {
