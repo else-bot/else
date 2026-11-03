@@ -10,7 +10,7 @@ The assistant POC extends that checkpoint with persistent memory, delegation, is
 
 All delivery targets disable provider-native sub-agents. App-managed delegation between registered bots remains a separate API operation. The initial saved Codex profile is GPT 6.1 Sol Medium Fast. See the [provider settings and policy](docs/providers.md#saved-execution-profile).
 
-POC-001 through POC-024 are marked complete. The next delivery target is VM automation and sidebar categories, POC-025 through POC-032. It adds guest toolchains and scripts, visual desktop control, guest-local CDP scripting, and database-backed sidebar groups. The built-in email client remains deferred; sending an authorized email through a guest script is a task workflow.
+POC-001 through POC-032 are marked complete. The VM automation and sidebar categories target, POC-025 through POC-032, added guest toolchains and scripts, visual desktop control, guest-local CDP scripting, and database-backed sidebar groups. The built-in email client remains deferred; sending an authorized email through a guest script is a task workflow.
 
 When asked to implement the next milestone, continue through its tasks without per-task confirmation. Stop when the assigned target's acceptance checks pass. Adding tasks to this queue does not itself start implementation.
 
@@ -57,7 +57,7 @@ When asked to implement the next milestone, continue through its tasks without p
 - [x] [POC-029: Visual mouse and keyboard control](docs/implementation/05-vm-automation-and-categories.md#poc-029-visual-mouse-and-keyboard-control)
 - [x] [POC-030: Persistent bot categories and API](docs/implementation/05-vm-automation-and-categories.md#poc-030-persistent-bot-categories-and-api)
 - [x] [POC-031: Grouped sidebar and category controls](docs/implementation/05-vm-automation-and-categories.md#poc-031-grouped-sidebar-and-category-controls)
-- [ ] [POC-032: Automation and categories acceptance](docs/implementation/05-vm-automation-and-categories.md#poc-032-automation-and-categories-acceptance)
+- [x] [POC-032: Automation and categories acceptance](docs/implementation/05-vm-automation-and-categories.md#poc-032-automation-and-categories-acceptance)
 
 ## Outside this backlog
 

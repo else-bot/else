@@ -5,7 +5,7 @@ Use [TODO.md](../../TODO.md) as the completion queue. Use the [handoff log](prog
 ## Start or resume
 
 1. Read the owner's current instructions, repository instructions, TODO.md, and the latest handoff. Run `git status --short` and inspect existing changes before editing.
-2. Identify the assigned delivery target. POC-001 through POC-024 are marked complete. The next milestone is VM automation and sidebar categories, POC-025 through POC-032. Preserve completed checkboxes and their evidence.
+2. Identify the assigned delivery target. POC-001 through POC-032 are marked complete, including VM automation and sidebar categories (POC-025 through POC-032); no further milestone is queued. Preserve completed checkboxes and their evidence.
 3. Resume the active task if its unfinished changes belong to this work. Otherwise choose the first unchecked task in the assigned target whose dependencies are complete and which has no unresolved blocker.
 4. Read that task's references and inspect the affected code. Verify the installed tool and dependency interfaces before relying on version-specific research.
 5. Record the active task and its immediate next action in the handoff. Implement that task, verify its acceptance checks, and record the result.

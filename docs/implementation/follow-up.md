@@ -1,6 +1,6 @@
-# Limitations and follow-up after the assistant POC
+# Limitations and follow-up after the assistant POC and the VM automation milestone
 
-Recorded at POC-024. These are known gaps, not part of the delivered targets. Deferred product areas (email, notes, projects, routines, mobile, extra desktop features) stay out of scope.
+Recorded at POC-024 and extended at POC-032. These are known gaps, not part of the delivered targets. Deferred product areas (email, notes, projects, routines, mobile, extra desktop features) stay out of scope.
 
 ## Verified only partly
 
@@ -17,6 +17,14 @@ Recorded at POC-024. These are known gaps, not part of the delivered targets. De
 - **Hostile child results and forced parking.** A delegated child's result is data to its parent, but a hostile result and a parked parent that must be terminated were tested only with synthetic providers (POC-016). Check: a live child returning instructions, and a parent that ignores the park interrupt.
 - **Guest isolation.** VM network isolation and the guest's lack of credentials were checked with smoke probes (private, link-local, and host targets denied; no credential directories), not an exhaustive audit (POC-017, POC-018). Check: a broader probe set, including IPv6 and DNS rebinding, from the guest.
 - **Injection resistance.** The acceptance run shows injected text could not widen API access (no grant, no cross-bot memory, owner token and anonymous calls refused); it does not prove a model never follows injected instructions within its own permissions.
+
+### After the VM automation and categories milestone (POC-032)
+
+- **One live run per path.** Each live scenario passed once with a given model and effort; model behavior varies, so a pass is evidence, not a guarantee. Codex did nearly all of the live work; Claude was exercised on the CDP script, screenshots (POC-028), and job checks, not on visual input.
+- **Backup duration.** The whole-assistant backup of two desktop computers took 287 s for a 1.30 GB set, all spent stopping, snapshotting, exporting, and encrypting the disks; nothing is incremental.
+- **Resource limits.** The computer budget, admission queueing, and the screenshot and input limits are covered by non-live tests; the live run used two computers within the default budget and did not exhaust it.
+- **Desktop arrow keys.** The category dialogs' radio groups move with Tab and Space; arrow keys do nothing in this toolkit version.
+- **Portable sessions.** CDP connections and input batches are never carried across a restart or restore; scripts reconnect, which the run shows only for the example script.
 
 ## Behavior to revisit
 

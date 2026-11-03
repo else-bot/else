@@ -4,7 +4,7 @@ else.bot is a personal AI agent that learns to reflect its owner. One main assis
 
 You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
 
-POC-001 through POC-024 are marked complete: the GPUI messaging app, Rust API, PostgreSQL storage, memory, delegation, bot computers, provider switching, and backup/recovery paths are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits. The next milestone adds guest programming tools, script workflows, visual desktop control, CDP scripting, and sidebar categories.
+POC-001 through POC-032 are marked complete: the GPUI messaging app, Rust API, PostgreSQL storage, memory, delegation, bot computers, provider switching, backup/recovery, guest programming tools and script workflows with task secrets, visual desktop control (screenshots and input), CDP scripting against the visible browser, and sidebar categories are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits.
 
 The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
 
@@ -89,7 +89,7 @@ See [local development](docs/development.md) for prerequisites, configuration, r
 
 ## Implementation backlog
 
-[TODO.md](TODO.md) is the ordered queue for implementation. The two POC milestones are marked complete. [POC-025 through POC-032](docs/implementation/05-vm-automation-and-categories.md) cover the next VM automation and sidebar-category milestone. Each task has dependencies, references, and acceptance checks.
+[TODO.md](TODO.md) is the ordered queue for implementation. The three POC milestones are marked complete, the last being [POC-025 through POC-032](docs/implementation/05-vm-automation-and-categories.md), VM automation and sidebar categories. Each task has dependencies, references, and acceptance checks.
 
 The [agent runbook](docs/implementation/README.md) explains how to select a task, verify it, commit progress, and continue. The [handoff log](docs/implementation/progress.md) records active work and evidence across sessions.
 
