@@ -25,11 +25,23 @@ const PASSWORD: &str = "s3cr3t-Pa55word";
 struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
     execs: Mutex<Vec<(String, Vec<String>, Vec<u8>)>>,
-    killed: tokio::sync::Notify,
+    /// Per computer: a kill for it arrived.
+    killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     started: tokio::sync::Notify,
+    /// Computers whose kill never answers.
+    stalled: Mutex<Vec<String>>,
 }
 
 impl Guest {
+    fn killed(&self, name: &str) -> Arc<tokio::sync::Notify> {
+        self.killed
+            .lock()
+            .unwrap()
+            .entry(name.to_owned())
+            .or_default()
+            .clone()
+    }
+
     fn execs(&self) -> Vec<(String, Vec<String>, Vec<u8>)> {
         self.execs.lock().unwrap().clone()
     }
@@ -104,7 +116,7 @@ impl ComputerRuntime for Guest {
     }
     async fn exec_input(
         &self,
-        _: &str,
+        name: &str,
         program: &str,
         args: &[&str],
         input: &[u8],
@@ -118,19 +130,23 @@ impl ComputerRuntime for Guest {
         // `runuser -u elsebot -- /bin/sh -c SCRIPT sh ARGS...`
         let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
         let script = args.get(at).copied().unwrap_or_default();
-        let stdout = if script.contains("wait $!; c=$?") {
+        let stdout = if script.contains("wait $pg; c=$?") {
             // A foreground command (RUN): its user command follows `sh`.
             if args.get(at + 2).is_some_and(|c| c.contains("HANG")) {
                 self.started.notify_one();
                 // Bounded, so a broken kill fails the test instead of hanging.
-                let _ = tokio::time::timeout(Duration::from_secs(20), self.killed.notified()).await;
+                let killed = self.killed(name);
+                let _ = tokio::time::timeout(Duration::from_secs(20), killed.notified()).await;
                 "143\n0\n0\n\n\0\n".to_owned()
             } else {
                 self.run_reply(args, input)
             }
         } else if script.contains("alive()") {
             // The kill script.
-            self.killed.notify_one();
+            if self.stalled.lock().unwrap().iter().any(|n| n == name) {
+                tokio::time::sleep(Duration::from_secs(12)).await;
+            }
+            self.killed(name).notify_one();
             "stopped".into()
         } else if script.contains("echo launched") {
             "launched".into()
@@ -362,15 +378,13 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     )
     .await;
     let id: Uuid = job["job_id"].as_str().unwrap().parse().unwrap();
-    let (secrets, redact): (Vec<String>, Value) =
-        sqlx::query_as("SELECT secrets, redact FROM guest_jobs WHERE id = $1")
-            .bind(id)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
-    assert_eq!(secrets, vec!["smtp".to_owned()]);
-    assert_eq!(redact[0]["name"], "SMTP_PASSWORD");
-    assert!(!redact.to_string().contains(PASSWORD));
+    let row: Value = sqlx::query_scalar("SELECT to_jsonb(j) FROM guest_jobs j WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(row["secrets"], json!(["smtp"]));
+    assert!(!row.to_string().contains(PASSWORD), "names only");
     let launch = guest
         .execs()
         .into_iter()
@@ -439,6 +453,20 @@ async fn stop_work_ends_a_running_foreground_command() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // Until the command ended, the stop stays pending.
+    else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
+    let receipt = |state: &'static str| {
+        let pool = app.db.pool.clone();
+        async move {
+            let states: Vec<String> =
+                sqlx::query_scalar("SELECT state FROM request_receipts WHERE operation = 'cancel'")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(states, vec![state.to_owned()]);
+        }
+    };
+    receipt("pending").await;
     manager.end_orphaned_commands().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), call)
         .await
@@ -455,4 +483,96 @@ async fn stop_work_ends_a_running_foreground_command() {
         "{:?}",
         kill.1
     );
+    let ended: bool = sqlx::query_scalar("SELECT bool_and(ended_at IS NOT NULL) FROM guest_runs")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(ended, "the run is recorded as ended");
+    // Once the turn also finished stopping, the stop completes.
+    for _ in 0..100 {
+        else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
+        let done: bool = sqlx::query_scalar(
+            "SELECT bool_and(state = 'done') FROM request_receipts WHERE operation = 'cancel'",
+        )
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    receipt("done").await;
+}
+
+/// A computer whose kill never answers does not hold up another bot's.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_stalled_kill_does_not_delay_another_bots_stop() {
+    let Setup {
+        app,
+        guest,
+        manager,
+    } = setup().await;
+    let slow = app.create_bot("Slow", "stalls").await;
+    let fast = app.create_bot("Fast", "stops").await;
+    let app = Arc::new(app);
+    let mut calls = Vec::new();
+    for bot in [&slow, &fast] {
+        let (_, token) = grant(&app, bot).await;
+        let app = app.clone();
+        calls.push(tokio::spawn(async move {
+            tool(
+                &app,
+                &token,
+                "computer_run",
+                json!({ "command": "HANG", "timeout_secs": 300 }),
+            )
+            .await
+        }));
+        tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
+            .await
+            .expect("started");
+    }
+    let slow_name = ComputerManager::runtime_name(slow.parse().unwrap());
+    guest.stalled.lock().unwrap().push(slow_name);
+    for bot in [&slow, &fast] {
+        let stop = app
+            .owner(
+                "POST",
+                &format!("/v1/bots/{bot}/cancel"),
+                Some(json!({ "request_id": Uuid::new_v4() })),
+            )
+            .await;
+        assert!(stop.status.is_success());
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    let pass = {
+        let manager = manager.clone();
+        tokio::spawn(async move { manager.end_orphaned_commands().await })
+    };
+    let fast_call = calls.pop().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), fast_call)
+        .await
+        .expect("the other bot's command ended while one kill stalls")
+        .unwrap();
+    assert_eq!(result["exit_code"], 143);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // The pass itself returns within its bound, leaving the slow kill.
+    tokio::time::timeout(Duration::from_secs(15), pass)
+        .await
+        .expect("the pass is bounded")
+        .unwrap()
+        .unwrap();
+    // The stalled kill finishes on its own; its command then ends too.
+    let slow_call = calls.pop().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(30), slow_call)
+        .await
+        .expect("the stalled command ended once its kill answered")
+        .unwrap();
+    assert_eq!(result["exit_code"], 143);
 }

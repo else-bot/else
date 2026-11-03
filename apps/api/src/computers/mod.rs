@@ -222,6 +222,10 @@ pub struct ComputerManager {
     /// Foreground commands while they run (POC-026), so Stop work can end
     /// them.
     foreground: std::sync::Mutex<HashMap<Uuid, jobs::Foreground>>,
+    /// Foreground commands being killed now (each kill once at a time).
+    killing: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    /// The master key, to decrypt a job's task secrets for redaction.
+    secret_key: Option<Arc<crate::credentials::SecretKey>>,
 }
 
 impl ComputerManager {
@@ -233,7 +237,14 @@ impl ComputerManager {
             ops: std::sync::Mutex::new(HashMap::new()),
             inspected: AtomicBool::new(false),
             foreground: std::sync::Mutex::new(HashMap::new()),
+            killing: std::sync::Mutex::new(std::collections::HashSet::new()),
+            secret_key: None,
         }
+    }
+
+    pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {
+        self.secret_key = Some(key);
+        self
     }
 
     pub fn config(&self) -> &ComputerConfig {

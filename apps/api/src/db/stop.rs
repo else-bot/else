@@ -104,14 +104,15 @@ pub async fn halt_accepted(
         .await
 }
 
-/// Complete pending stops and deletion once no turn and no cancelling guest
-/// job remains (and, for deletion, the computer is shut down). Runs in the
+/// Complete pending stops and deletion once no turn, no cancelling guest
+/// job, and no foreground command (POC-026) remains (and, for deletion, the computer is shut down). Runs in the
 /// caller's transaction under the bot row lock. Returns true if it changed
 /// anything.
 pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status IN {ACTIVE_STATUSES})
-             OR EXISTS (SELECT 1 FROM guest_jobs WHERE bot_id = $1 AND status = 'cancelling')"
+             OR EXISTS (SELECT 1 FROM guest_jobs WHERE bot_id = $1 AND status = 'cancelling')
+             OR EXISTS (SELECT 1 FROM guest_runs WHERE bot_id = $1 AND ended_at IS NULL)"
     )))
     .bind(bot_id)
     .fetch_one(&mut *conn)

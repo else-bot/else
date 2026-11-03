@@ -7,14 +7,14 @@
 //! in the clear and shown to the bot. A value reaches the guest only as an
 //! environment variable of the one command or job that names the secret,
 //! sent over the runtime's stdin, never in a command line, a file, or saved
-//! source. Output that would show a value is redacted, by length and
-//! SHA-256, before it is returned or stored.
+//! source. Output that would show a value is filtered inside the guest and
+//! redacted again before it is returned or stored; nothing derived from a
+//! value is stored.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -65,98 +65,41 @@ pub struct Env {
 }
 
 impl Env {
-    /// The redaction set for these values: (length, SHA-256), never the
-    /// value itself, so it can be stored with a job.
+    /// The values to redact from output (4 bytes or longer), held in
+    /// memory for one call and cleared when dropped. Nothing derived from a
+    /// value is stored: a stored fingerprint of a short value could be
+    /// brute-forced without `SECRET_KEY`.
     pub fn redaction(&self) -> Vec<Redact> {
-        self.vars
+        let mut set: Vec<Redact> = self
+            .vars
             .iter()
             .filter(|(_, v)| v.len() >= MIN_REDACTED)
-            .map(|(name, v)| {
-                let mut base = [0u8; 8];
-                getrandom::fill(&mut base).expect("the system random source");
-                let base = u64::from_le_bytes(base) % (MODULUS - 2) + 2;
-                Redact {
-                    name: name.clone(),
-                    len: v.len(),
-                    sha256: hex::encode(Sha256::digest(v.as_bytes())),
-                    base,
-                    rolling: rolling(v.as_bytes(), base),
-                }
+            .map(|(name, v)| Redact {
+                name: name.clone(),
+                value: v.clone(),
             })
-            .collect()
+            .collect();
+        // Longest first, so a value containing another is replaced whole.
+        set.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
+        set
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Redact {
     pub name: String,
-    pub len: usize,
-    pub sha256: String,
-    /// A polynomial hash of the value with a random base, so a scan finds
-    /// candidate positions in linear time; SHA-256 confirms each.
-    pub base: u64,
-    pub rolling: u64,
-}
-
-const MODULUS: u64 = (1 << 61) - 1;
-
-fn mul(a: u64, b: u64) -> u64 {
-    ((a as u128 * b as u128) % MODULUS as u128) as u64
-}
-
-fn rolling(bytes: &[u8], base: u64) -> u64 {
-    bytes
-        .iter()
-        .fold(0, |h, &b| (mul(h, base) + b as u64 + 1) % MODULUS)
+    pub value: Zeroizing<String>,
 }
 
 /// Replace every occurrence of a redacted value in `text` with
-/// `[secret NAME]`. Matching is by exact bytes (length, then SHA-256), so
-/// the value itself is never needed.
+/// `[secret NAME]` (linear-time substring search per value).
 pub fn redact(text: &str, set: &[Redact]) -> String {
-    let bytes = text.as_bytes();
-    // Every confirmed match, then replaced left to right.
-    let mut found: Vec<(usize, usize, &str)> = Vec::new();
+    let mut out = text.to_owned();
     for r in set {
-        if r.len == 0 || r.len > bytes.len() || r.base < 2 {
-            continue;
-        }
-        // base^(len-1), to drop the leading byte of a window.
-        let mut lead = 1u64;
-        for _ in 1..r.len {
-            lead = mul(lead, r.base);
-        }
-        let mut h = rolling(&bytes[..r.len], r.base);
-        let mut i = 0;
-        loop {
-            if h == r.rolling && hex::encode(Sha256::digest(&bytes[i..i + r.len])) == r.sha256 {
-                found.push((i, r.len, r.name.as_str()));
-            }
-            if i + r.len >= bytes.len() {
-                break;
-            }
-            let out = (mul(bytes[i] as u64 + 1, lead)) % MODULUS;
-            h = (h + MODULUS - out) % MODULUS;
-            h = (mul(h, r.base) + bytes[i + r.len] as u64 + 1) % MODULUS;
-            i += 1;
+        if out.contains(r.value.as_str()) {
+            out = out.replace(r.value.as_str(), &format!("[secret {}]", r.name));
         }
     }
-    if found.is_empty() {
-        return text.to_owned();
-    }
-    found.sort_by_key(|(start, len, _)| (*start, std::cmp::Reverse(*len)));
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    for (start, len, name) in found {
-        if start < at {
-            continue;
-        }
-        out.extend_from_slice(&bytes[at..start]);
-        out.extend_from_slice(format!("[secret {name}]").as_bytes());
-        at = start + len;
-    }
-    out.extend_from_slice(&bytes[at..]);
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    out
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -376,7 +319,6 @@ mod tests {
             "login [secret SMTP_PASSWORD] ok; again:[secret SMTP_PASSWORD]."
         );
         assert_eq!(redact("nothing here", &set), "nothing here");
-        assert!(!serde_json::to_string(&set).unwrap().contains("hunter2"));
         // A cut-off copy (a tail starting mid-value) is not a full match,
         // and a long output is scanned in linear time.
         assert_eq!(redact("2-é-pass", &set), "2-é-pass");

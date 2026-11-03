@@ -312,6 +312,54 @@ fn captured(home: &Path, name: &str) -> (std::collections::BTreeMap<String, usiz
     (counts, auth_failures)
 }
 
+/// Every captured message: (recipients, sender, data).
+fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
+    let text = guest(
+        home,
+        name,
+        "cat /home/elsebot/.capture/messages.jsonl 2>/dev/null || true",
+        None,
+        false,
+    );
+    text.lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|e| e["event"] == "message")
+        .map(|e| {
+            (
+                e["to"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.as_str().unwrap().to_owned())
+                    .collect(),
+                e["from"].as_str().unwrap_or_default().to_owned(),
+                e["data"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The last receipt line naming each recipient in the bot's receipt file.
+fn receipts(home: &Path, name: &str, project: &str) -> std::collections::BTreeMap<String, String> {
+    let text = guest(
+        home,
+        name,
+        &format!("find {project} -maxdepth 2 -iname '*receipt*' -type f -exec cat {{}} +"),
+        None,
+        false,
+    );
+    let mut last = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        for i in 1..=10 {
+            let who = format!("r{i:02}@example.test");
+            if line.contains(&who) {
+                last.insert(who, line.to_lowercase());
+            }
+        }
+    }
+    last
+}
+
 async fn activity(db: &sqlx::PgPool, bot: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
@@ -508,6 +556,16 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         counts.values().all(|c| *c == 1),
         "no duplicates: {counts:?}"
     );
+    // Ten separate messages, one per recipient, with the requested
+    // sender, subject, and body.
+    let sent = messages(&home, &name);
+    assert_eq!(sent.len(), 10, "ten captured messages");
+    for (to, from, data) in &sent {
+        assert_eq!(to.len(), 1, "one recipient per message: {to:?}");
+        assert_eq!(from, "owner@example.test");
+        assert!(data.contains("Subject: Team picnic on Saturday"), "{data}");
+        assert!(data.contains("Riverside Park"), "{data}");
+    }
     let lowered = reply.to_lowercase();
     assert!(
         lowered.contains("r07")
@@ -525,6 +583,25 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         false,
     );
     note(&format!("Node sender: {node_project}"));
+    let project = node_project
+        .lines()
+        .next()
+        .and_then(|l| l.rsplit_once('/'))
+        .map(|(dir, _)| dir.to_owned())
+        .unwrap_or_default();
+    let states = receipts(&home, &name, &project);
+    note(&format!("receipts: {states:?}"));
+    assert_eq!(states.len(), 10, "a receipt per recipient");
+    for (who, line) in &states {
+        if who == "r07@example.test" {
+            assert!(line.contains("uncertain"), "{line}");
+        } else {
+            assert!(
+                line.contains("sent") && !line.contains("uncertain"),
+                "{who}: {line}"
+            );
+        }
+    }
     let (scripts, _) = node_project
         .split_once("---")
         .unwrap_or((&node_project, ""));
@@ -545,6 +622,22 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     assert_eq!(status, "completed", "{reply}");
     let (counts, _) = captured(&home, &name);
     note(&format!("captured after the repeat: {counts:?}"));
+    let read: Vec<(String,)> = sqlx::query_as(
+        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'
+           AND source->>'turn_id' = $2 AND body ILIKE '%receipt%'",
+    )
+    .bind(bot.parse::<Uuid>().unwrap())
+    .bind(turn.to_string())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(!read.is_empty(), "the repeat consulted the receipt file");
+    assert_eq!(messages(&home, &name).len(), 10, "no new message");
+    assert_eq!(
+        receipts(&home, &name, &project),
+        states,
+        "receipts unchanged"
+    );
     assert!(
         counts.values().all(|c| *c == 1),
         "nothing was resent: {counts:?}"
@@ -640,6 +733,34 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         "the secret was named"
     );
 
+    note("== 6b. a foreground timeout ends the command");
+    let turn = api
+        .send(
+            &bot,
+            "Run exactly `sleep 30; touch ~/work/late.txt` with computer_run and \
+             timeout_secs 5, then tell me what happened.",
+        )
+        .await;
+    let (status, reply) = finish(&pool, turn, long).await;
+    assert_eq!(status, "completed", "{reply}");
+    assert_eq!(
+        guest(&home, &name, "pgrep -c -f '^sleep 30$' || true", None, true),
+        "0",
+        "the timed-out command was ended"
+    );
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        guest(
+            &home,
+            &name,
+            "ls ~/work/late.txt 2>/dev/null | wc -l",
+            None,
+            false
+        ),
+        "0",
+        "it never finished its side effect"
+    );
+
     note("== 7. Stop work ends foreground and background script work");
     let turn = api
         .send(
@@ -717,7 +838,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    note("== 8. a long job keeps its lease after the turn and across an API restart");
+    note("== 8. a lost provider and API: the job keeps its lease, the foreground command ends");
     let turn = loop {
         let (status, body) = api
             .call(
@@ -725,9 +846,10 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
                 &format!("/v1/bots/{bot}/turns"),
                 Some(
                     json!({ "request_id": Uuid::new_v4(), "provider_id": "codex",
-                    "text": "Start a background job with exactly the command \
-                    `sleep 45 && date +%s > ~/work/restart-proof.txt` and reply with its job ID. \
-                    Do not wait for it." }),
+                    "text": "Two steps, in this order. First start a background job with \
+                    exactly the command `sleep 45 && date +%s > ~/work/restart-proof.txt`. \
+                    Then run exactly `sleep 120` with computer_run and timeout_secs 300, and \
+                    wait for it." }),
                 ),
             )
             .await;
@@ -741,8 +863,24 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         assert_eq!(status, 409, "{body}");
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    let (status, reply) = finish(&pool, turn, long).await;
-    assert_eq!(status, "completed", "{reply}");
+    let started = Instant::now();
+    loop {
+        let procs = guest(
+            &home,
+            &name,
+            "pgrep -fa '^sleep (45|120)$' || true",
+            None,
+            true,
+        );
+        if procs.contains("sleep 45") && procs.contains("sleep 120") {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "the work did not start: {procs}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     let job: (Uuid, Option<Uuid>) = sqlx::query_as(
         "SELECT id, lease_id FROM guest_jobs WHERE bot_id = $1 AND command LIKE 'sleep 45%'",
     )
@@ -750,6 +888,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     .fetch_one(&pool)
     .await
     .unwrap();
+    // The API (and with it the provider's connection) dies mid-turn.
     api.kill();
     let mut api = install.serve().await;
     let after: Vec<(Uuid, String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
@@ -771,6 +910,34 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         guest(&home, &name, "pgrep -c -f '^sleep 45$' || true", None, true),
         "1",
         "one process"
+    );
+    // The foreground command the dead API left is ended after the restart.
+    let restarted = Instant::now();
+    loop {
+        let left = guest(
+            &home,
+            &name,
+            "pgrep -c -f '^sleep 120$' || true",
+            None,
+            true,
+        );
+        if left == "0" {
+            break;
+        }
+        assert!(
+            restarted.elapsed() < Duration::from_secs(30),
+            "sleep 120 still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    note(&format!(
+        "the left-over foreground command ended {:?} after the restart",
+        restarted.elapsed()
+    ));
+    let (status, _) = finish(&pool, turn, long).await;
+    assert_ne!(
+        status, "completed",
+        "the interrupted turn is not reported done"
     );
     let started = Instant::now();
     loop {

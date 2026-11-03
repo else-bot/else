@@ -492,11 +492,14 @@ fn run_serve() -> anyhow::Result<()> {
         let mut computer_task = None;
         match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
             Ok(msb) => {
-                let manager = Arc::new(else_api::computers::ComputerManager::new(
-                    pool.clone(),
-                    Arc::new(msb),
-                    config.computers.clone(),
-                ));
+                let manager = Arc::new(
+                    else_api::computers::ComputerManager::new(
+                        pool.clone(),
+                        Arc::new(msb),
+                        config.computers.clone(),
+                    )
+                    .with_secret_key(secret_key.clone()),
+                );
                 manager.reconcile_startup().await?;
                 computer_task = Some(tokio::spawn(manager.clone().run(stop_scheduler.clone())));
                 state = state.with_computers(manager);

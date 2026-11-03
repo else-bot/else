@@ -310,16 +310,35 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
-            match computers
-                .run_command_with(
-                    grant.bot_id,
-                    &holder(grant),
-                    &command,
-                    Duration::from_secs(timeout),
-                    &env,
-                )
-                .await
-            {
+            // In its own task: a dropped request (the provider went away)
+            // must not cut the command off between its record and its end.
+            let run = {
+                let computers = computers.clone();
+                let (bot, holder) = (grant.bot_id, holder(grant));
+                let command = command.clone();
+                tokio::spawn(async move {
+                    computers
+                        .run_command_with(
+                            bot,
+                            &holder,
+                            &command,
+                            Duration::from_secs(timeout),
+                            &env,
+                        )
+                        .await
+                })
+            };
+            let ran = match run.await {
+                Ok(ran) => ran,
+                Err(err) => {
+                    tracing::warn!(error = %err, "a computer command task failed");
+                    return (
+                        tool_error("COMPUTER_ERROR: the command did not report."),
+                        None,
+                    );
+                }
+            };
+            match ran {
                 Ok(Ok(out)) => {
                     let log = format!(
                         "run exit {:?}: {}",
