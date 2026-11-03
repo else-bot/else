@@ -25,9 +25,16 @@
 #   logs/       install and update logs; the API log without systemd
 # Outside it: system packages (with sudo, only when missing; Homebrew's
 # postgresql@18 on macOS), the Docker volume of the database, the guest image
-# in Docker, the systemd user unit ~/.config/systemd/user/else-api.service
-# (Linux), and the links ~/.local/bin/elsebot and
-# ~/.local/share/applications/else-bot.desktop (Linux).
+# in Docker, the API's service (Linux: the systemd user unit
+# ~/.config/systemd/user/else-api.service, and lingering for your user when
+# it starts at boot; macOS: the launchd agent
+# ~/Library/LaunchAgents/bot.else.else-api.plist), and the links
+# ~/.local/bin/elsebot and ~/.local/share/applications/else-bot.desktop
+# (Linux).
+#
+# The API can start by itself (asked once, remembered; --autostart or
+# --no-autostart to choose): at boot on Linux, at login on macOS, where the
+# agent needs your session for the Keychain login of Claude Code.
 #
 # An update builds the new release first, while the old one keeps running;
 # then it asks the API to stop taking work and refuses (changing nothing)
@@ -38,7 +45,8 @@
 # Settings (environment): ELSE_VERSION=0.0.2 installs that release instead
 # of the latest; ELSE_HOME, ELSE_REPO, ELSE_API_PORT, ELSE_SERVICE_NAME,
 # ELSE_DATABASE_URL (use an existing PostgreSQL instead of Docker), and
-# ELSE_INSTALL_NO_SYSTEMD=1 exist mostly for tests.
+# ELSE_INSTALL_NO_SYSTEMD=1 (no systemd or launchd: elsebot runs the API as a
+# plain process) exist mostly for tests.
 set -euo pipefail
 
 usage() {
@@ -48,6 +56,8 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
   -y, --yes            do not ask for confirmation (sudo may still ask for a password)
   --version X.Y.Z      install or update to this release instead of the latest
   --server-only        no desktop client (headless servers)
+  --autostart          start the API by itself: at boot (Linux) or at login (macOS)
+  --no-autostart       only start it with: elsebot start
   --skip-guest-image   do not build the guest VM image (bot computers then use a plain image)
   -h, --help           show this help
 EOF
@@ -69,6 +79,7 @@ WANT_VERSION="${ELSE_VERSION:-}"
 ASSUME_YES=0
 SERVER_ONLY=0
 SKIP_GUEST=0
+AUTOSTART="${ELSE_AUTOSTART:-}"
 ARGS=("$@")
 
 SRC="$ELSE_HOME/src"
@@ -113,6 +124,16 @@ confirm() {
 	local answer
 	read -r answer </dev/tty
 	case "$answer" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
+}
+
+# A question whose answer is yes with --yes or without a terminal.
+ask_yes() {
+	[ "$ASSUME_YES" = 1 ] && return 0
+	{ true </dev/tty; } 2>/dev/null || return 0
+	printf '    %s [Y/n] ' "$1"
+	local answer
+	read -r answer </dev/tty
+	case "$answer" in n | N | no | NO) return 1 ;; *) return 0 ;; esac
 }
 
 # version_ge A B: A >= B for dotted numbers.
@@ -553,13 +574,37 @@ prune_versions() {
 install_commands() {
 	mkdir -p "$BIN" "$HOME/.local/bin" "$CONFIG"
 	install -m 755 "$SRC/scripts/elsebot" "$BIN/elsebot"
-	# How elsebot runs the API here: a systemd user unit, or a process it
-	# manages itself where there is no systemd user session.
-	local manager=process
-	if [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ] && systemctl --user show-environment >/dev/null 2>&1; then
-		manager=systemd
+	# How elsebot runs the API here: a systemd user unit (Linux), a launchd
+	# agent (macOS), or a process it manages itself where there is neither.
+	local manager=process previous="" previous_autostart=""
+	if [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ]; then
+		if [ "$DISTRO" = macos ]; then
+			manager=launchd
+		elif systemctl --user show-environment >/dev/null 2>&1; then
+			manager=systemd
+		fi
 	fi
-	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_PSQL=%s\n' "$SERVICE" "$manager" "$PSQL" >"$CONFIG/elsebot.env"
+	if [ -f "$CONFIG/elsebot.env" ]; then
+		previous="$(sed -n 's/^ELSEBOT_MANAGER=//p' "$CONFIG/elsebot.env")"
+		previous_autostart="$(sed -n 's/^ELSEBOT_AUTOSTART=//p' "$CONFIG/elsebot.env")"
+	fi
+	# An API run by another manager (a process before the launchd agent) is
+	# stopped by the elsebot that started it; this run starts it again.
+	if [ -n "$previous" ] && [ "$previous" != "$manager" ] && [ -x "$BIN/elsebot" ]; then
+		elsebot stop >/dev/null 2>&1 || true
+	fi
+	# Asked once; the answer is kept for updates.
+	if [ -z "$AUTOSTART" ]; then AUTOSTART="$previous_autostart"; fi
+	if [ -z "$AUTOSTART" ]; then
+		AUTOSTART=0
+		if [ "$manager" != process ]; then
+			local when="at boot"
+			[ "$manager" = launchd ] && when="when you log in"
+			if ask_yes "Start the API by itself $when?"; then AUTOSTART=1; fi
+		fi
+	fi
+	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\nELSEBOT_PSQL=%s\n' \
+		"$SERVICE" "$manager" "$AUTOSTART" "$PSQL" >"$CONFIG/elsebot.env"
 	ln -sfn ../current/bin/else-api "$BIN/else-api"
 	[ "$SERVER_ONLY" = 1 ] || ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"
 	if [ ! -e "$HOME/.local/bin/elsebot" ] || [ -L "$HOME/.local/bin/elsebot" ]; then
@@ -740,11 +785,51 @@ run_setup() {
 
 elsebot() { ELSE_HOME="$ELSE_HOME" "$BIN/elsebot" "$@"; }
 
+# The API's service, and whether it starts by itself. Without systemd or
+# launchd it only starts with `elsebot start`.
+setup_service() {
+	step "API service"
+	local manager
+	manager="$(sed -n 's/^ELSEBOT_MANAGER=//p' "$CONFIG/elsebot.env")"
+	elsebot service-install >/dev/null || die "could not install the API's $manager service"
+	case "$manager" in
+	process)
+		[ "$AUTOSTART" = 1 ] && warn "the API cannot start by itself here (no systemd user session); start it with: elsebot start"
+		ok "a process managed by elsebot"
+		return 0
+		;;
+	launchd)
+		if [ "$AUTOSTART" = 1 ]; then
+			ok "launchd agent, starts when you log in"
+			info "${DIM}It needs Docker at login too: in OrbStack or Docker Desktop, turn on starting at login${RESET}"
+		else
+			ok "launchd agent, starts with: elsebot start (--autostart to start it at login)"
+		fi
+		return 0
+		;;
+	esac
+	if [ "$AUTOSTART" != 1 ]; then
+		ok "systemd user unit, starts with: elsebot start (--autostart to start it at boot)"
+		return 0
+	fi
+	# A user's units start at boot, before anyone logs in, only with lingering.
+	if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || true)" != yes ]; then
+		if ! loginctl enable-linger "$USER" >/dev/null 2>&1; then
+			sudo_ready
+			$SUDO loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+		fi
+	fi
+	if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || true)" = yes ]; then
+		ok "systemd user unit, starts at boot (lingering on for $USER)"
+	else
+		warn "could not turn on lingering for $USER (loginctl enable-linger): the API starts at your login, not at boot"
+	fi
+}
+
 api_running() { curl -fsS --max-time 3 "http://127.0.0.1:$API_PORT/healthz" >/dev/null 2>&1; }
 
 start_api() {
 	step "Start the API"
-	elsebot service-install >/dev/null
 	elsebot start >/dev/null 2>&1 || true
 	local _
 	for _ in $(seq 1 60); do
@@ -977,6 +1062,7 @@ stage2() {
 		fi
 		switch_to "$target"
 		install_commands
+		setup_service
 		if ! run_setup || ! start_api; then
 			warn "$target did not start; switching back to $installed"
 			elsebot stop >/dev/null 2>&1 || true
@@ -991,6 +1077,7 @@ stage2() {
 	else
 		switch_to "$target"
 		install_commands
+		setup_service
 		run_setup || die "else-api setup failed (log: $LOGS/setup.log)"
 		if api_running; then
 			ok "the API is running"
@@ -1024,6 +1111,8 @@ main() {
 		-y | --yes) ASSUME_YES=1 ;;
 		--version) WANT_VERSION="${2:?--version needs a value}"; shift ;;
 		--server-only) SERVER_ONLY=1 ;;
+		--autostart) AUTOSTART=1 ;;
+		--no-autostart) AUTOSTART=0 ;;
 		--skip-guest-image) SKIP_GUEST=1 ;;
 		-h | --help) usage; exit 0 ;;
 		*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;

@@ -29,6 +29,7 @@ LOGS="$ELSE_HOME/logs"
 RUN="$ELSE_HOME/run"
 ELSEBOT_SERVICE=else-api
 ELSEBOT_MANAGER=process
+ELSEBOT_AUTOSTART=0
 ELSEBOT_PSQL=""
 # shellcheck disable=SC1091
 [ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
@@ -45,7 +46,111 @@ running_version() {
 
 unit_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$ELSEBOT_SERVICE.service"; }
 
+# --- launchd (macOS): an agent in the owner's login session, which has the
+# Keychain that Claude Code keeps its login in.
+
+LABEL="bot.else.$ELSEBOT_SERVICE"
+# Loaded at login only from ~/Library/LaunchAgents. Without autostart it is
+# kept in the configuration, and `elsebot start` loads it from there: the
+# crash restart (KeepAlive) implies RunAtLoad, so RunAtLoad cannot say no.
+login_plist() { echo "$HOME/Library/LaunchAgents/$LABEL.plist"; }
+plist_file() {
+	if [ "$ELSEBOT_AUTOSTART" = 1 ]; then login_plist; else echo "$CONFIG/$LABEL.plist"; fi
+}
+# The login session's domain; over SSH without one, the user's background one.
+launchd_domain() {
+	if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then echo "gui/$(id -u)"; else echo "user/$(id -u)"; fi
+}
+launchd_loaded() { launchctl print "$(launchd_domain)/$LABEL" >/dev/null 2>&1; }
+launchd_pid() {
+	launchctl print "$(launchd_domain)/$LABEL" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}'
+}
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+launchd_install() {
+	local plist
+	plist="$(plist_file)"
+	mkdir -p "$(dirname "$plist")" "$LOGS"
+	# Started when loaded, restarted after a failure (not after a clean
+	# stop), as with systemd; 90 s for a graceful stop before launchd kills it.
+	cat >"$plist.tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$(xml "$LABEL")</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$(xml "$CURRENT/bin/else-api")</string>
+		<string>serve</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>$(xml "$CONFIG")</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>$(xml "$ELSE_HOME/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>$(xml "$LOGS/else-api.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml "$LOGS/else-api.log")</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ExitTimeOut</key>
+	<integer>90</integer>
+	<key>ProcessType</key>
+	<string>Standard</string>
+</dict>
+</plist>
+EOF
+	plutil -lint -s "$plist.tmp" || { rm -f "$plist.tmp"; die "the launchd agent is not a valid property list"; }
+	mv -f "$plist.tmp" "$plist"
+	# The other place's copy, from before the autostart choice changed.
+	if [ "$plist" = "$(login_plist)" ]; then rm -f "$CONFIG/$LABEL.plist"; else rm -f "$(login_plist)"; fi
+}
+
+launchd_start() {
+	local domain
+	domain="$(launchd_domain)"
+	# A loaded agent keeps the definition it was loaded with: reload it.
+	if launchd_loaded && [ -z "$(launchd_pid)" ]; then
+		launchctl bootout "$domain/$LABEL" 2>/dev/null || true
+	fi
+	launchd_loaded || launchctl bootstrap "$domain" "$(plist_file)" ||
+		die "launchctl could not load $(plist_file)"
+	launchctl kickstart "$domain/$LABEL" >/dev/null
+}
+
+# Unloaded until the next start or login: bootout sends SIGTERM and kills
+# after ExitTimeOut; wait for the API's own shutdown.
+launchd_stop() {
+	launchd_loaded || return 0
+	local pid _
+	pid="$(launchd_pid)"
+	launchctl bootout "$(launchd_domain)/$LABEL" 2>/dev/null || true
+	[ -n "$pid" ] || return 0
+	for _ in $(seq 1 95); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+	done
+	echo "elsebot: the API did not stop within 95 s" >&2
+	return 1
+}
+
 service_install() {
+	if [ "$ELSEBOT_MANAGER" = launchd ]; then
+		launchd_install
+		return
+	fi
 	[ "$ELSEBOT_MANAGER" = systemd ] || return 0
 	local unit
 	unit="$(unit_file)"
@@ -67,7 +172,11 @@ TimeoutStopSec=90
 WantedBy=default.target
 EOF
 	systemctl --user daemon-reload
-	systemctl --user enable "$ELSEBOT_SERVICE.service" >/dev/null 2>&1
+	if [ "$ELSEBOT_AUTOSTART" = 1 ]; then
+		systemctl --user enable "$ELSEBOT_SERVICE.service" >/dev/null 2>&1
+	else
+		systemctl --user disable "$ELSEBOT_SERVICE.service" >/dev/null 2>&1 || true
+	fi
 }
 
 pid_file() { echo "$RUN/$ELSEBOT_SERVICE.pid"; }
@@ -93,10 +202,10 @@ need_api() {
 
 start() {
 	need_api
-	if [ "$ELSEBOT_MANAGER" = systemd ]; then
-		systemctl --user start "$ELSEBOT_SERVICE.service"
-		return
-	fi
+	case "$ELSEBOT_MANAGER" in
+	systemd) systemctl --user start "$ELSEBOT_SERVICE.service"; return ;;
+	launchd) launchd_start; return ;;
+	esac
 	process_pid >/dev/null && return 0
 	mkdir -p "$RUN" "$LOGS"
 	(
@@ -116,10 +225,10 @@ start() {
 
 # Graceful: SIGTERM, then the API's own shutdown (up to 90 s).
 stop() {
-	if [ "$ELSEBOT_MANAGER" = systemd ]; then
-		systemctl --user stop "$ELSEBOT_SERVICE.service"
-		return
-	fi
+	case "$ELSEBOT_MANAGER" in
+	systemd) systemctl --user stop "$ELSEBOT_SERVICE.service"; return ;;
+	launchd) launchd_stop; return ;;
+	esac
 	local pid _
 	pid="$(process_pid)" || { rm -f "$(pid_file)"; return 0; }
 	kill -TERM "$pid"
@@ -133,11 +242,11 @@ stop() {
 }
 
 is_active() {
-	if [ "$ELSEBOT_MANAGER" = systemd ]; then
-		systemctl --user is-active --quiet "$ELSEBOT_SERVICE.service"
-	else
-		process_pid >/dev/null
-	fi
+	case "$ELSEBOT_MANAGER" in
+	systemd) systemctl --user is-active --quiet "$ELSEBOT_SERVICE.service" ;;
+	launchd) [ -n "$(launchd_pid)" ] ;;
+	*) process_pid >/dev/null ;;
+	esac
 }
 
 # --- Commands ----------------------------------------------------------------
@@ -151,6 +260,11 @@ status)
 		echo "API:       running on http://$(api_addr), version $(running_version || echo unknown) ($ELSEBOT_MANAGER)"
 	else
 		echo "API:       stopped ($ELSEBOT_MANAGER)"
+	fi
+	if [ "$ELSEBOT_AUTOSTART" = 1 ]; then
+		echo "autostart: on (change with: elsebot update --no-autostart)"
+	else
+		echo "autostart: off (change with: elsebot update --autostart)"
 	fi
 	;;
 version) installed else-api || installed else-desktop || die "not installed" ;;
@@ -201,6 +315,7 @@ db)
 paths)
 	where="$(pid_file)"
 	[ "$ELSEBOT_MANAGER" = systemd ] && where="$(unit_file)"
+	[ "$ELSEBOT_MANAGER" = launchd ] && where="$(plist_file)"
 	cat <<EOF
 home:        $ELSE_HOME
 source:      $ELSE_HOME/src
