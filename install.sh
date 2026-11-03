@@ -271,6 +271,7 @@ install_compose_plugin() {
 
 PG_DUMP=""
 PG_RESTORE=""
+PSQL=""
 pg_major() { "$1" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p' | head -1; }
 find_pg_tools() {
 	local dir major
@@ -280,6 +281,7 @@ find_pg_tools() {
 			if [ -n "$major" ] && [ "$major" -ge "$PG_MAJOR" ]; then
 				PG_DUMP="$dir/pg_dump"
 				PG_RESTORE="$dir/pg_restore"
+				PSQL="$dir/psql"
 				return 0
 			fi
 		fi
@@ -545,7 +547,7 @@ install_commands() {
 	if [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ] && systemctl --user show-environment >/dev/null 2>&1; then
 		manager=systemd
 	fi
-	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\n' "$SERVICE" "$manager" >"$CONFIG/elsebot.env"
+	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_PSQL=%s\n' "$SERVICE" "$manager" "$PSQL" >"$CONFIG/elsebot.env"
 	ln -sfn ../current/bin/else-api "$BIN/else-api"
 	[ "$SERVER_ONLY" = 1 ] || ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"
 	if [ ! -e "$HOME/.local/bin/elsebot" ] || [ -L "$HOME/.local/bin/elsebot" ]; then
@@ -775,6 +777,68 @@ backup_if_migrating() {
 	fi
 }
 
+# libpq settings (PGHOST… PGPASSWORD) from a postgresql:// URL, so no
+# password is ever on a command line. Fails on URLs it does not understand.
+pg_env_from_url() {
+	local url="$1" rest auth hostport
+	case "$url" in postgresql://* | postgres://*) ;; *) return 1 ;; esac
+	rest="${url#*://}"
+	case "$rest" in *@*) ;; *) return 1 ;; esac
+	auth="${rest%@*}"
+	rest="${rest##*@}"
+	hostport="${rest%%/*}"
+	PGUSER="${auth%%:*}"
+	PGPASSWORD="${auth#*:}"
+	PGHOST="${hostport%%:*}"
+	PGPORT="${hostport##*:}"
+	[ "$PGPORT" != "$hostport" ] || PGPORT=5432
+	PGDATABASE="${rest#*/}"
+	PGDATABASE="${PGDATABASE%%\?*}"
+	[ -n "$PGUSER" ] && [ -n "$PGHOST" ] && [ -n "$PGDATABASE" ] && [ "$PGDATABASE" != "$rest" ]
+}
+
+# A database role that can only read, for inspecting the installation
+# (`elsebot db`): it sees every table, current and future, and its sessions
+# are read-only. Refreshed on every run; its login is in readonly.env (0600).
+setup_readonly_access() {
+	step "Read-only database access (elsebot db)"
+	if [ -z "$PSQL" ] || [ ! -x "$PSQL" ]; then
+		warn "psql is missing; elsebot db is not available"
+		return 0
+	fi
+	local file="$CONFIG/readonly.env" password="" PGUSER PGPASSWORD PGHOST PGPORT PGDATABASE
+	if ! pg_env_from_url "$(env_value DATABASE_URL)"; then
+		warn "DATABASE_URL is not a postgresql://user:password@host:port/database URL; elsebot db is not available"
+		return 0
+	fi
+	[ -f "$file" ] && password="$(sed -n 's/^PGPASSWORD=//p' "$file")"
+	[ -n "$password" ] || password="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+	local log="$LOGS/readonly-access.log"
+	if ! PGUSER="$PGUSER" PGPASSWORD="$PGPASSWORD" PGHOST="$PGHOST" PGPORT="$PGPORT" PGDATABASE="$PGDATABASE" \
+		ELSE_READONLY_PASSWORD="$password" "$PSQL" -X -q -v ON_ERROR_STOP=1 >"$log" 2>&1 <<'SQL'; then
+\getenv password ELSE_READONLY_PASSWORD
+SELECT format('CREATE ROLE else_readonly LOGIN PASSWORD %L', :'password')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'else_readonly') \gexec
+ALTER ROLE else_readonly WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'password';
+ALTER ROLE else_readonly SET default_transaction_read_only = on;
+SELECT format('GRANT CONNECT ON DATABASE %I TO else_readonly', current_database()) \gexec
+GRANT USAGE ON SCHEMA public TO else_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO else_readonly;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO else_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO else_readonly;
+SQL
+		tail -5 "$log" >&2
+		warn "could not set up the read-only role; elsebot db is not available (log: $log)"
+		return 0
+	fi
+	(
+		umask 077
+		printf 'PGHOST=%s\nPGPORT=%s\nPGDATABASE=%s\nPGUSER=else_readonly\nPGPASSWORD=%s\n' \
+			"$PGHOST" "$PGPORT" "$PGDATABASE" "$password" >"$file"
+	)
+	ok "role else_readonly (read-only), login in $file"
+}
+
 check_providers() {
 	step "Provider CLIs"
 	if have codex; then
@@ -845,6 +909,7 @@ linux_stage2() {
 		fi
 		prune_versions "$target" "$installed"
 		ok "updated to $target (kept $installed in $VERSIONS)"
+		setup_readonly_access
 	else
 		switch_to "$target"
 		install_commands
@@ -854,6 +919,7 @@ linux_stage2() {
 		else
 			start_api || die "the API did not start; see: elsebot logs"
 		fi
+		setup_readonly_access
 	fi
 	check_providers
 	[ "$SERVER_ONLY" = 0 ] && next "open the app: elsebot desktop (or else.bot in your launcher)"

@@ -15,6 +15,7 @@ Usage: elsebot <command>
                     the API service (stop is graceful: running turns end as Stopped)
   logs              follow the API log
   api <args>        run else-api with this installation's settings, e.g. elsebot api backup
+  db [psql args]    read-only SQL on this installation's database, e.g. elsebot db -c 'select count(*) from bots'
   paths             where everything is
 EOF
 }
@@ -28,6 +29,7 @@ LOGS="$ELSE_HOME/logs"
 RUN="$ELSE_HOME/run"
 ELSEBOT_SERVICE=else-api
 ELSEBOT_MANAGER=process
+ELSEBOT_PSQL=""
 # shellcheck disable=SC1091
 [ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
 
@@ -167,6 +169,18 @@ logs)
 api)
 	[ -x "$CURRENT/bin/else-api" ] || die "else.bot is not installed in $ELSE_HOME"
 	cd "$CONFIG" && exec "$CURRENT/bin/else-api" "$@"
+	;;
+db)
+	[ -f "$CONFIG/readonly.env" ] || die "no read-only database login; run: elsebot update"
+	psql="${ELSEBOT_PSQL:-$(command -v psql || true)}"
+	[ -n "$psql" ] && [ -x "$psql" ] || die "psql is not installed"
+	set -a
+	# shellcheck disable=SC1091
+	. "$CONFIG/readonly.env"
+	set +a
+	# The role's sessions are read-only already; the client asks again.
+	export PGOPTIONS="-c default_transaction_read_only=on"
+	exec "$psql" -X "$@"
 	;;
 paths)
 	where="$(pid_file)"

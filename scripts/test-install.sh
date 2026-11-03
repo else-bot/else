@@ -134,6 +134,17 @@ wait_health 0.0.1
 ~/.local/bin/elsebot status | tee /tmp/status
 grep -q "running on" /tmp/status || fail "elsebot status"
 
+echo "--- elsebot db reads and cannot write"
+check_db() {
+	[ "$(stat -c %a $H/config/readonly.env)" = 600 ] || fail "readonly.env is not 0600"
+	[ "$(~/.local/bin/elsebot db -Atc 'select current_user')" = else_readonly ] || fail "elsebot db is not the read-only role"
+	[ "$(~/.local/bin/elsebot db -Atc 'select count(*) >= 1 from bots')" = t ] || fail "elsebot db cannot read"
+	if ~/.local/bin/elsebot db -c 'delete from bots' >/tmp/write.log 2>&1; then fail "elsebot db could write"; fi
+	grep -qi "read-only" /tmp/write.log || { cat /tmp/write.log; fail "the write was not refused as read-only"; }
+	if ~/.local/bin/elsebot db -c 'set transaction read write; delete from bots' >/tmp/write2.log 2>&1; then fail "the role could switch to read-write"; fi
+}
+check_db
+
 echo "--- an update is refused while a bot works"
 echo "ELSE_SYNTHETIC_PROVIDER=1" >>$H/config/.env
 ~/.local/bin/elsebot restart
@@ -169,6 +180,7 @@ ls $H/data/backups/*/complete.json >/dev/null || fail "no completed backup set"
 [ "$(api $URL/v1/bots | jq '[.bots[] | select(.name == "Worker")] | length')" = 1 ] || fail "the bot was lost"
 after="$(send 'on the new version')"
 wait_status "$after" completed
+check_db
 
 echo "--- running it again changes nothing"
 ~/.local/bin/elsebot update --yes --skip-guest-image 2>&1 | tee /tmp/again.log

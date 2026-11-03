@@ -80,13 +80,15 @@ Messages queued during the update run afterwards; background jobs in the bot com
   src/          the release's source (git checkout at the release tag)
   versions/     built releases; current -> versions/<version>
   bin/          elsebot, else-api, else-desktop
-  config/       .env (settings and database password, 0600), compose.yaml
+  config/       .env (settings and database password), readonly.env (elsebot db), both 0600; compose.yaml
   data/         credentials, bot computers, artifacts, backups
   toolchain/    Rust, only for building else.bot
   microsandbox/ the VM runtime
   build/        build cache
   logs/         install, update, and build logs
 ```
+
+`elsebot db` logs in as `else_readonly`, a database role with SELECT on every table (new ones included) whose sessions are read-only; it cannot change anything, which makes it the way to inspect an installation, for example when reporting a bug.
 
 Outside `~/.else`: the system packages, the database's Docker volume and the guest image in Docker, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
 
@@ -100,6 +102,7 @@ Outside `~/.else`: the system packages, the database's Docker volume and the gue
 | `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
 | `elsebot logs` | Follow the API log |
 | `elsebot api backup` | Any `else-api` command with this installation's settings |
+| `elsebot db` | Read-only SQL on the installation's database (`psql`), e.g. `elsebot db -c 'select count(*) from bots'` |
 | `elsebot paths` | Where everything is |
 
 ### Versions and releases
