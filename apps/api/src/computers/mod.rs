@@ -156,6 +156,9 @@ pub enum DiskCapture {
         /// For a desktop: whether its browser was checkpointed (`ok`) when
         /// it stopped; `None` when unknown.
         browser_checkpoint: Option<String>,
+        /// Its mount of the bot's project directory, if it was created with
+        /// one: a restore must bind it again.
+        project_mount: Option<Mount>,
     },
     /// The bot never used a computer.
     NoComputer,
@@ -629,6 +632,12 @@ impl ComputerManager {
             _ => self.stop_for_disk(bot_id, &row).await?,
         }
         self.runtime.export_disk(&row.runtime_name, archive).await?;
+        let project_mount = self
+            .runtime
+            .mounts(&row.runtime_name)
+            .await?
+            .into_iter()
+            .find(|m| m.guest == GUEST_PROJECT || m.guest == ROOT_PROJECT);
         let (port, browser_checkpoint): (Option<i32>, Option<String>) = sqlx::query_as(
             "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = $1",
         )
@@ -644,6 +653,7 @@ impl ComputerManager {
             desktop_port: port.map(|p| p as u16),
             was_running,
             browser_checkpoint,
+            project_mount,
         })
     }
 

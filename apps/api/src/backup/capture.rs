@@ -268,6 +268,9 @@ pub struct Coordinator {
     /// No API runs (its singleton lock is held by this process), so nothing
     /// else can change state during the capture.
     pub exclusive: bool,
+    /// The bots' project directories (`ELSE_BOTS_DIR`), captured at the
+    /// checkpoint.
+    pub projects_dir: Option<PathBuf>,
 }
 
 /// Seal a plaintext file into an artifact and remove the plaintext.
@@ -345,6 +348,7 @@ async fn capture_computers(
                 desktop_port,
                 was_running,
                 browser_checkpoint,
+                project_mount,
             } => {
                 let sealed =
                     seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
@@ -386,6 +390,10 @@ async fn capture_computers(
                             desktop_password,
                             was_running,
                             browser_checkpoint,
+                            project_mount: project_mount.map(|m| super::ProjectMount {
+                                guest: m.guest,
+                                uid: m.uid,
+                            }),
                         }),
                     ),
                 );
@@ -448,6 +456,63 @@ async fn capture_files(
         });
     }
     Ok((artifacts, missing))
+}
+
+/// Archive and seal every active bot's project directory. Returns the
+/// artifacts and each bot's project state.
+async fn capture_projects(
+    bots: &[(uuid::Uuid, String, String)],
+    projects_dir: &Path,
+    staging: &Path,
+    identity: &age::x25519::Identity,
+    limit: u64,
+) -> Result<(Vec<Artifact>, std::collections::HashMap<uuid::Uuid, String>), BackupError> {
+    let mut artifacts = Vec::new();
+    let mut states = std::collections::HashMap::new();
+    for (bot, name, status) in bots {
+        if status != "active" {
+            states.insert(*bot, "omitted-deleted-bot".to_owned());
+            continue;
+        }
+        let dir = projects_dir.join(bot.to_string());
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            states.insert(*bot, "none".to_owned());
+            continue;
+        }
+        let object = super::projects::object(*bot);
+        let plain = staging.join(format!("project-{bot}.tar"));
+        let archive_target = plain.clone();
+        let unreadable =
+            tokio::task::spawn_blocking(move || super::projects::archive(&dir, &archive_target))
+                .await
+                .map_err(|e| BackupError::Io(e.to_string()))?
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(&plain);
+                })?;
+        if !unreadable.is_empty() {
+            tracing::warn!(bot = %name, entries = unreadable.len(), "project entries could not be read and are not in the set");
+        }
+        let sealed = seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
+        artifacts.push(Artifact {
+            kind: "project".into(),
+            object,
+            bot_id: Some(*bot),
+            ciphertext_bytes: sealed.ciphertext_bytes,
+            ciphertext_sha256: sealed.ciphertext_sha256,
+            plaintext_bytes: sealed.plaintext_bytes,
+            plaintext_sha256: sealed.plaintext_sha256,
+        });
+        states.insert(
+            *bot,
+            if unreadable.is_empty() {
+                "included"
+            } else {
+                "partial"
+            }
+            .to_owned(),
+        );
+    }
+    Ok((artifacts, states))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -533,6 +598,17 @@ async fn capture_into(
             .await?
         }
         None => Default::default(),
+    };
+    // Project directories only at a checkpoint: no turn runs and their
+    // computers (which mount them) are stopped.
+    let (mut project_artifacts, mut project_states) = match (
+        &coordinator.projects_dir,
+        gate.is_some() || coordinator.exclusive,
+    ) {
+        (Some(dir), true) => {
+            capture_projects(&bot_rows, dir, staging, &identity, config.max_bytes).await?
+        }
+        _ => Default::default(),
     };
     if cancel.is_cancelled() {
         return Err(BackupError::Interrupted);
@@ -625,6 +701,12 @@ async fn capture_into(
             if vm == "missing" || (vm == "omitted" && status == "active") {
                 complete = false;
             }
+            let project = project_states
+                .remove(&id)
+                .unwrap_or_else(|| "omitted".to_owned());
+            if status == "active" && !matches!(project.as_str(), "included" | "none") {
+                complete = false;
+            }
             // A desktop whose browser was not checkpointed may carry a
             // stale profile lock.
             if computer.as_ref().is_some_and(|c| {
@@ -648,6 +730,7 @@ async fn capture_into(
                 vm,
                 computer,
                 provider_state: "omitted-reauth-required".into(),
+                project,
             }
         })
         .collect();
@@ -662,9 +745,21 @@ async fn capture_into(
     }];
     artifacts.append(&mut vm_artifacts);
     artifacts.append(&mut file_artifacts);
+    let projects_captured =
+        !project_artifacts.is_empty() || entries.iter().any(|b| !b.project.starts_with("omitted"));
+    let projects_partial = entries.iter().any(|b| b.project == "partial");
+    artifacts.append(&mut project_artifacts);
     if !missing_files.is_empty() {
         complete = false;
     }
+    let projects = if !projects_captured {
+        "omitted"
+    } else if projects_partial {
+        "partial"
+    } else {
+        "included"
+    }
+    .to_owned();
     let coverage = if coordinated {
         super::Coverage {
             database: "included".into(),
@@ -673,21 +768,32 @@ async fn capture_into(
             } else {
                 "partial".into()
             },
+            projects,
             provider_state: "omitted-reauth-required".into(),
             whole_assistant: complete,
             note: if complete {
-                "Whole assistant: the database and every active bot's computer (standalone disk \
-                 archives with their images). Native provider sessions are not included: \
-                 conversations are rebuilt from PostgreSQL and providers may need a fresh login."
+                "Whole assistant: the database, every active bot's computer (standalone disk \
+                 archives with their images), and every bot's project directory. Native provider \
+                 sessions are not included: conversations are rebuilt from PostgreSQL and \
+                 providers may need a fresh login."
                     .into()
             } else {
                 format!(
                     "Partial: a bot's computer is missing from the runtime, a desktop browser was \
-                     not checkpointed, or host artifacts are missing ({}), so this set does not \
-                     recover the whole assistant.",
+                     not checkpointed, a project directory was not captured whole, or host \
+                     artifacts are missing ({}), so this set does not recover the whole assistant.",
                     missing_files.len()
                 )
             },
+        }
+    } else if projects != "omitted" {
+        super::Coverage {
+            note: "The database and the bots' project directories only: bot computers \
+                   (files, browser profiles, running jobs) and native provider sessions are not \
+                   included. Restoring this set does not recover the whole assistant."
+                .into(),
+            projects,
+            ..super::database_only_coverage()
         }
     } else {
         super::database_only_coverage()

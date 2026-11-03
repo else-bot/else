@@ -40,11 +40,20 @@ pub struct RestoreRequest<'a> {
     pub computers: Option<ComputerTarget<'a>>,
 }
 
-/// A new runtime home and installation directory for restored computers.
+/// A new installation directory for restored host state, and the runtime
+/// home for restored computers.
 pub struct ComputerTarget<'a> {
-    pub runtime: std::sync::Arc<dyn crate::computers::ComputerRuntime>,
-    /// The new installation's data directory (desktop passwords go here).
+    /// Needed only for a set with computers.
+    pub runtime: Option<std::sync::Arc<dyn crate::computers::ComputerRuntime>>,
+    /// The new installation's data directory (desktop passwords, host
+    /// artifacts, and the bots' project directories under `projects/`).
     pub data_dir: &'a Path,
+}
+
+/// Where a restore puts the bots' project directories: point
+/// `ELSE_BOTS_DIR` here (restored computers mount them from here).
+pub fn projects_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("projects")
 }
 
 impl std::fmt::Debug for ComputerTarget<'_> {
@@ -156,8 +165,9 @@ pub fn open_set(
     Ok((completion, manifest, identity))
 }
 
-/// Exactly one database dump first, then one disk archive per bot whose
-/// entry names it, at the expected object name; nothing else.
+/// Exactly one database dump first, then one disk archive and one project
+/// archive per bot whose entry names them, and host artifacts, at the
+/// expected object names; nothing else.
 fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let invalid = |why: &str| Err(BackupError::Invalid(format!("unexpected artifacts: {why}")));
     let Some((first, rest)) = manifest.artifacts.split_first() else {
@@ -168,6 +178,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     }
     let mut seen = std::collections::HashSet::new();
     let mut files = std::collections::HashSet::new();
+    let mut projects = std::collections::HashSet::new();
     for artifact in rest {
         let Some(bot) = artifact.bot_id else {
             return invalid("an archive without its bot");
@@ -181,6 +192,19 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
             match id {
                 Some(id) if artifact.object == format!("file-{id}.age") && files.insert(id) => {}
                 _ => return invalid(&artifact.object),
+            }
+            continue;
+        }
+        if artifact.kind == "project" {
+            let named = manifest
+                .bots
+                .iter()
+                .any(|b| b.id == bot && matches!(b.project.as_str(), "included" | "partial"));
+            if artifact.object != super::projects::object(bot) || !named {
+                return invalid(&artifact.object);
+            }
+            if !projects.insert(bot) {
+                return invalid("two project archives for one bot");
             }
             continue;
         }
@@ -202,7 +226,12 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         }
     }
     let included = manifest.bots.iter().filter(|b| b.vm == "included").count();
-    if included != seen.len() {
+    let with_project = manifest
+        .bots
+        .iter()
+        .filter(|b| matches!(b.project.as_str(), "included" | "partial"))
+        .count();
+    if included != seen.len() || with_project != projects.len() {
         return invalid("a bot entry names a missing archive");
     }
     Ok(())
@@ -300,12 +329,23 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     {
         return Err(BackupError::TooLarge(request.max_bytes));
     }
-    let has_computers = manifest.artifacts.len() > 1;
-    if has_computers && request.computers.is_none() {
+    let has_host_state = manifest.artifacts.len() > 1;
+    if has_host_state && request.computers.is_none() {
         return Err(BackupError::Refused(
-            "this set includes bot computers or host artifacts; restore it into a new \
-             installation directory"
+            "this set includes bot computers, project directories, or host artifacts; restore \
+             it into a new installation directory"
                 .into(),
+        ));
+    }
+    let has_computers = manifest.artifacts.iter().any(|a| a.kind == "vm");
+    if has_computers
+        && request
+            .computers
+            .as_ref()
+            .is_some_and(|t| t.runtime.is_none())
+    {
+        return Err(BackupError::Refused(
+            "this set includes bot computers; restoring them needs Microsandbox (msb)".into(),
         ));
     }
     // One restore at a time per staging directory; stale staging from a
@@ -497,10 +537,10 @@ async fn restore_computers(
         // Nothing this restore started may keep running once its state is
         // removed: stop every computer it tried to create and confirm it.
         let mut running = Vec::new();
-        if let Some(target) = &request.computers {
+        if let Some(runtime) = request.computers.as_ref().and_then(|t| t.runtime.as_ref()) {
             for name in &attempted {
-                let _ = target.runtime.stop(name).await;
-                match target.runtime.state(name).await {
+                let _ = runtime.stop(name).await;
+                match runtime.state(name).await {
                     Ok(None | Some(crate::computers::RuntimeState::Stopped)) => {}
                     _ => running.push(name.clone()),
                 }
@@ -526,7 +566,32 @@ async fn restore_runtime(
     attempted: &mut Vec<String>,
 ) -> Result<(), BackupError> {
     if let Some(target) = &request.computers {
-        for artifact in &manifest.artifacts[1..] {
+        // Project directories first: restored computers mount them.
+        let projects = projects_dir(target.data_dir);
+        for artifact in manifest.artifacts[1..]
+            .iter()
+            .filter(|a| a.kind == "project")
+        {
+            let bot = artifact.bot_id.expect("validated");
+            ensure_private(&projects)?;
+            let plain = staging.join(format!("project-{bot}.tar"));
+            let set_dir = request.set_dir.to_owned();
+            let artifact = artifact.clone();
+            let identity = identity.clone();
+            let dir = projects.join(bot.to_string());
+            tokio::task::spawn_blocking(move || {
+                let result = verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
+                    .and_then(|()| super::projects::unpack(&plain, &dir));
+                let _ = std::fs::remove_file(&plain);
+                result
+            })
+            .await
+            .map_err(|e| BackupError::Io(e.to_string()))??;
+        }
+        for artifact in manifest.artifacts[1..]
+            .iter()
+            .filter(|a| a.kind != "project")
+        {
             let bot = artifact.bot_id.expect("validated");
             if artifact.kind == "file" {
                 let id = artifact
@@ -581,12 +646,29 @@ async fn restore_runtime(
                     .map(|p| vec![(p, crate::computers::DESKTOP_GUEST_PORT)])
                     .unwrap_or_default(),
                 files: Vec::new(),
-                // Project directories are not in backup sets yet, so a
-                // restored computer gets no project mount.
-                mounts: Vec::new(),
+                // A computer made with a project mount is restored with the
+                // restored project bound at the same guest path.
+                mounts: match &entry.project_mount {
+                    Some(mount) => {
+                        ensure_private(&projects)?;
+                        let dir = projects.join(bot.to_string());
+                        ensure_private(&dir)?;
+                        vec![crate::computers::Mount {
+                            host: std::fs::canonicalize(&dir)
+                                .map_err(|e| BackupError::io(dir.display(), e))?,
+                            guest: mount.guest.clone(),
+                            uid: mount.uid,
+                        }]
+                    }
+                    None => Vec::new(),
+                },
             };
+            let runtime = target
+                .runtime
+                .as_ref()
+                .expect("checked: a set with computers");
             attempted.push(spec.name.clone());
-            let result = target.runtime.restore_disk(&plain, &spec).await;
+            let result = runtime.restore_disk(&plain, &spec).await;
             let _ = std::fs::remove_file(&plain);
             result.map_err(|e| {
                 BackupError::Producer(format!("restoring {}: {e}", entry.runtime_name))
@@ -602,6 +684,16 @@ async fn restore_runtime(
         }
     }
     Ok(())
+}
+
+/// Create `dir` (mode 0700) unless it already exists.
+fn ensure_private(dir: &Path) -> Result<(), BackupError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| BackupError::io(dir.display(), e))
 }
 
 async fn reconcile(

@@ -33,7 +33,7 @@ Provider CLIs run directly on the host as the API's user, the way coding-agent d
 - else.bot's task grants still bound its own tools, but they are no longer a boundary against a misbehaving provider process, which could read the owner token.
 - Nothing ends a provider run when the API dies; leftovers are swept at the next startup (Linux through `/proc` and pidfds, macOS through libproc, pinned by start time).
 - The installer no longer installs or checks bubblewrap and sets `ELSE_BOTS_DIR` (kept if the owner changed it).
-- Backup sets do not include bot project directories yet, and a computer restored from a backup has no project mount.
+- Backup sets include each bot's project directory (`project-<bot>.tar.age`), and a restored computer is bound to its restored project; a computer created with the mount cannot be restored without that binding.
 - Only computers created after this change get the mount. An image upgrade recreates the computer with the mount; files in an older computer's `~/work` are unpacked into the new computer's mount, which moves them into the host project directory.
 - Claude Code runs with the host's own configuration directory, as in a terminal, so its login works on macOS too (the Keychain entry is tied to that directory). Its native sessions sit in `~/.claude/projects/`, one directory per bot project.
 - Native sessions created before this change do not resume: their fingerprint named the sandbox runtime. Conversations continue from PostgreSQL.

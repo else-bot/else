@@ -63,8 +63,8 @@ When asked to implement the next milestone, continue through its tasks without p
 
 Open work from [providers running on the host](docs/decisions/0001-providers-run-on-the-host.md):
 
-- [ ] Include bot project directories (`ELSE_BOTS_DIR`) in backup sets and restore them.
-- [ ] Mount the project directory into computers restored from a backup.
+- [x] Include bot project directories (`ELSE_BOTS_DIR`) in backup sets and restore them.
+- [x] Mount the project directory into computers restored from a backup.
 - [x] Claude Code login on macOS (Keychain): bots use the host's Claude configuration directory.
 - [x] Startup sweep of leftover provider processes on macOS (libproc and `KERN_PROCARGS2`).
 

@@ -14,6 +14,7 @@
 //! whole-assistant backup.
 
 pub mod capture;
+pub mod projects;
 pub mod replicate;
 pub mod restore;
 pub mod s3;
@@ -120,8 +121,9 @@ pub struct Completion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    /// `postgres`, `vm` (one bot's standalone disk archive with image), or
-    /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`).
+    /// `postgres`, `vm` (one bot's standalone disk archive with image),
+    /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`), or
+    /// `project` (a bot's project directory, `project-<bot>.tar.age`).
     pub kind: String,
     pub object: String,
     /// For a `vm` artifact, its bot.
@@ -175,6 +177,15 @@ pub struct BotEntry {
     pub provider_state: String,
     /// The native sessions the bot had (not included), for the record.
     pub provider_sessions: Vec<SessionEntry>,
+    /// Its project directory: `included`, `partial` (some entries could not
+    /// be read), `none` (no directory), `omitted-deleted-bot`, or `omitted`
+    /// (not captured, as in sets made before project directories).
+    #[serde(default = "omitted")]
+    pub project: String,
+}
+
+fn omitted() -> String {
+    "omitted".into()
 }
 
 /// A bot computer captured as a standalone disk archive.
@@ -199,6 +210,19 @@ pub struct ComputerEntry {
     /// For a desktop: `ok` when its browser was closed cleanly before the
     /// disk was captured.
     pub browser_checkpoint: Option<String>,
+    /// Where the computer mounts the bot's project directory, if it was
+    /// created with that mount; a restore binds the restored directory
+    /// there. Absent in sets made before project mounts.
+    #[serde(default)]
+    pub project_mount: Option<ProjectMount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMount {
+    pub guest: String,
+    /// The guest owner of the mounted files.
+    pub uid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +239,9 @@ pub struct SessionEntry {
 pub struct Coverage {
     pub database: String,
     pub vm: String,
+    /// Bot project directories: `included`, `partial`, or `omitted`.
+    #[serde(default = "omitted")]
+    pub projects: String,
     pub provider_state: String,
     /// True only when every state the assistant needs is included.
     pub whole_assistant: bool,
@@ -243,6 +270,7 @@ pub fn database_only_coverage() -> Coverage {
     Coverage {
         database: "included".into(),
         vm: "omitted".into(),
+        projects: "omitted".into(),
         provider_state: "omitted-reauth-required".into(),
         whole_assistant: false,
         note: "Database only: bot computers (files, browser profiles, running jobs) and native \
