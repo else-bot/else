@@ -19,6 +19,7 @@
 
 pub mod jobs;
 pub mod runtime;
+pub mod screens;
 pub mod upgrade;
 
 use std::collections::HashMap;

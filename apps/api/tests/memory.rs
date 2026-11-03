@@ -640,7 +640,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         let read_only = name.starts_with("memory_")
             || matches!(
                 name,
-                "computer_job" | "computer_read_file" | "computer_secrets"
+                "computer_job" | "computer_read_file" | "computer_secrets" | "computer_screenshot"
             );
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }

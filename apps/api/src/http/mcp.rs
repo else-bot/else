@@ -45,6 +45,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_fetch",
     "computer_browser",
     "computer_secrets",
+    "computer_screenshot",
 ];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
@@ -250,6 +251,17 @@ fn tool_list() -> Value {
 /// A tool-level failure the model can read and act on.
 pub(crate) fn tool_error(message: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": message }], "isError": true })
+}
+
+/// A result with an image (POC-028): the metadata as text, then the PNG as
+/// an MCP image content block, so the model receives pixels.
+pub(crate) fn tool_image(meta: Value, png: &[u8]) -> Value {
+    use base64::Engine;
+    json!({ "content": [
+        { "type": "text", "text": meta.to_string() },
+        { "type": "image", "mimeType": "image/png",
+          "data": base64::engine::general_purpose::STANDARD.encode(png) },
+    ] })
 }
 
 pub(crate) fn tool_result(value: Value) -> Value {

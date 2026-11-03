@@ -242,7 +242,7 @@ fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
 
 impl ComputerManager {
     /// The guest user and its program prefix for running a script.
-    fn as_guest_user(&self, script: &str) -> (String, Vec<String>) {
+    pub(super) fn as_guest_user(&self, script: &str) -> (String, Vec<String>) {
         if self.config.desktop {
             (
                 // Absolute paths: root resolves nothing through a PATH.
