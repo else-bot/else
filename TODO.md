@@ -56,7 +56,7 @@ When asked to implement the next milestone, continue through its tasks without p
 - [x] [POC-028: Desktop screenshots delivered to the model](docs/implementation/05-vm-automation-and-categories.md#poc-028-desktop-screenshots-delivered-to-the-model)
 - [x] [POC-029: Visual mouse and keyboard control](docs/implementation/05-vm-automation-and-categories.md#poc-029-visual-mouse-and-keyboard-control)
 - [x] [POC-030: Persistent bot categories and API](docs/implementation/05-vm-automation-and-categories.md#poc-030-persistent-bot-categories-and-api)
-- [ ] [POC-031: Grouped sidebar and category controls](docs/implementation/05-vm-automation-and-categories.md#poc-031-grouped-sidebar-and-category-controls)
+- [x] [POC-031: Grouped sidebar and category controls](docs/implementation/05-vm-automation-and-categories.md#poc-031-grouped-sidebar-and-category-controls)
 - [ ] [POC-032: Automation and categories acceptance](docs/implementation/05-vm-automation-and-categories.md#poc-032-automation-and-categories-acceptance)
 
 ## Outside this backlog

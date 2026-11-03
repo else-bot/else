@@ -69,6 +69,22 @@ pub struct Bot {
     pub activity: Option<Activity>,
     #[serde(default)]
     pub cleanup: Option<Cleanup>,
+    /// Its sidebar category; absent (older servers, receipts) or null means
+    /// unassigned.
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+}
+
+/// A sidebar category (POC-030).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Category {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CategoryEnvelope {
+    category: Category,
 }
 
 impl Bot {
@@ -80,6 +96,9 @@ impl Bot {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotList {
     pub default_bot_id: Option<Uuid>,
+    /// Absent from servers without categories.
+    #[serde(default)]
+    pub categories: Vec<Category>,
     pub bots: Vec<Bot>,
 }
 
@@ -393,6 +412,50 @@ impl Client {
         self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(body))
             .await
             .map(|(_, v)| v.bot)
+    }
+
+    pub async fn create_category(
+        self: Arc<Self>,
+        request_id: Uuid,
+        name: String,
+    ) -> Result<Category, ClientError> {
+        let body = json!({ "request_id": request_id, "name": name });
+        self.call::<CategoryEnvelope>(Method::POST, "/v1/categories".into(), Some(body))
+            .await
+            .map(|(_, v)| v.category)
+    }
+
+    pub async fn rename_category(
+        self: Arc<Self>,
+        id: Uuid,
+        name: String,
+    ) -> Result<Category, ClientError> {
+        let body = json!({ "name": name });
+        self.call::<CategoryEnvelope>(Method::PATCH, format!("/v1/categories/{id}"), Some(body))
+            .await
+            .map(|(_, v)| v.category)
+    }
+
+    pub async fn delete_category(self: Arc<Self>, id: Uuid) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(Method::DELETE, format!("/v1/categories/{id}"), None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Assign a bot to a category, or unassign it with `None`.
+    pub async fn set_category(
+        self: Arc<Self>,
+        bot: Uuid,
+        category: Option<Uuid>,
+    ) -> Result<Bot, ClientError> {
+        let body = json!({ "category_id": category });
+        self.call::<BotEnvelope>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}/category"),
+            Some(body),
+        )
+        .await
+        .map(|(_, v)| v.bot)
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {

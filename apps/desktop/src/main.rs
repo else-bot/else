@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod config;
 mod model;
+mod sidebar;
 
 use std::sync::Arc;
 
