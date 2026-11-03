@@ -44,6 +44,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_read_file",
     "computer_fetch",
     "computer_browser",
+    "computer_secrets",
 ];
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.

@@ -219,6 +219,9 @@ pub struct ComputerManager {
     ops: std::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     /// The startup inspection succeeded; until then nothing is used.
     inspected: AtomicBool,
+    /// Foreground commands while they run (POC-026), so Stop work can end
+    /// them.
+    foreground: std::sync::Mutex<HashMap<Uuid, jobs::Foreground>>,
 }
 
 impl ComputerManager {
@@ -229,6 +232,7 @@ impl ComputerManager {
             config,
             ops: std::sync::Mutex::new(HashMap::new()),
             inspected: AtomicBool::new(false),
+            foreground: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1342,6 +1346,25 @@ impl ComputerManager {
 
     /// Maintenance loop until cancelled.
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
+        // Ending foreground commands of stopped turns runs on its own: a
+        // maintenance pass can wait on a bot's operation lock, which the
+        // command itself holds.
+        let orphans = {
+            let manager = self.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(err) = manager.end_orphaned_commands().await {
+                        tracing::warn!(error = %err, "ending stopped foreground commands failed");
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    }
+                }
+            })
+        };
+        let _orphans = AbortOnDrop(orphans);
         loop {
             if let Err(err) = self.tick(&cancel).await {
                 tracing::warn!(error = %err, "computer maintenance failed");
@@ -1351,6 +1374,14 @@ impl ComputerManager {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

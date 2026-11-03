@@ -637,8 +637,11 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     // Memory tools only read; delegation and guest actions say they act.
     for tool in listed.body["result"]["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
-        let read_only =
-            name.starts_with("memory_") || matches!(name, "computer_job" | "computer_read_file");
+        let read_only = name.starts_with("memory_")
+            || matches!(
+                name,
+                "computer_job" | "computer_read_file" | "computer_secrets"
+            );
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }
 

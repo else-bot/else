@@ -95,6 +95,22 @@ pub trait ComputerRuntime: Send + Sync {
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError>;
 
+    /// Run a command with `input` on its standard input (task secrets are
+    /// sent this way, never in arguments).
+    async fn exec_input(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let _ = (name, program, args, input, timeout);
+        Err(RuntimeError::Unavailable(
+            "this runtime cannot pass input to a command".into(),
+        ))
+    }
+
     /// Copy a guest file to a host path.
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
@@ -263,15 +279,43 @@ impl Msb {
         args: &[&str],
         timeout: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        use tokio::io::AsyncReadExt;
+        self.run_input(operation, args, None, timeout).await
+    }
+
+    async fn run_input(
+        &self,
+        operation: &str,
+        args: &[&str],
+        input: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut command = self.command();
         command
             .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if input.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
         let mut child = command
             .spawn()
             .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
+        if let Some(input) = input {
+            let mut stdin = child.stdin.take().expect("piped");
+            let written = tokio::time::timeout(timeout, async {
+                stdin.write_all(input).await?;
+                stdin.shutdown().await
+            })
+            .await;
+            drop(stdin);
+            if !matches!(written, Ok(Ok(()))) {
+                return Err(RuntimeError::Failed {
+                    operation: operation.into(),
+                    message: "the command's input could not be written".into(),
+                });
+            }
+        }
         // Keep at most OUTPUT_LIMIT bytes of each stream; keep reading (and
         // dropping) the rest so the child never blocks on a full pipe.
         async fn capture(mut stream: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, bool) {
@@ -557,6 +601,28 @@ impl ComputerRuntime for Msb {
         ];
         all.extend_from_slice(args);
         self.run("exec", &all, timeout).await
+    }
+
+    async fn exec_input(
+        &self,
+        name: &str,
+        program: &str,
+        args: &[&str],
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        let guest_timeout = format!("{}s", timeout.as_secs().max(1));
+        let mut all = vec![
+            "exec",
+            "--stream",
+            "--timeout",
+            &guest_timeout,
+            name,
+            "--",
+            program,
+        ];
+        all.extend_from_slice(args);
+        self.run_input("exec", &all, Some(input), timeout).await
     }
 }
 

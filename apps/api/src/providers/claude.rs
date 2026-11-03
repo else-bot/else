@@ -52,7 +52,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "claude";
 /// Bump when the system prompt or packet format change.
-const PROMPT_VERSION: &str = "else-claude-v1";
+const PROMPT_VERSION: &str = "else-claude-v2";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",

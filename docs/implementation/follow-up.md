@@ -20,7 +20,7 @@ Recorded at POC-024. These are known gaps, not part of the delivered targets. De
 
 ## Behavior to revisit
 
-- **Foreground commands.** Stop work cancels background guest jobs but not a running `computer_run`, which ends with its 300 s timeout.
+- **Foreground commands.** Resolved in POC-026: a running `computer_run` is ended (its whole process group) within about 10 seconds once its turn is no longer running.
 - **Parked delegations.** A switch to another provider interrupts sending or running turns, not a root parked `waiting` for delegated children.
 - **Effort reporting.** Claude Code does not echo the effort level, so it is recorded as unknown.
 - **Checkpoint deadline.** Handoff checkpoints allow 60 s (the research suggested 20 s) because each attempt starts a CLI.

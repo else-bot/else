@@ -13,11 +13,14 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use sqlx::Row as _;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{Acquire, ComputerError, ComputerManager, ExecOutput};
+use crate::db::task_secrets::{Env, Redact, redact};
 
 /// Running background jobs per bot.
 pub const MAX_JOBS: i64 = 4;
@@ -28,21 +31,36 @@ const JOBS_DIR: &str = "/var/lib/elsebot/jobs";
 /// A job still `starting` this long after creation was interrupted.
 const STALE_START: Duration = Duration::from_secs(120);
 
-/// Run `$1` with its output in temporary files; print the exit code, both
-/// sizes, then the last bytes of each, separated by a NUL line. The user's
-/// own tool directories come first only for the user's command.
+/// Export task-secret variables sent on stdin as `NAME BASE64` lines
+/// (values never appear in arguments; see `db::task_secrets`).
+const ENV_FROM_STDIN: &str = r#"while IFS=' ' read -r n v; do [ -n "$n" ] && export "$n=$(printf %s "$v" | /usr/bin/base64 -d)"; done"#;
+
+/// Run `$1` in its own session (its pid, in `$3/pid`, is the process group,
+/// so Stop work can end it and its descendants) with its output in
+/// temporary files; print the exit code, both sizes, then the last bytes of
+/// each, separated by a NUL line. The user's own tool directories come
+/// first only for the user's command.
 const RUN: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"
+@ENV@
+mkdir -p "$3"
 o=$(mktemp); e=$(mktemp)
-PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$1" > "$o" 2> "$e"; c=$?
+PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /usr/bin/setsid /bin/sh -c "$1" > "$o" 2> "$e" < /dev/null &
+echo $! > "$3/pid"
+wait $!; c=$?
 printf '%s\n%s\n%s\n' "$c" "$(wc -c < "$o")" "$(wc -c < "$e")"
 tail -c "$2" "$o"; printf '\n\000\n'; tail -c "$2" "$e"
-rm -f "$o" "$e""#;
+rm -f "$o" "$e"; rm -rf "$3""#;
 
 /// Launch `$2` detached in its own session (its pid is the process group),
-/// recording pid, exit status, and output in `$1`.
+/// recording pid, exit status, and output in `$1`. Task-secret variables
+/// on stdin are exported to it.
 const LAUNCH: &str = r#"mkdir -p "$1" && { cd "$HOME/work" 2>/dev/null || cd "$HOME"; }
-setsid /bin/sh -c 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" > "$1/out" 2>&1; echo $? > "$1/exit"' sh "$1" "$2" > /dev/null 2>&1 < /dev/null &
+@ENV@
+/usr/bin/setsid /bin/sh -c 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" > "$1/out" 2>&1 < /dev/null; echo $? > "$1/exit"' sh "$1" "$2" > /dev/null 2>&1 < /dev/null &
 echo $! > "$1/pid"; echo launched"#;
+
+/// Where foreground commands record their process group.
+const RUNS_DIR: &str = "/var/lib/elsebot/runs";
 
 /// Report a job: `done <code>`, `running`, or `lost`, then the output tail.
 const PROBE: &str = r#"if [ -f "$1/exit" ]; then echo "done $(cat "$1/exit")"; elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running; else echo lost; fi; tail -c 4000 "$1/out" 2>/dev/null"#;
@@ -117,6 +135,39 @@ fn tail(text: &str, max: usize) -> String {
     text[start..].to_owned()
 }
 
+/// A script with the task-secret prologue in place.
+fn with_env(script: &str) -> String {
+    script.replace("@ENV@", ENV_FROM_STDIN)
+}
+
+/// Task-secret variables as `NAME BASE64` lines for `ENV_FROM_STDIN`.
+fn env_input(env: &Env) -> Vec<u8> {
+    use base64::Engine;
+    let mut input = Vec::new();
+    for (name, value) in &env.vars {
+        input.extend_from_slice(name.as_bytes());
+        input.push(b' ');
+        input.extend_from_slice(
+            base64::engine::general_purpose::STANDARD
+                .encode(value.as_bytes())
+                .as_bytes(),
+        );
+        input.push(b'\n');
+    }
+    input
+}
+
+/// A foreground command while it runs.
+#[derive(Clone)]
+pub(super) struct Foreground {
+    bot_id: Uuid,
+    turn_id: Option<Uuid>,
+    runtime_name: String,
+    dir: String,
+    /// True until the command returned; held while killing it.
+    alive: Arc<tokio::sync::Mutex<bool>>,
+}
+
 /// Parse the output of `RUN`.
 fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
     let mut lines = out.stdout.splitn(4, '\n');
@@ -172,6 +223,29 @@ impl ComputerManager {
         self.exec(lease, &program, &all, timeout).await
     }
 
+    async fn guest_input(
+        &self,
+        lease: Uuid,
+        script: &str,
+        args: &[&str],
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, ComputerError> {
+        let (program, mut all) = self.as_guest_user(script);
+        all.extend(args.iter().map(|a| (*a).to_owned()));
+        let all: Vec<&str> = all.iter().map(String::as_str).collect();
+        let (bot, name, _op) = self.checked(lease).await?;
+        let out = self
+            .runtime
+            .exec_input(&name, &program, &all, input, timeout)
+            .await?;
+        sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
+            .bind(bot)
+            .execute(&self.pool)
+            .await?;
+        Ok(out)
+    }
+
     /// Run a command in the bot's computer under `holder`'s lease (taken
     /// if needed), in the guest user's work directory.
     pub async fn run_command(
@@ -181,21 +255,133 @@ impl ComputerManager {
         command: &str,
         timeout: Duration,
     ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
+        self.run_command_with(bot_id, holder, command, timeout, &Env::default())
+            .await
+    }
+
+    /// [`Self::run_command`] with task-secret variables (POC-026), sent on
+    /// the runtime's stdin. While it runs the command is registered, so
+    /// maintenance can end it (its whole process group) once the turn that
+    /// started it is no longer running: Stop work, deletion, and a turn
+    /// that ended or lost its provider all stop foreground work. Output
+    /// showing a secret value is redacted.
+    pub async fn run_command_with(
+        &self,
+        bot_id: Uuid,
+        holder: &str,
+        command: &str,
+        timeout: Duration,
+        env: &Env,
+    ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
         let acquired = self.acquire(bot_id, holder).await?;
-        let Acquire::Ready { lease_id, .. } = acquired else {
+        let Acquire::Ready {
+            lease_id,
+            runtime_name,
+            ..
+        } = acquired
+        else {
             return Ok(Err(acquired));
         };
-        let out = self
-            .guest(lease_id, RUN, &[command, &TAIL_BYTES.to_string()], timeout)
-            .await?;
-        Ok(Ok(parse_run(&out).unwrap_or(CommandOutput {
+        let run_id = Uuid::new_v4();
+        let dir = format!("{RUNS_DIR}/{run_id}");
+        let alive = Arc::new(tokio::sync::Mutex::new(true));
+        self.foreground
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                run_id,
+                Foreground {
+                    bot_id,
+                    turn_id: holder.strip_prefix("turn:").and_then(|t| t.parse().ok()),
+                    runtime_name,
+                    dir: dir.clone(),
+                    alive: alive.clone(),
+                },
+            );
+        let script = with_env(RUN);
+        let tail_bytes = TAIL_BYTES.to_string();
+        let args = [command, tail_bytes.as_str(), dir.as_str()];
+        let out = if env.vars.is_empty() {
+            self.guest(lease_id, &script, &args, timeout).await
+        } else {
+            self.guest_input(lease_id, &script, &args, &env_input(env), timeout)
+                .await
+        };
+        // Ended: a kill can no longer target it (the operation lock this
+        // command held is released only after this).
+        *alive.lock().await = false;
+        self.foreground
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&run_id);
+        let out = out?;
+        let redaction = env.redaction();
+        let mut result = parse_run(&out).unwrap_or(CommandOutput {
             // The command was killed before reporting (its timeout).
             exit_code: None,
             stdout: String::new(),
             stderr: tail(&out.stderr, TAIL_BYTES),
             stdout_bytes: 0,
             stderr_bytes: out.stderr.len() as u64,
-        })))
+        });
+        result.stdout = redact(&result.stdout, &redaction);
+        result.stderr = redact(&result.stderr, &redaction);
+        Ok(Ok(result))
+    }
+
+    /// End foreground commands whose turn is no longer running (called by
+    /// maintenance). The command holds its bot's operation lock and so its
+    /// computer is running while it is registered; the kill runs while the
+    /// command is still registered as alive, so it can never reach a
+    /// computer that has stopped since.
+    pub async fn end_orphaned_commands(&self) -> Result<(), ComputerError> {
+        let runs: Vec<(Uuid, Foreground)> = self
+            .foreground
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(_, f)| f.turn_id.is_some())
+            .map(|(id, f)| (*id, f.clone()))
+            .collect();
+        if runs.is_empty() {
+            return Ok(());
+        }
+        let turns: Vec<Uuid> = runs.iter().filter_map(|(_, f)| f.turn_id).collect();
+        let live: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT t.id FROM turns t JOIN bots b ON b.id = t.bot_id
+             WHERE t.id = ANY($1) AND t.status IN ('preparing', 'sending', 'running')
+               AND b.status = 'active'",
+        )
+        .bind(&turns)
+        .fetch_all(&self.pool)
+        .await?;
+        for (run_id, run) in runs {
+            if run.turn_id.is_some_and(|t| live.contains(&t)) {
+                continue;
+            }
+            let alive = run.alive.lock().await;
+            if !*alive {
+                continue;
+            }
+            let (program, mut all) = self.as_guest_user(KILL);
+            all.push(run.dir.clone());
+            let all: Vec<&str> = all.iter().map(String::as_str).collect();
+            match self
+                .runtime
+                .exec(&run.runtime_name, &program, &all, Duration::from_secs(30))
+                .await
+            {
+                Ok(out) => tracing::info!(
+                    bot = %run.bot_id, run = %run_id, result = out.stdout.trim(),
+                    "ended a foreground command whose turn stopped"
+                ),
+                Err(err) => tracing::warn!(
+                    bot = %run.bot_id, run = %run_id, error = %err,
+                    "ending a foreground command failed; retried next pass"
+                ),
+            }
+        }
+        Ok(())
     }
 
     /// Start a background job with its own lease and deadline. Admission
@@ -212,7 +398,24 @@ impl ComputerManager {
         command: &str,
         max_duration: Duration,
     ) -> Result<Started, ComputerError> {
+        self.start_job_with(bot_id, turn_id, command, max_duration, &Env::default(), &[])
+            .await
+    }
+
+    /// [`Self::start_job`] with task-secret variables (POC-026), exported to
+    /// the job at launch over stdin. The job records which secrets it used
+    /// and how to redact their values from its output, never the values.
+    pub async fn start_job_with(
+        &self,
+        bot_id: Uuid,
+        turn_id: Option<Uuid>,
+        command: &str,
+        max_duration: Duration,
+        env: &Env,
+        secret_names: &[String],
+    ) -> Result<Started, ComputerError> {
         let id = Uuid::new_v4();
+        let redaction = serde_json::to_value(env.redaction()).expect("serializable");
         let duration = max_duration.min(MAX_JOB_DURATION);
         // Reserve a slot atomically before anything else.
         {
@@ -271,14 +474,16 @@ impl ComputerManager {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline)
-                 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))",
+                "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, redact, secrets)
+                 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), $6, $7)",
             )
             .bind(id)
             .bind(bot_id)
             .bind(turn_id)
             .bind(command)
             .bind(duration.as_secs_f64())
+            .bind(&redaction)
+            .bind(secret_names)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -305,7 +510,7 @@ impl ComputerManager {
             self.release(lease_id).await?;
             return Ok(Started::Stopped);
         }
-        match self.launch(lease_id, id, command).await {
+        match self.launch(lease_id, id, command, env).await {
             Launch::Launched => {
                 sqlx::query(
                     "UPDATE guest_jobs SET status = 'running' WHERE id = $1 AND status = 'starting'",
@@ -337,7 +542,7 @@ impl ComputerManager {
 
     /// Launch a job under its lease and the bot's operation lock, only
     /// while it is still `starting` (a kill holds the same lock).
-    async fn launch(&self, lease: Uuid, id: Uuid, command: &str) -> Launch {
+    async fn launch(&self, lease: Uuid, id: Uuid, command: &str, env: &Env) -> Launch {
         let checked = match self.checked(lease).await {
             Ok(checked) => checked,
             Err(err @ (ComputerError::LeaseEnded | ComputerError::NotRunning)) => {
@@ -358,14 +563,25 @@ impl ComputerManager {
             Err(err) => return Launch::Uncertain(err.to_string()),
         }
         let dir = format!("{JOBS_DIR}/{id}");
-        let (program, mut all) = self.as_guest_user(LAUNCH);
+        let (program, mut all) = self.as_guest_user(&with_env(LAUNCH));
         all.push(dir);
         all.push(command.to_owned());
         let all: Vec<&str> = all.iter().map(String::as_str).collect();
-        let launched = self
-            .runtime
-            .exec(&name, &program, &all, Duration::from_secs(30))
-            .await;
+        let launched = if env.vars.is_empty() {
+            self.runtime
+                .exec(&name, &program, &all, Duration::from_secs(30))
+                .await
+        } else {
+            self.runtime
+                .exec_input(
+                    &name,
+                    &program,
+                    &all,
+                    &env_input(env),
+                    Duration::from_secs(30),
+                )
+                .await
+        };
         if crate::faults::hit("job.after_launch") {
             return Launch::Interrupted;
         }
@@ -492,7 +708,7 @@ impl ComputerManager {
             .stdout
             .split_once('\n')
             .unwrap_or((out.stdout.as_str(), ""));
-        let output = tail(rest, 4000);
+        let output = self.redact_job(job_id, &tail(rest, 4000)).await?;
         if let Some(code) = first.strip_prefix("done ") {
             let code = code.trim().parse::<i32>().ok();
             let status = if code == Some(0) {
@@ -515,6 +731,19 @@ impl ComputerManager {
             .await?;
             Ok(())
         }
+    }
+
+    /// A job's output with its task-secret values redacted.
+    async fn redact_job(&self, job_id: Uuid, output: &str) -> Result<String, ComputerError> {
+        let set: Option<sqlx::types::Json<Vec<Redact>>> =
+            sqlx::query_scalar("SELECT redact FROM guest_jobs WHERE id = $1")
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(match set {
+            Some(set) => redact(output, &set.0),
+            None => output.to_owned(),
+        })
     }
 
     async fn finish_job(

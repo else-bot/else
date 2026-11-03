@@ -9,6 +9,7 @@ pub mod guest_tools;
 pub mod mcp;
 pub mod memory;
 pub mod settings;
+pub mod task_secrets;
 pub mod tools;
 pub mod turns;
 pub mod ws;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub auth_failures: auth::FailureLimiter,
     /// Bot computers, when a runtime is available.
     pub computers: Option<Arc<crate::computers::ComputerManager>>,
+    /// The installation's master key, for task secrets (POC-026).
+    pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
 }
 
 impl AppState {
@@ -60,7 +63,13 @@ impl AppState {
             server_instance_id: Uuid::new_v4(),
             auth_failures: auth::FailureLimiter::default(),
             computers: None,
+            secret_key: None,
         }
+    }
+
+    pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {
+        self.secret_key = Some(key);
+        self
     }
 
     pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
@@ -82,6 +91,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(memory::routes())
         .merge(computers::routes())
         .merge(settings::routes())
+        .merge(task_secrets::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(

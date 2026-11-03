@@ -266,10 +266,20 @@ pub fn key_id(key: &SecretKey) -> String {
 /// encoded as a standard X25519 identity. Every intermediate copy of the
 /// derived key is cleared.
 pub fn identity(key: &SecretKey, salt: &[u8; 32]) -> Result<age::x25519::Identity, BackupError> {
+    identity_for_purpose(key, salt, PURPOSE)
+}
+
+/// The same derivation for another purpose (task secrets use their own),
+/// so keys for different uses are independent.
+pub fn identity_for_purpose(
+    key: &SecretKey,
+    salt: &[u8; 32],
+    purpose: &str,
+) -> Result<age::x25519::Identity, BackupError> {
     use zeroize::{Zeroize, Zeroizing};
     let mut seed = Zeroizing::new([0u8; 32]);
     hkdf::Hkdf::<sha2_010::Sha256>::new(Some(salt), key.bytes())
-        .expand(PURPOSE.as_bytes(), seed.as_mut())
+        .expand(purpose.as_bytes(), seed.as_mut())
         .map_err(|_| BackupError::Crypto("HKDF output length rejected".into()))?;
     let mut groups = seed.to_base32();
     let mut encoded = Zeroizing::new(String::new());

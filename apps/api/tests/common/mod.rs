@@ -264,6 +264,11 @@ impl TestApp {
         if let Some(computers) = computers {
             state = state.with_computers(computers);
         }
+        // A fixed test master key, for task secrets.
+        state = state.with_secret_key(Arc::new(
+            else_api::credentials::SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+                .unwrap(),
+        ));
         let state = Arc::new(state);
         let router = else_api::http::router(&config, state.clone());
         Self {

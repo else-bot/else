@@ -15,6 +15,7 @@ use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
 use crate::computers::{Acquire, ComputerError};
 use crate::db::memory::RESPONSE_BUDGET;
+use crate::db::task_secrets::{self, Env};
 use crate::grants::Grant;
 
 pub const TOOL_NAMES: &[&str] = &[
@@ -26,6 +27,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_read_file",
     "computer_fetch",
     "computer_browser",
+    "computer_secrets",
 ];
 
 const MAX_ARTIFACT: u64 = 10 * 1024 * 1024;
@@ -35,6 +37,11 @@ pub fn tool_list() -> Vec<Value> {
     let guest = json!({ "readOnlyHint": false, "destructiveHint": true,
                         "idempotentHint": false, "openWorldHint": true });
     let job = json!({ "type": "string", "format": "uuid" });
+    let secrets = json!({ "type": "array", "maxItems": 4, "uniqueItems": true,
+        "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$" },
+        "description": "Names of task secrets (see computer_secrets) whose variables the \
+            command gets in its environment. Read them from the environment; never print \
+            them, pass them as arguments, or write them into files or source." });
     vec![
         json!({
             "name": "computer_run",
@@ -48,7 +55,8 @@ pub fn tool_list() -> Vec<Value> {
                 `command -v` before relying on it.",
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300 } },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300 },
+                "secrets": secrets.clone() },
                 "required": ["command"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -59,7 +67,8 @@ pub fn tool_list() -> Vec<Value> {
                 stop it with computer_job_cancel. At most 4 at once; max_minutes default 60.",
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
-                "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 } },
+                "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
+                "secrets": secrets },
                 "required": ["command"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -121,6 +130,15 @@ pub fn tool_list() -> Vec<Value> {
                 "text": { "type": "string", "maxLength": 4000 } },
                 "required": ["action"], "additionalProperties": false },
             "annotations": guest,
+        }),
+        json!({
+            "name": "computer_secrets",
+            "description": "List the task secrets the owner gave you for scripts: each secret's \
+                name and the environment variable names it sets (never the values). Pass a \
+                name in the secrets argument of computer_run or computer_job_start.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
         }),
     ]
 }
@@ -225,6 +243,55 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
     })
 }
 
+/// The task secrets a call names, decrypted, or the tool error.
+async fn secrets_for(
+    state: &AppState,
+    grant: &Grant,
+    args: &Value,
+) -> Result<(Env, Vec<String>), Outcome> {
+    let names: Vec<String> = match &args["secrets"] {
+        Value::Null => Vec::new(),
+        Value::Array(items) => {
+            let names: Option<Vec<String>> = items
+                .iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            match names {
+                Some(names) => names,
+                None => return Err((tool_error("secrets must be a list of names."), None)),
+            }
+        }
+        _ => return Err((tool_error("secrets must be a list of names."), None)),
+    };
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != names.len() {
+        return Err((tool_error("secrets names a secret twice."), None));
+    }
+    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), grant.bot_id, &names).await
+    {
+        Ok(env) => Ok((env, names)),
+        Err(task_secrets::SecretError::Unknown(name)) => Err((
+            tool_error(&format!(
+                "SECRET_UNKNOWN: there is no task secret named {name}; computer_secrets lists \
+                 yours. Ask the owner to add it if the task needs it."
+            )),
+            None,
+        )),
+        Err(task_secrets::SecretError::Invalid(reason)) => {
+            Err((tool_error(&format!("SECRET_INVALID: {reason}")), None))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "task secrets unavailable");
+            Err((
+                tool_error("SECRET_UNAVAILABLE: task secrets could not be read."),
+                None,
+            ))
+        }
+    }
+}
+
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let Some(computers) = state.computers.clone() else {
         return (
@@ -239,12 +306,17 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 return (tool_error("command is required."), None);
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
+            let (env, _) = match secrets_for(state, grant, args).await {
+                Ok(found) => found,
+                Err(outcome) => return outcome,
+            };
             match computers
-                .run_command(
+                .run_command_with(
                     grant.bot_id,
                     &holder(grant),
                     &command,
                     Duration::from_secs(timeout),
+                    &env,
                 )
                 .await
             {
@@ -265,12 +337,18 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 return (tool_error("command is required."), None);
             };
             let minutes = args["max_minutes"].as_u64().unwrap_or(60).clamp(1, 360);
+            let (env, names) = match secrets_for(state, grant, args).await {
+                Ok(found) => found,
+                Err(outcome) => return outcome,
+            };
             match computers
-                .start_job(
+                .start_job_with(
                     grant.bot_id,
                     Some(grant.turn_id),
                     &command,
                     Duration::from_secs(minutes * 60),
+                    &env,
+                    &names,
                 )
                 .await
             {
@@ -459,6 +537,23 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                 Err(err) => failure(err),
             }
         }
+        "computer_secrets" => match task_secrets::list(&state.db, grant.bot_id).await {
+            Ok(list) => {
+                let secrets: Vec<Value> = list
+                    .iter()
+                    .map(|s| json!({ "name": s.name, "env": s.env }))
+                    .collect();
+                let log = format!("listed {} task secrets", secrets.len());
+                (tool_result(json!({ "secrets": secrets })), Some(log))
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "listing task secrets failed");
+                (
+                    tool_error("SECRET_UNAVAILABLE: task secrets could not be read."),
+                    None,
+                )
+            }
+        },
         _ => (tool_error("Unknown tool."), None),
     }
 }

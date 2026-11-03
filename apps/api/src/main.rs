@@ -487,7 +487,8 @@ fn run_serve() -> anyhow::Result<()> {
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         // Bot computers: inspect the runtime (never waking or recreating
         // anything), then maintain leases and idle computers.
-        let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events);
+        let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events)
+            .with_secret_key(secret_key.clone());
         let mut computer_task = None;
         match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
             Ok(msb) => {
