@@ -6,5 +6,5 @@ resolver = "3"
 # The one else.bot version: both binaries report it, release tags are
 # v<version>, and scripts/release.sh bumps it.
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
