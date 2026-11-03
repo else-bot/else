@@ -47,13 +47,17 @@ async fn running_main(app: &TestApp) -> (String, Uuid, String) {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        main.parse().unwrap(),
-        conversation,
-        turn_id,
-        vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Delegate],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            main.parse().unwrap(),
+            conversation,
+            turn_id,
+            vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Delegate],
+            DEFAULT_TTL,
+        )
+        .await;
     (main, turn_id, token)
 }
 
@@ -212,13 +216,17 @@ async fn delegation_limits_fail_in_code() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let no_delegate = app.scheduler.grants().issue(
-        main.parse().unwrap(),
-        conversation,
-        root,
-        vec![Tool::ReadMemory],
-        DEFAULT_TTL,
-    );
+    let no_delegate = app
+        .scheduler
+        .grants()
+        .issue(
+            main.parse().unwrap(),
+            conversation,
+            root,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
     assert_eq!(
         delegate(&app, &no_delegate, &work, "x").await.status,
         StatusCode::FORBIDDEN
@@ -617,14 +625,18 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         .await
         .unwrap();
     let _ = warm;
-    let token = app.scheduler.grants().issue_scoped(
-        work_id,
-        conversation,
-        turn,
-        vec![Tool::ReadMemory],
-        Some(scope),
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue_scoped(
+            work_id,
+            conversation,
+            turn,
+            vec![Tool::ReadMemory],
+            Some(scope),
+            DEFAULT_TTL,
+        )
+        .await;
     let call = |bot: Uuid| {
         app.call(
             "POST",

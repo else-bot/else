@@ -6,7 +6,7 @@
 //! a different [`Principal`] and be refused by owner routes with `403`.
 
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
@@ -30,39 +30,47 @@ const MAX_FAILURES_PER_WINDOW: u32 = 30;
 
 #[derive(Debug)]
 pub struct FailureLimiter {
-    window: Mutex<(Instant, u32)>,
+    started: Instant,
+    window: AtomicU64,
 }
 
 impl Default for FailureLimiter {
     fn default() -> Self {
         Self {
-            window: Mutex::new((Instant::now(), 0)),
+            started: Instant::now(),
+            window: AtomicU64::new(0),
         }
     }
 }
 
 impl FailureLimiter {
-    fn window(&self) -> std::sync::MutexGuard<'_, (Instant, u32)> {
-        let mut guard = self.window.lock().unwrap_or_else(|p| p.into_inner());
-        if guard.0.elapsed() >= FAILURE_WINDOW {
-            *guard = (Instant::now(), 0);
-        }
-        guard
+    fn epoch(&self) -> u64 {
+        self.started.elapsed().as_secs() / FAILURE_WINDOW.as_secs()
     }
 
     /// Seconds until attempts are accepted again, if the budget is spent.
     fn blocked_for(&self) -> Option<u64> {
-        let guard = self.window();
-        (guard.1 >= MAX_FAILURES_PER_WINDOW).then(|| {
-            FAILURE_WINDOW
-                .saturating_sub(guard.0.elapsed())
-                .as_secs()
-                .max(1)
+        let window = self.window.load(Ordering::Acquire);
+        (window >> 32 == self.epoch() && window as u32 >= MAX_FAILURES_PER_WINDOW).then(|| {
+            (FAILURE_WINDOW
+                - Duration::from_secs(self.started.elapsed().as_secs() % FAILURE_WINDOW.as_secs()))
+            .as_secs()
+            .max(1)
         })
     }
 
     fn record_failure(&self) {
-        self.window().1 += 1;
+        let _ = self
+            .window
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |window| {
+                let epoch = self.epoch();
+                let count = if window >> 32 == epoch {
+                    (window as u32).saturating_add(1)
+                } else {
+                    1
+                };
+                Some((epoch << 32) | u64::from(count))
+            });
     }
 }
 
@@ -144,7 +152,7 @@ pub async fn require_owner(
     mut request: Request,
     next: Next,
 ) -> Response {
-    match authenticate(&state, request.headers()) {
+    match authenticate(&state, request.headers()).await {
         Ok(principal) => {
             request.extensions_mut().insert(principal);
             next.run(request).await
@@ -154,12 +162,14 @@ pub async fn require_owner(
 }
 
 /// Check the owner bearer credential, returning the rejection response.
-pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
+pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
     let presented = bearer(headers);
     let authenticated = presented.is_some_and(|token| state.owner_token.matches(token));
     if !authenticated {
         // A valid task grant is authenticated but not allowed here.
-        if presented.is_some_and(|token| state.scheduler.grants().resolve(token).is_some()) {
+        if let Some(token) = presented
+            && state.scheduler.grants().resolve(token).await.is_some()
+        {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "task_grant_forbidden",
@@ -270,7 +280,11 @@ pub async fn require_task_grant(
         )
         .into_response();
     }
-    match presented.and_then(|token| state.scheduler.grants().resolve(token)) {
+    let grant = match presented {
+        Some(token) => state.scheduler.grants().resolve(token).await,
+        None => None,
+    };
+    match grant {
         Some(grant) => {
             request.extensions_mut().insert(grant);
             next.run(request).await

@@ -269,13 +269,15 @@ async fn task_grants_are_scoped_to_their_turn() {
 
     let (turn, conversation) = hanging_turn(&app, &bot).await;
     let grants = app.scheduler.grants();
-    let token = grants.issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadHistory],
-        DEFAULT_TTL,
-    );
+    let token = grants
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await;
 
     let history = tool(&app, "/tools/v1/history", Some(&token)).await;
     assert_eq!(history.status, StatusCode::OK);
@@ -351,13 +353,15 @@ async fn task_grants_are_scoped_to_their_turn() {
     );
 
     // A grant without the tool is refused.
-    let narrow = grants.issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![],
-        DEFAULT_TTL,
-    );
+    let narrow = grants
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![],
+            DEFAULT_TTL,
+        )
+        .await;
     assert_eq!(
         tool(&app, "/tools/v1/history", Some(&narrow)).await.status,
         StatusCode::FORBIDDEN
@@ -379,13 +383,15 @@ async fn task_grants_are_scoped_to_their_turn() {
     // A grant for a turn that is no longer running is refused even if it
     // was never revoked in memory (for example, after reconciliation).
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
-    let stale = grants.issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadHistory],
-        DEFAULT_TTL,
-    );
+    let stale = grants
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await;
     assert_eq!(
         tool(&app, "/tools/v1/history", Some(&stale)).await.status,
         StatusCode::UNAUTHORIZED
@@ -393,13 +399,15 @@ async fn task_grants_are_scoped_to_their_turn() {
 
     // Retrying the completed stop leaves a newer turn's grant alone.
     let (newer, conversation) = hanging_turn(&app, &bot).await;
-    let newer_grant = grants.issue(
-        bot.parse().unwrap(),
-        conversation,
-        newer,
-        vec![Tool::ReadHistory],
-        DEFAULT_TTL,
-    );
+    let newer_grant = grants
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            newer,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await;
     let retry = app
         .owner(
             "POST",
@@ -421,13 +429,17 @@ async fn deleting_a_bot_revokes_its_grants() {
     let app = TestApp::installed().await;
     let bot = app.create_bot("Temp", "temp").await;
     let (turn, conversation) = hanging_turn(&app, &bot).await;
-    let token = app.scheduler.grants().issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::ReadHistory],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::ReadHistory],
+            DEFAULT_TTL,
+        )
+        .await;
     assert_eq!(
         app.call("GET", "/tools/v1/history", None, Some(&token))
             .await

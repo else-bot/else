@@ -9,8 +9,10 @@
 //! the originals stay complete and traversable. No text is ever truncated
 //! to make it fit.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::actor::Actor;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -69,7 +71,7 @@ pub struct Compactor {
     summarizer: Option<Arc<dyn Summarizer>>,
     scheduler: Option<Arc<Scheduler>>,
     cancel: CancellationToken,
-    summary: Arc<Mutex<Option<JoinHandle<()>>>>,
+    summary: Actor<Option<JoinHandle<()>>>,
     /// Steps are admitted through the backup gate when one is set.
     gate: Option<Arc<crate::maintenance::Gate>>,
 }
@@ -88,7 +90,7 @@ impl Compactor {
             summarizer: None,
             scheduler: None,
             cancel: CancellationToken::new(),
-            summary: Arc::default(),
+            summary: Actor::default(),
             gate: None,
         }
     }
@@ -106,31 +108,21 @@ impl Compactor {
         }
     }
 
-    fn summary_running(&self) -> bool {
-        self.summary
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .is_some_and(|h| !h.is_finished())
-    }
-
-    fn summary_pending(&self) -> bool {
-        self.summary
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some()
+    async fn summary_pending(&self) -> bool {
+        self.summary.call(|summary| summary.is_some()).await
     }
 
     /// Wait for the summary task, if one runs.
     pub async fn settle(&self) {
-        let handle = self
-            .summary
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
-        }
+        self.summary
+            .call_async(|summary| {
+                Box::pin(async move {
+                    if let Some(handle) = summary.take() {
+                        let _ = handle.await;
+                    }
+                })
+            })
+            .await;
     }
 
     /// Claim and process one job.
@@ -179,7 +171,7 @@ impl Compactor {
                     .await?;
                     return Ok(Step::Deferred);
                 };
-                if self.summary_running() || self.cancel.is_cancelled() {
+                if self.cancel.is_cancelled() {
                     // Woken as soon as the running summary ends.
                     store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
                         .await?;
@@ -190,29 +182,44 @@ impl Compactor {
                     summarizer: summarizer.clone(),
                     scheduler: self.scheduler.clone().expect("set with a summarizer"),
                     cancel: self.cancel.clone(),
-                    job,
+                    job: job.clone(),
                     input,
                     input_hash: prepared.input_hash,
                     audit,
                 };
                 let wake_pool = pool.clone();
-                let handle = tokio::spawn(async move {
-                    if let Err(err) = task.run().await {
-                        tracing::warn!(error = %err, "memory summary task failed");
-                    }
-                    // Jobs that waited for this summary may go next.
-                    let woken = sqlx::query(
-                        "UPDATE memory_job SET available_at = now()
+                let started = self
+                    .summary
+                    .call(move |summary| {
+                        if summary.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                            return false;
+                        }
+                        let handle = tokio::spawn(async move {
+                            if let Err(err) = task.run().await {
+                                tracing::warn!(error = %err, "memory summary task failed");
+                            }
+                            // Jobs that waited for this summary may go next.
+                            let woken = sqlx::query(
+                                "UPDATE memory_job SET available_at = now()
                          WHERE blocked_reason = 'waiting_for_summary' AND lease_token IS NULL",
-                    )
-                    .execute(&wake_pool)
+                            )
+                            .execute(&wake_pool)
+                            .await;
+                            if let Err(err) = woken {
+                                tracing::warn!(error = %err, "waking memory jobs failed");
+                            }
+                        });
+                        *summary = Some(handle);
+                        true
+                    })
                     .await;
-                    if let Err(err) = woken {
-                        tracing::warn!(error = %err, "waking memory jobs failed");
-                    }
-                });
-                *self.summary.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
-                Ok(Step::Summarizing)
+                if started {
+                    Ok(Step::Summarizing)
+                } else {
+                    store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
+                        .await?;
+                    Ok(Step::Deferred)
+                }
             }
         }
     }
@@ -224,7 +231,7 @@ impl Compactor {
         for _ in 0..1_000_000 {
             match self.step().await? {
                 // A finished summary wakes the jobs that waited for it.
-                Step::Idle if self.summary_pending() => self.settle().await,
+                Step::Idle if self.summary_pending().await => self.settle().await,
                 Step::Idle => break,
                 _ => done += 1,
             }

@@ -556,7 +556,9 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         )
         .await;
     app.wait_turn(&turn_id(&queued), &["running"]).await;
-    app.scheduler.interrupt(turn_id(&queued).parse().unwrap());
+    app.scheduler
+        .interrupt(turn_id(&queued).parse().unwrap())
+        .await;
     app.wait_turn(&turn_id(&queued), &["interrupted"]).await;
     sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = $1")
         .bind(turn_id(&queued).parse::<Uuid>().unwrap())

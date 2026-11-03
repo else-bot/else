@@ -821,7 +821,7 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Ok(accepted) => {
             // This attempt must now end; the API refuses its further calls.
-            state.scheduler.grants().park(grant.turn_id);
+            state.scheduler.grants().park(grant.turn_id).await;
             state.scheduler.wake();
             let log = format!(
                 "pending {} to {} ({})",

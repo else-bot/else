@@ -437,7 +437,7 @@ async fn input(
             None,
         );
     }
-    let used = computers.count_input(grant.turn_id);
+    let used = computers.count_input(grant.turn_id).await;
     if used > MAX_INPUT_BATCHES {
         return (
             tool_error(&format!(

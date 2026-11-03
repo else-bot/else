@@ -27,8 +27,10 @@
 //! 30 seconds; outgoing delivery is bounded.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::actor::Actor;
 
 use axum::Router;
 use axum::extract::State;
@@ -87,6 +89,7 @@ struct Outgoing {
     body: Value,
 }
 
+#[derive(Clone)]
 struct Tag {
     channel: String,
     generation: u64,
@@ -151,11 +154,7 @@ impl Registry {
     }
 }
 
-type Shared = Arc<Mutex<Registry>>;
-
-fn lock(registry: &Shared) -> MutexGuard<'_, Registry> {
-    registry.lock().unwrap_or_else(|p| p.into_inner())
-}
+type Shared = Actor<Registry>;
 
 /// A channel worker's handle on its own subscription.
 struct Sub {
@@ -192,11 +191,17 @@ impl Sub {
 
     /// End the subscription with an error, its final message.
     async fn fail(&self, code: &str, message: &str) {
-        if let Some(entry) = lock(&self.registry).channels.get_mut(&self.channel)
-            && entry.generation == self.generation
-        {
-            entry.running = false;
-        }
+        let channel = self.channel.clone();
+        let generation = self.generation;
+        self.registry
+            .call(move |registry| {
+                if let Some(entry) = registry.channels.get_mut(&channel)
+                    && entry.generation == generation
+                {
+                    entry.running = false;
+                }
+            })
+            .await;
         let body =
             json!({ "channel": self.channel, "error": { "code": code, "message": message } });
         let message = self.message(body, true);
@@ -209,7 +214,9 @@ impl Sub {
     /// End a bot's subscription because the bot was deleted. Data already
     /// queued for it is dropped by the writer from now on.
     async fn deleted(&self, bot: Uuid) {
-        lock(&self.registry).deleted.insert(bot);
+        self.registry
+            .call(move |registry| registry.deleted.insert(bot))
+            .await;
         self.fail("bot_deleted", "This bot has been deleted.").await;
     }
 }
@@ -217,7 +224,7 @@ impl Sub {
 async fn connection(state: Arc<AppState>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(OUTGOING);
-    let registry: Shared = Arc::default();
+    let registry: Shared = Actor::default();
     let closed = CancellationToken::new();
 
     // Writer: the only task touching the sink.
@@ -233,7 +240,7 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                 next = out_rx.recv() => {
                     let Some(next) = next else { break };
                     if let Some(tag) = &next.tag
-                        && !lock(&writer_registry).admit(tag)
+                        && !writer_registry.call({ let tag = tag.clone(); move |registry| registry.admit(&tag) }).await
                     {
                         continue;
                     }
@@ -280,7 +287,12 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                 }
             }
             Ok(ClientMessage::Unsubscribe { channel }) => {
-                lock(&registry).channels.remove(&channel);
+                registry
+                    .call({
+                        let channel = channel.clone();
+                        move |registry| registry.channels.remove(&channel)
+                    })
+                    .await;
                 if let Some(token) = tokens.remove(&channel) {
                     token.cancel();
                 }
@@ -290,24 +302,36 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
                     old.cancel();
                 }
                 let bot = channel.strip_prefix("bot:").map(|id| id.parse::<Uuid>());
-                let refusal = {
-                    let mut registry = lock(&registry);
-                    registry.channels.remove(&channel);
-                    tokens.retain(|c, _| registry.channels.contains_key(c));
-                    if registry.running() >= MAX_SUBSCRIPTIONS {
-                        Some(("too_many_subscriptions", "Unsubscribe first."))
-                    } else {
-                        match &bot {
-                            Some(Err(_)) => Some(("not_found", "Unknown bot.")),
-                            None if channel != "bots" => {
-                                Some(("unknown_channel", "Use bots or bot:<id>."))
+                let channel_for_check = channel.clone();
+                let bot_for_check = bot.clone();
+                let (refusal, channels) = registry
+                    .call(move |registry| {
+                        let channel = channel_for_check;
+                        let bot = bot_for_check;
+                        registry.channels.remove(&channel);
+                        let channels: HashSet<String> = registry.channels.keys().cloned().collect();
+                        let refusal = if registry.running() >= MAX_SUBSCRIPTIONS {
+                            Some(("too_many_subscriptions", "Unsubscribe first."))
+                        } else {
+                            match &bot {
+                                Some(Err(_)) => Some(("not_found", "Unknown bot.")),
+                                None if channel != "bots" => {
+                                    Some(("unknown_channel", "Use bots or bot:<id>."))
+                                }
+                                _ => None,
                             }
-                            _ => None,
-                        }
-                    }
-                };
+                        };
+                        (refusal, channels)
+                    })
+                    .await;
+                tokens.retain(|c, _| channels.contains(c));
                 let token = closed.child_token();
-                let generation = lock(&registry).open(&channel, refusal.is_none());
+                let generation = registry
+                    .call({
+                        let channel = channel.clone();
+                        move |registry| registry.open(&channel, refusal.is_none())
+                    })
+                    .await;
                 let sub = Sub {
                     channel: channel.clone(),
                     generation,

@@ -20,8 +20,10 @@
 //! and records every packet so tests can check what a session received.
 //! Its checkpoint is deterministic text, or an error when a test asks.
 
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use std::time::Duration;
+
+use crate::actor::Actor;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +40,14 @@ pub struct Synthetic {
     id: &'static str,
     label: &'static str,
     chunk_delay: Duration,
-    packets: Arc<Mutex<Vec<String>>>,
-    checkpoint_error: Mutex<Option<String>>,
-    forgotten: Mutex<Vec<String>>,
+    state: Actor<State>,
+}
+
+#[derive(Default)]
+struct State {
+    packets: VecDeque<String>,
+    checkpoint_error: Option<String>,
+    forgotten: Vec<String>,
 }
 
 impl Synthetic {
@@ -54,25 +61,31 @@ impl Synthetic {
             id,
             label,
             chunk_delay,
-            packets: Arc::default(),
-            checkpoint_error: Mutex::new(None),
-            forgotten: Mutex::new(Vec::new()),
+            state: Actor::default(),
         }
     }
 
-    /// Every packet this provider was sent, oldest first.
-    pub fn packets(&self) -> Arc<Mutex<Vec<String>>> {
-        self.packets.clone()
+    /// The last 256 packets this provider was sent, oldest first.
+    pub async fn packets(&self) -> Vec<String> {
+        self.state
+            .call(|state| state.packets.iter().cloned().collect())
+            .await
     }
 
     /// Make checkpoints fail with `reason` (or succeed again with `None`).
-    pub fn fail_checkpoints(&self, reason: Option<&str>) {
-        *self.checkpoint_error.lock().unwrap() = reason.map(str::to_owned);
+    pub async fn fail_checkpoints(&self, reason: Option<&str>) {
+        let reason = reason.map(str::to_owned);
+        self.state
+            .call(move |state| state.checkpoint_error = reason)
+            .await;
     }
 
     /// Lose every native session so far, as if its files were removed.
-    pub fn forget_sessions(&self, native_ids: &[String]) {
-        self.forgotten.lock().unwrap().extend_from_slice(native_ids);
+    pub async fn forget_sessions(&self, native_ids: &[String]) {
+        let native_ids = native_ids.to_owned();
+        self.state
+            .call(move |state| state.forgotten.extend(native_ids))
+            .await;
     }
 }
 
@@ -116,7 +129,11 @@ impl Provider for Synthetic {
         request: CheckpointRequest,
         _: &CancellationToken,
     ) -> Result<String, String> {
-        if let Some(reason) = self.checkpoint_error.lock().unwrap().clone() {
+        if let Some(reason) = self
+            .state
+            .call(|state| state.checkpoint_error.clone())
+            .await
+        {
             return Err(reason);
         }
         let lines = request
@@ -146,9 +163,15 @@ impl Provider for Synthetic {
             };
         }
         // Resume the recorded session unless it is gone or incompatible.
-        let resumed = input.session.as_ref().filter(|s| {
-            s.fingerprint == FINGERPRINT && !self.forgotten.lock().unwrap().contains(&s.native_id)
-        });
+        let session = input.session.clone();
+        let resumed = self
+            .state
+            .call(move |state| {
+                session.filter(|s| {
+                    s.fingerprint == FINGERPRINT && !state.forgotten.contains(&s.native_id)
+                })
+            })
+            .await;
         let mut state = match resumed {
             Some(session) => session.clone(),
             None => SessionState {
@@ -169,7 +192,14 @@ impl Provider for Synthetic {
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        self.packets.lock().unwrap().push(packet);
+        self.state
+            .call(move |state| {
+                if state.packets.len() == 256 {
+                    state.packets.pop_front();
+                }
+                state.packets.push_back(packet);
+            })
+            .await;
         if input.text.contains("[synthetic:stall-send]") {
             cancel.cancelled().await;
             return TurnOutcome::Uncertain {

@@ -4,6 +4,7 @@
 /// This build's version (the workspace version; release tags are `v<VERSION>`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+mod actor;
 pub mod app;
 pub mod backup;
 pub mod computers;

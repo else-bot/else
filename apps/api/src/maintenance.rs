@@ -8,18 +8,16 @@
 //! conversation records are captured at one application checkpoint.
 //! Reads, Stop work, and stopping a computer stay available.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-#[derive(Debug, Default)]
-struct State {
-    closed: bool,
-    admitted: usize,
-}
+const CLOSED: usize = 1 << (usize::BITS - 1);
+const ADMITTED: usize = CLOSED - 1;
 
 #[derive(Debug, Default)]
 pub struct Gate {
-    state: Mutex<State>,
+    state: AtomicUsize,
     idle: tokio::sync::Notify,
 }
 
@@ -28,9 +26,7 @@ pub struct Admission(Arc<Gate>);
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        let mut state = self.0.lock();
-        state.admitted -= 1;
-        if state.admitted == 0 {
+        if self.0.state.fetch_sub(1, Ordering::AcqRel) & ADMITTED == 1 {
             self.0.idle.notify_waiters();
         }
     }
@@ -41,26 +37,22 @@ pub struct Closed(Arc<Gate>);
 
 impl Drop for Closed {
     fn drop(&mut self) {
-        self.0.lock().closed = false;
+        self.0.state.fetch_and(ADMITTED, Ordering::AcqRel);
     }
 }
 
 impl Gate {
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     pub fn is_closed(&self) -> bool {
-        self.lock().closed
+        self.state.load(Ordering::Acquire) & CLOSED != 0
     }
 
     /// Admit work, or `None` while the gate is closed.
     pub fn enter(self: &Arc<Self>) -> Option<Admission> {
-        let mut state = self.lock();
-        if state.closed {
-            return None;
-        }
-        state.admitted += 1;
+        self.state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state & CLOSED == 0 && state < ADMITTED).then_some(state + 1)
+            })
+            .ok()?;
         Some(Admission(self.clone()))
     }
 
@@ -68,23 +60,19 @@ impl Gate {
     /// ended. `Ok(None)` if another closer holds it; `Err` (with the gate
     /// reopened) if admitted work did not end within `timeout`.
     pub async fn close(self: &Arc<Self>, timeout: Duration) -> Result<Option<Closed>, usize> {
-        {
-            let mut state = self.lock();
-            if state.closed {
-                return Ok(None);
-            }
-            state.closed = true;
+        if self.state.fetch_or(CLOSED, Ordering::AcqRel) & CLOSED != 0 {
+            return Ok(None);
         }
         let closed = Closed(self.clone());
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.idle.notified();
-            let admitted = self.lock().admitted;
+            let admitted = self.state.load(Ordering::Acquire) & ADMITTED;
             if admitted == 0 {
                 return Ok(Some(closed));
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                let admitted = self.lock().admitted;
+                let admitted = self.state.load(Ordering::Acquire) & ADMITTED;
                 if admitted == 0 {
                     return Ok(Some(closed));
                 }
@@ -112,6 +100,37 @@ pub fn allowed(method: &axum::http::Method, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_never_enter_a_closed_gate() {
+        let gate = Arc::new(Gate::default());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let gate = gate.clone();
+            let stop = stop.clone();
+            workers.push(tokio::spawn(async move {
+                while !stop.is_cancelled() {
+                    let admission = gate.enter();
+                    tokio::task::yield_now().await;
+                    drop(admission);
+                }
+            }));
+        }
+        for _ in 0..100 {
+            let closed = gate.close(Duration::from_secs(1)).await.unwrap().unwrap();
+            assert_eq!(gate.state.load(Ordering::Acquire), CLOSED);
+            assert!(gate.enter().is_none());
+            tokio::task::yield_now().await;
+            assert_eq!(gate.state.load(Ordering::Acquire), CLOSED);
+            drop(closed);
+        }
+        stop.cancel();
+        for worker in workers {
+            worker.await.unwrap();
+        }
+        assert_eq!(gate.state.load(Ordering::Acquire), 0);
+    }
 
     #[tokio::test]
     async fn closing_waits_for_admitted_work_and_refuses_new_work() {

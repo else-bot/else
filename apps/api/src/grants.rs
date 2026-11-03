@@ -9,8 +9,9 @@
 //! routes, and the owner token never authenticates tool routes.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::actor::Actor;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -52,10 +53,15 @@ impl Grant {
 
 #[derive(Default)]
 pub struct Grants {
-    by_digest: Mutex<HashMap<[u8; 32], Grant>>,
+    state: Actor<State>,
+}
+
+#[derive(Default)]
+struct State {
+    by_digest: HashMap<[u8; 32], Grant>,
     /// Turns whose current attempt delegated: every further tool call of
     /// that attempt is refused (it must end). A new attempt's grant clears it.
-    parked: Mutex<std::collections::HashSet<Uuid>>,
+    parked: std::collections::HashSet<Uuid>,
 }
 
 fn digest(token: &str) -> [u8; 32] {
@@ -63,12 +69,8 @@ fn digest(token: &str) -> [u8; 32] {
 }
 
 impl Grants {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], Grant>> {
-        self.by_digest.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     /// Issue a grant and return its token. Only the digest is kept.
-    pub fn issue(
+    pub async fn issue(
         &self,
         bot_id: Uuid,
         conversation_id: Uuid,
@@ -77,10 +79,11 @@ impl Grants {
         ttl: Duration,
     ) -> String {
         self.issue_scoped(bot_id, conversation_id, turn_id, tools, None, ttl)
+            .await
     }
 
     /// Issue a grant whose memory reads are limited to `memory_scope`.
-    pub fn issue_scoped(
+    pub async fn issue_scoped(
         &self,
         bot_id: Uuid,
         conversation_id: Uuid,
@@ -93,54 +96,72 @@ impl Grants {
         getrandom::fill(&mut bytes).expect("system random source");
         // A distinct prefix keeps grants and owner tokens visibly different.
         let token = format!("tg_{}", URL_SAFE_NO_PAD.encode(bytes));
-        self.parked().remove(&turn_id);
-        self.map().insert(
-            digest(&token),
-            Grant {
-                bot_id,
-                conversation_id,
-                turn_id,
-                tools,
-                memory_scope,
-                expires_at: Instant::now() + ttl,
-            },
-        );
+        let key = digest(&token);
+        self.state
+            .call(move |state| {
+                state.parked.remove(&turn_id);
+                state.by_digest.insert(
+                    key,
+                    Grant {
+                        bot_id,
+                        conversation_id,
+                        turn_id,
+                        tools,
+                        memory_scope,
+                        expires_at: Instant::now() + ttl,
+                    },
+                );
+            })
+            .await;
         token
     }
 
     /// The live grant for a presented token. Expired grants are removed.
-    pub fn resolve(&self, token: &str) -> Option<Grant> {
+    pub async fn resolve(&self, token: &str) -> Option<Grant> {
         let key = digest(token);
-        let mut map = self.map();
-        match map.get(&key) {
-            Some(grant) if grant.expires_at > Instant::now() => Some(grant.clone()),
-            Some(_) => {
-                map.remove(&key);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn parked(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<Uuid>> {
-        self.parked.lock().unwrap_or_else(|p| p.into_inner())
+        self.state
+            .call(move |state| {
+                let map = &mut state.by_digest;
+                match map.get(&key) {
+                    Some(grant) if grant.expires_at > Instant::now() => Some(grant.clone()),
+                    Some(_) => {
+                        map.remove(&key);
+                        None
+                    }
+                    None => None,
+                }
+            })
+            .await
     }
 
     /// The attempt of `turn_id` delegated and must end.
-    pub fn park(&self, turn_id: Uuid) {
-        self.parked().insert(turn_id);
+    pub async fn park(&self, turn_id: Uuid) {
+        self.state
+            .call(move |state| {
+                state.parked.insert(turn_id);
+            })
+            .await;
     }
 
-    pub fn is_parked(&self, turn_id: Uuid) -> bool {
-        self.parked().contains(&turn_id)
+    pub async fn is_parked(&self, turn_id: Uuid) -> bool {
+        self.state
+            .call(move |state| state.parked.contains(&turn_id))
+            .await
     }
 
-    pub fn revoke_turn(&self, turn_id: Uuid) {
-        self.map().retain(|_, grant| grant.turn_id != turn_id);
+    pub async fn revoke_turn(&self, turn_id: Uuid) {
+        self.state
+            .call(move |state| {
+                state.by_digest.retain(|_, grant| grant.turn_id != turn_id);
+                state.parked.remove(&turn_id);
+            })
+            .await;
     }
 
-    pub fn revoke_bot(&self, bot_id: Uuid) {
-        self.map().retain(|_, grant| grant.bot_id != bot_id);
+    pub async fn revoke_bot(&self, bot_id: Uuid) {
+        self.state
+            .call(move |state| state.by_digest.retain(|_, grant| grant.bot_id != bot_id))
+            .await;
     }
 }
 
@@ -148,24 +169,26 @@ impl Grants {
 mod tests {
     use super::*;
 
-    #[test]
-    fn issue_resolve_expire_and_revoke() {
+    #[tokio::test]
+    async fn issue_resolve_expire_and_revoke() {
         let grants = Grants::default();
         let (bot, conv, turn) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let token = grants.issue(bot, conv, turn, vec![Tool::ReadHistory], DEFAULT_TTL);
+        let token = grants
+            .issue(bot, conv, turn, vec![Tool::ReadHistory], DEFAULT_TTL)
+            .await;
         assert!(token.starts_with("tg_"));
-        let grant = grants.resolve(&token).unwrap();
+        let grant = grants.resolve(&token).await.unwrap();
         assert_eq!((grant.bot_id, grant.turn_id), (bot, turn));
         assert!(grant.allows(Tool::ReadHistory));
-        assert!(grants.resolve("tg_forged").is_none());
-        grants.revoke_turn(turn);
-        assert!(grants.resolve(&token).is_none());
+        assert!(grants.resolve("tg_forged").await.is_none());
+        grants.revoke_turn(turn).await;
+        assert!(grants.resolve(&token).await.is_none());
 
-        let token = grants.issue(bot, conv, turn, vec![], DEFAULT_TTL);
-        grants.revoke_bot(bot);
-        assert!(grants.resolve(&token).is_none());
+        let token = grants.issue(bot, conv, turn, vec![], DEFAULT_TTL).await;
+        grants.revoke_bot(bot).await;
+        assert!(grants.resolve(&token).await.is_none());
 
-        let token = grants.issue(bot, conv, turn, vec![], Duration::ZERO);
-        assert!(grants.resolve(&token).is_none(), "expired");
+        let token = grants.issue(bot, conv, turn, vec![], Duration::ZERO).await;
+        assert!(grants.resolve(&token).await.is_none(), "expired");
     }
 }

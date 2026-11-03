@@ -222,7 +222,7 @@ pub(super) struct Foreground {
     runtime_name: String,
     dir: String,
     /// True until the command returned; held while killing it.
-    alive: Arc<tokio::sync::Mutex<bool>>,
+    alive: crate::actor::Actor<bool>,
 }
 
 /// Parse the output of `RUN`.
@@ -398,20 +398,24 @@ impl ComputerManager {
         .bind(&runtime_name)
         .execute(&self.pool)
         .await?;
-        let alive = Arc::new(tokio::sync::Mutex::new(true));
+        let alive = crate::actor::Actor::new(true);
+        let registered_name = runtime_name.clone();
+        let registered_dir = dir.clone();
+        let registered_alive = alive.clone();
         self.foreground
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                run_id,
-                Foreground {
-                    bot_id,
-                    turn_id,
-                    runtime_name: runtime_name.clone(),
-                    dir: dir.clone(),
-                    alive: alive.clone(),
-                },
-            );
+            .call(move |foreground| {
+                foreground.insert(
+                    run_id,
+                    Foreground {
+                        bot_id,
+                        turn_id,
+                        runtime_name: registered_name,
+                        dir: registered_dir,
+                        alive: registered_alive,
+                    },
+                )
+            })
+            .await;
         let script = with_env(RUN);
         let tail_bytes = (TAIL_BYTES + REDACT_MARGIN).to_string();
         let (program, mut all) = self.as_guest_user(&script);
@@ -455,11 +459,10 @@ impl ComputerManager {
             }
         }
         // Retired while the operation lock is still held.
-        *alive.lock().await = false;
+        alive.call(|alive| *alive = false).await;
         self.foreground
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&run_id);
+            .call(move |foreground| foreground.remove(&run_id))
+            .await;
         if end_reason != "kill unconfirmed" {
             sqlx::query("UPDATE guest_runs SET ended_at = now(), end_reason = $2 WHERE id = $1")
                 .bind(run_id)
@@ -512,10 +515,8 @@ impl ComputerManager {
         for (run_id, bot_id, runtime_name) in open {
             let registered = self
                 .foreground
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .get(&run_id)
-                .cloned();
+                .call(move |foreground| foreground.get(&run_id).cloned())
+                .await;
             // A command of this process without a turn (an operator or test
             // holder) is not the orphan loop's to end.
             if registered.as_ref().is_some_and(|f| f.turn_id.is_none()) {
@@ -523,9 +524,8 @@ impl ComputerManager {
             }
             if !self
                 .killing
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(run_id)
+                .call(move |killing| killing.insert(run_id))
+                .await
             {
                 continue;
             }
@@ -556,11 +556,7 @@ impl ComputerManager {
                         "ending a foreground command failed; retried next pass"
                     ),
                 }
-                manager
-                    .killing
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&run_id);
+                manager.killing.call(move |killing| killing.remove(&run_id)).await;
             }));
         }
         let _ = tokio::time::timeout(Duration::from_secs(10), async {
@@ -576,24 +572,26 @@ impl ComputerManager {
     /// owner stop: it must not wait behind them), without the operation
     /// lock, which they hold.
     pub async fn end_bot_commands(&self, bot_id: Uuid) {
-        self.end_commands(|run, _| run.bot_id == bot_id).await;
+        self.end_commands(move |run, _| run.bot_id == bot_id).await;
     }
 
     /// End every foreground command of a turn (its caller went away).
     pub async fn end_turn_commands(&self, turn_id: Uuid) {
-        self.end_commands(|run, _| run.turn_id == Some(turn_id))
+        self.end_commands(move |run, _| run.turn_id == Some(turn_id))
             .await;
     }
 
-    async fn end_commands(&self, matches: impl Fn(&Foreground, Uuid) -> bool) {
+    async fn end_commands(&self, matches: impl Fn(&Foreground, Uuid) -> bool + Send + 'static) {
         let runs: Vec<(Uuid, Foreground)> = self
             .foreground
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .filter(|(id, run)| matches(run, **id))
-            .map(|(id, run)| (*id, run.clone()))
-            .collect();
+            .call(move |foreground| {
+                foreground
+                    .iter()
+                    .filter(|(id, run)| matches(run, **id))
+                    .map(|(id, run)| (*id, run.clone()))
+                    .collect()
+            })
+            .await;
         for (id, run) in runs {
             if let Err(err) = self.kill_registered(&run).await {
                 tracing::warn!(run = %id, error = %err, "ending a foreground command failed");
@@ -607,23 +605,29 @@ impl ComputerManager {
         &self,
         run: &Foreground,
     ) -> Result<Option<&'static str>, ComputerError> {
-        let alive = run.alive.lock().await;
-        if !*alive {
-            return Ok(None);
-        }
+        let run = run.clone();
+        let runtime = self.runtime.clone();
         let (program, mut all) = self.as_guest_user(KILL);
         all.push(run.dir.clone());
-        let all: Vec<&str> = all.iter().map(String::as_str).collect();
-        let out = self
-            .runtime
-            .exec(&run.runtime_name, &program, &all, Duration::from_secs(30))
-            .await?;
-        // The command's own path records the end once its call returns.
-        Ok(if out.stdout.contains("stopped") {
-            None
-        } else {
-            Some("still running")
-        })
+        run.alive
+            .call_async(move |alive| {
+                Box::pin(async move {
+                    if !*alive {
+                        return Ok(None);
+                    }
+                    let all: Vec<&str> = all.iter().map(String::as_str).collect();
+                    let out = runtime
+                        .exec(&run.runtime_name, &program, &all, Duration::from_secs(30))
+                        .await?;
+                    // The command's own path records the end once its call returns.
+                    Ok(if out.stdout.contains("stopped") {
+                        None
+                    } else {
+                        Some("still running")
+                    })
+                })
+            })
+            .await
     }
 
     /// Kill a command an earlier API process left, under the operation lock.

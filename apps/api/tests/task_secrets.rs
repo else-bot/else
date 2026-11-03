@@ -205,13 +205,17 @@ async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    let token = app.scheduler.grants().issue(
-        bot.parse().unwrap(),
-        conversation,
-        turn,
-        vec![Tool::Computer],
-        DEFAULT_TTL,
-    );
+    let token = app
+        .scheduler
+        .grants()
+        .issue(
+            bot.parse().unwrap(),
+            conversation,
+            turn,
+            vec![Tool::Computer],
+            DEFAULT_TTL,
+        )
+        .await;
     (turn, token)
 }
 
