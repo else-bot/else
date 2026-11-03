@@ -4,6 +4,8 @@ The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL 
 
 ## Prerequisites
 
+For a host installation rather than a development checkout, `./install.sh` sets all of this up (see [Install on a host](../README.md#install-on-a-host)); `scripts/test-install.sh` tests it in Debian, Ubuntu, and Arch containers.
+
 Install Rust with Cargo and rustfmt, Docker Engine with Docker Compose, `bubblewrap`, and the PostgreSQL 18 client tools (`pg_dump`, `pg_restore`; checked with 18.6) for backups. Checked with Rust 1.98.0, Compose 5.6.1, and bubblewrap 0.13.1. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run the commands below from the repository root.
 
 To chat through Claude as well, install Claude Code (verified with 2.1.316), log in once by running `claude` as the API user, and save an explicit Claude profile (see [Claude provider](#claude-provider)).

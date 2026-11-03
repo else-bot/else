@@ -45,6 +45,29 @@ The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings a
 
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
+## Install on a host
+
+On Linux (Debian 12 or newer, Ubuntu 24.04 or newer, Arch Linux / Omarchy; x86_64), from a checkout of this repository:
+
+```sh
+./install.sh            # --help lists the options, e.g. --server-only for a headless machine
+```
+
+It asks before installing anything with sudo, then sets up only what is missing:
+- system packages: build tools, bubblewrap, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
+- Rust through rustup when no Rust 1.94 or newer is present;
+- Microsandbox 0.7.13 in `~/.microsandbox` (checksum-verified);
+- release builds of `else-api` and `else-desktop` in `~/.local/bin`;
+- PostgreSQL 18 as the Docker Compose project `else-bot`, with a generated password, configured in `~/.config/else-bot/.env` (mode 0600);
+- the guest VM image `else-guest:2` (about 15 minutes the first time);
+- `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`.
+
+It needs `/dev/kvm` for bot computers and adds you to the `docker` and `kvm` groups if needed (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the script checks for them but does not install them. Running it again keeps the existing configuration, database, and installation. Operator commands read the same configuration from its directory, for example `cd ~/.config/else-bot && else-api backup`.
+
+On macOS the script builds only the desktop client (it needs Xcode with the Metal toolchain) and prints how to reach an API on a Linux machine through an SSH tunnel. The macOS path and arm64 Linux are not tested yet.
+
+`scripts/test-install.sh [--quick] [debian-12|debian-13|ubuntu-24.04|ubuntu-26.04|arch]` runs the installer in fresh containers as an unprivileged sudo user and checks the result and a second, idempotent run. Containers have no systemd, Docker daemon, or KVM, so the database, guest image, and service steps only run on a real host.
+
 ## Try the POC
 
 You need Rust, Docker, `bubblewrap`, and a logged-in `codex` CLI (`codex login`). From the repository root:
