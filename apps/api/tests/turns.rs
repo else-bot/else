@@ -529,11 +529,12 @@ async fn capabilities_list_providers_and_limits() {
     assert_eq!(caps.body["providers"][0]["label"], "Synthetic (test)");
     assert_eq!(caps.body["limits"]["max_queued_turns"], 4);
     assert_eq!(caps.body["limits"]["max_text_bytes"], 32768);
-    let text = caps.body.to_string();
-    assert!(
-        !text.contains("gpt-6.1-sol"),
-        "model controls stay inside the API"
-    );
+    // The owner picks each bot's model: the defaults and each provider's
+    // exact values are offered.
+    assert_eq!(caps.body["defaults"]["provider_id"], "codex");
+    assert_eq!(caps.body["defaults"]["model"], "gpt-6.1-sol");
+    assert_eq!(caps.body["providers"][1]["cli_available"], true);
+    assert!(caps.body["providers"][1]["catalog"].is_object());
 }
 
 #[tokio::test(flavor = "multi_thread")]

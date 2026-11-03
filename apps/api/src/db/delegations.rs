@@ -172,17 +172,23 @@ pub async fn create(
     if target_status != "active" || cancel_pending {
         return Err(DelegateError::BotUnavailable);
     }
-    // The child uses the target's chosen provider (else Codex) and that
-    // provider's saved profile, like an owner message would.
-    let provider = selected.unwrap_or_else(|| "codex".to_owned());
-    let profile: Option<(i64, sqlx::types::Json<Profile>)> = sqlx::query_as(
-        "SELECT revision, json_build_object('model', model, 'reasoning_effort', reasoning_effort,
-                'service_tier', service_tier)
-         FROM provider_profiles WHERE provider_id = $1",
-    )
-    .bind(&provider)
-    .fetch_optional(&mut *tx)
-    .await?;
+    // The child uses the target's own provider and profile, like an owner
+    // message would: else the installation's default provider, else the
+    // provider it last used, else Codex.
+    let own: Option<String> =
+        sqlx::query_scalar("SELECT provider_id FROM bot_profiles WHERE bot_id = $1")
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let provider = match own {
+        Some(provider) => provider,
+        None => match crate::db::bot_profiles::default_provider(&mut tx).await? {
+            Some(provider) => provider,
+            None => selected.unwrap_or_else(|| "codex".to_owned()),
+        },
+    };
+    let profile: Option<(i64, sqlx::types::Json<Profile>)> =
+        crate::db::bot_profiles::effective(&mut tx, target, &provider).await?;
     let delegation_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
     let child_turn = Uuid::new_v4();

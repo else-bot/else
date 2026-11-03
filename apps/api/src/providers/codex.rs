@@ -281,6 +281,14 @@ impl Provider for Codex {
         validate(profile)
     }
 
+    fn catalog(&self) -> crate::app::providers::Catalog {
+        crate::app::providers::Catalog {
+            models: MODELS,
+            efforts: EFFORTS,
+            tiers: TIERS,
+        }
+    }
+
     async fn checkpoint(
         &self,
         request: CheckpointRequest,

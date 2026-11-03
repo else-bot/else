@@ -165,24 +165,13 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     if queued >= req.max_queued {
         return Err(AcceptError::QueueFull);
     }
+    // The bot's own profile for this provider, else the provider's saved one.
     let profile: Option<(i64, Json<Profile>)> = if req.uses_profile {
-        let row: Option<(i64, String, String, String)> = sqlx::query_as(
-            "SELECT revision, model, reasoning_effort, service_tier
-             FROM provider_profiles WHERE provider_id = $1 FOR SHARE",
+        Some(
+            crate::db::bot_profiles::effective(&mut tx, req.bot_id, req.provider_id)
+                .await?
+                .ok_or_else(|| AcceptError::ProfileMissing(req.provider_id.to_owned()))?,
         )
-        .bind(req.provider_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let (revision, model, reasoning_effort, service_tier) =
-            row.ok_or_else(|| AcceptError::ProfileMissing(req.provider_id.to_owned()))?;
-        Some((
-            revision,
-            Json(Profile {
-                model,
-                reasoning_effort,
-                service_tier,
-            }),
-        ))
     } else {
         None
     };

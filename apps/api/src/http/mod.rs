@@ -278,20 +278,31 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             if available && default_id.is_none() {
                 default_id = Some(provider.id());
             }
+            let cli = provider.availability();
             json!({
                 "id": provider.id(),
                 "label": provider.label(),
                 "available": available,
                 "unavailable_reason": reason,
+                // Whether the CLI itself runs here (a profile can still be
+                // chosen for a bot), and the exact values it applies.
+                "cli_available": cli == Availability::Available,
+                "cli_unavailable_reason": match cli {
+                    Availability::Unavailable(reason) => Some(reason),
+                    Availability::Available => None,
+                },
+                "catalog": provider.catalog(),
                 "requires_profile": provider.uses_profile(),
                 "profile_configured": has_profile,
             })
         })
         .collect();
+    let defaults = settings::defaults(&state).await.ok().flatten();
     Json(json!({
         "api_version": "v1",
         "server_instance_id": state.server_instance_id,
         "default_provider_id": default_id,
+        "defaults": defaults,
         "providers": providers,
         "limits": {
             "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,

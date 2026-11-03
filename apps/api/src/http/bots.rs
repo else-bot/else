@@ -20,6 +20,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bots", get(list).post(create))
         .route("/bots/{bot_id}", get(show).delete(delete))
+        .route("/bots/{bot_id}/profile", get(show_profile).put(set_profile))
 }
 
 impl From<BotError> for ApiError {
@@ -68,6 +69,9 @@ struct CreateBot {
     request_id: Uuid,
     name: String,
     role: String,
+    /// The bot's own provider and model; without one it uses the defaults.
+    #[serde(default)]
+    profile: Option<super::settings::ProfileChoice>,
 }
 
 async fn create(
@@ -84,9 +88,25 @@ async fn create(
     };
     let name = BotName::parse(&body.name).map_err(invalid)?;
     let role = BotRole::parse(&body.role).map_err(invalid)?;
+    let choice = match &body.profile {
+        Some(choice) => Some((
+            super::settings::validate_choice(&state, choice)
+                .map_err(|err| err.with_request_id(body.request_id))?,
+            choice.profile(),
+        )),
+        None => None,
+    };
     let created = bots::create(&state.db, body.request_id, &name, &role)
         .await
         .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
+    if let Some((provider_id, profile)) = &choice {
+        let bot = match &created {
+            Created::New(bot) | Created::Existing(bot) => bot.id,
+        };
+        crate::db::bot_profiles::put(&state.db, bot, provider_id, profile)
+            .await
+            .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
+    }
     Ok(match created {
         Created::New(bot) => {
             let location = HeaderValue::from_str(&format!("/v1/bots/{}", bot.id))
@@ -129,4 +149,50 @@ async fn delete(
         _ => StatusCode::ACCEPTED,
     };
     Ok((status, Json(json!({ "bot": bot_json(&bot) }))).into_response())
+}
+
+impl From<crate::db::bot_profiles::BotProfileError> for ApiError {
+    fn from(err: crate::db::bot_profiles::BotProfileError) -> Self {
+        match err {
+            crate::db::bot_profiles::BotProfileError::NotFound => ApiError::not_found(),
+            crate::db::bot_profiles::BotProfileError::Db(err) => err.into(),
+        }
+    }
+}
+
+/// The bot's provider and model: its own (`own: true`), else the defaults
+/// it uses (`null` when there are none yet).
+async fn show_profile(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    bots::find(&state.db, bot_id)
+        .await?
+        .filter(|bot| bot.status == BotStatus::Active)
+        .ok_or_else(ApiError::not_found)?;
+    if let Some(own) = crate::db::bot_profiles::get(&state.db, bot_id).await? {
+        let mut profile = super::settings::choice_json(&own.provider_id, &own.profile);
+        profile["own"] = json!(true);
+        profile["revision"] = json!(own.revision);
+        return Ok(Json(json!({ "profile": profile })));
+    }
+    let mut defaults = super::settings::defaults(&state).await?;
+    if let Some(profile) = defaults.as_mut() {
+        profile["own"] = json!(false);
+    }
+    Ok(Json(json!({ "profile": defaults })))
+}
+
+async fn set_profile(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+    ApiJson(body): ApiJson<super::settings::ProfileChoice>,
+) -> Result<Json<Value>, ApiError> {
+    let provider_id = super::settings::validate_choice(&state, &body)?;
+    let saved =
+        crate::db::bot_profiles::put(&state.db, bot_id, provider_id, &body.profile()).await?;
+    let mut profile = super::settings::choice_json(&saved.provider_id, &saved.profile);
+    profile["own"] = json!(true);
+    profile["revision"] = json!(saved.revision);
+    Ok(Json(json!({ "profile": profile })))
 }

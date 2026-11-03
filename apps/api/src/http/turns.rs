@@ -92,14 +92,22 @@ async fn send(
         })
     })?;
     let registry = state.scheduler.registry();
-    let default_id = registry.default_id();
     let requested = body.provider_id.as_deref();
+    // Without a named provider: the bot's own, else the installation's
+    // default, else the first available one.
+    let chosen = match requested {
+        Some(_) => None,
+        None => crate::db::bot_profiles::provider_for(&state.db, bot_id)
+            .await
+            .map_err(|err| with_id(err.into()))?,
+    };
+    let chosen = chosen.and_then(|id| registry.get(&id).map(|p| p.id()));
     let mut request = SendRequest {
         bot_id,
         request_id,
         text: &body.text,
         requested_provider: requested,
-        provider_id: requested.or(default_id).unwrap_or(""),
+        provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
         max_queued: MAX_QUEUED_TURNS,
     };

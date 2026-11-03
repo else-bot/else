@@ -10,7 +10,16 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// A saved default execution profile for one provider.
+/// The models, reasoning efforts, and service tiers an adapter applies
+/// exactly. `priority` is the Fast tier.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct Catalog {
+    pub models: &'static [&'static str],
+    pub efforts: &'static [&'static str],
+    pub tiers: &'static [&'static str],
+}
+
+/// An execution profile: a provider's saved default, or a bot's own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub model: String,
@@ -235,6 +244,11 @@ pub trait Provider: Send + Sync {
     fn uses_profile(&self) -> bool;
     /// Reject a profile the adapter cannot apply exactly. No substitution.
     fn validate_profile(&self, profile: &Profile) -> Result<(), String>;
+    /// The exact values `validate_profile` accepts, for the owner's
+    /// pickers. Empty for a provider without profiles.
+    fn catalog(&self) -> Catalog {
+        Catalog::default()
+    }
     /// A checkpoint of recorded history with no tools: only when the adapter
     /// can enforce and verify that nothing but text is produced. Errors mean
     /// the deterministic fallback is used. Cancellation stops it and reaps
