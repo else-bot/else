@@ -12,7 +12,7 @@ use else_api::scheduler::Scheduler;
 use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
-const USAGE: &str = "usage: else-api [serve|setup|migrate|backup]\n       \
+const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version]\n       \
 else-api restore <set-dir> <new-database> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
@@ -29,9 +29,18 @@ restore-remote  download a completed set from the configured bucket, then restor
 upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
 files, environments, browser profile, and network profile (--network picks\n           \
 another); the old computer is kept stopped\n  \
-rollback-computer  switch a bot back to the computer its last upgrade replaced\n";
+rollback-computer  switch a bot back to the computer its last upgrade replaced\n  \
+version  print this build's version\n";
 
 fn main() -> ExitCode {
+    // Before anything else: the installer reads it without a configuration.
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("version" | "--version" | "-V")
+    ) {
+        println!("else-api {}", else_api::VERSION);
+        return ExitCode::SUCCESS;
+    }
     // A local `.env` is a development convenience. Existing process variables
     // take precedence, and a missing file is not an error. Any other problem
     // fails startup rather than silently ignoring settings. Line contents are

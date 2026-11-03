@@ -7,6 +7,7 @@ pub mod computers;
 pub mod conversation;
 pub mod error;
 pub mod guest_tools;
+pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod settings;
@@ -47,6 +48,8 @@ pub struct AppState {
     pub computers: Option<Arc<crate::computers::ComputerManager>>,
     /// The installation's master key, for task secrets (POC-026).
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
+    /// Held while an update is prepared: the gate stays closed until exit.
+    pub update_hold: tokio::sync::Mutex<Option<crate::maintenance::Closed>>,
 }
 
 impl AppState {
@@ -65,6 +68,7 @@ impl AppState {
             auth_failures: auth::FailureLimiter::default(),
             computers: None,
             secret_key: None,
+            update_hold: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -94,6 +98,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(computers::routes())
         .merge(settings::routes())
         .merge(task_secrets::routes())
+        .merge(maintenance::routes())
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async { method_not_allowed() })
         .layer(middleware::from_fn_with_state(
@@ -170,7 +175,7 @@ async fn maintenance_gate(
 fn maintenance_response() -> Response {
     ApiError::unavailable(
         "maintenance",
-        "A backup is capturing the assistant; try again in a moment.",
+        "else.bot is paused for a backup or an update; try again in a moment.",
     )
     .into_response()
 }
@@ -215,7 +220,7 @@ async fn reject_large_body(max: usize, request: Request, next: Next) -> Response
 /// Liveness only: it reports that the process serves HTTP, not that its
 /// dependencies are ready.
 async fn liveness() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+    Json(json!({ "status": "ok", "version": crate::VERSION }))
 }
 
 /// Readiness: the database is reachable. Unauthenticated and content-free.

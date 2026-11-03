@@ -95,10 +95,14 @@ impl Gate {
 }
 
 /// Requests allowed while the gate is closed (and that need no admission):
-/// reads (except opening a desktop, which wakes a computer), Stop work, and
-/// stopping a computer.
+/// reads (except opening a desktop, which wakes a computer), Stop work,
+/// stopping a computer, and preparing or abandoning an update (which close
+/// and reopen the gate themselves).
 pub fn allowed(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
+    if path.ends_with("/maintenance/update") {
+        return matches!(*method, Method::POST | Method::DELETE);
+    }
     if matches!(*method, Method::GET | Method::HEAD) {
         return !path.ends_with("/desktop");
     }

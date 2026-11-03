@@ -2,3 +2,9 @@
 members = ["apps/api", "apps/desktop"]
 exclude = ["docs/experiments/backups"]
 resolver = "3"
+
+# The one else.bot version: both binaries report it, release tags are
+# v<version>, and scripts/release.sh bumps it.
+[workspace.package]
+version = "0.0.1"
+edition = "2024"

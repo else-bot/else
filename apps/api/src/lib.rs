@@ -1,6 +1,9 @@
 //! else.bot API library. The `else-api` binary composes these modules; the
 //! integration tests drive them directly against PostgreSQL.
 
+/// This build's version (the workspace version; release tags are `v<VERSION>`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod app;
 pub mod backup;
 pub mod computers;

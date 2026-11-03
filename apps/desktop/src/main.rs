@@ -15,6 +15,13 @@ fn env(name: &str) -> Option<String> {
 }
 
 fn main() {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("version" | "--version" | "-V")
+    ) {
+        println!("else-desktop {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // Same `.env` as the API, so `ELSE_DATA_DIR` or `OWNER_TOKEN_FILE` set
     // there point both at one installation. Process variables win.
     let _ = dotenvy::dotenv();

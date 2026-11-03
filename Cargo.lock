@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "else-api"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "age",
  "anyhow",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "else-desktop"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "dotenvy",

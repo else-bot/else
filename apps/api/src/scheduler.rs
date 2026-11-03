@@ -93,6 +93,11 @@ impl Scheduler {
         })
     }
 
+    /// Turns this process is running now.
+    pub fn running_count(&self) -> usize {
+        self.running().len()
+    }
+
     /// The maintenance gate shared with the HTTP layer.
     pub fn gate(&self) -> &Arc<crate::maintenance::Gate> {
         &self.gate
