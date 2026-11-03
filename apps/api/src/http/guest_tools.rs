@@ -156,7 +156,8 @@ pub fn tool_list() -> Vec<Value> {
                 "save": { "type": "boolean" },
                 "artifact_id": { "type": "string", "format": "uuid" } },
                 "additionalProperties": false },
-            "annotations": { "readOnlyHint": true, "destructiveHint": false,
+            // It may start the computer and, with save, store an artifact.
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": false, "openWorldHint": false },
         }),
         json!({
@@ -310,6 +311,9 @@ async fn screenshot(
             tool_error(&match r {
                 ScreenRefusal::DisplayUnavailable(m) | ScreenRefusal::TooLarge(m) => m,
                 ScreenRefusal::Invalid(m) => format!("SCREENSHOT_INVALID: {m}"),
+                ScreenRefusal::Stopped => {
+                    "STOPPED: this turn was stopped; nothing was captured.".into()
+                }
                 ScreenRefusal::NoSuchArtifact => {
                     "No such screenshot: artifact_id must be one you saved.".into()
                 }
@@ -322,9 +326,12 @@ async fn screenshot(
             return (tool_error("artifact_id must be an artifact ID."), None);
         };
         return match computers.saved_screen(grant.bot_id, id).await {
-            Ok(Ok((png, created_at))) => {
-                let meta = json!({ "artifact_id": id, "captured_at": created_at,
-                    "bytes": png.len(), "image_size": crate::computers::screens::png_size(&png) });
+            Ok(Ok((png, meta))) => {
+                // The original capture's metadata: screen size, scale, and
+                // pointer still map this image to the screen it showed.
+                let mut meta = if meta.is_object() { meta } else { json!({}) };
+                meta["artifact_id"] = json!(id);
+                meta["saved"] = json!(true);
                 (
                     tool_image(meta, &png),
                     Some(format!("showed saved screenshot {id}")),

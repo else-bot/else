@@ -79,8 +79,10 @@ def main(argv):
     if not image:
         fail("DISPLAY_UNAVAILABLE", "the display could not be read")
     img = image.contents
-    if img.bits_per_pixel != 32 or img.red_mask != 0xFF0000 or img.blue_mask != 0xFF:
-        fail("DISPLAY_UNAVAILABLE", f"unsupported pixel format ({img.bits_per_pixel} bpp)")
+    # Only the format this decoder reads: 32-bit LSBFirst xRGB (BGRX bytes).
+    if (img.bits_per_pixel != 32 or img.byte_order != 0 or img.red_mask != 0xFF0000
+            or img.green_mask != 0xFF00 or img.blue_mask != 0xFF):
+        fail("DISPLAY_UNAVAILABLE", f"unsupported pixel format ({img.bits_per_pixel} bpp, byte order {img.byte_order})")
     stride = img.bytes_per_line
     data = ctypes.string_at(img.data, stride * height)
     pointer = [ctypes.c_int() for _ in range(4)]

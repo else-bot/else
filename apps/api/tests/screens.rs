@@ -254,8 +254,8 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert_eq!(content[1]["mimeType"], "image/png");
     assert_eq!(content[1]["data"], PNG);
     let artifact = meta["artifact_id"].as_str().unwrap().to_owned();
-    // The guest file was copied under /var/lib/elsebot/screens.
-    assert!(guest.files.lock().unwrap()[0].starts_with("/var/lib/elsebot/screens/"));
+    // What left the guest is root's checked copy, not the user's file.
+    assert!(guest.files.lock().unwrap()[0].starts_with("/var/lib/elsebot-screens/"));
     // Memory records metadata only, never the image.
     let logged: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'",
@@ -274,6 +274,35 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     // The saved screenshot can be shown again; another bot cannot see it.
     let again = shot(&app, &token, json!({ "artifact_id": artifact })).await;
     assert_eq!(again["content"][1]["data"], PNG);
+    // With the original capture's coordinate mapping.
+    let saved: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+    for key in [
+        "screen_width",
+        "screen_height",
+        "scale",
+        "pointer",
+        "capture_id",
+        "captured_at",
+    ] {
+        assert_eq!(saved[key], meta[key], "{key}");
+    }
+    // A capture for a turn that no longer runs takes nothing.
+    let lease = match manager
+        .acquire(bot.parse().unwrap(), "test:late")
+        .await
+        .unwrap()
+    {
+        else_api::computers::Acquire::Ready { lease_id, .. } => lease_id,
+        other => panic!("{other:?}"),
+    };
+    let before = guest.files.lock().unwrap().len();
+    let late = manager
+        .capture_screen(lease, bot.parse().unwrap(), Some(Uuid::new_v4()), true)
+        .await
+        .unwrap();
+    assert!(late.is_err(), "a stopped turn captures nothing");
+    assert_eq!(guest.files.lock().unwrap().len(), before);
+    manager.release(lease).await.unwrap();
     let other_token = grant(&app, &other, Some("gpt-6.1-sol")).await;
     let foreign = error(&shot(&app, &other_token, json!({ "artifact_id": artifact })).await);
     assert!(foreign.starts_with("No such screenshot"), "{foreign}");

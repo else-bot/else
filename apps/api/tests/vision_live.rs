@@ -486,6 +486,23 @@ async fn both_providers_read_pixels_from_their_desktop() {
         let (status, reply) = finish(&pool, turn, long).await;
         assert_eq!(status, "completed", "{reply}");
         assert!(reply.contains(&word), "{reply}");
+        // The same native session answered (resumed, not rebuilt).
+        let sessions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT native_session_id, status FROM provider_sessions
+             WHERE bot_id = $1 AND provider_id = $2 ORDER BY created_at",
+        )
+        .bind(bot.parse::<Uuid>().unwrap())
+        .bind(provider)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        note(&format!("{provider} sessions: {sessions:?}"));
+        assert_eq!(
+            sessions.len(),
+            1,
+            "one native session across the image and the follow-up"
+        );
+        assert_eq!(sessions[0].1, "active");
     }
 
     note("== 4. a missing display is an explicit outcome");
@@ -511,7 +528,7 @@ async fn both_providers_read_pixels_from_their_desktop() {
         true,
     );
 
-    note("== 5. Stop work during a screenshot turn; the next turn is normal");
+    note("== 5. Stop work after a screenshot was taken; the next turn is normal");
     let turn = api
         .send(
             &bot,
@@ -519,18 +536,14 @@ async fn both_providers_read_pixels_from_their_desktop() {
             "Take three screenshots, one at a time, and describe each in detail.",
         )
         .await;
-    for _ in 0..600 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
-            .bind(turn)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if status == "running" {
-            break;
-        }
+    let started_turn = Instant::now();
+    while turn_activity(&pool, &bot, turn).await.is_empty() {
+        assert!(
+            started_turn.elapsed() < Duration::from_secs(120),
+            "no screenshot was taken"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
     let (status, body) = api
         .call(
             reqwest::Method::POST,
@@ -540,7 +553,15 @@ async fn both_providers_read_pixels_from_their_desktop() {
         .await;
     assert!(status < 300, "{body}");
     let (status, _) = finish(&pool, turn, long).await;
-    note(&format!("stopped turn: {status}"));
+    note(&format!(
+        "stopped turn: {status}, screenshots taken: {}",
+        turn_activity(&pool, &bot, turn).await.len()
+    ));
+    assert_eq!(status, "interrupted");
+    assert!(
+        turn_activity(&pool, &bot, turn).await.len() < 3,
+        "stopped before finishing"
+    );
     let turn = loop {
         let (status, body) = api
             .call(
@@ -564,6 +585,40 @@ async fn both_providers_read_pixels_from_their_desktop() {
     };
     let (status, reply) = finish(&pool, turn, long).await;
     assert_eq!(status, "completed", "{reply}");
+    note("== 6. the API dies during a screenshot turn (the provider loses its tools)");
+    let mut api = api;
+    let turn = api
+        .send(
+            &bot,
+            "codex",
+            "Take a screenshot with computer_screenshot, then describe the desktop.",
+        )
+        .await;
+    let started_turn = Instant::now();
+    loop {
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+            .bind(turn)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if status == "running" {
+            break;
+        }
+        assert!(started_turn.elapsed() < Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    api.kill();
+    let api = install.serve().await;
+    let (status, _) = finish(&pool, turn, long).await;
+    note(&format!("turn cut off by the API's death: {status}"));
+    assert_ne!(status, "completed");
+    let turn = api
+        .send(&bot, "codex", "Reply with the single word AGAIN.")
+        .await;
+    let (status, reply) = finish(&pool, turn, long).await;
+    assert_eq!(status, "completed", "{reply}");
+
     let violations: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM turns WHERE bot_id = $1 AND error_code IN ('policy_violation', 'profile_mismatch')",
     )
@@ -580,6 +635,29 @@ async fn both_providers_read_pixels_from_their_desktop() {
     .await
     .unwrap();
     assert_eq!(images, 0, "no image data in the conversation or memory");
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("iVBORw0KGgo"),
+        "nor the API log"
+    );
+    // Where image data does live: the providers' own native session files
+    // (their conversation, like any tool result), never backed up.
+    let holders = std::process::Command::new("grep")
+        .args(["-rl", "--exclude-dir=microsandbox", "iVBORw0KGgo"])
+        .arg(&data)
+        .output()
+        .unwrap();
+    let holders = String::from_utf8_lossy(&holders.stdout)
+        .trim()
+        .replace(&data.display().to_string(), "$DATA");
+    note(&format!("files holding image data: {holders}"));
+    for path in holders.lines() {
+        assert!(
+            path.starts_with("$DATA/bots/") || path.starts_with("$DATA/artifacts/"),
+            "{path}"
+        );
+    }
     note(&format!(
         "POC-028 live run passed in {:?}",
         started.elapsed()
