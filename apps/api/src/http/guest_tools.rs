@@ -397,14 +397,30 @@ async fn screenshot(
     }
 }
 
+/// Ends a turn's foreground commands if the request that started them is
+/// dropped before they returned (the caller went away); disarmed once the
+/// command returned.
+struct EndOnDrop {
+    computers: Option<std::sync::Arc<crate::computers::ComputerManager>>,
+    turn: Uuid,
+}
+
+impl Drop for EndOnDrop {
+    fn drop(&mut self) {
+        if let Some(computers) = self.computers.take() {
+            let turn = self.turn;
+            tokio::spawn(async move { computers.end_turn_commands(turn).await });
+        }
+    }
+}
+
 /// Pointer and keyboard input on the bot's own desktop (POC-029).
 async fn input(
-    state: &AppState,
+    _state: &AppState,
     grant: &Grant,
     args: &Value,
     computers: &std::sync::Arc<crate::computers::ComputerManager>,
 ) -> Outcome {
-    use base64::Engine;
     let (Some(frame), Some(actions)) = (args["frame"].as_array(), args["actions"].as_array())
     else {
         return (tool_error("frame and actions are required."), None);
@@ -418,25 +434,6 @@ async fn input(
     if !computers.config().desktop {
         return (
             tool_error("DISPLAY_UNAVAILABLE: this installation's computers have no desktop."),
-            None,
-        );
-    }
-    // The owner's open desktop session has the desktop; the bot waits.
-    let owner_in: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = $1 AND holder = $2
-                        AND released_at IS NULL AND expires_at > now())",
-    )
-    .bind(grant.bot_id)
-    .bind(format!("desktop:{}", grant.bot_id))
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(true);
-    if owner_in {
-        return (
-            tool_error(
-                "OWNER_USING_DESKTOP: the owner has your desktop open; nothing was done. \
-                        Wait until they close it.",
-            ),
             None,
         );
     }
@@ -454,26 +451,38 @@ async fn input(
     if batch.len() > 16_000 {
         return (tool_error("the batch is over 16 KB."), None);
     }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(batch);
-    let command = format!("DISPLAY=:99 exec /usr/local/bin/else-input {encoded}");
+    // The batch (with any typed text) travels as an environment variable
+    // over the runtime's stdin, never in a command line.
+    let env = Env {
+        vars: vec![(
+            "ELSE_INPUT_BATCH".to_owned(),
+            zeroize::Zeroizing::new(batch),
+        )],
+    };
+    let command = "DISPLAY=:99 exec /usr/local/bin/else-input".to_owned();
+    // If this request is dropped (the provider went away), the batch is
+    // ended rather than left clicking on its own.
+    let mut guard = EndOnDrop {
+        computers: Some(computers.clone()),
+        turn: grant.turn_id,
+    };
     let run = {
         let computers = computers.clone();
         let (bot, holder) = (grant.bot_id, holder(grant));
         tokio::spawn(async move {
             computers
-                .run_command_with(
-                    bot,
-                    &holder,
-                    &command,
-                    Duration::from_secs(150),
-                    &Env::default(),
-                )
+                .run_input(bot, &holder, &command, Duration::from_secs(150), &env)
                 .await
         })
     };
-    let out = match run.await {
+    let finished = run.await;
+    guard.computers = None;
+    let out = match finished {
         Ok(Ok(Ok(out))) => out,
         Ok(Ok(Err(acquired))) => return (not_ready(&acquired), None),
+        Ok(Err(crate::computers::ComputerError::Refused(message))) => {
+            return (tool_error(&message), None);
+        }
         Ok(Err(err)) => return failure(err),
         Err(_) => {
             return (
@@ -487,35 +496,43 @@ async fn input(
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
+    let started = lines.iter().any(|l| l["started"] == true);
     let done = lines.iter().filter(|l| l.get("done").is_some()).count();
+    let finished_ok = lines.iter().any(|l| l["ok"] == true);
     let error = lines
         .iter()
         .find_map(|l| l["error"].as_str().map(str::to_owned));
     let summary = summarize_input(actions);
-    match (out.exit_code, error) {
-        (Some(0), None) => (
+    if !started {
+        // Refused before anything happened (validation, a changed screen,
+        // the owner connected, the desktop busy, no display).
+        return (
+            tool_error(&format!(
+                "{} Nothing was done.",
+                error.unwrap_or_else(|| "INPUT_FAILED: the input helper did not start.".into())
+            )),
+            None,
+        );
+    }
+    if out.exit_code == Some(0) && finished_ok && done == actions.len() {
+        return (
             tool_result(json!({ "done": done, "of": actions.len(),
                 "next": "take a screenshot to see the result" })),
             Some(format!("input {done}/{} actions: {summary}", actions.len())),
-        ),
-        (Some(2), Some(error)) => (tool_error(&format!("{error} Nothing was done.")), None),
-        (_, error) if done == 0 && error.as_deref().is_some_and(|e| !e.starts_with("STOPPED")) => (
-            tool_error(&format!("{} Nothing was done.", error.unwrap_or_default())),
-            None,
-        ),
-        (_, error) => (
-            tool_error(&format!(
-                "UNCERTAIN: {done} of {} actions completed; the next may or may not have \
-                 happened ({}). Take a screenshot before repeating anything.",
-                actions.len(),
-                error.unwrap_or_else(|| "the input was cut off".into())
-            )),
-            Some(format!(
-                "input cut off after {done}/{} actions: {summary}",
-                actions.len()
-            )),
-        ),
+        );
     }
+    (
+        tool_error(&format!(
+            "UNCERTAIN: {done} of {} actions completed; the next may or may not have happened \
+             ({}). Take a screenshot before repeating anything.",
+            actions.len(),
+            error.unwrap_or_else(|| "the input was cut off".into())
+        )),
+        Some(format!(
+            "input cut off after {done}/{} actions: {summary}",
+            actions.len()
+        )),
+    )
 }
 
 /// An input batch for the activity log: action kinds and points, never the
@@ -623,7 +640,13 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
                         .await
                 })
             };
-            let ran = match run.await {
+            let mut guard = EndOnDrop {
+                computers: Some(computers.clone()),
+                turn: grant.turn_id,
+            };
+            let finished = run.await;
+            guard.computers = None;
+            let ran = match finished {
                 Ok(ran) => ran,
                 Err(err) => {
                     tracing::warn!(error = %err, "a computer command task failed");

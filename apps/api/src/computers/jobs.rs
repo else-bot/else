@@ -121,8 +121,9 @@ if [ -f "$1/exit" ]; then echo "done $(cat "$1/exit")"; elif [ -f "$1/pid" ] && 
 /// takes a negative process group (the shell builtin does not). Once it is
 /// gone, the browser work of any script that no longer runs is reconciled
 /// (`else-browser reconcile` closes the tabs it opened and halts code in
-/// those it attached to). Prints `stopped` or `alive`.
-const KILL: &str = r#"settled() { [ -x /usr/local/bin/else-browser ] && /usr/local/bin/else-browser reconcile > /dev/null 2>&1; echo stopped; exit 0; }
+/// those it attached to) and any key or button an input batch held is
+/// released (`else-input --release-all`). Prints `stopped` or `alive`.
+const KILL: &str = r#"settled() { [ -x /usr/local/bin/else-browser ] && /usr/local/bin/else-browser reconcile > /dev/null 2>&1; [ -x /usr/local/bin/else-input ] && DISPLAY=:99 /usr/local/bin/else-input --release-all > /dev/null 2>&1; echo stopped; exit 0; }
 b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/sys/kernel/random/boot_id)" ] && settled
 pg=$(cat "$1/pid" 2>/dev/null) || settled
 alive() { pgrep -g "$pg" > /dev/null 2>&1; }
@@ -216,6 +217,7 @@ fn env_input(env: &Env) -> Vec<u8> {
 /// A foreground command while it runs.
 #[derive(Clone)]
 pub(super) struct Foreground {
+    bot_id: Uuid,
     turn_id: Option<Uuid>,
     runtime_name: String,
     dir: String,
@@ -313,11 +315,75 @@ impl ComputerManager {
         timeout: Duration,
         env: &Env,
     ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
+        self.run_foreground(bot_id, holder, command, timeout, env, false)
+            .await
+    }
+
+    /// A desktop input batch (POC-029): a foreground command that, under the
+    /// operation lock, also requires that the owner's desktop session is not
+    /// open (desktop admission takes the same lock, so they exclude each
+    /// other).
+    pub async fn run_input(
+        &self,
+        bot_id: Uuid,
+        holder: &str,
+        command: &str,
+        timeout: Duration,
+        env: &Env,
+    ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
+        self.run_foreground(bot_id, holder, command, timeout, env, true)
+            .await
+    }
+
+    async fn run_foreground(
+        &self,
+        bot_id: Uuid,
+        holder: &str,
+        command: &str,
+        timeout: Duration,
+        env: &Env,
+        exclusive_of_owner: bool,
+    ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
         let acquired = self.acquire(bot_id, holder).await?;
         let Acquire::Ready { lease_id, .. } = acquired else {
             return Ok(Err(acquired));
         };
         let (bot, runtime_name, op) = self.checked(lease_id).await?;
+        // Decided again under the lock: a request that waited behind other
+        // work must not run after its turn was stopped, or (for input) once
+        // the owner opened the desktop.
+        let turn: Option<Uuid> = holder.strip_prefix("turn:").and_then(|t| t.parse().ok());
+        if let Some(turn) = turn {
+            let live: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1
+                                AND status IN ('preparing', 'sending', 'running'))",
+            )
+            .bind(turn)
+            .fetch_one(&self.pool)
+            .await?;
+            if !live {
+                return Err(ComputerError::Refused(
+                    "STOPPED: this turn was stopped; nothing was run.".into(),
+                ));
+            }
+        }
+        if exclusive_of_owner {
+            let owner: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = $1 AND holder = $2
+                                AND released_at IS NULL AND expires_at > now())",
+            )
+            .bind(bot)
+            .bind(format!("desktop:{bot}"))
+            .fetch_one(&self.pool)
+            .await?;
+            if owner {
+                return Err(ComputerError::Refused(
+                    "OWNER_USING_DESKTOP: the owner has your desktop open; nothing was done. \
+                     Wait until they close it."
+                        .into(),
+                ));
+            }
+        }
         let run_id = Uuid::new_v4();
         let dir = format!("{RUNS_DIR}/{run_id}");
         let turn_id: Option<Uuid> = holder.strip_prefix("turn:").and_then(|t| t.parse().ok());
@@ -339,6 +405,7 @@ impl ComputerManager {
             .insert(
                 run_id,
                 Foreground {
+                    bot_id,
                     turn_id,
                     runtime_name: runtime_name.clone(),
                     dir: dir.clone(),
@@ -434,9 +501,10 @@ impl ComputerManager {
             "SELECT r.id, r.bot_id, r.runtime_name FROM guest_runs r
              LEFT JOIN turns t ON t.id = r.turn_id
              JOIN bots b ON b.id = r.bot_id
+             LEFT JOIN bot_computers c ON c.bot_id = r.bot_id
              WHERE r.ended_at IS NULL
                AND NOT (t.status IS NOT NULL AND t.status IN ('preparing', 'sending', 'running')
-                        AND b.status = 'active')",
+                        AND b.status = 'active' AND coalesce(c.desired_state, 'auto') = 'auto')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -502,6 +570,35 @@ impl ComputerManager {
         })
         .await;
         Ok(())
+    }
+
+    /// End every foreground command of a bot that this process runs (an
+    /// owner stop: it must not wait behind them), without the operation
+    /// lock, which they hold.
+    pub async fn end_bot_commands(&self, bot_id: Uuid) {
+        self.end_commands(|run, _| run.bot_id == bot_id).await;
+    }
+
+    /// End every foreground command of a turn (its caller went away).
+    pub async fn end_turn_commands(&self, turn_id: Uuid) {
+        self.end_commands(|run, _| run.turn_id == Some(turn_id))
+            .await;
+    }
+
+    async fn end_commands(&self, matches: impl Fn(&Foreground, Uuid) -> bool) {
+        let runs: Vec<(Uuid, Foreground)> = self
+            .foreground
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(id, run)| matches(run, **id))
+            .map(|(id, run)| (*id, run.clone()))
+            .collect();
+        for (id, run) in runs {
+            if let Err(err) = self.kill_registered(&run).await {
+                tracing::warn!(run = %id, error = %err, "ending a foreground command failed");
+            }
+        }
     }
 
     /// Kill a command this process runs. `None` when it already returned

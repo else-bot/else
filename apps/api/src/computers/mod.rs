@@ -1041,6 +1041,9 @@ impl ComputerManager {
         // The intent and revoked leases commit before the runtime is asked
         // to stop, so nothing can acquire the computer in between.
         tx.commit().await?;
+        // A foreground command (an input batch, a script) holds the
+        // operation lock while it runs: end it first rather than wait for it.
+        self.end_bot_commands(bot_id).await;
         let _op = self.op(bot_id).await;
         self.stop_held(bot_id, Reason::MustStop).await.map(|_| ())
     }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Pointer and keyboard input on the desktop (X display :99, the one VNC serves).
 
-Usage: else-input BASE64_JSON
+Usage: ELSE_INPUT_BATCH=JSON else-input   (the batch never appears in arguments)
+       else-input --release-all              (release every held key and button)
 The JSON is {"frame": [WIDTH, HEIGHT], "actions": [...]}, coordinates in screen
 pixels. Actions:
   {"move": [x, y]}
@@ -11,12 +12,18 @@ pixels. Actions:
   {"key": "ctrl+l"}            a key or chord, pressed together then released
   {"type": "text"}             literal text, character by character
   {"wait": 0.1-5}              seconds
-The whole batch is checked before anything happens: the display must still be
-WIDTH x HEIGHT (else SCREEN_CHANGED: take a new screenshot) and every point
-inside it. Prints one JSON line per completed action, then a final result.
-Whatever it pressed is released at the end, on an error, and on SIGTERM. Takes
-the desktop lock that browser scripts and computer_browser also take. Uses
-libX11 and libXtst through ctypes; nothing touches any other display.
+The whole batch is checked before anything happens (every key name resolved,
+every point inside the screen), the desktop lock that browser scripts and
+computer_browser take is acquired, and then the display must still be
+WIDTH x HEIGHT (else SCREEN_CHANGED: take a new screenshot) and no VNC viewer
+may be connected (OWNER_USING_DESKTOP). Only then does it print
+{"started": true}; a failure before that did nothing. After it, one line per
+completed action; a failure prints an error and the done lines tell what
+happened. The screen size and VNC connections are checked again before each
+action. Whatever it pressed is released at the end, on an error, and on
+SIGTERM (a forced kill is covered by --release-all, which every guest kill
+runs). Errors never repeat the supplied values. Uses libX11 and libXtst
+through ctypes; nothing touches any other display.
 """
 import base64
 import ctypes
@@ -45,9 +52,28 @@ def emit(obj):
     print(json.dumps(obj), flush=True)
 
 
+STARTED = False
+
+
 def fail(code, message, status=3):
     emit({"error": f"{code}: {message}"})
-    sys.exit(status)
+    # After execution started, any failure leaves what is done in doubt.
+    sys.exit(5 if STARTED else status)
+
+
+def vnc_viewer_connected():
+    """Whether a VNC client (the owner, through noVNC) holds a connection to
+    x11vnc on guest port 5900 right now."""
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as f:
+                for line in f.readlines()[1:]:
+                    cols = line.split()
+                    if cols[3] == "01" and cols[1].endswith(":170C"):
+                        return True
+        except OSError:
+            pass
+    return False
 
 
 class Input:
@@ -81,9 +107,30 @@ class Input:
             fail("DISPLAY_UNAVAILABLE", "the desktop display is not running")
         screen = x.XDefaultScreen(self.d)
         self.size = (x.XDisplayWidth(self.d, screen), x.XDisplayHeight(self.d, screen))
+        x.XDefaultRootWindow.restype = ctypes.c_ulong
+        x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        self.root = x.XDefaultRootWindow(self.d)
+        x.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_void_p] * 7
+        x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_void_p] * 7
+        x.XQueryKeymap.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.keys, self.buttons = set(), set()
-        self.spare = None
-        self.remapped = False
+        # Spare keycodes in use: keysym -> keycode; all restored to empty.
+        self.spares = {}
+
+    def current_size(self):
+        """The root window's size now (it changes if the screen is resized)."""
+        r, u = ctypes.c_ulong(), [ctypes.c_int() for _ in range(2)]
+        w, h, b, d = (ctypes.c_uint() for _ in range(4))
+        self.x.XGetGeometry(self.d, self.root, ctypes.byref(r), ctypes.byref(u[0]), ctypes.byref(u[1]),
+                            ctypes.byref(w), ctypes.byref(h), ctypes.byref(b), ctypes.byref(d))
+        return (w.value, h.value)
+
+    def modifier_mask(self):
+        u = [ctypes.c_ulong(), ctypes.c_ulong()]
+        i = [ctypes.c_int() for _ in range(4)]
+        m = ctypes.c_uint()
+        self.x.XQueryPointer(self.d, self.root, *[ctypes.byref(v) for v in u + i], ctypes.byref(m))
+        return m.value
 
     def sync(self):
         self.x.XSync(self.d, 0)
@@ -93,25 +140,56 @@ class Input:
         self.sync()
 
     def button(self, b, down):
-        self.t.XTestFakeButtonEvent(self.d, b, 1 if down else 0, 0)
-        (self.buttons.add if down else self.buttons.discard)(b)
-        self.sync()
+        # Recorded before the press is sent and with SIGTERM blocked, so the
+        # cleanup always knows what may be down.
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            if down:
+                self.buttons.add(b)
+            self.t.XTestFakeButtonEvent(self.d, b, 1 if down else 0, 0)
+            self.sync()
+            if not down:
+                self.buttons.discard(b)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
 
     def key(self, code, down):
-        self.t.XTestFakeKeyEvent(self.d, code, 1 if down else 0, 0)
-        (self.keys.add if down else self.keys.discard)(code)
-        self.sync()
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            if down:
+                self.keys.add(code)
+            self.t.XTestFakeKeyEvent(self.d, code, 1 if down else 0, 0)
+            self.sync()
+            if not down:
+                self.keys.discard(code)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)
 
     def release_all(self):
         for code in list(self.keys):
             self.key(code, False)
         for b in list(self.buttons):
             self.button(b, False)
-        if self.remapped and self.spare:
-            # Leave the spare keycode as unmapped as it was.
+        # Leave the spare keycodes as empty as they were.
+        for code in self.spares.values():
             none = (ctypes.c_ulong * 1)(0)
-            self.x.XChangeKeyboardMapping(self.d, self.spare, 1, none, 1)
-            self.sync()
+            self.x.XChangeKeyboardMapping(self.d, code, 1, none, 1)
+        self.spares.clear()
+        self.sync()
+
+    def release_held(self):
+        """Release every key and button X reports as held (after a forced
+        kill of an input batch)."""
+        keymap = (ctypes.c_char * 32)()
+        self.x.XQueryKeymap(self.d, keymap)
+        for n in range(8, 256):
+            if keymap.raw[n // 8] >> (n % 8) & 1:
+                self.t.XTestFakeKeyEvent(self.d, n, 0, 0)
+        mask = self.modifier_mask()
+        for b, bit in ((1, 0x100), (2, 0x200), (3, 0x400), (4, 0x800), (5, 0x1000)):
+            if mask & bit:
+                self.t.XTestFakeButtonEvent(self.d, b, 0, 0)
+        self.sync()
 
     def keysym(self, name):
         sym = self.x.XStringToKeysym(name.encode())
@@ -121,45 +199,62 @@ class Input:
 
     def code_for(self, sym):
         """A keycode for a keysym, and whether Shift is needed; a keysym the
-        keyboard lacks is put on a spare keycode."""
+        keyboard lacks is put on a keycode with no mapping at any level."""
         code = self.x.XKeysymToKeycode(self.d, sym)
-        if code:
+        if code and code not in self.spares.values():
             if self.x.XKeycodeToKeysym(self.d, code, 0) == sym:
                 return code, False
             if self.x.XKeycodeToKeysym(self.d, code, 1) == sym:
                 return code, True
-        if self.spare is None:
-            lo, hi = ctypes.c_int(), ctypes.c_int()
-            self.x.XDisplayKeycodes(self.d, ctypes.byref(lo), ctypes.byref(hi))
-            for c in range(hi.value, lo.value - 1, -1):
-                if not self.x.XKeycodeToKeysym(self.d, c, 0):
-                    self.spare = c
-                    break
-            if self.spare is None:
-                fail("INVALID_TEXT", "no spare keycode to type this character", 2)
+        if sym in self.spares:
+            return self.spares[sym], False
+        lo, hi = ctypes.c_int(), ctypes.c_int()
+        self.x.XDisplayKeycodes(self.d, ctypes.byref(lo), ctypes.byref(hi))
+        spare = next((c for c in range(hi.value, lo.value - 1, -1)
+                      if c not in self.spares.values()
+                      and not any(self.x.XKeycodeToKeysym(self.d, c, i) for i in range(4))), None)
+        if spare is None:
+            fail("INVALID_TEXT", "no spare keycode to type a character")
         syms = (ctypes.c_ulong * 1)(sym)
-        self.x.XChangeKeyboardMapping(self.d, self.spare, 1, syms, 1)
-        self.remapped = True
+        self.x.XChangeKeyboardMapping(self.d, spare, 1, syms, 1)
+        self.spares[sym] = spare
         self.sync()
         time.sleep(0.05)
-        return self.spare, False
+        return spare, False
 
     def chord(self, text):
-        parts = [p for p in text.replace(" ", "").split("+") if p]
-        if not parts:
-            fail("INVALID_KEY", "an empty key", 2)
+        """Press a key or chord together, then release in reverse; a key
+        that needs Shift (such as %) gets it."""
+        shift = self.x.XKeysymToKeycode(self.d, self.keysym("Shift_L"))
         codes = []
-        for p in parts:
-            name = NAMES.get(p.lower(), p if len(p) > 1 else p)
-            sym = self.keysym(name) if len(name) > 1 else (ord(name.lower()) if name.isalpha() else ord(name))
-            codes.append(self.code_for(sym)[0])
+        for sym in chord_keysyms(text):
+            code, needs_shift = self.code_for(sym)
+            if needs_shift and shift not in codes:
+                codes.append(shift)
+            codes.append(code)
         for c in codes:
             self.key(c, True)
         for c in reversed(codes):
             self.key(c, False)
 
     def type(self, text):
+        """Literal text: Caps Lock is turned off for it and restored, so case
+        is exactly as given (no modifier of ours is held: each key is
+        released before the next)."""
         shift = self.x.XKeysymToKeycode(self.d, self.keysym("Shift_L"))
+        caps = self.x.XKeysymToKeycode(self.d, self.keysym("Caps_Lock"))
+        locked = bool(self.modifier_mask() & 0x2)
+        if locked:
+            self.key(caps, True)
+            self.key(caps, False)
+        try:
+            self._type(text, shift)
+        finally:
+            if locked:
+                self.key(caps, True)
+                self.key(caps, False)
+
+    def _type(self, text, shift):
         for ch in text:
             if ch == "\n":
                 sym = self.keysym("Return")
@@ -178,12 +273,33 @@ class Input:
             time.sleep(0.008)
 
 
-def point(name, values, size, count=2):
+def chord_keysyms(text):
+    """The keysyms of a key or chord such as ctrl+shift+t, or INVALID_KEY.
+    Needs no display, so a whole batch is checked before anything happens."""
+    x = ctypes.cdll.LoadLibrary(ctypes.util.find_library("X11") or "libX11.so.6")
+    x.XStringToKeysym.restype = ctypes.c_ulong
+    x.XStringToKeysym.argtypes = [ctypes.c_char_p]
+    parts = [p for p in text.replace(" ", "").split("+") if p]
+    if not parts:
+        return None
+    syms = []
+    for p in parts:
+        if len(p) == 1:
+            syms.append(ord(p.lower()) if p.isalpha() else ord(p))
+            continue
+        sym = x.XStringToKeysym(NAMES.get(p.lower(), p).encode())
+        if not sym:
+            return None
+        syms.append(sym)
+    return syms
+
+
+def point(index, name, values, size, count=2):
     if not isinstance(values, list) or len(values) != count or not all(isinstance(v, (int, float)) for v in values):
-        fail("INVALID_ACTION", f"{name} needs {count} numbers", 2)
+        fail("INVALID_ACTION", f"action {index + 1}: {name} needs {count} numbers", 2)
     for i in range(0, count, 2):
         if not (0 <= values[i] < size[0] and 0 <= values[i + 1] < size[1]):
-            fail("OUT_OF_BOUNDS", f"{name} {values[i]},{values[i + 1]} is outside the {size[0]}x{size[1]} screen", 2)
+            fail("OUT_OF_BOUNDS", f"action {index + 1}: {name} {values[i]},{values[i + 1]} is outside the {size[0]}x{size[1]} screen", 2)
 
 
 def check(batch, size):
@@ -192,39 +308,45 @@ def check(batch, size):
         fail("INVALID_ACTION", "frame [width, height] from the latest screenshot is required", 2)
     if tuple(frame) != tuple(size):
         fail("SCREEN_CHANGED", f"the screen is now {size[0]}x{size[1]}, not {frame[0]}x{frame[1]}; take a new screenshot", 2)
+    if not isinstance(batch.get("actions"), list):
+        fail("INVALID_ACTION", "actions is a list", 2)
     actions = batch.get("actions")
     if not isinstance(actions, list) or not 1 <= len(actions) <= 20:
         fail("INVALID_ACTION", "1 to 20 actions", 2)
-    for a in actions:
+    for n, a in enumerate(actions):
         if not isinstance(a, dict) or len([k for k in a if k in ("move", "click", "drag", "scroll", "key", "type", "wait")]) != 1:
-            fail("INVALID_ACTION", f"one action per entry: {a}", 2)
+            fail("INVALID_ACTION", f"action {n + 1}: exactly one of move, click, drag, scroll, key, type, wait", 2)
         if "move" in a:
-            point("move", a["move"], size)
+            point(n, "move", a["move"], size)
         elif "click" in a:
-            point("click", a["click"], size)
+            point(n, "click", a["click"], size)
             if a.get("button", "left") not in BUTTONS or a.get("count", 1) not in (1, 2, 3):
-                fail("INVALID_ACTION", "button left|middle|right, count 1-3", 2)
+                fail("INVALID_ACTION", f"action {n + 1}: button left|middle|right, count 1-3", 2)
         elif "drag" in a:
-            point("drag", a["drag"], size, 4)
+            point(n, "drag", a["drag"], size, 4)
         elif "scroll" in a:
-            point("scroll", a["scroll"], size)
+            point(n, "scroll", a["scroll"], size)
             for k in ("dx", "dy"):
                 if not isinstance(a.get(k, 0), int) or abs(a.get(k, 0)) > 10:
-                    fail("INVALID_ACTION", f"{k} is -10 to 10", 2)
+                    fail("INVALID_ACTION", f"action {n + 1}: {k} is -10 to 10", 2)
         elif "key" in a:
-            if not isinstance(a["key"], str) or not 0 < len(a["key"]) <= 64:
-                fail("INVALID_ACTION", "key is a key name or chord such as ctrl+l", 2)
+            if not isinstance(a["key"], str) or not 0 < len(a["key"]) <= 64 or not chord_keysyms(a["key"]):
+                fail("INVALID_KEY", f"action {n + 1}: not a key name or chord such as ctrl+l or Enter", 2)
         elif "type" in a:
             if not isinstance(a["type"], str) or not 0 < len(a["type"]) <= 2000:
-                fail("INVALID_ACTION", "type is 1 to 2000 characters", 2)
+                fail("INVALID_ACTION", f"action {n + 1}: type is 1 to 2000 characters", 2)
         elif "wait" in a:
             if not isinstance(a["wait"], (int, float)) or not 0 < a["wait"] <= 5:
-                fail("INVALID_ACTION", "wait is up to 5 seconds", 2)
+                fail("INVALID_ACTION", f"action {n + 1}: wait is up to 5 seconds", 2)
     return actions
 
 
-def run(inp, actions):
+def run(inp, actions, frame):
     for i, a in enumerate(actions):
+        if inp.current_size() != tuple(frame):
+            fail("SCREEN_CHANGED", "the screen was resized during the batch; take a new screenshot")
+        if vnc_viewer_connected():
+            fail("OWNER_USING_DESKTOP", "the owner connected to the desktop during the batch")
         if "move" in a:
             inp.move(*a["move"])
         elif "click" in a:
@@ -261,14 +383,22 @@ def run(inp, actions):
 
 
 def main(argv):
-    if len(argv) != 1:
-        fail("USAGE", __doc__.strip(), 2)
+    global STARTED
+    if argv == ["--release-all"]:
+        Input().release_held()
+        emit({"released": True})
+        return
+    raw = os.environ.pop("ELSE_INPUT_BATCH", None)
+    if argv or raw is None:
+        fail("USAGE", "the batch comes in ELSE_INPUT_BATCH", 2)
     try:
-        batch = json.loads(base64.b64decode(argv[0]))
+        batch = json.loads(raw)
     except Exception:  # noqa: BLE001
-        fail("INVALID_ACTION", "the batch is not base64 JSON", 2)
+        fail("INVALID_ACTION", "the batch is not JSON", 2)
+    if not isinstance(batch, dict):
+        fail("INVALID_ACTION", "the batch is an object", 2)
     inp = Input()
-    actions = check(batch, inp.size)
+    actions = check(batch, inp.current_size())
     fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + 20
     while True:
@@ -279,6 +409,10 @@ def main(argv):
             if time.monotonic() > deadline:
                 fail("DESKTOP_BUSY", "a script controls the browser or desktop; wait for it or cancel its job")
             time.sleep(0.2)
+    # The wait may have taken a while: check the screen and the owner again.
+    check(batch, inp.current_size())
+    if vnc_viewer_connected():
+        fail("OWNER_USING_DESKTOP", "the owner is connected to the desktop; wait until they leave", 2)
 
     def stop(*_):
         inp.release_all()
@@ -286,8 +420,10 @@ def main(argv):
         os._exit(143)
 
     signal.signal(signal.SIGTERM, stop)
+    STARTED = True
+    emit({"started": True})
     try:
-        run(inp, actions)
+        run(inp, actions, batch["frame"])
     finally:
         inp.release_all()
     emit({"ok": True, "actions": len(actions)})

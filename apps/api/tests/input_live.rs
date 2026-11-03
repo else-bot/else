@@ -15,7 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -299,14 +298,14 @@ async fn turn_activity(db: &sqlx::PgPool, bot: &str, turn: Uuid) -> Vec<String> 
     .unwrap()
 }
 
-/// Run the guest input helper directly (the test's own check).
+/// Run the guest input helper directly (the test's own check); the batch
+/// goes through the environment, as the API sends it.
 fn input(home: &Path, name: &str, batch: Value) -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(batch.to_string());
     guest(
         home,
         name,
-        &format!("DISPLAY=:99 /usr/local/bin/else-input {encoded} || true"),
-        None,
+        "IFS= read -r b; ELSE_INPUT_BATCH=\"$b\" DISPLAY=:99 /usr/local/bin/else-input || true",
+        Some(&format!("{batch}\n")),
         false,
     )
 }
@@ -408,6 +407,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         "K{}",
         10000 + u16::from_be_bytes([b[3], b[4]]) as u32 % 90000
     );
+    let hours = format!("{:02}:30-{:02}:00", 6 + b[6] % 4, 18 + b[7] % 5);
     guest(
         &home,
         &name,
@@ -419,7 +419,8 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         &home,
         &name,
         &format!(
-            "cd ~/site && (/usr/bin/setsid python3 input_site.py 8421 {code} > site.log 2>&1 < /dev/null &); sleep 1"
+            "cd ~/site && (/usr/bin/setsid python3 input_site.py 8421 {code} {x} {y} {word} {hours} > site.log 2>&1 < /dev/null &); \
+             (/usr/bin/setsid python3 input_site.py 8420 TEST 40 120 TEST 00:00-00:00 > test.log 2>&1 < /dev/null &); sleep 1"
         ),
         None,
         false,
@@ -430,7 +431,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     guest(
         &home,
         &name,
-        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/?x=40&y=120&word=TEST' > /dev/null",
+        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8420/' > /dev/null",
         None,
         false,
     );
@@ -446,7 +447,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     // wheel scrolls (checked through the page itself, not given to a model).
     let page = |expr: &str| {
         format!(
-            "python3 -c 'import sys; sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp\nwith elsecdp.connect() as b: print(b.page(url_prefix=\"http://127.0.0.1:8421/\").read(\"{expr}\"))'"
+            "python3 -c 'import sys; sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp\nwith elsecdp.connect() as b: print(b.page(url_prefix=\"http://127.0.0.1:8420/\").read(\"{expr}\"))'"
         )
     };
     // The button's centre on screen: its page position plus where the page
@@ -476,7 +477,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     guest(
         &home,
         &name,
-        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/done?word=probe' > /dev/null",
+        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8420/done?word=probe' > /dev/null",
         None,
         false,
     );
@@ -486,11 +487,11 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         json!({ "frame": [1280, 800], "actions": [{ "scroll": [640, 500], "dy": 10 }] }),
     );
     assert!(scrolled.contains("\"ok\": true"), "{scrolled}");
-    let y: f64 = guest(&home, &name, &page("window.scrollY"), None, false)
+    let scroll_y: f64 = guest(&home, &name, &page("window.scrollY"), None, false)
         .parse()
         .unwrap();
-    note(&format!("the wheel scrolled the page to {y}"));
-    assert!(y > 0.0, "the wheel scrolled");
+    note(&format!("the wheel scrolled the page to {scroll_y}"));
+    assert!(scroll_y > 0.0, "the wheel scrolled");
     let refused = input(
         &home,
         &name,
@@ -516,16 +517,22 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
             "/bin/sh",
             "-c",
         ])
-        .arg(format!(
-            "DISPLAY=:99 exec /usr/local/bin/else-input {}",
-            base64::engine::general_purpose::STANDARD.encode(
-                json!({ "frame": [1280, 800], "actions": [{ "type": "ABCDEFGHIJ".repeat(150) }] })
-                    .to_string()
-            )
-        ))
+        .arg("IFS= read -r b; ELSE_INPUT_BATCH=\"$b\" DISPLAY=:99 exec /usr/local/bin/else-input")
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    {
+        use std::io::Write;
+        let batch =
+            json!({ "frame": [1280, 800], "actions": [{ "type": "AbCdEfGhIj".repeat(150) }] });
+        stopped
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{batch}\n").as_bytes())
+            .unwrap();
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
     guest(
         &home,
@@ -544,7 +551,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         &home,
         &name,
         &format!(
-            "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/?x={x}&y={y}&word={word}' > /dev/null"
+            "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/' > /dev/null"
         ),
         None,
         false,
@@ -591,6 +598,108 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     assert!(
         reply.contains(&code),
         "the code read from the final screenshot: {reply}"
+    );
+
+    note("== 2b. an information task on a website, by looking and typing only");
+    guest(
+        &home,
+        &name,
+        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/search' > /dev/null",
+        None,
+        false,
+    );
+    let turn = api
+        .send(
+            &bot,
+            "codex",
+            "The browser on your desktop shows a library search page. Using only \
+             computer_screenshot and computer_input, search it for Riverside and tell me the \
+             opening hours it lists for Riverside Library. Do not use any other tool.",
+        )
+        .await;
+    let (status, reply) = finish(&pool, turn, long).await;
+    assert_eq!(status, "completed", "{reply}");
+    let used = turn_activity(&pool, &bot, turn).await;
+    assert!(
+        used.iter()
+            .all(|a| a.starts_with("computer_screenshot") || a.starts_with("computer_input")),
+        "{used:?}"
+    );
+    let submitted = guest(
+        &home,
+        &name,
+        "curl -s http://127.0.0.1:8421/log",
+        None,
+        false,
+    );
+    assert!(
+        submitted
+            .lines()
+            .any(|l| l.to_lowercase().starts_with("query:")
+                && l.to_lowercase().contains("riverside")),
+        "{submitted}"
+    );
+    assert!(
+        reply
+            .replace(['\u{2013}', '\u{2014}', '\u{2012}'], "-")
+            .contains(&hours),
+        "the hours read from the results: {reply} (expected {hours})"
+    );
+
+    note("== 2c. a forced kill mid-typing: every guest kill releases what is held");
+    let mut killed = std::process::Command::new(msb())
+        .env("MSB_HOME", &home)
+        .args([
+            "exec",
+            &name,
+            "--",
+            "/usr/sbin/runuser",
+            "-u",
+            "elsebot",
+            "--",
+            "/bin/sh",
+            "-c",
+        ])
+        .arg("IFS= read -r b; ELSE_INPUT_BATCH=\"$b\" DISPLAY=:99 exec /usr/local/bin/else-input")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let batch = json!({ "frame": [1280, 800], "actions": [{ "drag": [600, 500, 900, 600] }, { "type": "XyXyXyXyXy".repeat(150) }] });
+        killed
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{batch}\n").as_bytes())
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    guest(
+        &home,
+        &name,
+        "pkill -KILL -f '[/]usr/local/bin/else-input'; sleep 0.5",
+        None,
+        true,
+    );
+    let _ = killed.wait();
+    note(&format!(
+        "right after SIGKILL: {}",
+        guest(&home, &name, HELD, None, false)
+    ));
+    let released = guest(
+        &home,
+        &name,
+        "DISPLAY=:99 /usr/local/bin/else-input --release-all",
+        None,
+        false,
+    );
+    assert!(released.contains("released"), "{released}");
+    assert_eq!(
+        guest(&home, &name, HELD, None, false),
+        "keys=[] buttons=0",
+        "released after a forced kill"
     );
 
     note("== 3. an application outside the browser: a terminal window");

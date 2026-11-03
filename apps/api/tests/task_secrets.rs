@@ -576,3 +576,125 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
         .unwrap();
     assert_eq!(result["exit_code"], 143);
 }
+
+/// POC-029 review: foreground work ends with an owner stop (without
+/// waiting for the operation lock it holds) and when its request is
+/// dropped; a command queued behind it runs nothing once its turn stopped.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() {
+    let Setup {
+        app,
+        guest,
+        manager,
+    } = setup().await;
+    let bot = app.create_bot("Clicker", "clicks").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    let (_, token) = grant(&app, &bot).await;
+    let app = Arc::new(app);
+    let call = |command: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            tool(
+                &app,
+                &token,
+                "computer_run",
+                json!({ "command": command, "timeout_secs": 300 }),
+            )
+            .await
+        })
+    };
+    let kills = || {
+        guest
+            .execs()
+            .iter()
+            .filter(|(_, args, _)| args.iter().any(|a| a.contains("alive()")))
+            .count()
+    };
+
+    // An owner stop ends the running command at once.
+    let first = call("HANG one");
+    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
+        .await
+        .expect("started");
+    let stopped_at = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(10), manager.owner_stop(bot_id))
+        .await
+        .expect("the owner stop did not wait behind the command")
+        .unwrap();
+    assert!(stopped_at.elapsed() < Duration::from_secs(5));
+    let result = tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["exit_code"], 143, "{result}");
+    manager.owner_resume(bot_id).await.unwrap();
+
+    // A dropped request ends its command.
+    let before = kills();
+    let second = call("HANG two");
+    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
+        .await
+        .expect("started");
+    second.abort();
+    let started = std::time::Instant::now();
+    while kills() == before {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the dropped request's command was not ended"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A command queued behind a running one, for a turn stopped meanwhile,
+    // runs nothing.
+    let third = call("HANG three");
+    tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
+        .await
+        .expect("started");
+    let queued = call("echo should-not-run");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success());
+    for _ in 0..100 {
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status = 'running')",
+        )
+        .bind(bot_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if !live {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    manager.end_orphaned_commands().await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), third)
+        .await
+        .unwrap();
+    let refused = tokio::time::timeout(Duration::from_secs(5), queued)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("STOPPED"),
+        "{refused}"
+    );
+    assert!(
+        guest
+            .execs()
+            .iter()
+            .all(|(_, args, _)| args.iter().all(|a| !a.contains("should-not-run"))),
+        "the queued command never reached the guest"
+    );
+}

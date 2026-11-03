@@ -94,6 +94,44 @@ impl ComputerRuntime for Guest {
         self.files.lock().unwrap().push(guest.to_owned());
         std::fs::write(host, png()).map_err(|e| RuntimeError::Unavailable(e.to_string()))
     }
+    async fn exec_input(
+        &self,
+        _: &str,
+        _: &str,
+        args: &[&str],
+        input: &[u8],
+        _: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        assert!(
+            args.iter().any(|a| a.contains("/usr/local/bin/else-input")),
+            "only input batches take stdin here"
+        );
+        assert!(
+            args.iter().all(|a| !a.contains("actions")),
+            "the batch is never an argument"
+        );
+        let line = String::from_utf8_lossy(input).into_owned();
+        let encoded = line
+            .lines()
+            .find_map(|l| l.strip_prefix("ELSE_INPUT_BATCH "))
+            .expect("the batch arrives as ELSE_INPUT_BATCH on stdin");
+        let batch: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        self.inputs.lock().unwrap().push(batch);
+        let (code, lines) = self.input_reply.lock().unwrap().clone();
+        let out = lines.join("\n");
+        // The RUN wrapper's reply: code, sizes, stdout, NUL line, stderr.
+        Ok(ExecOutput {
+            status: Some(0),
+            stdout: format!("{code}\n{}\n0\n{out}\n\0\n", out.len()),
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
     async fn exec(
         &self,
         _: &str,
@@ -101,28 +139,6 @@ impl ComputerRuntime for Guest {
         args: &[&str],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        if let Some(command) = args
-            .iter()
-            .find(|a| a.contains("/usr/local/bin/else-input "))
-        {
-            let encoded = command.rsplit(' ').next().unwrap();
-            let batch: Value = serde_json::from_slice(
-                &base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .unwrap(),
-            )
-            .unwrap();
-            self.inputs.lock().unwrap().push(batch);
-            let (code, lines) = self.input_reply.lock().unwrap().clone();
-            let out = lines.join("\n");
-            // The RUN wrapper's reply: code, sizes, stdout, NUL line, stderr.
-            return Ok(ExecOutput {
-                status: Some(0),
-                stdout: format!("{code}\n{}\n0\n{out}\n\0\n", out.len()),
-                stderr: String::new(),
-                truncated: false,
-            });
-        }
         let script = args.iter().find(|a| a.contains("else-screenshot")).copied();
         let stdout = match (script, *self.mode.lock().unwrap()) {
             (None, _) => String::new(),
@@ -169,6 +185,7 @@ async fn setup(desktop: bool) -> Setup {
         input_reply: Mutex::new((
             0,
             vec![
+                r#"{"started": true}"#.into(),
                 r#"{"done": 0}"#.into(),
                 r#"{"done": 1}"#.into(),
                 r#"{"ok": true, "actions": 2}"#.into(),
@@ -465,6 +482,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     *guest.input_reply.lock().unwrap() = (
         143,
         vec![
+            r#"{"started": true}"#.into(),
             r#"{"done": 0}"#.into(),
             r#"{"error": "STOPPED: the input was stopped; what is listed as done happened"}"#
                 .into(),
@@ -473,11 +491,32 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let cut = tool(&app, &token, "computer_input", batch.clone()).await;
     let text = cut["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
+    // An error after execution started (say a failure on action 2) is never
+    // reported as nothing done.
+    *guest.input_reply.lock().unwrap() = (
+        5,
+        vec![
+            r#"{"started": true}"#.into(),
+            r#"{"done": 0}"#.into(),
+            r#"{"error": "INVALID_TEXT: no spare keycode to type a character"}"#.into(),
+        ],
+    );
+    let late = tool(&app, &token, "computer_input", batch.clone()).await;
+    let text = late["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
     let sent = guest.inputs.lock().unwrap().len();
-    assert_eq!(sent, 3, "nothing was replayed");
+    assert_eq!(sent, 4, "nothing was replayed");
 
     // The owner's open desktop session has the desktop.
-    *guest.input_reply.lock().unwrap() = (0, vec![r#"{"ok": true, "actions": 2}"#.into()]);
+    *guest.input_reply.lock().unwrap() = (
+        0,
+        vec![
+            r#"{"started": true}"#.into(),
+            r#"{"done": 0}"#.into(),
+            r#"{"done": 1}"#.into(),
+            r#"{"ok": true, "actions": 2}"#.into(),
+        ],
+    );
     let desktop = manager.desktop(bot.parse().unwrap()).await.unwrap();
     assert!(desktop.is_ok());
     let busy = tool(&app, &token, "computer_input", batch.clone()).await;
@@ -511,7 +550,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     );
     assert_eq!(
         guest.inputs.lock().unwrap().len(),
-        40,
-        "40 batches per turn, refused or not"
+        39,
+        "40 batches counted per turn (one refused while the owner was in never reached the guest)"
     );
 }
