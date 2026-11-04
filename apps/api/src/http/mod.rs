@@ -11,6 +11,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;
+mod owner_tools;
 pub mod questions;
 pub mod routines;
 pub mod settings;
