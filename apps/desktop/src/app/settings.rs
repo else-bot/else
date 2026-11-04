@@ -741,7 +741,7 @@ impl ElseApp {
             }
             None => body = body.child(muted("Loading…", cx)),
         }
-        v_flex()
+        let mut panel = v_flex()
             .id("bot-settings")
             .w(PANEL_WIDTH)
             .flex_none()
@@ -751,8 +751,31 @@ impl ElseApp {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .child(header)
-            .child(body)
-            .into_any_element()
+            .child(body);
+        if self.default_bot_id != Some(bot.id) {
+            let id = bot.id;
+            panel = panel.child(
+                div()
+                    .flex_none()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(theme.sidebar_border)
+                    .child(
+                        Button::new("delete-bot")
+                            .label("Delete bot")
+                            .danger()
+                            .w_full()
+                            .disabled(
+                                self.connection != Connection::Connected
+                                    || self.deleting.contains(&id),
+                            )
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.open_delete_dialog(id, window, cx)
+                            })),
+                    ),
+            );
+        }
+        panel.into_any_element()
     }
 
     fn render_details(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {

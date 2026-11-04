@@ -331,25 +331,12 @@ impl ElseApp {
         if !self.settings_open {
             actions = actions.child(
                 Button::new("toggle-settings")
-                    .icon(IconName::Settings)
+                    .icon(IconName::PanelRightOpen)
                     .small()
                     .ghost()
+                    .accessibility_label("Show bot settings")
                     .tooltip_with_action("Show bot settings", &ToggleSettings, Some(APP_CONTEXT))
                     .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
-            );
-        }
-        if self.default_bot_id != Some(bot.id) {
-            actions = actions.child(
-                Button::new("delete-bot")
-                    .label("Delete")
-                    .small()
-                    .ghost()
-                    .disabled(self.connection != Connection::Connected)
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        if let Some(id) = app.selected {
-                            app.open_delete_dialog(id, window, cx)
-                        }
-                    })),
             );
         }
         h_flex()
