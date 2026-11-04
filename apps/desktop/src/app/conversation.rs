@@ -1,9 +1,11 @@
 //! Transcript loading, committed events, paging, and row reconciliation.
 
 use super::ElseApp;
+use super::reply::Author;
 use super::row_text::{RowFormat, RowText};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
+use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -17,13 +19,45 @@ pub(super) enum RowKey {
     SecretRequest(Uuid),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TranscriptRow {
+    pub(super) key: RowKey,
+    pub(super) footer_stamp: Option<DateTime<Utc>>,
+}
+
+const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
+
+fn burst_tail_stamps<Tz: TimeZone>(
+    rows: &[(Option<Author>, Option<DateTime<Utc>>)],
+    zone: &Tz,
+) -> Vec<Option<DateTime<Utc>>> {
+    let joins = |(author, at): (Option<Author>, Option<DateTime<Utc>>),
+                 (next_author, next_at): (Option<Author>, Option<DateTime<Utc>>)| {
+        let (Some(author), Some(at), Some(next_at)) = (author, at, next_at) else {
+            return false;
+        };
+        let gap = next_at - at;
+        next_author == Some(author)
+            && gap >= TimeDelta::zero()
+            && gap < BURST_GAP
+            && at.with_timezone(zone).date_naive() == next_at.with_timezone(zone).date_naive()
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(ix, &row)| {
+            let joined = rows.get(ix + 1).is_some_and(|&next| joins(row, next));
+            if joined { None } else { row.1 }
+        })
+        .collect()
+}
+
 /// The selected bot's transcript and its live subscription.
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
     pub(super) conversation: Option<Conversation>,
     pub(super) stream_problem: Option<String>,
     pub(super) loading_older: bool,
-    pub(super) rows: Vec<RowKey>,
+    pub(super) rows: Vec<TranscriptRow>,
     pub(super) list: ListState,
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
@@ -248,19 +282,57 @@ impl ElseApp {
                 RowFormat::Plain,
             ));
         }
+        let pending = self.pending.get(&bot);
+        let senders: Vec<_> = rows
+            .iter()
+            .map(|key| match *key {
+                RowKey::Item(id) => conversation
+                    .and_then(|c| c.item(id))
+                    .map_or((None, None), |item| {
+                        (Author::of(&item.kind), item.created_at)
+                    }),
+                RowKey::Pending(request) => pending
+                    .and_then(|list| list.iter().find(|p| p.request_id == request))
+                    .map_or((None, None), |p| {
+                        let author = p.rejected.is_none().then_some(Author::Owner);
+                        (author, Some(p.sent_at))
+                    }),
+                RowKey::SecretRequest(_) => (None, None),
+            })
+            .collect();
+        let rows: Vec<TranscriptRow> = rows
+            .into_iter()
+            .zip(burst_tail_stamps(&senders, &Local))
+            .map(|(key, footer_stamp)| TranscriptRow { key, footer_stamp })
+            .collect();
         let old = std::mem::take(&mut view.rows);
-        let prefix = old.iter().zip(&rows).take_while(|(a, b)| a == b).count();
+        let same = |a: &TranscriptRow, b: &TranscriptRow| a.key == b.key;
+        let prefix = old
+            .iter()
+            .zip(&rows)
+            .take_while(|(a, b)| same(a, b))
+            .count();
         let max_suffix = old.len().min(rows.len()) - prefix;
         let suffix = old
             .iter()
             .rev()
             .zip(rows.iter().rev())
             .take(max_suffix)
-            .take_while(|(a, b)| a == b)
+            .take_while(|(a, b)| same(a, b))
             .count();
         if prefix + suffix != old.len() || old.len() != rows.len() {
             view.list
                 .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
+        }
+        let old_stamps: HashMap<RowKey, Option<DateTime<Utc>>> =
+            old.iter().map(|row| (row.key, row.footer_stamp)).collect();
+        for (ix, row) in rows.iter().enumerate() {
+            if old_stamps
+                .get(&row.key)
+                .is_some_and(|stamp| *stamp != row.footer_stamp)
+            {
+                view.list.remeasure_items(ix..ix + 1);
+            }
         }
         // Create or update the selectable text of each row.
         let mut changed = Vec::new();
@@ -279,7 +351,8 @@ impl ElseApp {
                 }
             }
         }
-        view.texts.retain(|key, _| rows.contains(key));
+        view.texts
+            .retain(|key, _| rows.iter().any(|row| row.key == *key));
         if created {
             // New text views learn their wrapped height during their first
             // layout; measure the rows again once that has happened.
@@ -293,7 +366,7 @@ impl ElseApp {
             });
         }
         for key in changed {
-            if let Some(ix) = rows.iter().position(|r| *r == key) {
+            if let Some(ix) = rows.iter().position(|r| r.key == key) {
                 view.list.remeasure_items(ix..ix + 1);
             }
         }
@@ -303,4 +376,98 @@ impl ElseApp {
     }
 
     // ----- Sending ----------------------------------------------------------
+}
+
+#[cfg(test)]
+mod tests {
+    use super::burst_tail_stamps;
+    use crate::app::reply::Author::{self, Bot, Owner};
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    fn at(text: &str) -> DateTime<Utc> {
+        format!("2026-11-04T{text}Z").parse().unwrap()
+    }
+
+    fn stamps(rows: &[(Option<Author>, Option<&str>)]) -> Vec<Option<DateTime<Utc>>> {
+        let rows: Vec<_> = rows.iter().map(|&(a, t)| (a, t.map(at))).collect();
+        burst_tail_stamps(&rows, &Utc)
+    }
+
+    #[test]
+    fn a_burst_shares_the_stamp_of_its_last_message() {
+        let burst = [
+            (Some(Bot), Some("10:00:00")),
+            (Some(Bot), Some("10:04:00")),
+            (Some(Bot), Some("10:08:59")),
+            (Some(Bot), Some("10:08:59")),
+        ];
+        assert_eq!(stamps(&burst), [None, None, None, Some(at("10:08:59"))]);
+    }
+
+    #[test]
+    fn a_five_minute_gap_or_another_sender_starts_a_new_stamp() {
+        let rows = [
+            (Some(Bot), Some("10:00:00")),
+            (Some(Bot), Some("10:05:00")),
+            (Some(Owner), Some("10:05:01")),
+            (Some(Bot), Some("10:05:02")),
+        ];
+        assert_eq!(
+            stamps(&rows),
+            [
+                Some(at("10:00:00")),
+                Some(at("10:05:00")),
+                Some(at("10:05:01")),
+                Some(at("10:05:02")),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_or_reversed_times_break_a_burst() {
+        let rows = [
+            (Some(Bot), None),
+            (Some(Bot), Some("10:01:00")),
+            (Some(Bot), Some("10:00:00")),
+        ];
+        assert_eq!(
+            stamps(&rows),
+            [None, Some(at("10:01:00")), Some(at("10:00:00"))]
+        );
+    }
+
+    #[test]
+    fn rows_without_a_sender_stand_apart_and_keep_their_own_time() {
+        let rows = [
+            (Some(Bot), Some("10:00:00")),
+            (None, None),
+            (Some(Bot), Some("10:00:10")),
+            (None, Some("10:00:20")),
+            (Some(Bot), Some("10:00:30")),
+        ];
+        assert_eq!(
+            stamps(&rows),
+            [
+                Some(at("10:00:00")),
+                None,
+                Some(at("10:00:10")),
+                Some(at("10:00:20")),
+                Some(at("10:00:30")),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_midnight_splits_a_burst_in_the_viewer_zone() {
+        let rows = [
+            (Some(Bot), Some(at("21:58:00"))),
+            (Some(Bot), Some(at("22:01:00"))),
+        ];
+        let plus_two = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            burst_tail_stamps(&rows, &plus_two),
+            [Some(at("21:58:00")), Some(at("22:01:00"))]
+        );
+        assert_eq!(burst_tail_stamps(&rows, &Utc), [None, Some(at("22:01:00"))]);
+    }
 }
