@@ -27,7 +27,8 @@ pub enum Tool {
     ReadHistory,
     /// Read the bot's memory and memory the owner shared with it.
     ReadMemory,
-    /// Hand a task to another registered bot (main bot only).
+    /// Hand a task to another registered bot (a bot's own owner
+    /// conversation, never a delegated task).
     Delegate,
     /// Register a new bot for the owner (main bot only).
     CreateBot,
@@ -35,8 +36,8 @@ pub enum Tool {
     Computer,
     /// Ask the owner for credentials (owner conversations only).
     RequestSecret,
-    /// Manage the bot's own routines (owner messages only, never in a
-    /// delegated task or a routine run).
+    /// Manage the bot's own routines (work rooted in an owner message,
+    /// including a task delegated for one; never a routine run or its tasks).
     Routines,
 }
 

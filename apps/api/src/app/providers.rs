@@ -170,20 +170,49 @@ pub struct SecretOutcome {
     pub stored: bool,
 }
 
+/// What a turn's work traces back to, derived by the server from stored
+/// rows: a delegated task inherits the origin of the request that
+/// delegated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Origin {
+    /// An owner message in the bot's owner conversation.
+    OwnerRequest,
+    /// A scheduled run of a saved routine.
+    RoutineRun,
+    /// Anything else, such as the greeting that opens a conversation.
+    #[default]
+    Other,
+}
+
 /// What an attempt knows about delegation, all derived by the server.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DelegationContext {
-    /// This attempt may delegate (main bot, owner conversation).
-    pub can_delegate: bool,
-    /// This turn is a delegated task (a leaf).
+    pub origin: Origin,
+    /// This turn is a delegated task (a leaf): it cannot delegate.
     pub delegated_task: bool,
-    /// For a delegated task: the bot that delegated it.
-    pub parent_bot_id: Option<Uuid>,
+    /// For a delegated task: the bot that delegated it, ID and name.
+    pub delegated_by: Option<(Uuid, String)>,
+    /// The installation's main bot in its owner conversation.
+    pub can_create_bot: bool,
     /// Other active bots: ID and name.
     pub registry: Vec<(Uuid, String)>,
     pub remaining: i64,
     /// Child outcomes not yet given to an attempt of this turn.
     pub outcomes: Vec<DelegationOutcome>,
+}
+
+impl DelegationContext {
+    /// Any bot's own conversation may hand work to another bot; a
+    /// delegated task may not (one hop).
+    pub fn can_delegate(&self) -> bool {
+        !self.delegated_task
+    }
+
+    /// A bot manages its own routines only for work rooted in an owner
+    /// message, never for a routine run or a task one delegated.
+    pub fn can_manage_routines(&self) -> bool {
+        self.origin == Origin::OwnerRequest
+    }
 }
 
 /// Bounded saved memory at one view revision.

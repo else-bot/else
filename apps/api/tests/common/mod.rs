@@ -1,5 +1,6 @@
 //! Each integration test owns a private temporary SQLite database.
 #![allow(dead_code)]
+pub mod recorder;
 use else_api::config::{Config, DatabaseUrl};
 use sqlx::SqlitePool;
 pub struct TestDb {

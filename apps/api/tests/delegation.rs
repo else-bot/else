@@ -916,3 +916,145 @@ async fn only_a_running_main_owner_turn_creates_bots() {
     ));
     assert_eq!(bot_count(&app).await, before);
 }
+
+async fn delegation_of(
+    app: &TestApp,
+    root: Uuid,
+) -> (Uuid, Uuid, String, Option<i32>, Option<String>) {
+    sqlx::query_as(
+        "SELECT parent_bot_id, target_bot_id, status, delivered_attempt, result
+         FROM delegations WHERE root_turn_id = ?1",
+    )
+    .bind(root)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
+    use common::recorder::{GATE, harness, tool};
+    let h = harness(2).await;
+    let main = h.app.main_bot().await;
+    let (work, family) = tokio::join!(h.app.create_bot("Work"), h.app.create_bot("Family"));
+
+    for (target, task) in [
+        (&family, "Find the date of the school recital."),
+        (&main, "Note the dentist appointment on Friday."),
+    ] {
+        let (root, token) = h.running(&work, GATE).await;
+        let not_main = tool(&h.app, &token, "create_bot", json!({ "name": "X" })).await;
+        assert_eq!(
+            not_main.status,
+            StatusCode::FORBIDDEN,
+            "creation stays main-only"
+        );
+        let pending = tool(
+            &h.app,
+            &token,
+            "delegate",
+            json!({ "target_bot_id": target, "task": task }),
+        )
+        .await;
+        assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+        h.release(root).await;
+        wait_status(&h.app, root, "completed").await;
+        let (parent, to, status, delivered, result) = delegation_of(&h.app, root).await;
+        assert_eq!(
+            (parent.to_string(), to.to_string()),
+            (work.clone(), target.clone())
+        );
+        assert_eq!((status.as_str(), delivered), ("completed", Some(2)));
+        assert!(result.unwrap().contains(task));
+        let attempts = h.inputs(root).await;
+        let results = else_api::providers::prompt::outcomes_block(&attempts[1]);
+        assert!(results.contains(task), "{results}");
+        let rules = else_api::providers::prompt::instructions(&attempts[0], "/p");
+        assert!(
+            rules.contains("Only the main bot can create bots"),
+            "{rules}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_bots_waiting_on_each_other_both_finish_with_one_provider_slot() {
+    use common::recorder::{GATE, harness, tool};
+    let h = harness(1).await;
+    let (a, b) = tokio::join!(h.app.create_bot("Alpha"), h.app.create_bot("Beta"));
+    let root_a = h.send(&a, GATE).await;
+    let root_b = h.send(&b, GATE).await;
+
+    let (_, token) = h.started(root_a).await;
+    let asked = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": b, "task": "Alpha asks: what is on the calendar?" }),
+    )
+    .await;
+    assert_eq!(asked.result["status"], "pending", "{}", asked.body);
+    h.release(root_a).await;
+    wait_status(&h.app, root_a, "waiting").await;
+
+    let (_, token) = h.started(root_b).await;
+    let asked = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": a, "task": "Beta asks: which bills are due?" }),
+    )
+    .await;
+    assert_eq!(asked.result["status"], "pending", "{}", asked.body);
+    h.release(root_b).await;
+
+    tokio::join!(
+        wait_status(&h.app, root_a, "completed"),
+        wait_status(&h.app, root_b, "completed"),
+    );
+    let outcomes = tokio::join!(delegation_of(&h.app, root_a), delegation_of(&h.app, root_b));
+    for (_, _, status, delivered, _) in [outcomes.0, outcomes.1] {
+        assert_eq!((status.as_str(), delivered), ("completed", Some(2)));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_peer_cancels_its_task_on_the_main_bot() {
+    use common::recorder::{GATE, harness, tool};
+    let h = harness(1).await;
+    let main = h.app.main_bot().await;
+    let peer = h.app.create_bot("Work").await;
+    let (root, token) = h.running(&peer, GATE).await;
+    let pending = tool(
+        &h.app,
+        &token,
+        "delegate",
+        json!({ "target_bot_id": main, "task": "[synthetic:hang] research the appointment details" }),
+    )
+    .await;
+    assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+    let child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    h.release(root).await;
+    wait_status(&h.app, root, "waiting").await;
+    h.started(child).await;
+    let stop = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{peer}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    tokio::join!(
+        wait_status(&h.app, root, "interrupted"),
+        wait_status(&h.app, child, "interrupted"),
+    );
+    let (_, _, status, _, _) = delegation_of(&h.app, root).await;
+    assert_eq!(status, "cancelled");
+}

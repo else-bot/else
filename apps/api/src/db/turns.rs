@@ -347,11 +347,17 @@ pub async fn find_by_request(
     }
 }
 
+const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
+                                 WHERE k.id = t.conversation_id AND k.kind = 'task')
+          OR NOT EXISTS (SELECT 1 FROM turns w
+                         WHERE w.bot_id = t.bot_id AND w.status = 'waiting'))";
+
 /// Claim the oldest queued turn of the next eligible bot, oldest first
 /// across bots. A bot is eligible when it is active, not stopping work, and
-/// has no turn in an active status. The claimed turn moves to `preparing`
-/// and is returned; the caller must start it before claiming again, so a
-/// later failure never strands an already committed claim.
+/// has no turn in an active status. A waiting root holds only owner work. The
+/// claimed turn moves to `preparing` and is returned; the caller must start
+/// it before claiming again, so a later failure never strands an already
+/// committed claim.
 pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (
@@ -362,9 +368,7 @@ pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>
               AND NOT (lower(hex(t.bot_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
-              -- A root task waiting for delegated work holds the bot's queue.
-              AND NOT EXISTS (SELECT 1 FROM turns w
-                              WHERE w.bot_id = t.bot_id AND w.status = 'waiting')
+              AND {TASK_OR_NO_WAITING_OWNER}
          ) oldest WHERE queue_rank = 1 ORDER BY created_at, id LIMIT 8"
     )))
     .bind(sqlx::types::Json(skip))
@@ -386,7 +390,8 @@ pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>
                  attempt = attempt + 1
              WHERE id = ?1 AND status = 'queued'
                AND NOT EXISTS (SELECT 1 FROM turns a
-                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
+                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})
+               AND (SELECT {TASK_OR_NO_WAITING_OWNER} FROM turns t WHERE t.id = ?1)"
         )))
         .bind(turn_id)
         .bind(bot_id)

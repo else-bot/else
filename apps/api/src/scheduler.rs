@@ -311,8 +311,8 @@ impl Scheduler {
         // A delegated task reads its own bot's memory, and other bots only
         // where both the delegating bot and its own bot may: delegation
         // never widens what the original request could reach.
-        let memory_scope = match input.delegation.parent_bot_id {
-            Some(parent) if input.delegation.delegated_task => {
+        let memory_scope = match input.delegation.delegated_by {
+            Some((parent, _)) if input.delegation.delegated_task => {
                 match delegated_scope(&self.pool, parent, input.bot_id).await {
                     Ok(scope) => Some(scope),
                     Err(err) => {
@@ -421,16 +421,16 @@ impl Scheduler {
 }
 
 fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
+    let delegation = &input.delegation;
     let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
-    if input.delegation.delegated_task {
-        return tools;
+    if delegation.can_delegate() {
+        tools.extend([Tool::RequestSecret, Tool::Delegate]);
     }
-    tools.push(Tool::RequestSecret);
-    if input.routine.is_none() {
+    if delegation.can_create_bot {
+        tools.push(Tool::CreateBot);
+    }
+    if delegation.can_manage_routines() {
         tools.push(Tool::Routines);
-    }
-    if input.delegation.can_delegate {
-        tools.extend([Tool::Delegate, Tool::CreateBot]);
     }
     tools
 }

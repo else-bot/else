@@ -1,7 +1,8 @@
 //! One-hop asynchronous delegation (POC-016).
 //!
-//! The main bot's provider attempt may hand one task to another registered
-//! bot, at most two per owner request. The child runs as an ordinary queued
+//! A bot's provider attempt in its own owner conversation may hand one task
+//! to another registered bot (the main bot included), at most two per
+//! request. The child runs as an ordinary queued
 //! turn of the target bot, in a separate task conversation, through the
 //! same scheduler. The parent attempt then ends; its owner turn waits
 //! (`waiting`) with no provider process, and a database trigger requeues it
@@ -24,7 +25,7 @@ pub const MAX_TASK_BYTES: usize = 8_000;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DelegateError {
-    #[error("only the main bot's own conversation can delegate; delegated tasks cannot delegate")]
+    #[error("only a bot's own conversation can delegate; delegated tasks cannot delegate")]
     NotAllowed,
     #[error("a bot cannot delegate to itself")]
     SelfTarget,
@@ -73,7 +74,6 @@ pub async fn create(
         return Err(DelegateError::InvalidTask);
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    // Lock order everywhere: bot rows (parent before target), then turns.
     let parent_bot: Option<Uuid> = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
         .bind(turn_id)
         .fetch_optional(&mut *tx)
@@ -85,9 +85,8 @@ pub async fn create(
         .bind(parent_bot)
         .execute(&mut *tx)
         .await?;
-    let caller: Option<(Uuid, String, i32, String, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind,
-                (SELECT default_bot_id FROM installation), b.status
+    let caller: Option<(Uuid, String, i32, String, String)> = sqlx::query_as(
+        "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
          FROM turns t JOIN conversations c ON c.id = t.conversation_id
          JOIN bots b ON b.id = t.bot_id
          WHERE t.id = ?1",
@@ -95,15 +94,13 @@ pub async fn create(
     .bind(turn_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((parent, status, attempt, kind, main, bot_status)) = caller else {
+    let Some((parent, status, attempt, kind, bot_status)) = caller else {
         return Err(DelegateError::NotRunning);
     };
     if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
         return Err(DelegateError::NotRunning);
     }
-    // Main to leaf only: the installation's main bot, in its own owner
-    // conversation. Delegated tasks run in task conversations and stop here.
-    if kind != "owner" || main != Some(parent) {
+    if kind != "owner" {
         return Err(DelegateError::NotAllowed);
     }
     if target == parent {
@@ -454,6 +451,31 @@ pub async fn mark_delivered(
 }
 
 pub use crate::app::providers::DelegationContext as Context;
+use crate::app::providers::Origin;
+
+/// What a turn's work traces back to: the source item of the turn itself
+/// in an owner conversation, or of the root that delegated it for a task.
+/// Never derived from text a model wrote.
+pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin, sqlx::Error> {
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT CASE c.kind WHEN 'owner' THEN i.kind ELSE ri.kind END
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         JOIN items i ON i.id = t.owner_item_id
+         LEFT JOIN delegations d ON d.child_turn_id = t.id
+         LEFT JOIN turns r ON r.id = d.root_turn_id
+         LEFT JOIN items ri ON ri.id = r.owner_item_id
+         WHERE t.id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    Ok(match source.as_deref() {
+        Some("user") => Origin::OwnerRequest,
+        Some("routine") => Origin::RoutineRun,
+        _ => Origin::Other,
+    })
+}
 
 pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Context, sqlx::Error> {
     let (bot, kind, main): (Uuid, String, Option<Uuid>) = sqlx::query_as(
@@ -463,20 +485,21 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     .bind(turn_id)
     .fetch_one(&mut *conn)
     .await?;
+    let origin = origin(conn, turn_id).await?;
     if kind == "task" {
-        let parent: Option<Uuid> =
-            sqlx::query_scalar("SELECT parent_bot_id FROM delegations WHERE child_turn_id = ?1")
-                .bind(turn_id)
-                .fetch_optional(&mut *conn)
-                .await?;
+        let parent: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT d.parent_bot_id, b.name FROM delegations d JOIN bots b ON b.id = d.parent_bot_id
+             WHERE d.child_turn_id = ?1",
+        )
+        .bind(turn_id)
+        .fetch_optional(&mut *conn)
+        .await?;
         return Ok(Context {
+            origin,
             delegated_task: true,
-            parent_bot_id: parent,
+            delegated_by: parent,
             ..Context::default()
         });
-    }
-    if main != Some(bot) {
-        return Ok(Context::default());
     }
     let registry: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, name FROM bots WHERE status = 'active' AND id <> ?1
@@ -490,9 +513,10 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         .fetch_one(&mut *conn)
         .await?;
     Ok(Context {
-        can_delegate: true,
+        origin,
         delegated_task: false,
-        parent_bot_id: None,
+        delegated_by: None,
+        can_create_bot: main == Some(bot),
         registry,
         remaining: (MAX_CHILDREN - used).max(0),
         outcomes: undelivered(conn, turn_id).await?,
