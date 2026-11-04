@@ -3,9 +3,9 @@
 //! A provider CLI connects to `POST /tools/v1/mcp` with its turn's task
 //! grant as the bearer token; identity comes only from that grant. The
 //! endpoint answers JSON-RPC with plain JSON responses (no server stream).
-//! Every tool reads; none can write memory, grant access, or create an
-//! owner correction. Results carry provenance outside the generated text,
-//! and recalled text is data, never instructions. Each call is logged to
+//! Memory results carry provenance outside the generated text, and recalled
+//! text is data, never instructions. Other tools act on the bot's computer
+//! or create work and bots for the owner. Each call is logged to
 //! the calling bot's memory as tool activity (arguments and which entries
 //! were returned, not copies of their text).
 
@@ -83,6 +83,7 @@ pub async fn endpoint(
         "tools/call" => {
             let needs = match params["name"].as_str() {
                 Some("delegate") => Tool::Delegate,
+                Some("create_bot") => Tool::CreateBot,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 _ => Tool::ReadMemory,
             };
@@ -192,7 +193,7 @@ fn tool_list() -> Value {
         {
             "name": "delegate",
             "description": "Main bot only: hand one subtask to another registered bot from your \
-                registry, by its exact bot_id. Returns status pending with a task_id at once; it \
+                registry or a create_bot result, by its exact bot_id. Returns status pending with a task_id at once; it \
                 does not wait. After a pending result, tell the owner briefly and end this attempt; \
                 the result arrives later in a continuation. At most one per attempt and two per \
                 owner request.",
@@ -207,6 +208,29 @@ fn tool_list() -> Value {
                 "additionalProperties": false,
             },
             // It creates work, so it is not read-only; retries are safe.
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "create_bot",
+            "description": "Main bot only: register a new else.bot specialist for the owner, with \
+                the installation's default provider and no credentials, shared memory, or \
+                other access. Returns its bot_id at once; you may delegate to it in this \
+                attempt. Repeating the same name and role in this owner request returns the \
+                same bot; a changed role conflicts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "minLength": 1,
+                              "maxLength": crate::app::bots::MAX_NAME_CHARS,
+                              "description": "Short display name, for example GitHub." },
+                    "role": { "type": "string", "minLength": 1,
+                              "description": "Its responsibilities, in the second person or as a \
+                                  job description. A role grants no permissions." },
+                },
+                "required": ["name", "role"],
+                "additionalProperties": false,
+            },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
@@ -369,6 +393,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
         "delegate" => delegate(state, grant, args).await,
+        "create_bot" => create_bot(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
@@ -828,6 +853,85 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             };
             let log = format!("rejected {code}");
             (tool_error(&format!("{code}: {err}")), Some(log))
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBotArgs {
+    name: String,
+    role: String,
+}
+
+async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::app::bots::{BotName, BotRole};
+    use crate::db::bots::{self, BotError, Created, Refusal};
+    let reject = |code: &str, message: &str| {
+        (
+            tool_error(&format!("{code}: {message}")),
+            Some(format!("rejected {code}")),
+        )
+    };
+    let Ok(parsed) = serde_json::from_value::<CreateBotArgs>(args.clone()) else {
+        return reject(
+            "INVALID_ARGUMENTS",
+            "pass exactly a name and a role, both strings.",
+        );
+    };
+    let (name, role) = match (BotName::parse(&parsed.name), BotRole::parse(&parsed.role)) {
+        (Ok(name), Ok(role)) => (name, role),
+        (Err(err), _) | (_, Err(err)) => return reject("INVALID_BOT", &err.to_string()),
+    };
+    match bots::create_for_turn(&state.db, grant.turn_id, &name, &role).await {
+        Ok(created) => {
+            let (bot, new) = match created {
+                Created::New(bot) => (bot, true),
+                Created::Existing(bot) => (bot, false),
+            };
+            let next = match bot.status {
+                bots::BotStatus::Active => {
+                    "It is registered. Delegate to this bot_id when it should work; it has no \
+                     credentials until the owner adds task secrets or other access."
+                }
+                _ => "The owner deleted this bot; do not delegate to it or create it again.",
+            };
+            let log = format!(
+                "{} {} ({}) {:?}",
+                if new { "created" } else { "existing" },
+                bot.name,
+                bot.id,
+                bot.status
+            );
+            let result = json!({
+                "bot_id": bot.id,
+                "name": bot.name,
+                "role": bot.role,
+                "status": bot.status,
+                "created": new,
+                "next": next,
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(BotError::RequestConflict) => reject(
+            "CREATE_CONFLICT",
+            "this request already created a bot with that name and a different role; \
+             retry with the original role, or use another name for another bot.",
+        ),
+        Err(BotError::Refused(refusal)) => {
+            let code = match refusal {
+                Refusal::NotMain => "NOT_ALLOWED",
+                Refusal::NotRunning => "NOT_RUNNING",
+                Refusal::AttemptDelegated => "ATTEMPT_PARKED",
+            };
+            reject(code, &refusal.to_string())
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "creating a bot from a turn failed");
+            reject(
+                "UNAVAILABLE",
+                "bots cannot be created right now; try again shortly.",
+            )
         }
     }
 }

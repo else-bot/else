@@ -11,6 +11,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_zoom",
     "memory_date",
     "delegate",
+    "create_bot",
     "computer_run",
     "computer_job_start",
     "computer_job",
