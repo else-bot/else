@@ -14,6 +14,7 @@ use super::bots::{self, BotRecord, BotStatus};
 
 /// A point in the bot's replies, ordered by item, then by text within it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplyPosition {
     pub item_seq: i64,
     pub text_bytes: i64,
@@ -85,7 +86,6 @@ impl ReadRow {
     }
 }
 
-/// One line of plain text, cut at a word where possible.
 fn preview(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() <= PREVIEW_CHARS {
@@ -101,7 +101,7 @@ fn preview(text: &str) -> String {
 
 /// An owner change to the read state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadCommand {
     /// The owner saw replies up to here. Never clears `marked_unread`.
     Through {

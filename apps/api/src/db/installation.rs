@@ -122,7 +122,6 @@ pub async fn append_welcome(
     .bind(&text)
     .execute(&mut **tx)
     .await?;
-    // The owner has not missed the greeting of a bot they just made.
     sqlx::query(
         "UPDATE conversations SET last_turn_no = 1, last_item_seq = 1,
              read_item_seq = 1, read_text_bytes = length(CAST(?2 AS BLOB))

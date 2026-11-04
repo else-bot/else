@@ -139,6 +139,25 @@ async fn reads_only_move_forward_and_must_point_into_a_reply() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn misspelled_read_commands_preserve_the_unread_mark() {
+    let app = TestApp::installed().await;
+    let main = app.main_bot().await;
+    let marked = mark(&app, &main, json!({ "action": "mark_unread" })).await;
+    let position = marked.body["bot"]["read_state"]["latest"]["position"].clone();
+
+    for command in [
+        json!({ "action": "mark_read", "postion": position }),
+        json!({ "action": "through", "position": {
+            "item_seq": position["item_seq"], "text_bytes": position["text_bytes"], "bytes": 0
+        } }),
+    ] {
+        let refused = mark(&app, &main, command).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(read_state(&app, &main).await["marked_unread"], true);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn text_appended_after_a_partial_read_is_unread_again() {
     let app = TestApp::installed().await;
     let bot = app.create_bot("Streamer").await;
