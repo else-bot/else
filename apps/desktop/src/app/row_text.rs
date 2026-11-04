@@ -1,6 +1,7 @@
+use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
-use gpui_kit::base::text::TextView;
+use gpui_kit::base::text::{MarkdownExtensions, TextView};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::tooltip::Tooltip;
@@ -15,6 +16,9 @@ pub(super) enum RowFormat {
 
 pub(super) struct RowText {
     source: String,
+    mentions: Vec<BotMention>,
+    bots: Arc<MentionRegistry>,
+    display: MentionDisplay,
     widget: Widget,
 }
 
@@ -31,18 +35,25 @@ impl RowText {
         key: RowKey,
         source: String,
         format: RowFormat,
+        bots: &Arc<MentionRegistry>,
         window: &mut Window,
         cx: &mut Context<ElseApp>,
     ) -> Self {
+        let mentions = match format {
+            RowFormat::Plain => BotMention::find(&source, bots),
+            RowFormat::Markdown => BotMention::in_markdown(&source, bots),
+        };
+        let display = MentionDisplay::new(&source, &mentions);
         let widget = match format {
             RowFormat::Plain => Widget::Plain(cx.new(|cx| {
-                TextareaState::new(window, cx)
+                let mut state = TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
-                    .default_value(source.clone())
-                    .context_menu(!matches!(key, RowKey::Item(_)))
+                    .context_menu(!matches!(key, RowKey::Item(_)));
+                state.set_value(BotMention::content(&source, &mentions), window, cx);
+                state
             })),
             RowFormat::Markdown => {
-                let state = cx.new(|cx| TextViewState::markdown(&source, cx));
+                let state = cx.new(|cx| TextViewState::markdown(&display.text, cx));
                 // Markdown parses in the background, so the row's height is
                 // only known once the state notifies.
                 let _observe = cx.observe_in(&state, window, move |app, state, window, cx| {
@@ -65,7 +76,13 @@ impl RowText {
                 Widget::Markdown { state, _observe }
             }
         };
-        Self { source, widget }
+        Self {
+            source,
+            mentions,
+            bots: bots.clone(),
+            display,
+            widget,
+        }
     }
 
     pub(super) fn format(&self) -> RowFormat {
@@ -80,9 +97,10 @@ impl RowText {
             Widget::Plain(_) => Some(self.source.len()),
             Widget::Markdown { state, .. } => {
                 let rendered = state.read(cx).rendered_text();
-                self.source
+                self.display
+                    .text
                     .starts_with(rendered.source())
-                    .then_some(rendered.source().len())
+                    .then(|| self.display.source_bytes(rendered.source().len()))
             }
         }
     }
@@ -99,30 +117,57 @@ impl RowText {
         }
     }
 
-    pub(super) fn sync(&mut self, source: String, window: &mut Window, cx: &mut App) -> bool {
-        if self.source == source {
+    pub(super) fn sync(
+        &mut self,
+        source: String,
+        bots: &Arc<MentionRegistry>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        if self.source == source && Arc::ptr_eq(&self.bots, bots) {
             return false;
         }
+        let mentions = match self.format() {
+            RowFormat::Plain => BotMention::find(&source, bots),
+            RowFormat::Markdown => BotMention::in_markdown(&source, bots),
+        };
+        self.bots = bots.clone();
+        if self.source == source && self.mentions == mentions {
+            return false;
+        }
+        let display = MentionDisplay::new(&source, &mentions);
         match &self.widget {
-            Widget::Plain(state) => {
-                state.update(cx, |state, cx| state.set_value(source.clone(), window, cx))
-            }
-            Widget::Markdown { state, .. } => {
-                state.update(cx, |state, cx| state.set_text(&source, cx))
-            }
+            Widget::Plain(state) => state.update(cx, |state, cx| {
+                state.set_value(BotMention::content(&source, &mentions), window, cx)
+            }),
+            Widget::Markdown { state, .. } => state.update(cx, |state, cx| {
+                state.set_text(&display.text, cx);
+                state.invalidate_inline_layout(cx);
+            }),
         }
         self.source = source;
+        self.mentions = mentions;
+        self.display = display;
         true
     }
 
     pub(super) fn render(&self) -> AnyElement {
+        let mentions = self.mentions.clone();
         match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
                 .readonly(true)
                 .appearance(false)
                 .bordered(false)
+                .token(move |token, _, cx| {
+                    mentions
+                        .iter()
+                        .find(|mention| mention.token_id() == token.token().id().as_ref())
+                        .expect("row token belongs to its matched bot")
+                        .token_element(token.line_height(), token.is_selected(), cx)
+                })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
+                .markdown_extensions(MarkdownExtensions::default().plugin(MentionPlugin(mentions)))
                 .w_full()
                 .text_sm()
                 .line_height(rems(1.375))
