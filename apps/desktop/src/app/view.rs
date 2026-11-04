@@ -1,5 +1,6 @@
 //! Rendering of the sidebar, header, conversation, and composer.
 
+use super::reply::{Author, MessageReference};
 use super::row_text::RowText;
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
@@ -399,30 +400,31 @@ impl ElseApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
-        let bubble = |text: &RowText, user: bool| {
-            // Wrapped text needs a definite width, so bubbles span the row
-            // and are offset to their side.
+        let card = |text: &RowText, user: bool| {
+            div()
+                .w_full()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .bg(if user {
+                    theme.secondary
+                } else {
+                    theme.background
+                })
+                .border_1()
+                .border_color(theme.border)
+                .child(text.render())
+        };
+        // Wrapped text needs a definite width, so bubbles span the row and
+        // are offset to their side.
+        let side = |user: bool, card: AnyElement| {
             let side = div().w_full();
             let side = if user {
                 side.pl(px(96.))
             } else {
                 side.pr(px(96.))
             };
-            side.child(
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_lg()
-                    .bg(if user {
-                        theme.secondary
-                    } else {
-                        theme.background
-                    })
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(text.render()),
-            )
+            side.child(card)
         };
         let note = |text: String, error: bool| {
             div()
@@ -458,7 +460,19 @@ impl ElseApp {
                 {
                     column = column.child(note(self.provider_label(provider), false));
                 }
-                column = column.child(bubble(text, user));
+                let card = card(text, user);
+                let card = match Author::of(&item.kind) {
+                    Some(author) => {
+                        let (owner, bot) = (cx.entity().downgrade(), view.bot_id);
+                        card.id(SharedString::from(format!("message-{id}")))
+                            .context_menu(move |menu, window, cx| {
+                                Self::message_menu(owner.clone(), bot, id, author, menu, window, cx)
+                            })
+                            .into_any_element()
+                    }
+                    None => card.into_any_element(),
+                };
+                column = column.child(side(user, card));
                 if let Some(turn) = turn {
                     let show_on_user = user && !turn.is_finished()
                         || user
@@ -494,7 +508,7 @@ impl ElseApp {
                     .gap_1()
                     .px_4()
                     .py_1()
-                    .child(bubble(text, true));
+                    .child(side(true, card(text, true).into_any_element()));
                 if let Some(reason) = &pending.rejected {
                     return column
                         .child(
@@ -635,6 +649,9 @@ impl ElseApp {
                     .child(notice.clone()),
             );
         }
+        if let Some(reference) = self.drafts.get(&bot.id).and_then(|d| d.reply_to.as_ref()) {
+            footer = footer.child(self.render_reply_strip(bot, reference, cx));
+        }
         let can_send = self.connection == Connection::Connected;
         footer = footer.child(
             h_flex()
@@ -661,6 +678,69 @@ impl ElseApp {
             .child(self.render_header(bot, cx))
             .child(transcript)
             .child(footer)
+    }
+
+    fn render_reply_strip(
+        &self,
+        bot: &Bot,
+        reference: &MessageReference,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let bot_id = bot.id;
+        let author = match reference.author {
+            Author::Owner => "yourself".to_owned(),
+            Author::Bot => bot.name.clone(),
+        };
+        let preview = reference
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        h_flex()
+            .id(SharedString::from(format!("reply-{}", reference.item)))
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .pl_3()
+            .pr_1()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .text_sm()
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(relative(0.5))
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Replying to {author}")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(preview),
+            )
+            .child(
+                Button::new("cancel-reply")
+                    .flex_none()
+                    .icon(IconName::Close)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Cancel reply")
+                    .accessibility_label("Cancel reply")
+                    .on_click(
+                        cx.listener(move |app, _, window, cx| {
+                            app.dismiss_reply(bot_id, window, cx)
+                        }),
+                    ),
+            )
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {

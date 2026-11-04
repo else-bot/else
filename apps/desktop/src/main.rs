@@ -12,7 +12,7 @@ mod sidebar;
 use gpui_kit::*;
 
 gpui_kit::assets::icon_assets!(
-    BotMenuIcons,
+    AppIcons,
     [
         FolderInput,
         BellDot,
@@ -20,7 +20,10 @@ gpui_kit::assets::icon_assets!(
         Trash,
         TriangleAlert,
         Check,
-        ChevronRight
+        ChevronRight,
+        Reply,
+        Copy,
+        Close
     ]
 );
 
@@ -28,7 +31,7 @@ struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if let Some(bytes) = BotMenuIcons.load(path)? {
+        if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
         gpui_kit::assets::Assets.load(path)
@@ -36,7 +39,7 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
-        paths.extend(BotMenuIcons.list(path)?);
+        paths.extend(AppIcons.list(path)?);
         paths.sort();
         paths.dedup();
         Ok(paths)
