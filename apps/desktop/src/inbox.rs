@@ -6,7 +6,7 @@
 //! merged into the next request instead of queued: positions only move
 //! forward, and of two explicit marks the later one wins.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use uuid::Uuid;
 
@@ -140,30 +140,38 @@ pub struct Alert {
     pub body: String,
 }
 
+#[derive(Debug)]
+struct Announcement {
+    turn: Uuid,
+    shown: bool,
+}
+
+#[derive(Debug, Default)]
+struct BotAttention {
+    read: ReadSync,
+    head: Option<ReplyPosition>,
+    due: bool,
+    announcement: Option<Announcement>,
+}
+
 #[derive(Debug, Default)]
 pub struct Inbox {
-    reads: HashMap<Uuid, ReadSync>,
-    /// The bot the owner explicitly opened. Its explicit unread mark is
-    /// cleared once its replies are seen; any other is kept.
+    bots: HashMap<Uuid, BotAttention>,
     opening: Option<Uuid>,
-    /// Whether the first bot list has been seen: what it shows is restored,
-    /// never announced.
     baseline: bool,
-    /// The latest reply position seen per bot.
-    heads: HashMap<Uuid, ReplyPosition>,
-    /// Bots with new replies awaiting a notification decision.
-    due: HashSet<Uuid>,
-    /// The turn last announced per bot, and whether its notification is up.
-    alerted: HashMap<Uuid, (Uuid, bool)>,
 }
 
 impl Inbox {
     pub fn is_unread(&self, bot: &Bot) -> bool {
-        unread(&self.reads, bot)
+        unread(self.bots.get(&bot.id).map(|attention| &attention.read), bot)
     }
 
     fn is_marked(&self, bot: &Bot) -> bool {
-        match self.reads.get(&bot.id).and_then(ReadSync::mark) {
+        match self
+            .bots
+            .get(&bot.id)
+            .and_then(|attention| attention.read.mark())
+        {
             Some(mark) => mark == Mark::Unread,
             None => bot.read_state.as_ref().is_some_and(|s| s.marked_unread),
         }
@@ -180,7 +188,7 @@ impl Inbox {
         if mark == Mark::Unread && self.opening == Some(bot.id) {
             self.opening = None;
         }
-        let sync = self.reads.entry(bot.id).or_default();
+        let sync = &mut self.bots.entry(bot.id).or_default().read;
         if mark == Mark::Read
             && let Some(latest) = bot.read_state.as_ref().and_then(|s| s.latest.as_ref())
         {
@@ -200,7 +208,7 @@ impl Inbox {
             .as_ref()
             .map(|state| state.read_through)
             .unwrap_or_default();
-        let sync = self.reads.entry(bot.id).or_default();
+        let sync = &mut self.bots.entry(bot.id).or_default().read;
         let mut changed = sync.observe(position, server);
         if clear {
             sync.pending.mark = Some(Mark::Read);
@@ -212,9 +220,9 @@ impl Inbox {
     /// The furthest seen here or saved on the server.
     pub fn seen_through(&self, bot: &Bot) -> ReplyPosition {
         let local = self
-            .reads
+            .bots
             .get(&bot.id)
-            .map(ReadSync::optimistic_position)
+            .map(|attention| attention.read.optimistic_position())
             .unwrap_or_default();
         bot.read_state
             .as_ref()
@@ -223,12 +231,12 @@ impl Inbox {
 
     /// The request to send for `bot` now, if any and none is in flight.
     pub fn next_command(&mut self, bot: Uuid) -> Option<ReadCommand> {
-        self.reads.get_mut(&bot)?.next()
+        self.bots.get_mut(&bot)?.read.next()
     }
 
     pub fn finished(&mut self, bot: Uuid, outcome: Outcome) {
-        if let Some(sync) = self.reads.get_mut(&bot) {
-            sync.finished(outcome);
+        if let Some(attention) = self.bots.get_mut(&bot) {
+            attention.read.finished(outcome);
         }
     }
 
@@ -237,48 +245,55 @@ impl Inbox {
     pub fn observe(&mut self, bots: &[Bot]) -> bool {
         let first = !self.baseline;
         self.baseline = true;
-        let live: HashSet<Uuid> = bots
-            .iter()
-            .filter(|b| b.is_active())
-            .map(|b| b.id)
-            .collect();
-        self.heads.retain(|id, _| live.contains(id));
-        self.due.retain(|id| live.contains(id));
-        self.reads
-            .retain(|id, sync| live.contains(id) || sync.inflight.is_some());
-        for bot in bots.iter().filter(|b| b.is_active()) {
-            let Some(latest) = bot.read_state.as_ref().and_then(|s| s.latest.as_ref()) else {
+        let mut due = false;
+        for bot in bots.iter().filter(|bot| bot.is_active()) {
+            let Some(latest) = bot
+                .read_state
+                .as_ref()
+                .and_then(|state| state.latest.as_ref())
+            else {
                 continue;
             };
-            let before = self.heads.insert(bot.id, latest.position);
-            let announced = self
-                .alerted
-                .get(&bot.id)
-                .is_some_and(|(turn, _)| *turn == latest.turn_id);
-            if !first && before.is_none_or(|p| latest.position > p) && !announced {
-                self.due.insert(bot.id);
-            }
+            let attention = self.bots.entry(bot.id).or_default();
+            let before = attention.head.replace(latest.position);
+            let announced = attention
+                .announcement
+                .as_ref()
+                .is_some_and(|alert| alert.turn == latest.turn_id);
+            attention.due |=
+                !first && before.is_none_or(|position| latest.position > position) && !announced;
+            due |= attention.due;
         }
-        !self.due.is_empty()
+        due
     }
 
     /// Decide the due notifications. `viewing` says whether the owner is
     /// looking at that bot's conversation right now.
     pub fn alerts(&mut self, bots: &[Bot], viewing: impl Fn(Uuid) -> bool) -> Vec<Alert> {
         let mut alerts = Vec::new();
-        for id in std::mem::take(&mut self.due) {
-            let Some(bot) = bots.iter().find(|b| b.id == id && b.is_active()) else {
+        for bot in bots.iter().filter(|bot| bot.is_active()) {
+            let Some(attention) = self.bots.get_mut(&bot.id) else {
                 continue;
             };
-            let Some(latest) = bot.read_state.as_ref().and_then(|s| s.latest.as_ref()) else {
-                continue;
-            };
-            if !self.is_unread(bot) || viewing(id) {
+            if !std::mem::take(&mut attention.due) {
                 continue;
             }
-            self.alerted.insert(id, (latest.turn_id, true));
+            let Some(latest) = bot
+                .read_state
+                .as_ref()
+                .and_then(|state| state.latest.as_ref())
+            else {
+                continue;
+            };
+            if !unread(Some(&attention.read), bot) || viewing(bot.id) {
+                continue;
+            }
+            attention.announcement = Some(Announcement {
+                turn: latest.turn_id,
+                shown: true,
+            });
             alerts.push(Alert {
-                bot: id,
+                bot: bot.id,
                 title: bot.name.clone(),
                 body: latest.preview.clone(),
             });
@@ -289,43 +304,55 @@ impl Inbox {
 
     /// Notifications to take down: their bot was read, deleted, or is gone.
     pub fn settle(&mut self, bots: &[Bot]) -> Vec<Uuid> {
+        let live: HashMap<_, _> = bots
+            .iter()
+            .filter(|bot| bot.is_active())
+            .map(|bot| (bot.id, bot))
+            .collect();
         let mut gone = Vec::new();
-        for (id, (_, shown)) in &mut self.alerted {
-            let unread = bots
-                .iter()
-                .find(|b| b.id == *id && b.is_active())
-                .is_some_and(|b| unread(&self.reads, b));
-            if *shown && !unread {
-                *shown = false;
+        self.bots.retain(|id, attention| {
+            let unread = live
+                .get(id)
+                .is_some_and(|bot| unread(Some(&attention.read), bot));
+            if let Some(alert) = &mut attention.announcement
+                && alert.shown
+                && !unread
+            {
+                alert.shown = false;
                 gone.push(*id);
             }
-        }
-        self.alerted
-            .retain(|id, _| bots.iter().any(|b| b.id == *id && b.is_active()));
+            live.contains_key(id) || attention.read.inflight.is_some()
+        });
+        self.opening = self.opening.filter(|id| live.contains_key(id));
         gone.sort();
         gone
     }
 
-    /// Bots whose notification is still up.
     pub fn shown(&self) -> impl Iterator<Item = Uuid> + '_ {
-        self.alerted
-            .iter()
-            .filter(|(_, (_, shown))| *shown)
-            .map(|(id, _)| *id)
+        self.bots.iter().filter_map(|(id, attention)| {
+            attention
+                .announcement
+                .as_ref()
+                .filter(|alert| alert.shown)
+                .map(|_| *id)
+        })
     }
 }
 
-fn unread(reads: &HashMap<Uuid, ReadSync>, bot: &Bot) -> bool {
-    let sync = reads.get(&bot.id);
+fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
     let mark = sync.and_then(ReadSync::mark);
     let Some(state) = bot.read_state.as_ref().filter(|_| bot.is_active()) else {
         return mark == Some(Mark::Unread);
     };
-    let marked = mark.map_or(state.marked_unread, |m| m == Mark::Unread);
+    let marked = mark.map_or(state.marked_unread, |mark| mark == Mark::Unread);
     let through = state
         .read_through
         .max(sync.map(ReadSync::optimistic_position).unwrap_or_default());
-    marked || state.latest.as_ref().is_some_and(|l| l.position > through)
+    marked
+        || state
+            .latest
+            .as_ref()
+            .is_some_and(|latest| latest.position > through)
 }
 
 /// A notification's tag: the connection it came from and its bot, so a
