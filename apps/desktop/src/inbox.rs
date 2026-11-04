@@ -30,38 +30,73 @@ pub enum Outcome {
 }
 
 #[derive(Debug, Default)]
-struct ReadSync {
-    /// The furthest this client has seen.
-    through: ReplyPosition,
-    /// The furthest the server confirmed.
-    confirmed: ReplyPosition,
-    /// An explicit mark the server has not confirmed yet.
+struct ReadIntent {
+    position: Option<ReplyPosition>,
     mark: Option<Mark>,
-    mark_unsent: bool,
+}
+
+impl ReadIntent {
+    fn advance(&mut self, position: ReplyPosition) {
+        self.position = Some(
+            self.position
+                .map_or(position, |pending| pending.max(position)),
+        );
+    }
+
+    fn retry(&mut self, command: ReadCommand) {
+        if let Some(position) = command_position(command) {
+            self.advance(position);
+        }
+        self.mark = self.mark.or_else(|| command_mark(command));
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReadSync {
+    observed: ReplyPosition,
+    confirmed: ReplyPosition,
+    pending: ReadIntent,
     inflight: Option<ReadCommand>,
 }
 
 impl ReadSync {
-    fn set_mark(&mut self, mark: Mark) {
-        self.mark = Some(mark);
-        self.mark_unsent = true;
+    fn observe(&mut self, position: ReplyPosition, server: ReplyPosition) -> bool {
+        if position <= self.observed {
+            return false;
+        }
+        self.observed = position;
+        if position <= self.confirmed.max(server) {
+            return false;
+        }
+        self.pending.advance(position);
+        true
+    }
+
+    fn mark(&self) -> Option<Mark> {
+        self.pending
+            .mark
+            .or_else(|| self.inflight.and_then(command_mark))
+    }
+
+    fn optimistic_position(&self) -> ReplyPosition {
+        self.confirmed
+            .max(self.pending.position.unwrap_or_default())
+            .max(self.inflight.and_then(command_position).unwrap_or_default())
     }
 
     fn next(&mut self) -> Option<ReadCommand> {
         if self.inflight.is_some() {
             return None;
         }
-        let command = match self.mark.filter(|_| self.mark_unsent) {
+        let command = match self.pending.mark.take() {
             Some(Mark::Unread) => ReadCommand::MarkUnread,
             Some(Mark::Read) => ReadCommand::MarkRead {
-                position: (self.through > ReplyPosition::default()).then_some(self.through),
+                position: self.pending.position.take(),
             },
-            None if self.through > self.confirmed => ReadCommand::Through {
-                position: self.through,
+            None => ReadCommand::Through {
+                position: self.pending.position.take()?,
             },
-            None => return None,
         };
-        self.mark_unsent = false;
         self.inflight = Some(command);
         Some(command)
     }
@@ -70,27 +105,31 @@ impl ReadSync {
         let Some(command) = self.inflight.take() else {
             return;
         };
-        let position = match command {
-            ReadCommand::Through { position } => Some(position),
-            ReadCommand::MarkRead { position } => position,
-            ReadCommand::MarkUnread => None,
-        };
-        let explicit = !matches!(command, ReadCommand::Through { .. });
         match outcome {
-            Outcome::Retry => {
-                if explicit && self.mark.is_some() {
-                    self.mark_unsent = true;
-                }
-            }
-            Outcome::Done | Outcome::Refused => {
-                if let Some(position) = position {
+            Outcome::Done => {
+                if let Some(position) = command_position(command) {
                     self.confirmed = self.confirmed.max(position);
                 }
-                if explicit && !self.mark_unsent {
-                    self.mark = None;
-                }
             }
+            Outcome::Retry => self.pending.retry(command),
+            Outcome::Refused => {}
         }
+    }
+}
+
+fn command_position(command: ReadCommand) -> Option<ReplyPosition> {
+    match command {
+        ReadCommand::Through { position } => Some(position),
+        ReadCommand::MarkRead { position } => position,
+        ReadCommand::MarkUnread => None,
+    }
+}
+
+fn command_mark(command: ReadCommand) -> Option<Mark> {
+    match command {
+        ReadCommand::Through { .. } => None,
+        ReadCommand::MarkRead { .. } => Some(Mark::Read),
+        ReadCommand::MarkUnread => Some(Mark::Unread),
     }
 }
 
@@ -124,7 +163,7 @@ impl Inbox {
     }
 
     fn is_marked(&self, bot: &Bot) -> bool {
-        match self.reads.get(&bot.id).and_then(|s| s.mark) {
+        match self.reads.get(&bot.id).and_then(ReadSync::mark) {
             Some(mark) => mark == Mark::Unread,
             None => bot.read_state.as_ref().is_some_and(|s| s.marked_unread),
         }
@@ -145,24 +184,25 @@ impl Inbox {
         if mark == Mark::Read
             && let Some(latest) = bot.read_state.as_ref().and_then(|s| s.latest.as_ref())
         {
-            sync.through = sync.through.max(latest.position);
+            sync.observed = sync.observed.max(latest.position);
+            sync.pending.advance(latest.position);
         }
-        sync.set_mark(mark);
+        sync.pending.mark = Some(mark);
     }
 
     /// The owner saw the bot's replies up to `position`. Returns whether
     /// that changed anything to send.
     pub fn saw(&mut self, bot: &Bot, position: ReplyPosition) -> bool {
         let clear = self.opened == Some(bot.id) && self.is_marked(bot);
-        let known = self.seen_through(bot);
+        let server = bot
+            .read_state
+            .as_ref()
+            .map(|state| state.read_through)
+            .unwrap_or_default();
         let sync = self.reads.entry(bot.id).or_default();
-        let mut changed = false;
-        if position > known {
-            sync.through = position;
-            changed = true;
-        }
+        let mut changed = sync.observe(position, server);
         if clear {
-            sync.set_mark(Mark::Read);
+            sync.pending.mark = Some(Mark::Read);
             changed = true;
         }
         changed
@@ -173,7 +213,7 @@ impl Inbox {
         let local = self
             .reads
             .get(&bot.id)
-            .map(|s| s.through)
+            .map(ReadSync::optimistic_position)
             .unwrap_or_default();
         bot.read_state
             .as_ref()
@@ -276,14 +316,14 @@ impl Inbox {
 
 fn unread(reads: &HashMap<Uuid, ReadSync>, bot: &Bot) -> bool {
     let sync = reads.get(&bot.id);
-    let mark = sync.and_then(|s| s.mark);
+    let mark = sync.and_then(ReadSync::mark);
     let Some(state) = bot.read_state.as_ref().filter(|_| bot.is_active()) else {
         return mark == Some(Mark::Unread);
     };
     let marked = mark.map_or(state.marked_unread, |m| m == Mark::Unread);
     let through = state
         .read_through
-        .max(sync.map(|s| s.through).unwrap_or_default());
+        .max(sync.map(ReadSync::optimistic_position).unwrap_or_default());
     marked || state.latest.as_ref().is_some_and(|l| l.position > through)
 }
 
@@ -567,6 +607,56 @@ mod tests {
         inbox.observe(std::slice::from_ref(&old));
         assert!(!inbox.observe(std::slice::from_ref(&old)));
         assert!(!inbox.is_unread(&old));
+    }
+
+    #[test]
+    fn a_rejected_read_restores_unread_without_retrying_the_same_text() {
+        let mut inbox = Inbox::default();
+        let waiting = bot(1, Some((1, at(3, 40))), at(0, 0));
+        assert!(inbox.saw(&waiting, at(3, 40)));
+        assert!(inbox.next_command(waiting.id).is_some());
+        assert!(!inbox.is_unread(&waiting));
+        inbox.finished(waiting.id, Outcome::Refused);
+        assert!(inbox.is_unread(&waiting));
+        assert!(!inbox.saw(&waiting, at(3, 40)));
+        assert_eq!(inbox.next_command(waiting.id), None);
+
+        assert!(inbox.saw(&waiting, at(3, 50)));
+        assert_eq!(
+            inbox.next_command(waiting.id),
+            Some(ReadCommand::Through {
+                position: at(3, 50)
+            })
+        );
+    }
+
+    #[test]
+    fn a_rejected_manual_read_restores_the_server_mark() {
+        let mut inbox = Inbox::default();
+        let waiting = flagged(bot(1, Some((1, at(3, 40))), at(0, 0)));
+        inbox.mark(&waiting, Mark::Read);
+        assert!(inbox.next_command(waiting.id).is_some());
+        assert!(!inbox.is_unread(&waiting));
+        inbox.finished(waiting.id, Outcome::Refused);
+        assert!(inbox.is_unread(&waiting));
+        assert_eq!(inbox.seen_through(&waiting), at(0, 0));
+        assert_eq!(inbox.next_command(waiting.id), None);
+    }
+
+    #[test]
+    fn a_rejected_read_keeps_newer_pending_progress() {
+        let mut inbox = Inbox::default();
+        let waiting = bot(1, Some((1, at(3, 40))), at(0, 0));
+        inbox.saw(&waiting, at(3, 20));
+        inbox.next_command(waiting.id).unwrap();
+        inbox.saw(&waiting, at(3, 40));
+        inbox.finished(waiting.id, Outcome::Refused);
+        assert_eq!(
+            inbox.next_command(waiting.id),
+            Some(ReadCommand::Through {
+                position: at(3, 40)
+            })
+        );
     }
 
     #[test]

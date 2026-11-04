@@ -166,6 +166,12 @@ impl ElseApp {
                 cx.background_executor().timer(pause).await;
             }
             let _ = this.update(cx, |app, cx| {
+                if outcome == Outcome::Refused
+                    && let Err(error) = &result
+                    && app.active_bots().any(|active| active.id == bot)
+                {
+                    app.notice = Some(format!("Could not save read state: {error}"));
+                }
                 // Only the read fields: the list may already be newer.
                 if let Some(fresh) = result.ok().and_then(|b| b.read_state)
                     && let Some(saved) = app
