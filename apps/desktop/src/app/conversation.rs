@@ -51,6 +51,12 @@ fn burst_tail_stamps<Tz: TimeZone>(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ReplyLayout {
+    pub position: crate::api::ReplyPosition,
+    pub bounds: Bounds<Pixels>,
+}
+
 /// The selected bot's transcript and its live subscription.
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
@@ -62,6 +68,9 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
+    /// The end of the latest loaded reply was on screen at the last check.
+    pub(super) latest_seen: bool,
+    pub(super) reply_layout: Option<ReplyLayout>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -80,6 +89,8 @@ impl ConversationView {
             texts: HashMap::new(),
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
+            latest_seen: false,
+            reply_layout: None,
             _load: None,
             _older: None,
         }
@@ -372,6 +383,7 @@ impl ElseApp {
         }
         view.rows = rows;
         self.sync_secret_forms(window, cx);
+        self.check_reading(window, cx);
         cx.notify();
     }
 

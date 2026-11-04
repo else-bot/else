@@ -101,6 +101,7 @@ mod tests {
             category_id: category.map(Uuid::from_u128),
             created_at: None,
             last_message_at: None,
+            read_state: None,
         }
     }
 

@@ -11,6 +11,7 @@ use crate::api::Bot;
 use crate::avatar::bot_avatar;
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -228,7 +229,7 @@ impl ElseApp {
         let theme = cx.theme();
         let id = bot.id;
         let selected = self.selected == Some(id);
-        let unread = self.unread.contains(&id);
+        let unread = self.is_unread(id);
         let pending = !bot.is_active();
         let activity = if pending {
             "Deleting…".to_owned()
@@ -470,6 +471,28 @@ impl ElseApp {
                     card(text, user).id(SharedString::from(format!("message-{id}"))),
                     item.created_at,
                 );
+                let card = if item.kind == "assistant" {
+                    let owner = cx.entity().downgrade();
+                    let bot = view.bot_id;
+                    let position = crate::api::ReplyPosition {
+                        item_seq: item.seq,
+                        text_bytes: text.rendered_bytes(cx).unwrap_or(0) as i64,
+                    };
+                    card.relative().on_prepaint(move |bounds, window, cx| {
+                        window.defer(cx, move |window, cx| {
+                            let _ = owner.update(cx, |app, cx| {
+                                app.reply_laid_out(
+                                    bot,
+                                    super::conversation::ReplyLayout { position, bounds },
+                                    window,
+                                    cx,
+                                );
+                            });
+                        });
+                    })
+                } else {
+                    card
+                };
                 let card = match Author::of(&item.kind) {
                     Some(author) => {
                         let (owner, bot) = (cx.entity().downgrade(), view.bot_id);
@@ -633,16 +656,36 @@ impl ElseApp {
                                 ),
                             );
                     }
-                    column
-                        .child(
-                            list(
-                                view.list.clone(),
-                                cx.processor(|app, ix, window, cx| app.render_row(ix, window, cx)),
-                            )
-                            .flex_1()
-                            .py_2(),
+                    let mut transcript = div().relative().flex_1().min_h_0().child(
+                        list(
+                            view.list.clone(),
+                            cx.processor(|app, ix, window, cx| app.render_row(ix, window, cx)),
                         )
-                        .into_any_element()
+                        .size_full()
+                        .py_2(),
+                    );
+                    if self.unseen_below() {
+                        transcript = transcript.child(
+                            h_flex()
+                                .absolute()
+                                .bottom_3()
+                                .w_full()
+                                .justify_center()
+                                .child(
+                                    Button::new("jump-to-latest")
+                                        .label("New messages")
+                                        .icon(IconName::ArrowDown)
+                                        .small()
+                                        .primary()
+                                        .rounded_full()
+                                        .shadow_md()
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.jump_to_latest(window, cx)
+                                        })),
+                                ),
+                        );
+                    }
+                    column.child(transcript).into_any_element()
                 }
             }
             _ => div()

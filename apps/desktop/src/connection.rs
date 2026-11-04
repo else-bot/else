@@ -136,6 +136,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         let loaded = store.clone().and_then(|store| store.load());
+        // The platform keeps one handler for the whole process.
+        let this = cx.weak_entity();
+        let handle = window.window_handle();
+        cx.on_system_notification_response(move |response, cx| {
+            let this = this.clone();
+            let _ = handle.update(cx, |_, window, cx| {
+                let Some((scope, bot)) = crate::inbox::parse_tag(&response.tag) else {
+                    return;
+                };
+                let _ = this.update(cx, |shell, cx| {
+                    shell.open_notification(scope, bot, window, cx)
+                });
+            });
+        });
         let mut shell = Self {
             store,
             runtime,
@@ -176,6 +190,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(previous) = self.active.take() {
+            previous
+                .app
+                .update(cx, |app, cx| app.dismiss_notifications(cx));
+        }
         let app = cx.new(|cx| ElseApp::new(client, window, cx));
         let observer = cx.observe(&app, |_, _, cx| cx.notify());
         self.active = Some(Active {
@@ -194,7 +213,31 @@ impl Shell {
         );
         // The messaging view's dialogs belong to the hidden view.
         window.close_dialog(cx);
+        active
+            .app
+            .update(cx, |app, cx| app.set_hidden(true, window, cx));
         self.open_editor(origin, token, None, window, cx);
+    }
+
+    /// Show the notification's conversation, unless it belongs to another
+    /// connection or its bot is gone.
+    fn open_notification(
+        &mut self,
+        scope: uuid::Uuid,
+        bot: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = &self.active else { return };
+        let app = active.app.clone();
+        if !app.update(cx, |app, cx| app.open_notification(scope, bot, window, cx)) {
+            return;
+        }
+        cx.activate(true);
+        window.activate_window();
+        if self.editor.is_some() {
+            self.cancel(window, cx);
+        }
     }
 
     fn open_editor(
@@ -307,9 +350,12 @@ impl Shell {
         self.activate(profile, client, window, cx);
     }
 
-    fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.active.is_some() {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(active) = &self.active {
             self.editor = None;
+            active
+                .app
+                .update(cx, |app, cx| app.set_hidden(false, window, cx));
             cx.notify();
         }
     }
@@ -392,7 +438,7 @@ impl Shell {
                 Button::new("connection-cancel")
                     .label("Cancel")
                     .ghost()
-                    .on_click(cx.listener(|shell, _, _, cx| shell.cancel(cx))),
+                    .on_click(cx.listener(|shell, _, window, cx| shell.cancel(window, cx))),
             );
         }
         actions = actions

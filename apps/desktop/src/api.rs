@@ -150,6 +150,44 @@ pub struct Bot {
     /// from older servers.
     #[serde(default)]
     pub last_message_at: Option<DateTime<Utc>>,
+    /// Absent from older servers and on receipts.
+    #[serde(default)]
+    pub read_state: Option<ReadState>,
+}
+
+/// A point in a bot's replies: the assistant item, then the UTF-8 bytes of
+/// its text. Field order makes the derived ordering lexicographic.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize,
+)]
+pub struct ReplyPosition {
+    pub item_seq: i64,
+    pub text_bytes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LatestReply {
+    pub turn_id: Uuid,
+    pub item_id: Uuid,
+    pub position: ReplyPosition,
+    #[serde(default)]
+    pub preview: String,
+}
+
+/// The owner's saved read state for a bot's owner conversation.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReadState {
+    pub latest: Option<LatestReply>,
+    pub read_through: ReplyPosition,
+    pub marked_unread: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ReadCommand {
+    Through { position: ReplyPosition },
+    MarkRead { position: Option<ReplyPosition> },
+    MarkUnread,
 }
 
 /// A sidebar category (POC-030).
@@ -604,6 +642,21 @@ impl Client {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Change the owner's read state. Every command is safe to repeat.
+    pub async fn read(
+        self: Arc<Self>,
+        bot: Uuid,
+        command: ReadCommand,
+    ) -> Result<Bot, ClientError> {
+        self.call::<BotEnvelope>(
+            Method::POST,
+            format!("/v1/bots/{bot}/read"),
+            Some(json!(command)),
+        )
+        .await
+        .map(|(_, v)| v.bot)
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {
