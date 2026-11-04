@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::Question;
+use crate::model::{APPROVE, APPROVE_FOREVER, DENY, Question};
 
 /// The owner's click on a pending card, until the turn's event settles it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +53,11 @@ fn heading(question: &Question, bot_name: &str) -> String {
 fn outcome(question: &Question, bot_name: &str) -> String {
     match question.status.as_str() {
         "answered" => match (question.is_approval(), question.answer.as_deref()) {
-            (true, Some("approve")) => "Approved once.".into(),
-            (true, Some("approve_forever")) => {
+            (true, Some(APPROVE)) => "Approved once.".into(),
+            (true, Some(APPROVE_FOREVER)) => {
                 format!("Approved, and destructive actions are always allowed for {bot_name}.")
             }
-            (true, Some("deny")) => "Denied.".into(),
+            (true, Some(DENY)) => "Denied.".into(),
             _ => format!(
                 "You chose {}.",
                 question
@@ -90,18 +90,6 @@ impl ElseApp {
                 .and_then(|c| c.question(*id))
                 .is_some_and(Question::is_pending)
         });
-    }
-
-    fn remeasure_question(&mut self, question: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut()
-            && let Some(ix) = view
-                .rows
-                .iter()
-                .position(|r| r.key == RowKey::Question(question))
-        {
-            view.list.remeasure_items(ix..ix + 1);
-        }
-        cx.notify();
     }
 
     fn answer_question(
@@ -143,7 +131,7 @@ impl ElseApp {
             });
         });
         task.detach();
-        self.remeasure_question(question, cx);
+        self.remeasure_row(RowKey::Question(question), cx);
     }
 
     fn question_answered(
@@ -169,7 +157,7 @@ impl ElseApp {
             ),
             Err(err) => SubmitState::Failed(err.to_string()),
         };
-        self.remeasure_question(question, cx);
+        self.remeasure_row(RowKey::Question(question), cx);
     }
 
     pub(super) fn render_question_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
@@ -256,8 +244,8 @@ impl ElseApp {
                     app.answer_question(id, choice_id.clone(), window, cx)
                 }));
             let button = match (approval, choice.id.as_str(), chosen) {
-                (true, "approve", _) => button.primary(),
-                (true, "deny", _) => button.ghost(),
+                (true, APPROVE, _) => button.primary(),
+                (true, DENY, _) => button.ghost(),
                 (true, _, _) => button.outline(),
                 (false, _, true) => button.primary(),
                 (false, _, false) => button.outline(),
@@ -298,7 +286,7 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{heading, letter, outcome};
-    use crate::model::{Question, QuestionChoice};
+    use crate::model::{APPROVE, DENY, Question, QuestionChoice};
     use uuid::Uuid;
 
     fn question(kind: &str, status: &str, answer: Option<&str>) -> Question {
@@ -316,11 +304,11 @@ mod tests {
         } else {
             vec![
                 QuestionChoice {
-                    id: "approve".into(),
+                    id: APPROVE.into(),
                     label: "Approve once".into(),
                 },
                 QuestionChoice {
-                    id: "deny".into(),
+                    id: DENY.into(),
                     label: "Deny".into(),
                 },
             ]
@@ -344,7 +332,7 @@ mod tests {
             "You chose HTML digest."
         );
         assert_eq!(
-            outcome(&question("external", "answered", Some("deny")), "Mail"),
+            outcome(&question("external", "answered", Some(DENY)), "Mail"),
             "Denied."
         );
         assert!(

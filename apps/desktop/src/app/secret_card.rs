@@ -128,19 +128,6 @@ impl ElseApp {
         }
     }
 
-    fn remeasure_secret(&mut self, request: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
-            if let Some(ix) = view
-                .rows
-                .iter()
-                .position(|r| r.key == RowKey::SecretRequest(request))
-            {
-                view.list.remeasure_items(ix..ix + 1);
-            }
-        }
-        cx.notify();
-    }
-
     fn capture_paste(
         &mut self,
         request: Uuid,
@@ -162,7 +149,7 @@ impl ElseApp {
                 .update(cx, |state, cx| state.set_value("", window, cx));
             field.captured = Some(text);
         }
-        self.remeasure_secret(request, cx);
+        self.remeasure_row(RowKey::SecretRequest(request), cx);
     }
 
     fn replace_paste(
@@ -183,7 +170,7 @@ impl ElseApp {
             field.captured = None;
             field.input.update(cx, |state, cx| state.focus(window, cx));
         }
-        self.remeasure_secret(request, cx);
+        self.remeasure_row(RowKey::SecretRequest(request), cx);
     }
 
     /// Send the form's values, or decline the request with `None`.
@@ -210,7 +197,7 @@ impl ElseApp {
                 Ok(env) => Some(env),
                 Err(message) => {
                     form.error = Some(message);
-                    self.remeasure_secret(request, cx);
+                    self.remeasure_row(RowKey::SecretRequest(request), cx);
                     return;
                 }
             }
@@ -226,7 +213,7 @@ impl ElseApp {
             });
         });
         task.detach();
-        self.remeasure_secret(request, cx);
+        self.remeasure_row(RowKey::SecretRequest(request), cx);
     }
 
     fn secret_answered(
@@ -261,7 +248,7 @@ impl ElseApp {
                 }
             }
         }
-        self.remeasure_secret(request, cx);
+        self.remeasure_row(RowKey::SecretRequest(request), cx);
     }
 
     pub(super) fn render_secret_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {

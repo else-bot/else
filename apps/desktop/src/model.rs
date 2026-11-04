@@ -73,6 +73,10 @@ impl SecretRequest {
     }
 }
 
+pub const APPROVE: &str = "approve";
+pub const DENY: &str = "deny";
+pub const APPROVE_FOREVER: &str = "approve_forever";
+
 /// One option of a bot's question, by its stable id and shown label.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QuestionChoice {

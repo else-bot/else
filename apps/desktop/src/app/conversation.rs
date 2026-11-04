@@ -104,6 +104,15 @@ impl ConversationView {
 }
 
 impl ElseApp {
+    pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_ref()
+            && let Some(ix) = view.rows.iter().position(|row| row.key == key)
+        {
+            view.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (client, Some(view)) = (self.client.clone(), self.view.as_mut()) else {
             return;
