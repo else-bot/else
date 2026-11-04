@@ -10,6 +10,8 @@ mod conversation;
 mod dialogs;
 mod link_target;
 mod message_menu;
+mod message_row;
+mod reading;
 mod reply;
 mod row_text;
 mod secret_card;
@@ -114,7 +116,12 @@ pub struct ElseApp {
     drafts: HashMap<Uuid, Draft>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
-    unread: HashSet<Uuid>,
+    inbox: crate::inbox::Inbox,
+    /// Names this connection in notification tags.
+    scope: Uuid,
+    /// Covered by the connection editor.
+    hidden: bool,
+    _alerts: Option<Task<()>>,
     deleting: HashSet<Uuid>,
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
@@ -156,6 +163,12 @@ impl ElseApp {
                 }
             },
         );
+        let activation =
+            cx.observe_window_activation(window, |app, window, cx| app.check_reading(window, cx));
+        let visibility = cx
+            .observe_window_visibility(window, |app, _, window, cx| app.check_reading(window, cx));
+        let bounds =
+            cx.observe_window_bounds(window, |app, window, cx| app.check_reading(window, cx));
         let mut app = Self {
             client,
             connection: Connection::Connecting,
@@ -169,7 +182,10 @@ impl ElseApp {
             drafts: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
-            unread: HashSet::new(),
+            inbox: Default::default(),
+            scope: Uuid::new_v4(),
+            hidden: false,
+            _alerts: None,
             deleting: HashSet::new(),
             notice: None,
             create: None,
@@ -186,7 +202,7 @@ impl ElseApp {
             sidebar_focus,
             live: None,
             _live: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, activation, visibility, bounds],
         };
         app.start_live(window, cx);
         app
@@ -239,6 +255,7 @@ impl ElseApp {
                 }
                 // Resolve sends whose outcome became unknown while offline.
                 self.resolve_unknown_sends(window, cx);
+                self.resume_reads(cx);
             }
             LiveEvent::Disconnected(reason) => {
                 // Keep whatever was loaded; show the problem and keep retrying.
@@ -309,8 +326,7 @@ impl ElseApp {
                 .iter()
                 .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle"))
         });
-        self.unread
-            .retain(|id| self.bots.iter().any(|b| b.id == *id && b.is_active()));
+        self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
         self.sync_settings(window, cx);
         cx.notify();
@@ -332,11 +348,12 @@ impl ElseApp {
         }
     }
 
+    /// The owner chose this bot. Selection alone never reads it; the
+    /// replies it shows are read once they are on screen.
     fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if self.unread.remove(&id) {
-            cx.notify();
-        }
+        self.inbox.open(id);
         self.select(Some(id), window, cx);
+        self.check_reading(window, cx);
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
@@ -363,6 +380,12 @@ impl ElseApp {
         }
         self.clear_secret_forms(window, cx);
         self.view = id.map(ConversationView::new);
+        if let Some(view) = &self.view {
+            let this = cx.entity().downgrade();
+            view.list.set_scroll_handler(move |_, window, cx| {
+                let _ = this.update(cx, |app, cx| app.check_reading(window, cx));
+            });
+        }
         self.ensure_settings(window, cx);
         if id.is_some() {
             // Pending sends show at once, even before history loads.

@@ -56,6 +56,9 @@ async fn onboarding_names_the_main_bot_and_sets_its_model_and_the_defaults() {
     assert_eq!(caps.body["defaults"], profile);
     let bot = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
     assert_eq!(bot.body["bot"]["name"], "Jarvis");
+    let read = &bot.body["bot"]["read_state"];
+    assert!(read["latest"].is_object(), "greeted: {read}");
+    assert_eq!(read["unread"], false, "the greeting is not news");
     let own = app
         .owner("GET", &format!("/v1/bots/{main}/profile"), None)
         .await;

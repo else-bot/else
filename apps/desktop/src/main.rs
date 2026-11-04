@@ -5,6 +5,7 @@ mod app;
 mod avatar;
 mod config;
 mod connection;
+mod inbox;
 mod model;
 mod profile_picker;
 mod sidebar;
@@ -75,6 +76,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(AppAssets)
         .run(move |cx| {
+            cx.set_app_identity("else-bot", "else.bot");
             gpui_kit::init(cx);
             app::bind_keys(cx);
             // Closing the window ends the desktop only; API work continues.

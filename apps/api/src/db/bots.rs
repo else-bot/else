@@ -47,6 +47,8 @@ pub struct BotRecord {
     pub metadata_revision: i64,
     avatar_shape: Option<AvatarShape>,
     avatar_color: Option<AvatarColor>,
+    #[sqlx(flatten)]
+    pub read: super::reads::ReadRow,
 }
 
 impl BotRecord {
@@ -63,6 +65,9 @@ impl BotRecord {
 const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status,
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
         b.avatar_shape, b.avatar_color,
+        c.read_item_seq, c.read_text_bytes, c.marked_unread,
+        h.id AS head_item_id, h.turn_id AS head_turn_id, h.seq AS head_seq,
+        length(CAST(h.text AS BLOB)) AS head_bytes, substr(h.text, 1, 240) AS head_preview,
         a.id AS active_turn_id, a.status AS active_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
@@ -70,6 +75,8 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
             AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
+    LEFT JOIN items h ON h.id = (SELECT x.id FROM items x WHERE x.conversation_id = c.id
+                                 AND x.kind = 'assistant' ORDER BY x.seq DESC LIMIT 1)
     LEFT JOIN turns a ON a.bot_id = b.id
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
         AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id

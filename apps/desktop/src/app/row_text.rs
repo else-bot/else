@@ -45,7 +45,7 @@ impl RowText {
                 let state = cx.new(|cx| TextViewState::markdown(&source, cx));
                 // Markdown parses in the background, so the row's height is
                 // only known once the state notifies.
-                let _observe = cx.observe(&state, move |app, state, cx| {
+                let _observe = cx.observe_in(&state, window, move |app, state, window, cx| {
                     let Some(view) = app.view.as_ref() else {
                         return;
                     };
@@ -58,6 +58,7 @@ impl RowText {
                     }
                     if let Some(ix) = view.rows.iter().position(|r| r.key == key) {
                         view.list.remeasure_items(ix..ix + 1);
+                        app.check_reading(window, cx);
                         cx.notify();
                     }
                 });
@@ -71,6 +72,18 @@ impl RowText {
         match self.widget {
             Widget::Plain(_) => RowFormat::Plain,
             Widget::Markdown { .. } => RowFormat::Markdown,
+        }
+    }
+
+    pub(super) fn rendered_bytes(&self, cx: &App) -> Option<usize> {
+        match &self.widget {
+            Widget::Plain(_) => Some(self.source.len()),
+            Widget::Markdown { state, .. } => {
+                let rendered = state.read(cx).rendered_text();
+                self.source
+                    .starts_with(rendered.source())
+                    .then_some(rendered.source().len())
+            }
         }
     }
 

@@ -12,6 +12,7 @@ pub mod installation;
 pub mod memory;
 pub mod memory_tree;
 pub mod profiles;
+pub mod reads;
 pub mod routines;
 pub mod secret_requests;
 pub mod stop;

@@ -1,4 +1,5 @@
 use super::{Connection, ElseApp};
+use crate::inbox::Mark;
 use crate::sidebar::{fold, known_category};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -29,7 +30,7 @@ impl ElseApp {
             .collect();
         categories.sort_by_key(|(id, name)| (fold(name), *id));
         let movable = !categories.is_empty() && app.movable_bot(id).is_some();
-        let unread = app.unread.contains(&id);
+        let unread = app.is_unread(id);
         let deletable = app.default_bot_id != Some(id)
             && app.connection == Connection::Connected
             && !app.deleting.contains(&id);
@@ -108,12 +109,11 @@ impl ElseApp {
     }
 
     fn toggle_unread(&mut self, id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.active_bots().any(|b| b.id == id) {
-            return;
-        }
-        if !self.unread.remove(&id) {
-            self.unread.insert(id);
-        }
-        cx.notify();
+        let mark = if self.is_unread(id) {
+            Mark::Read
+        } else {
+            Mark::Unread
+        };
+        self.mark_bot(id, mark, cx);
     }
 }
