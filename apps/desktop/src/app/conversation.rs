@@ -1,9 +1,9 @@
 //! Transcript loading, committed events, paging, and row reconciliation.
 
 use super::ElseApp;
+use super::row_text::{RowFormat, RowText};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
-use gpui_kit::component::input::TextareaState;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -23,7 +23,7 @@ pub(super) struct ConversationView {
     pub(super) loading_older: bool,
     pub(super) rows: Vec<RowKey>,
     pub(super) list: ListState,
-    pub(super) texts: HashMap<RowKey, (Entity<TextareaState>, String)>,
+    pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -200,14 +200,23 @@ impl ElseApp {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
         let mut rows = Vec::new();
-        let mut texts: Vec<(RowKey, String)> = Vec::new();
+        let mut texts = Vec::new();
         for item in conversation.into_iter().flat_map(|c| c.items()) {
+            let format = if item.kind == "assistant" {
+                RowFormat::Markdown
+            } else {
+                RowFormat::Plain
+            };
             rows.push(RowKey::Item(item.id));
-            texts.push((RowKey::Item(item.id), item.text.clone()));
+            texts.push((RowKey::Item(item.id), item.text.clone(), format));
         }
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
-            texts.push((RowKey::Pending(pending.request_id), pending.text.clone()));
+            texts.push((
+                RowKey::Pending(pending.request_id),
+                pending.text.clone(),
+                RowFormat::Plain,
+            ));
         }
         let old = std::mem::take(&mut view.rows);
         let prefix = old.iter().zip(&rows).take_while(|(a, b)| a == b).count();
@@ -226,21 +235,16 @@ impl ElseApp {
         // Create or update the selectable text of each row.
         let mut changed = Vec::new();
         let mut created = false;
-        for (key, text) in texts {
+        for (key, text, format) in texts {
             match view.texts.get_mut(&key) {
-                Some((state, current)) if *current != text => {
-                    state.update(cx, |state, cx| state.set_value(text.clone(), window, cx));
-                    *current = text;
-                    changed.push(key);
+                Some(row) if row.format() == format => {
+                    if row.sync(text, window, cx) {
+                        changed.push(key);
+                    }
                 }
-                Some(_) => {}
-                None => {
-                    let state = cx.new(|cx| {
-                        TextareaState::new(window, cx)
-                            .auto_grow(1, 100_000)
-                            .default_value(text.clone())
-                    });
-                    view.texts.insert(key, (state, text));
+                _ => {
+                    view.texts
+                        .insert(key, RowText::new(key, text, format, window, cx));
                     created = true;
                 }
             }

@@ -1,5 +1,6 @@
 //! Rendering of the sidebar, header, conversation, and composer.
 
+use super::row_text::RowText;
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
     LoadOlder, MoveBot, NewBot, NewCategory, RowKey, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
@@ -7,7 +8,7 @@ use super::{
 };
 use crate::api::Bot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
@@ -372,7 +373,7 @@ impl ElseApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
-        let bubble = |state: &Entity<TextareaState>, user: bool| {
+        let bubble = |text: &RowText, user: bool| {
             // Wrapped text needs a definite width, so bubbles span the row
             // and are offset to their side.
             let side = div().w_full();
@@ -394,12 +395,7 @@ impl ElseApp {
                     })
                     .border_1()
                     .border_color(theme.border)
-                    .child(
-                        Textarea::new(state)
-                            .readonly(true)
-                            .appearance(false)
-                            .bordered(false),
-                    ),
+                    .child(text.render()),
             )
         };
         let note = |text: String, error: bool| {
@@ -420,7 +416,7 @@ impl ElseApp {
                 let Some(item) = conversation.item(id) else {
                     return div().into_any_element();
                 };
-                let Some((state, _)) = view.texts.get(&key) else {
+                let Some(text) = view.texts.get(&key) else {
                     return div().into_any_element();
                 };
                 let user = item.kind == "user";
@@ -433,7 +429,7 @@ impl ElseApp {
                         column = column.child(note(self.provider_label(provider), false));
                     }
                 }
-                column = column.child(bubble(state, user));
+                column = column.child(bubble(text, user));
                 if let Some(turn) = turn {
                     let show_on_user = user && !turn.is_finished()
                         || user
@@ -460,7 +456,7 @@ impl ElseApp {
                 else {
                     return div().into_any_element();
                 };
-                let Some((state, _)) = view.texts.get(&key) else {
+                let Some(text) = view.texts.get(&key) else {
                     return div().into_any_element();
                 };
                 let mut column = v_flex()
@@ -468,7 +464,7 @@ impl ElseApp {
                     .gap_1()
                     .px_4()
                     .py_1()
-                    .child(bubble(state, true));
+                    .child(bubble(text, true));
                 if let Some(reason) = &pending.rejected {
                     return column
                         .child(
