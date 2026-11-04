@@ -24,7 +24,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::events;
-use super::turns;
+use super::turns::{self, AskingCaller as Caller};
 
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, Choice, DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, Spec, Status,
@@ -139,37 +139,6 @@ impl From<sqlx::Error> for RequestError {
     }
 }
 
-/// The calling turn, checked for asking: its bot, attempt, and whether it
-/// is the owner's conversation.
-struct Caller {
-    bot_id: Uuid,
-    attempt: i32,
-    owner_conversation: bool,
-}
-
-async fn caller(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Caller, RequestError> {
-    let row: Option<(Uuid, String, i32, String, String, bool)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status, b.cancel_pending
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((bot_id, status, attempt, kind, bot_status, cancel_pending)) = row else {
-        return Err(RequestError::NotRunning);
-    };
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" || cancel_pending
-    {
-        return Err(RequestError::NotRunning);
-    }
-    Ok(Caller {
-        bot_id,
-        attempt,
-        owner_conversation: kind == "owner",
-    })
-}
-
 /// The newest question of `turn_id` with this title (a choice) or action
 /// hash (an approval).
 async fn find_same(
@@ -255,7 +224,9 @@ pub async fn create(
     spec: &Spec,
 ) -> Result<QuestionInfo, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let caller = caller(&mut tx, turn_id).await?;
+    let caller = turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .ok_or(RequestError::NotRunning)?;
     if let Some(found) = find_same(&mut tx, turn_id, spec).await? {
         if found.kind != spec.kind || found.choices != spec.choices || found.context != spec.context
         {
@@ -300,7 +271,9 @@ pub enum Gate {
 /// arguments is consumed by this one call; otherwise the owner is asked.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let caller = caller(&mut tx, turn_id).await?;
+    let caller = turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .ok_or(RequestError::NotRunning)?;
     if spec.kind == Kind::Destructive
         && has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await?
     {

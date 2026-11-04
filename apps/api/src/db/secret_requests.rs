@@ -175,24 +175,13 @@ pub async fn create(
     spec: &Spec,
 ) -> Result<RequestInfo, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let caller: Option<(Uuid, String, i32, String, String, bool)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status, b.cancel_pending
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((bot_id, status, attempt, kind, bot_status, cancel_pending)) = caller else {
-        return Err(RequestError::NotRunning);
-    };
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" || cancel_pending
-    {
-        return Err(RequestError::NotRunning);
-    }
-    if kind != "owner" {
+    let caller = super::turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .ok_or(RequestError::NotRunning)?;
+    if !caller.owner_conversation {
         return Err(RequestError::NotAllowed);
     }
+    let (bot_id, attempt) = (caller.bot_id, caller.attempt);
     let existing: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM secret_requests WHERE turn_id = ?1 AND name = ?2"
     )))

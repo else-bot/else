@@ -318,6 +318,31 @@ pub async fn attach_owner_requests(
     Ok(())
 }
 
+#[derive(sqlx::FromRow)]
+pub struct AskingCaller {
+    pub bot_id: Uuid,
+    pub attempt: i32,
+    pub owner_conversation: bool,
+    pub main_bot: bool,
+}
+
+pub async fn asking_caller(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Option<AskingCaller>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.bot_id, t.attempt, c.kind = 'owner' AS owner_conversation,
+             EXISTS (SELECT 1 FROM installation WHERE default_bot_id = t.bot_id) AS main_bot
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         JOIN bots b ON b.id = t.bot_id
+         WHERE t.id = ?1 AND t.status IN ('sending', 'running')
+           AND b.status = 'active' AND NOT b.cancel_pending",
+    )
+    .bind(turn_id)
+    .fetch_optional(conn)
+    .await
+}
+
 /// Whether the current `attempt` of `turn_id` already delegated, asked for
 /// a secret, or asked the owner: it must end, and asks nothing more.
 pub async fn attempt_parked(

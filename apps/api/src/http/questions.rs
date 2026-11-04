@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use super::turns::bot_deleted;
+use super::turns::active_bot;
 use crate::db::owner_questions::{self, SettleError};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -66,18 +66,6 @@ async fn answer(
     Ok(Json(
         json!({ "question": settled.question, "requeued": settled.requeued }),
     ))
-}
-
-async fn active_bot(state: &AppState, bot_id: Uuid) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
-        None => Err(ApiError::not_found()),
-        Some("active") => Ok(()),
-        Some(_) => Err(bot_deleted()),
-    }
 }
 
 async fn permissions(

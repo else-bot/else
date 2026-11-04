@@ -170,26 +170,13 @@ pub async fn create_for_turn(
 }
 
 async fn authorize(conn: &mut sqlx::SqliteConnection, turn_id: Uuid) -> Result<(), BotError> {
-    let caller: Option<(Uuid, String, i32, String, Option<Uuid>, BotStatus)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind,
-                (SELECT default_bot_id FROM installation), b.status
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id
-         WHERE t.id = ?1",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((bot, status, attempt, kind, main, bot_status)) = caller else {
-        return Err(Refusal::NotRunning.into());
-    };
-    if kind != "owner" || main != Some(bot) {
+    let caller = super::turns::asking_caller(conn, turn_id)
+        .await?
+        .ok_or(Refusal::NotRunning)?;
+    if !caller.owner_conversation || !caller.main_bot {
         return Err(Refusal::NotMain.into());
     }
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != BotStatus::Active {
-        return Err(Refusal::NotRunning.into());
-    }
-    if super::turns::attempt_parked(conn, turn_id, attempt).await? {
+    if super::turns::attempt_parked(conn, turn_id, caller.attempt).await? {
         return Err(Refusal::AttemptDelegated.into());
     }
     Ok(())
