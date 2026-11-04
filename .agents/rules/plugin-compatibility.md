@@ -2,9 +2,9 @@
 
 The canonical directory is `.agents`. `.claude` is a relative symlink to it.
 Skills live in `.agents/skills/<name>/SKILL.md`, and agent definitions live
-in `.agents/agents/<name>.md`. These are generated local adaptations.
-Supporting scripts and assets use relative links to pinned runtime source files.
-The trimmed sources in `.agents/plugins/` are provenance, not active instructions.
+in `.agents/agents/<name>.md`. Edit these installed files directly.
+Supporting scripts and assets live inside their skill folders.
+Upstream licenses are retained in `.agents/licenses/`.
 
 Invoke skills by their local name, such as `/poteto-mode`, and agents by
 their local name, such as `poteto-agent`. Read another skill's local
@@ -14,10 +14,8 @@ references from the instruction file's own directory, not the shell's cwd.
 Use `.agents/rules/pstack-models.md` for model selection. It overrides upstream
 model defaults, budget adjustments, and home-directory configuration paths.
 The other `.agents/rules/*.md` apply here too. The TypeScript rule applies
-only to TypeScript files. Preserve the retained upstream runtime files. To change a
-bundled document, add or edit its corresponding file in `.agents/adaptations/`
-and run `python scripts/sync-agent-plugins.py --write`. New project skills
-live directly in `.agents/skills/`. Use the local `create-skill` workflow.
+only to TypeScript files. Update bundled documents in place. New project
+skills live in `.agents/skills/`. Use the local `create-skill` workflow.
 
 Workflow verbs describe intent. Use only the current runtime's tools and
 accepted arguments. In Claude Code, delegation uses `Agent` and supported

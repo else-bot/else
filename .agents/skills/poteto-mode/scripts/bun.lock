@@ -1,1 +1,15 @@
-../../../plugins/pstack/skills/poteto-mode/scripts/bun.lock
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "@cursor-skill/poteto-mode-tools",
+      "dependencies": {
+        "commander": "14.0.0",
+      },
+    },
+  },
+  "packages": {
+    "commander": ["commander@14.0.0", "", {}, "sha512-2uM9rYjPvyq39NwLRqaiLtWHyDC1FvryJDa2ATTVims5YAS4PupsEQsDvP14FqhFr0P49CYDugi59xaxJlTXRA=="],
+  }
+}

@@ -5,13 +5,11 @@ and [cursor-team-kit](https://github.com/cursor/plugins/tree/main/cursor-team-ki
 in `.agents`. `.claude` points to the same directory.
 
 The installation contains 76 bundled skills, a local `create-skill` helper,
-and four agent definitions. Active instructions in `skills/`, `agents/`, and
-`docs/` are generated local adaptations. Supporting scripts and assets use
-relative symlinks to the pinned runtime sources in `plugins/`.
-`sources.json` records the upstream revision, retained file hashes, and excluded
-development paths. Test suites, fixtures, saved test output, and compiler-only
-files are omitted. Package manifests and the watcher lockfile contain only runtime
-dependencies. Licenses and source attribution are retained.
+and four agent definitions. Edit the installed files directly in `skills/`,
+`agents/`, `docs/`, and `rules/`. Each skill contains its own supporting scripts
+and assets. Test suites, fixtures, saved test output, and compiler-only files
+are omitted. Package manifests and the watcher lockfile contain only runtime
+dependencies. Upstream licenses are in `licenses/`.
 
 Edit [rules/pstack-models.md](rules/pstack-models.md) to change the five model
 presets or their role assignments. Sol uses xhigh reasoning and fast service.
@@ -23,11 +21,6 @@ Cross-provider panels require T3 delegation support.
 Codex reads the shared rules through the root `AGENTS.md`. Claude Code loads
 them through `.claude/rules/`. Every bundled skill and agent links directly
 to the local runtime rules and model presets.
-
-Run `python scripts/sync-agent-plugins.py --write` to regenerate active files.
-Keep document changes in `adaptations/`, using the same path below `.agents`.
-The generator handles shared path and tool mappings and omits excluded development
-files. Preserve the retained runtime sources when changing workflow instructions.
 
 Transcripts come from workspace-scoped runtime tools or an explicitly supplied
 path. The worktree audit accepts `PSTACK_TRANSCRIPTS_DIR` and leaves chat

@@ -1,1 +1,8 @@
-../../../plugins/pstack/skills/poteto-mode/scripts/package.json
+{
+  "name": "@cursor-skill/poteto-mode-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "commander": "14.0.0"
+  }
+}

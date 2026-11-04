@@ -44,7 +44,7 @@ Present the synthesizer's full Accepted / Rejected / Backlog output and wait for
 
 File each Backlog item to your team's devex or backlog tracker without waiting. Only the Accepted list waits for approval.
 
-Never edit the pinned snapshots in `.agents/plugins/`. For an approved bundled-skill change, edit the corresponding `.agents/adaptations/skills/` file and regenerate with `python scripts/sync-agent-plugins.py --write`. New project skills live directly in `.agents/skills/`. Never open a PR or push.
+For an approved skill change, edit its installed file directly in `.agents/skills/`. New project skills live there too. Never open a PR or push.
 
 Follow each approved row's Routing exactly:
 
