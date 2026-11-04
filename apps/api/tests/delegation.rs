@@ -122,6 +122,61 @@ async fn wait_status(app: &TestApp, turn: Uuid, status: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_new_bot_acknowledges_delegated_work_in_its_conversation() {
+    let app = app_with(1).await;
+    let target = app.create_bot("GitHub").await;
+    sqlx::query("UPDATE bots SET selected_provider_id = 'synthetic' WHERE id = ?1")
+        .bind(target.parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let (main, root, token) = running_main(&app).await;
+    let task = "Set up the repository cleanup routine every six hours.";
+    let reply = delegate(&app, &token, &target, task).await;
+    assert_eq!(tool_text(&reply)["status"], "pending", "{}", reply.body);
+
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{target}/conversation"), None)
+        .await
+        .body;
+    let items = snapshot["items"].as_array().unwrap();
+    assert!(
+        !items.is_empty(),
+        "receiving bot conversation is empty after accepting delegated work: {snapshot}"
+    );
+    let sender: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
+        .bind(main.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["kind"] != "user"
+                && item["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(&sender) && text.contains(task))
+        }),
+        "missing acknowledgement of sender and task: {snapshot}"
+    );
+
+    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
+        .await;
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{target}/conversation"), None)
+        .await
+        .body;
+    assert!(
+        snapshot["items"].as_array().unwrap().iter().any(|item| {
+            item["kind"] == "assistant"
+                && item["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Synthetic reply"))
+        }),
+        "receiving bot reply is missing: {snapshot}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     // One provider slot: the parent must release it for the child.
     let app = app_with(1).await;
