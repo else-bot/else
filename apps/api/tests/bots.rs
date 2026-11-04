@@ -261,3 +261,149 @@ async fn unknown_ids_and_authorization() {
     );
     assert_eq!(row_counts(&app).await, (1, 1));
 }
+
+async fn update(app: &TestApp, id: &str, body: serde_json::Value) -> common::Reply {
+    app.owner("PATCH", &format!("/v1/bots/{id}"), Some(body))
+        .await
+}
+
+async fn updated_events(app: &TestApp, id: &str) -> Vec<serde_json::Value> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE bot_id = ?1 AND kind = 'bot.updated' ORDER BY seq",
+    )
+    .bind(id.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    rows.iter()
+        .map(|row| serde_json::from_str(row).unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_update_saves_once_and_keeps_everything_else() {
+    let app = TestApp::installed().await;
+    let category = app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Work" })),
+        )
+        .await
+        .body["category"]["id"]
+        .clone();
+    let id = app.create_bot("Work", "Help with my work").await;
+    app.owner(
+        "PATCH",
+        &format!("/v1/bots/{id}/category"),
+        Some(json!({ "category_id": category })),
+    )
+    .await;
+    let before = app.owner("GET", &format!("/v1/bots/{id}"), None).await.body["bot"].clone();
+    let main = app.main_bot().await;
+    let journaled = updated_events(&app, &id).await.len();
+
+    let saved = update(
+        &app,
+        &id,
+        json!({ "name": "  Planner  ", "role": "Plan my week." }),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let bot = &saved.body["bot"];
+    assert_eq!(bot["name"], "Planner", "the name is trimmed");
+    assert_eq!(bot["role"], "Plan my week.");
+    assert_eq!(bot["category_id"], category);
+    assert_eq!(bot["conversation_id"], before["conversation_id"]);
+    let events = updated_events(&app, &id).await;
+    assert_eq!(
+        events.len(),
+        journaled + 1,
+        "one bot.updated for the change"
+    );
+    let last = events.last().unwrap();
+    assert_eq!(last["bot"]["name"], "Planner");
+    assert_eq!(last["bot"]["role"], "Plan my week.");
+
+    let again = update(
+        &app,
+        &id,
+        json!({ "name": "Planner", "role": "Plan my week." }),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.body, saved.body);
+    assert_eq!(updated_events(&app, &id).await.len(), journaled + 1);
+
+    let listing = app.owner("GET", "/v1/bots", None).await;
+    assert_eq!(listing.body["default_bot_id"], main, "main bot unchanged");
+    let listed = listing.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(listed, saved.body["bot"]);
+
+    let renamed = update(
+        &app,
+        &main,
+        json!({ "name": "Home", "role": "Run my day." }),
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    let listing = app.owner("GET", "/v1/bots", None).await;
+    assert_eq!(listing.body["default_bot_id"], main);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_update_validates_and_refuses_deleted_bots() {
+    let app = TestApp::installed().await;
+    let id = app.create_bot("Work", "Help").await;
+    for body in [
+        json!({ "name": " ", "role": "ok" }),
+        json!({ "name": "n".repeat(81), "role": "ok" }),
+        json!({ "name": "ok", "role": "\n " }),
+        json!({ "name": "ok" }),
+        json!({ "name": "ok", "role": "ok", "category_id": null }),
+    ] {
+        let reply = update(&app, &id, body.clone()).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let too_large = update(&app, &id, json!({ "name": "ok", "role": "r".repeat(8193) })).await;
+    assert_eq!(too_large.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let bot = app.owner("GET", &format!("/v1/bots/{id}"), None).await;
+    assert_eq!(
+        bot.body["bot"]["name"], "Work",
+        "rejected input changes nothing"
+    );
+    assert_eq!(bot.body["bot"]["role"], "Help");
+    assert!(updated_events(&app, &id).await.is_empty());
+
+    let unknown = update(
+        &app,
+        &Uuid::new_v4().to_string(),
+        json!({ "name": "a", "role": "b" }),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    app.owner("DELETE", &format!("/v1/bots/{id}"), None).await;
+    let gone = update(&app, &id, json!({ "name": "Back", "role": "Revived?" })).await;
+    assert_eq!(gone.status, StatusCode::GONE);
+    assert_eq!(gone.body["error"]["code"], "bot_deleted");
+    let receipt = app.owner("GET", &format!("/v1/bots/{id}"), None).await;
+    assert_eq!(receipt.body["bot"]["cleanup"]["state"], "done");
+    assert_eq!(receipt.body["bot"]["name"], "Work");
+
+    let unauthorized = app
+        .call(
+            "PATCH",
+            &format!("/v1/bots/{id}"),
+            Some(json!({ "name": "a", "role": "b" })),
+            None,
+        )
+        .await;
+    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+}

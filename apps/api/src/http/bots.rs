@@ -19,7 +19,7 @@ use crate::views::*;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bots", get(list).post(create))
-        .route("/bots/{bot_id}", get(show).delete(delete))
+        .route("/bots/{bot_id}", get(show).patch(update).delete(delete))
         .route("/bots/{bot_id}/profile", get(show_profile).put(set_profile))
 }
 
@@ -37,6 +37,7 @@ impl From<BotError> for ApiError {
                 "main_bot",
                 "The main bot cannot be deleted.",
             ),
+            BotError::Deleted => super::turns::bot_deleted(),
             BotError::RequestConflict => ApiError::new(
                 StatusCode::CONFLICT,
                 "request_conflict",
@@ -44,6 +45,14 @@ impl From<BotError> for ApiError {
             ),
             BotError::Db(err) => err.into(),
         }
+    }
+}
+
+fn invalid_bot(err: crate::app::bots::InvalidBot) -> ApiError {
+    if err.is_size_limit() {
+        ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
+    } else {
+        ApiError::bad_request("invalid_input", err.to_string())
     }
 }
 
@@ -85,14 +94,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<CreateBot>,
 ) -> Result<Response, ApiError> {
-    let invalid = |err: crate::app::bots::InvalidBot| {
-        let error = if err.is_size_limit() {
-            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
-        } else {
-            ApiError::bad_request("invalid_input", err.to_string())
-        };
-        error.with_request_id(body.request_id)
-    };
+    let invalid = |err| invalid_bot(err).with_request_id(body.request_id);
     let name = BotName::parse(&body.name).map_err(invalid)?;
     let role = BotRole::parse(&body.role).map_err(invalid)?;
     let choice = match &body.profile {
@@ -141,6 +143,26 @@ async fn show(
     let bot = bots::find(&state.db, bot_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    Ok(Json(json!({ "bot": bot_json(&bot) })))
+}
+
+/// The bot's name and role (its instructions), both required. Replacing
+/// them with the same values is a no-op, so a retry is always safe.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateBot {
+    name: String,
+    role: String,
+}
+
+async fn update(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+    ApiJson(body): ApiJson<UpdateBot>,
+) -> Result<Json<Value>, ApiError> {
+    let name = BotName::parse(&body.name).map_err(invalid_bot)?;
+    let role = BotRole::parse(&body.role).map_err(invalid_bot)?;
+    let bot = bots::update_metadata(&state.db, bot_id, &name, &role).await?;
     Ok(Json(json!({ "bot": bot_json(&bot) })))
 }
 

@@ -95,6 +95,7 @@ All routes require the owner bearer token, including reads and streams. Task gra
 | `PATCH /v1/bots/{id}/category` | `{category_id: <uuid>}` assigns or moves, `{category_id: null}` unassigns. An unknown category is `404 category_not_found`; a deleted bot is `410` and is not revived. A category groups the sidebar only: it changes no identity, role, permission, memory, provider profile, or computer. |
 | `POST /v1/bots` | `{request_id, name, role}`. `201` with bot and `Location` on first acceptance. Matching retries return `200` with the same ID and current state. |
 | `GET /v1/bots/{bot_id}` | Active bot or owner-visible deletion receipt. Allows deletion progress polling without access to retained conversation data. |
+| `PATCH /v1/bots/{bot_id}` | `{name, role}`, both required and replaced together; unknown fields are rejected. Same validation as creation. Idempotent: equal values change nothing. A change journals `bot.updated`. A deleted bot is `410 bot_deleted`. The desktop's settings panel calls it Name and Description. |
 | `DELETE /v1/bots/{bot_id}` | No body. Tombstone and revoke before returning. `202` while stopping work, `200` when already stopped. Returns the same deletion receipt on retry. |
 | `GET /v1/bots/{bot_id}/conversation?limit=50` | Consistent snapshot and event cursor. `before_seq` fetches older pages. |
 | `POST /v1/bots/{bot_id}/turns` | `{request_id, text, provider_id}`. `202` after saving the owner item and queued attempt. Returns canonical item and turn. Matching retries return `200` with their current state. |
