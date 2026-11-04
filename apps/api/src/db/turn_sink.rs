@@ -606,6 +606,18 @@ impl SinkState {
         }
         Ok(())
     }
+
+    async fn end_message(&mut self) -> Result<(), Fenced> {
+        self.flush().await?;
+        if self.pending.is_empty() {
+            self.assistant_item = None;
+        } else {
+            // A failed write keeps the text buffered, so the next message
+            // joins it rather than splitting text whose item is unknown.
+            self.pending.push_str("\n\n");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -672,5 +684,10 @@ impl TurnSink for SqliteSink {
             remaining = &remaining[end..];
         }
         Ok(())
+    }
+    async fn end_message(&self) -> Result<(), Fenced> {
+        self.state
+            .call_async(|state| Box::pin(state.end_message()))
+            .await
     }
 }

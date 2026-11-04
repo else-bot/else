@@ -421,13 +421,16 @@ impl ElseApp {
                 };
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
+                // A reply's messages share one provider note and one status.
+                let run = conversation.run(id);
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
                 let mut column = v_flex().w_full().gap_1().px_4().py_1();
-                if !user {
-                    if let Some(provider) = &item.provider_id {
-                        column = column.child(note(self.provider_label(provider), false));
-                    }
+                if !user
+                    && run.first
+                    && let Some(provider) = &item.provider_id
+                {
+                    column = column.child(note(self.provider_label(provider), false));
                 }
                 column = column.child(bubble(text, user));
                 if let Some(turn) = turn {
@@ -437,7 +440,7 @@ impl ElseApp {
                             && !conversation
                                 .items()
                                 .any(|i| i.turn_id == turn.id && i.kind == "assistant");
-                    let show_on_assistant = !user && turn.status != "completed";
+                    let show_on_assistant = !user && run.last && turn.status != "completed";
                     if show_on_user || show_on_assistant {
                         let (label, error) = turn_label(turn);
                         if !label.is_empty() {

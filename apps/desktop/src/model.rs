@@ -82,6 +82,12 @@ pub enum Applied {
     Changed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    pub first: bool,
+    pub last: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Conversation {
     /// `<server_instance_id>:<bot_id>`; events must carry the same prefix.
@@ -234,6 +240,24 @@ impl Conversation {
         self.turns.get(&id)
     }
 
+    /// Where `id` sits in its run of same-kind items from one turn, such as
+    /// the agent messages of one reply.
+    pub fn run(&self, id: Uuid) -> Run {
+        let Some((seq, item)) = self.seq_of.get(&id).zip(self.item(id)) else {
+            return Run {
+                first: true,
+                last: true,
+            };
+        };
+        let same = |other: Option<(&i64, &Item)>| {
+            other.is_some_and(|(_, o)| o.kind == item.kind && o.turn_id == item.turn_id)
+        };
+        Run {
+            first: !same(self.items.range(..seq).next_back()),
+            last: !same(self.items.range(seq + 1..).next()),
+        }
+    }
+
     pub fn has_request(&self, request_id: Uuid) -> bool {
         self.items
             .values()
@@ -305,6 +329,41 @@ mod tests {
         assert_eq!(c.item(Uuid::from_u128(2)).unwrap().text, "é✓日");
         assert_eq!(c.cursor(), format!("{PREFIX}:5"));
         assert_eq!(c.items().count(), 2);
+    }
+
+    #[test]
+    fn agent_messages_of_one_turn_form_a_run() {
+        let reply = |id, seq, text| {
+            let mut item = item(id, seq, "assistant", text);
+            item["turn_id"] = json!(Uuid::from_u128(901));
+            item
+        };
+        let c = Conversation::from_snapshot(snapshot(
+            1,
+            vec![
+                item(1, 1, "user", "hi"),
+                reply(2, 2, "one"),
+                reply(3, 3, "two"),
+                reply(4, 4, "three"),
+                item(5, 5, "user", "next"),
+            ],
+            None,
+        ))
+        .unwrap();
+        let runs: Vec<_> = (1..=5)
+            .map(|id| c.run(Uuid::from_u128(id)))
+            .map(|r| (r.first, r.last))
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                (true, true),
+                (true, false),
+                (false, false),
+                (false, true),
+                (true, true)
+            ]
+        );
     }
 
     #[test]

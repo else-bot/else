@@ -702,9 +702,10 @@ impl Codex {
                 }
                 "item/agentMessage/delta" => {
                     let item = params["itemId"].as_str().unwrap_or_default().to_owned();
-                    // Separate distinct agent messages in one turn.
-                    if current_message.as_ref().is_some_and(|c| *c != item) {
-                        let _ = sink.text("\n\n").await;
+                    if current_message.as_ref().is_some_and(|c| *c != item)
+                        && sink.end_message().await.is_err()
+                    {
+                        cancel.cancel();
                     }
                     current_message = Some(item);
                     if let Some(delta) = params["delta"].as_str() {

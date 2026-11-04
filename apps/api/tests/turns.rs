@@ -96,6 +96,35 @@ async fn send_retry_and_conflict_create_one_message() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn each_agent_message_is_its_own_item() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let sent = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:messages]",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
+    let history = items(&app, &bot).await;
+    let replies: Vec<&str> = history[1..]
+        .iter()
+        .map(|(_, _, text)| text.as_str())
+        .collect();
+    assert_eq!(
+        replies,
+        vec![
+            "Synthetic reply ✓ from Assistant (turn 1): [synthetic:messages]",
+            else_api::providers::synthetic::SECOND_MESSAGE,
+        ],
+        "one assistant item per agent message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_duplicate_sends_accept_once() {
     let app = Arc::new(TestApp::installed().await);
     let bot = app.main_bot().await;

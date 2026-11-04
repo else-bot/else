@@ -216,6 +216,8 @@ pub trait TurnSink: Send + Sync {
     /// are batched for about 100 ms; reaching the flush threshold waits for
     /// persistence, applying backpressure to the provider.
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
+    /// End the current agent message: later text starts a new assistant item.
+    async fn end_message(&self) -> Result<(), Fenced>;
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.
     async fn session(&self, state: &SessionState) -> Result<(), Fenced>;
