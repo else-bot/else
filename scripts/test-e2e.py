@@ -137,7 +137,11 @@ def application_tests(cargo, selected, args, env, work, result):
         status = "passed"
         with log.open("w") as stream:
             try:
-                run(cargo + flags + ["--", "--test-threads", str(args.test_threads)],
+                test_args = ["--test-threads", str(args.test_threads)]
+                # S3 tests are optional for ordinary Cargo runs, mandatory here.
+                if name == "replication":
+                    test_args += ["--ignored"]
+                run(cargo + flags + ["--", *test_args],
                     cancel=cancel, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT)
             except Exception as error:
                 status = "failed"
@@ -179,7 +183,7 @@ def worker(args):
         cli = installation / "bin/elsebot"
         env_file = work / "compose.env"
         env_file.write_text("\n".join(f"{key}={env[key]}" for key in
-                                     ["COMPOSE_PROJECT_NAME", "POSTGRES_PASSWORD", "POSTGRES_PORT", "ELSE_TEST_S3_PORT"]) + "\n")
+                                     ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT"]) + "\n")
         env.update(ELSE_TEST_COMPOSE_ENV_FILE=str(env_file),
                    ELSE_TEST_COMPOSE_FILE=str(ROOT / "infra/e2e/compose.yaml"))
 
@@ -304,12 +308,7 @@ def host_guard():
 def lane(args, variant, output, image, sdk_key, cancel):
     project = "else-e2e-" + variant + "-" + uuid.uuid4().hex[:8]
     env = clean_environment()
-    pg_port = free_port()
-    s3_port = free_port()
-    while s3_port == pg_port:
-        s3_port = free_port()
-    env.update(COMPOSE_PROJECT_NAME=project, POSTGRES_PASSWORD=uuid.uuid4().hex,
-               POSTGRES_PORT=str(pg_port), ELSE_TEST_S3_PORT=str(s3_port),
+    env.update(COMPOSE_PROJECT_NAME=project, ELSE_TEST_S3_PORT=str(free_port()),
                ELSE_TEST_S3_REGION="us-east-1", ELSE_TEST_S3_ACCESS_KEY_ID="elsetestaccess01",
                ELSE_TEST_S3_SECRET_ACCESS_KEY="elsetestsecret0123456789abcdef")
     before = host_guard()
@@ -318,7 +317,7 @@ def lane(args, variant, output, image, sdk_key, cancel):
         work = Path(directory)
         config = work / "compose.env"
         config.write_text("\n".join(f"{key}={env[key]}" for key in
-                                   ["COMPOSE_PROJECT_NAME", "POSTGRES_PASSWORD", "POSTGRES_PORT", "ELSE_TEST_S3_PORT"]) + "\n")
+                                   ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT"]) + "\n")
         compose = ["docker", "compose", "--project-name", project, "--env-file", str(config),
                    "-f", str(ROOT / "infra/e2e/compose.yaml")]
         container = project + "-runner"
@@ -339,11 +338,8 @@ def lane(args, variant, output, image, sdk_key, cancel):
                            CARGO_TARGET_DIR=str(cache / "build"), ELSE_E2E_CACHE=str(cache),
                            RUSTUP_TOOLCHAIN="e2e-host",
                            PATH=str(cache / "toolchain/cargo/bin") + os.pathsep + env["PATH"])
-                pg = capture(compose + ["port", "postgres", "5432"], env=env).rsplit(":", 1)[1]
                 s3 = capture(compose + ["port", "seaweedfs", "8333"], env=env).rsplit(":", 1)[1]
-                env.update(TEST_DATABASE_URL=f"postgresql://else:{env['POSTGRES_PASSWORD']}@127.0.0.1:{pg}/else",
-                           ELSE_TEST_S3_ENDPOINT=f"http://127.0.0.1:{s3}")
-                env["ELSE_DATABASE_URL"] = env["TEST_DATABASE_URL"]
+                env["ELSE_TEST_S3_ENDPOINT"] = f"http://127.0.0.1:{s3}"
                 command = [sys.executable, str(source / "scripts/test-e2e.py"), *worker_args]
                 run(command, cancel=cancel, env=env, stdout=log, stderr=subprocess.STDOUT)
             else:
@@ -362,10 +358,8 @@ def lane(args, variant, output, image, sdk_key, cancel):
                            "-v", f"else-e2e-ubuntu-arm64-{sdk_key}:/cache", "-e", "ELSE_E2E_CACHE=/cache",
                            "-e", "CARGO_TARGET_DIR=/cache/build",
                            "-e", f"CARGO_BUILD_JOBS={args.build_jobs}"]
-                env.update(TEST_DATABASE_URL=f"postgresql://else:{env['POSTGRES_PASSWORD']}@postgres:5432/else",
-                           ELSE_TEST_S3_ENDPOINT="http://seaweedfs:8333")
-                env["ELSE_DATABASE_URL"] = env["TEST_DATABASE_URL"]
-                for key in ["COMPOSE_PROJECT_NAME", "POSTGRES_PASSWORD", "POSTGRES_PORT", "ELSE_TEST_S3_PORT", "TEST_DATABASE_URL", "ELSE_DATABASE_URL",
+                env["ELSE_TEST_S3_ENDPOINT"] = "http://seaweedfs:8333"
+                for key in ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT",
                             "ELSE_TEST_S3_ENDPOINT", "ELSE_TEST_S3_REGION", "ELSE_TEST_S3_ACCESS_KEY_ID", "ELSE_TEST_S3_SECRET_ACCESS_KEY"]:
                     command += ["-e", key]
                 command += [image, "python3", "/src/scripts/test-e2e.py", *worker_args]
@@ -425,12 +419,9 @@ def main():
     if "macos-arm64" in variants and platform.system() != "Darwin":
         parser.error("macos-arm64 requires a macOS host")
     if "macos-arm64" in variants:
-        for tool in ["rustup", "rustc", "pg_dump", "pg_restore", "psql"]:
+        for tool in ["rustup", "rustc", "sqlite3"]:
             if not shutil.which(tool):
                 parser.error(f"macOS prerequisite missing: {tool}; the harness will not install host packages")
-        pg_version = re.search(r"(\d+)\.", capture(["pg_dump", "--version"]))
-        if not pg_version or int(pg_version[1]) < 18:
-            parser.error("macOS requires PostgreSQL 18 or newer client tools")
         capture(["xcrun", "-sdk", "macosx", "-f", "metal"])
     if capture(["docker", "version", "--format", "{{.Server.Arch}}"]) != "arm64":
         parser.error("the Docker engine must be arm64")

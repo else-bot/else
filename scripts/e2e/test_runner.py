@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -95,6 +96,24 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(outcomes.get_nowait(), "cancelled")
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pid_file.read_text()), 0)
+
+    def test_application_lane_runs_optional_s3_tests_without_ignoring_sqlite_tests(self):
+        commands = queue.Queue(maxsize=3)
+        def record(command, **kwargs):
+            commands.put_nowait(command)
+        with tempfile.TemporaryDirectory() as directory:
+            result = {}
+            with patch.object(runner, "run", side_effect=record):
+                runner.application_tests(["cargo", "test"], ["replication", "sqlite"],
+                                         SimpleNamespace(test_threads=4, test_jobs=2), {},
+                                         Path(directory), result)
+            captured = [commands.get_nowait() for _ in range(3)]
+            for command in captured:
+                if "replication" in command:
+                    self.assertIn("--ignored", command)
+                else:
+                    self.assertNotIn("--ignored", command)
+            self.assertEqual(set(result["test_targets"]), {"unit", "replication", "sqlite"})
 
     def test_installer_rejects_unscoped_fast_profile_and_relative_cache(self):
         for extra, message in [({"ELSE_INSTALL_TEST_PROFILE": "dev"}, "requires ELSE_INSTALL_TEST_CACHE"),

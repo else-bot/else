@@ -98,8 +98,8 @@ python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --repeat 2
 
 The Ubuntu lane runs Ubuntu 26.04 aarch64 in Docker; macOS runs native arm64
 binaries and a temporary launchd service. Both build the API and desktop, run
-the application tests against fresh PostgreSQL/S3 services, and exercise the
-real installer with local v0.0.1/v0.0.2 Git tags: installation, busy-update
+the application tests with temporary SQLite files and an isolated S3 emulator,
+and exercise the real installer with local v0.0.1/v0.0.2 Git tags: installation, busy-update
 refusal, backup-before-migration, preserved conversations, read-only database
 access, native binaries, and an idempotent reinstall. Ubuntu uses a managed
 API process, as the container has no systemd. Desktop rendering is not driven.
@@ -114,13 +114,14 @@ serial Cargo test binaries, `--test-threads N` for their inner concurrency,
 `--parallel 1` for serial platforms, and `--build-jobs N` for Ubuntu's CPU/build
 budget (default 4).
 
-Mac prerequisites: arm64 Rust/rustup, Docker with Compose, PostgreSQL 18 or
-newer client tools on PATH, and the Xcode Metal compiler (`xcrun -sdk macosx -f
+Mac prerequisites: arm64 Rust/rustup, Docker with Compose for the S3 test emulator,
+the SQLite CLI, and the Xcode Metal compiler (`xcrun -sdk macosx -f
 metal`). The runner checks prerequisites and does not install host packages.
 Ubuntu prerequisites and Rust are layered in a reusable Docker image before
 source is mounted; source edits do not invalidate those layers. Only native
 ARM64 hosts and Docker engines are accepted. On Linux ARM64, run the Ubuntu
-lane alone.
+lane alone. Run the amd64 Debian/Ubuntu/Arch matrix separately on an amd64
+host with `scripts/test-install.sh`; these ARM64 lanes do not emulate amd64.
 
 ```sh
 python3 scripts/test-e2e.py ubuntu-arm64 --suite application
@@ -129,13 +130,13 @@ python3 scripts/test-e2e.py macos-arm64 --compile-live
 python3 scripts/e2e/test_runner.py
 ```
 
-Application runs include unit tests, integration targets, and doctests. By
-default, `*_live` targets that require authorized providers/VMs are not compiled;
+Application runs include unit tests, integration targets, and doctests. The
+replication target explicitly runs its otherwise ignored S3 tests. By default, `*_live` targets that require authorized providers/VMs are not compiled;
 `--compile-live` adds their build checks. All `ELSE_LIVE_*` gates, including real
 S3, remain disabled in these isolated lanes. Run live-provider/VM scenarios
 separately using their documented authorization and prerequisites.
 
-Each run has its own Compose project, PostgreSQL/S3 volumes, ports, installation,
+Each run has its own SQLite files, Compose S3 project/volume, port, installation,
 credentials, and service name. Services and data are removed on completion,
 failure, or Ctrl-C. The checkout's `.env` and the owner's installation links
 are untouched; ignored files are excluded from fake release snapshots. The
