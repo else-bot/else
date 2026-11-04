@@ -13,6 +13,38 @@ use crate::api::Bot;
 use crate::avatar::{Avatar, bot_avatar};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct MentionBot {
+    id: Uuid,
+    name: String,
+    avatar: Avatar,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub(super) struct MentionRegistry(Vec<MentionBot>);
+
+impl MentionRegistry {
+    pub(super) fn new(bots: &[Bot]) -> Self {
+        let mut entries: Vec<_> = bots
+            .iter()
+            .filter(|bot| {
+                bot.is_active()
+                    && !bot
+                        .name
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+            })
+            .map(|bot| MentionBot {
+                id: bot.id,
+                name: bot.name.clone(),
+                avatar: bot.avatar,
+            })
+            .collect();
+        entries.sort_by_key(|bot| bot.id);
+        Self(entries)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BotMention {
     pub range: Range<usize>,
     id: Uuid,
@@ -22,7 +54,7 @@ pub(super) struct BotMention {
 }
 
 impl BotMention {
-    pub(super) fn find(source: &str, bots: &[Bot]) -> Vec<Self> {
+    pub(super) fn find(source: &str, bots: &MentionRegistry) -> Vec<Self> {
         let mut mentions = Vec::new();
         let mut end = 0;
         for (start, _) in source.match_indices('@') {
@@ -31,14 +63,8 @@ impl BotMention {
             }
             let suffix = &source[start + 1..];
             let matched = bots
+                .0
                 .iter()
-                .filter(|bot| {
-                    bot.is_active()
-                        && !bot
-                            .name
-                            .chars()
-                            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
-                })
                 .filter_map(|bot| {
                     let len = suffix
                         .char_indices()
@@ -65,6 +91,15 @@ impl BotMention {
                 })
                 .max_by_key(|(_, end)| *end);
             if let Some((bot, matched_end)) = matched {
+                if bots
+                    .0
+                    .iter()
+                    .filter(|candidate| candidate.name.to_lowercase() == bot.name.to_lowercase())
+                    .count()
+                    > 1
+                {
+                    continue;
+                }
                 end = matched_end;
                 mentions.push(Self {
                     range: start..end,
@@ -78,11 +113,16 @@ impl BotMention {
         mentions
     }
 
-    pub(super) fn in_markdown(source: &str, bots: &[Bot]) -> Vec<Self> {
+    pub(super) fn in_markdown(source: &str, bots: &MentionRegistry) -> Vec<Self> {
         if !source.contains('@') {
             return Vec::new();
         }
-        fn visit(node: &Node, source: &str, bots: &[Bot], mentions: &mut Vec<BotMention>) {
+        fn visit(
+            node: &Node,
+            source: &str,
+            bots: &MentionRegistry,
+            mentions: &mut Vec<BotMention>,
+        ) {
             match node {
                 Node::Link(_)
                 | Node::LinkReference(_)
@@ -241,7 +281,7 @@ impl MarkdownPlugin for MentionPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotMention, MentionDisplay};
+    use super::{BotMention, MentionDisplay, MentionRegistry};
     use crate::api::Bot;
     use uuid::Uuid;
 
@@ -252,7 +292,7 @@ mod tests {
 
     #[test]
     fn full_names_match_at_boundaries_and_the_longest_name_wins() {
-        let bots = vec![bot(1, "Scout"), bot(2, "Scout Comp"), bot(3, "日報")];
+        let bots = MentionRegistry::new(&[bot(1, "Scout"), bot(2, "Scout Comp"), bot(3, "日報")]);
         let source = "Hi @scout comp, compare with @日報. Email me@Scout and @Scouting stay plain.";
         let matches = BotMention::find(source, &bots);
         assert_eq!(
@@ -272,7 +312,14 @@ mod tests {
         let mut deleted = bot(2, "Removed");
         deleted.cleanup =
             Some(serde_json::from_value(serde_json::json!({"state":"done","error":null})).unwrap());
-        let bots = vec![bot(1, "Scout"), bot(3, "e"), bot(4, "Line\nBreak"), deleted];
+        let bots = MentionRegistry::new(&[
+            bot(1, "Scout"),
+            bot(3, "e"),
+            bot(4, "Line\nBreak"),
+            bot(5, "Tab\tName"),
+            bot(6, "Line\u{2028}Name"),
+            deleted,
+        ]);
         for source in [
             "@Missing",
             "@Removed",
@@ -281,6 +328,8 @@ mod tests {
             "@Scoutish",
             "@e\u{301}",
             "@Line\nBreak",
+            "@Tab\tName",
+            "@Line\u{2028}Name",
         ] {
             assert!(BotMention::find(source, &bots).is_empty(), "{source}");
         }
@@ -289,7 +338,7 @@ mod tests {
 
     #[test]
     fn markdown_only_decorates_prose_and_keeps_code_and_links_intact() {
-        let bots = vec![bot(1, "Scout Comp")];
+        let bots = MentionRegistry::new(&[bot(1, "Scout Comp")]);
         let source = "Ask **@Scout Comp**. `@Scout Comp`\n\n```text\n@Scout Comp\n```\n\n[visit @Scout Comp](https://example.test/@Scout) and \\@Scout Comp.";
         let matches = BotMention::in_markdown(source, &bots);
         assert_eq!(matches.len(), 1);
@@ -307,7 +356,10 @@ mod tests {
     #[test]
     fn display_offsets_map_back_to_original_message_bytes() {
         let source = "Hé @Scout and @日報 finish.";
-        let matches = BotMention::find(source, &[bot(1, "Scout"), bot(2, "日報")]);
+        let matches = BotMention::find(
+            source,
+            &MentionRegistry::new(&[bot(1, "Scout"), bot(2, "日報")]),
+        );
         let display = MentionDisplay::new(source, &matches);
         assert_eq!(display.source_bytes(0), 0);
         for (original, replacement) in &display.replacements {
@@ -318,5 +370,18 @@ mod tests {
         assert_eq!(display.source_bytes(display.text.len()), source.len());
         let plain = MentionDisplay::new("no mentions ✓", &[]);
         assert_eq!(plain.source_bytes(plain.text.len()), "no mentions ✓".len());
+    }
+
+    #[test]
+    fn ambiguous_names_stay_plain_instead_of_showing_an_arbitrary_avatar() {
+        let bots = MentionRegistry::new(&[bot(1, "Scout"), bot(2, "SCOUT"), bot(3, "Todo")]);
+        let source = "Ask @Scout and @Todo";
+        let matches = BotMention::find(source, &bots);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, Uuid::from_u128(3));
+        assert_eq!(
+            BotMention::content(source, &matches).text().as_ref(),
+            source
+        );
     }
 }

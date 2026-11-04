@@ -1,7 +1,6 @@
-use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin};
+use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
-use crate::api::Bot;
 use gpui_kit::base::text::{MarkdownExtensions, TextView};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
@@ -18,6 +17,7 @@ pub(super) enum RowFormat {
 pub(super) struct RowText {
     source: String,
     mentions: Vec<BotMention>,
+    bots: Arc<MentionRegistry>,
     display: MentionDisplay,
     widget: Widget,
 }
@@ -35,7 +35,7 @@ impl RowText {
         key: RowKey,
         source: String,
         format: RowFormat,
-        bots: &[Bot],
+        bots: &Arc<MentionRegistry>,
         window: &mut Window,
         cx: &mut Context<ElseApp>,
     ) -> Self {
@@ -79,6 +79,7 @@ impl RowText {
         Self {
             source,
             mentions,
+            bots: bots.clone(),
             display,
             widget,
         }
@@ -119,14 +120,18 @@ impl RowText {
     pub(super) fn sync(
         &mut self,
         source: String,
-        bots: &[Bot],
+        bots: &Arc<MentionRegistry>,
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
+        if self.source == source && Arc::ptr_eq(&self.bots, bots) {
+            return false;
+        }
         let mentions = match self.format() {
             RowFormat::Plain => BotMention::find(&source, bots),
             RowFormat::Markdown => BotMention::in_markdown(&source, bots),
         };
+        self.bots = bots.clone();
         if self.source == source && self.mentions == mentions {
             return false;
         }

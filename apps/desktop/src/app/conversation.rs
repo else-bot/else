@@ -396,13 +396,15 @@ impl ElseApp {
         for (key, text, format) in texts {
             match view.texts.get_mut(&key) {
                 Some(row) if row.format() == format => {
-                    if row.sync(text, &self.bots, window, cx) {
+                    if row.sync(text, &self.mention_bots, window, cx) {
                         changed.push(key);
                     }
                 }
                 _ => {
-                    view.texts
-                        .insert(key, RowText::new(key, text, format, &self.bots, window, cx));
+                    view.texts.insert(
+                        key,
+                        RowText::new(key, text, format, &self.mention_bots, window, cx),
+                    );
                     created = true;
                 }
             }

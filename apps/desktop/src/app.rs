@@ -180,6 +180,7 @@ pub struct ElseApp {
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
+    mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
     selected: Option<Uuid>,
@@ -257,6 +258,7 @@ impl ElseApp {
             connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
+            mention_bots: Default::default(),
             categories: Vec::new(),
             default_bot_id: None,
             selected: None,
@@ -412,6 +414,10 @@ impl ElseApp {
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
         self.bots = list.bots;
+        let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
+        if *self.mention_bots != mention_bots {
+            self.mention_bots = Arc::new(mention_bots);
+        }
         self.categories = list.categories;
         self.stopping.retain(|id| {
             self.bots
