@@ -195,7 +195,7 @@ process_pid() {
 need_api() {
 	[ -x "$CURRENT/bin/else-api" ] && return 0
 	[ -x "$CURRENT/bin/else-desktop" ] &&
-		die "this installation in $ELSE_HOME has only the desktop client; install the API with: elsebot update"
+		die "this installation in $ELSE_HOME has only the app; add the server with: elsebot update --both"
 	die "else.bot is not installed in $ELSE_HOME"
 }
 
@@ -255,7 +255,9 @@ cmd="${1:-status}"
 case "$cmd" in
 status)
 	echo "installed: $(installed else-api || installed else-desktop || echo none) ($ELSE_HOME)"
-	if is_active; then
+	if [ ! -x "$CURRENT/bin/else-api" ]; then
+		echo "API:       not on this machine (the app connects to a server elsewhere)"
+	elif is_active; then
 		echo "API:       running on http://$(api_addr), version $(running_version || echo unknown) ($ELSEBOT_MANAGER)"
 	else
 		echo "API:       stopped ($ELSEBOT_MANAGER)"
@@ -276,13 +278,18 @@ update)
 	ELSE_HOME="$ELSE_HOME" bash "$tmp" "$@"
 	;;
 desktop)
-	[ -x "$CURRENT/bin/else-desktop" ] || die "the desktop is not installed (server-only installation?)"
+	[ -x "$CURRENT/bin/else-desktop" ] || die "the app is not installed; add it with: elsebot update --both"
 	# From the configuration folder: the desktop also reads a `.env` in its
 	# working directory, and a checkout's (development settings) must not
-	# point it at another API or token.
+	# seed it with another API or token.
 	cd "$CONFIG"
-	ELSE_API_URL="http://$(api_addr)" ELSE_OWNER_TOKEN_FILE="$ELSE_HOME/data/owner-token" \
-		exec "$CURRENT/bin/else-desktop" "$@"
+	export ELSE_DESKTOP_CONFIG_FILE="$CONFIG/desktop.json"
+	# This machine's API only seeds the first launch; the server saved in
+	# the app wins.
+	if [ -x "$CURRENT/bin/else-api" ]; then
+		export ELSE_API_URL="http://$(api_addr)" ELSE_OWNER_TOKEN_FILE="$ELSE_HOME/data/owner-token"
+	fi
+	exec "$CURRENT/bin/else-desktop" "$@"
 	;;
 start) start ;;
 stop) stop ;;
@@ -321,6 +328,7 @@ home:        $ELSE_HOME
 source:      $ELSE_HOME/src
 release:     $(readlink "$CURRENT" 2>/dev/null || echo none)
 settings:    $CONFIG/.env
+app server:  $CONFIG/desktop.json
 data:        $ELSE_HOME/data
 logs:        $LOGS
 service:     $ELSEBOT_MANAGER ($where)

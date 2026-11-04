@@ -55,6 +55,14 @@ On Linux (Debian 12 or newer, Ubuntu 24.04 or newer, Arch Linux / Omarchy; x86_6
 curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash
 ```
 
+It first asks what this machine runs. Press Enter for both, or skip the question with `--both`, `--server-only`, or `--app-only` (for example `curl … | bash -s -- --app-only`):
+
+- **both**: the server and the app on one machine.
+- **server**: the API, bot computers, and everything bots need, on home hardware or a VPS.
+- **app**: only the desktop app, which connects to a server on another machine. It needs no Docker, KVM, Microsandbox, provider CLIs, or API service.
+
+Updates keep the choice. Adding a component keeps what is installed: `--app-only` on a server installs both, and nothing is deleted.
+
 It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
 
 - build tools, the SQLite CLI for optional SQL inspection, and the desktop's libraries;
@@ -63,7 +71,7 @@ It installs the latest release into `~/.else`, asking once before it installs an
 - Docker, only when the guest VM image must be built (about 15 minutes the first time; skip with `--skip-guest-image`). The installer starts the Docker service for the build but does not set it to start at boot. Once the image is loaded, later runs skip Docker;
 - `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`. The installer asks once whether the API should start at boot; if yes, it turns on lingering for your user with `loginctl enable-linger`, using sudo if needed. `--autostart` and `--no-autostart` choose without asking, and the choice is kept for updates.
 
-Bot computers need `/dev/kvm`, and the installer offers to add you to the `kvm` group. When it builds the guest image, it also offers to add you to the `docker` group. Log in again after a group change. Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
+With the server, bot computers need `/dev/kvm`, and the installer offers to add you to the `kvm` group. When it builds the guest image, it also offers to add you to the `docker` group. Log in again after a group change. Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
 On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, SQLite, Microsandbox, and the guest image. Before running it, install:
 
@@ -71,6 +79,33 @@ On macOS (Apple silicon), the same command installs everything on the Mac itself
 - OrbStack or Docker Desktop, running, when the guest image needs to be built.
 
 Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`. The API does not need Docker to run. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
+
+### Connect the app to a server
+
+When the app opens for the first time, it asks for the server's address and its owner token. On the same machine as the server, both are filled in. For another machine, print the token on the server:
+
+```sh
+cat ~/.else/data/owner-token
+```
+
+Then enter the address and paste the token. Press **Check connection**. **Continue** (or **Save** later) becomes available only after the server accepts that exact address and token. Any edit requires a new check. **Change server**, at the top of the window, opens the same form at any time. A failed check keeps the current connection.
+
+The app saves the server in `~/.else/config/desktop.json` (mode 0600). This saved choice wins over the launcher's defaults.
+
+The API listens only on `127.0.0.1` and accepts only loopback `Host` names. The app sends the owner token over plain `http://` only to this machine. Reach a remote server in one of two ways:
+
+- An SSH tunnel. Run `ssh -N -L 7878:127.0.0.1:7878 you@server` and keep it open. Then use `127.0.0.1:7878` as the address.
+- HTTPS through a reverse proxy on the server that forwards to `127.0.0.1:7878` and rewrites `Host` to it. A minimal [Caddy configuration](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#headers), with a certificate it obtains for your domain:
+
+  ```text
+  else.example.com {
+      reverse_proxy 127.0.0.1:7878 {
+          header_up Host {upstream_hostport}
+      }
+  }
+  ```
+
+  Then use `https://else.example.com` as the address. A bare address such as `else.example.com` means `https://`. The app checks the certificate against the system's trust store and never follows redirects.
 
 ### Update
 
@@ -90,7 +125,8 @@ Alpha installations with a non-SQLite database URL stop the API and set up SQLit
   src/          the release's source (git checkout at the release tag)
   versions/     built releases; current -> versions/<version>
   bin/          elsebot, else-api, else-desktop
-  config/       .env (settings, 0600), elsebot.env (service settings)
+  config/       .env (server settings, 0600), elsebot.env (service settings),
+                components (what this machine runs), desktop.json (the app's server, 0600)
   data/         else.sqlite3, credentials, bot computers, artifacts, backups
   bots/         each bot's project directory (bots/<bot id>), mounted as ~/work in its computer
   toolchain/    Rust, only for building else.bot
@@ -108,7 +144,7 @@ Outside `~/.else`: the system packages, the guest image in Docker when the insta
 | Command | What it does |
 | --- | --- |
 | `elsebot status` | Installed and running versions; whether the API is up |
-| `elsebot desktop` | Open the app |
+| `elsebot desktop` | Open the app (the first launch asks which server to use) |
 | `elsebot update` | Install the latest release (see above) |
 | `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
 | `elsebot logs` | Follow the API log |

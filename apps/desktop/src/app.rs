@@ -71,8 +71,6 @@ pub enum Connection {
     Disconnected(String),
     /// Retrying will not help until the token is fixed.
     InvalidCredentials(String),
-    /// Configuration could not be loaded at all.
-    Misconfigured(String),
 }
 
 /// An owner message not yet confirmed by the server.
@@ -89,7 +87,7 @@ struct PendingSend {
 }
 
 pub struct ElseApp {
-    client: Option<Arc<Client>>,
+    client: Arc<Client>,
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
@@ -120,17 +118,9 @@ pub struct ElseApp {
 }
 
 impl ElseApp {
-    pub fn new(
-        client: Result<Arc<Client>, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar_focus = cx.focus_handle();
         sidebar_focus.focus(window, cx);
-        let (client, connection) = match client {
-            Ok(client) => (Some(client), Connection::Connecting),
-            Err(message) => (None, Connection::Misconfigured(message)),
-        };
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Message… (Enter to send, Shift+Enter for a new line)")
@@ -148,7 +138,7 @@ impl ElseApp {
         );
         let mut app = Self {
             client,
-            connection,
+            connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
             categories: Vec::new(),
@@ -183,9 +173,7 @@ impl ElseApp {
     /// current; `bot:<id>` channels stream the open conversation.
     /// Capabilities are fetched over HTTP each time the connection opens.
     fn start_live(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         let Live {
             commands,
             mut events,
@@ -271,9 +259,7 @@ impl ElseApp {
     /// Fetch the bot list once over HTTP, right after this window changed
     /// it, without waiting for the `bots` channel.
     fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(list) = client.bots().await {
                 let _ = this.update_in(cx, |app, window, cx| app.apply_bots(list, window, cx));
@@ -408,9 +394,7 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client
                 .send(
@@ -482,9 +466,7 @@ impl ElseApp {
     /// After reconnecting, ask the server about sends whose outcome is
     /// unknown. Found ones are shown; missing ones stay retryable.
     fn resolve_unknown_sends(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         for (bot, list) in &self.pending {
             for pending in list.iter().filter(|p| p.unknown.is_some()) {
                 let (client, bot, request_id) = (client.clone(), *bot, pending.request_id);
@@ -566,7 +548,7 @@ impl ElseApp {
     // ----- Stop, create, delete ---------------------------------------------
 
     fn stop_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(bot)) = (self.client.clone(), self.selected) else {
+        let (client, Some(bot)) = (self.client.clone(), self.selected) else {
             return;
         };
         self.stopping.insert(bot);

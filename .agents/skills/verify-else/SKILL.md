@@ -81,11 +81,14 @@ Always name the box explicitly; never double-drive another agent's box.
 omabox run -b BOX -d -- python3 .agents/skills/verify-else/verify.py --session native
 omabox wait -b BOX until -- python3 .agents/skills/verify-else/verify.py --probe native
 omabox run -b BOX -- python3 .agents/skills/verify-else/verify.py --probe native
-omabox run -b BOX -d -- sh -c '. "$HOME/else-verification/native/desktop.env"; export ELSE_API_URL ELSE_OWNER_TOKEN_FILE; cd /tmp; exec /absolute/checkout/target/debug/else-desktop'
+omabox run -b BOX -d -- sh -c '. "$HOME/else-verification/native/desktop.env"; export ELSE_API_URL ELSE_OWNER_TOKEN_FILE ELSE_DESKTOP_CONFIG_FILE; cd /tmp; exec /absolute/checkout/target/debug/else-desktop'
 omabox wait -b BOX window else-bot
 ```
 
-Replace `/absolute/checkout` with this checkout's absolute path. The session
+Replace `/absolute/checkout` with this checkout's absolute path. The desktop
+opens on its connection editor, seeded with the session's address and token,
+and keeps its profile in the session's evidence directory: press Check
+connection, then Continue. The session
 helper creates a fresh usable installation and completes onboarding through
 `POST /v1/onboarding`. It saves a supported Codex profile but starts no Codex
 turn. `--probe` defaults to a read-only bot listing; `--path`, `--method`, and

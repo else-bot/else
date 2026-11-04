@@ -154,11 +154,11 @@ impl Client {
 
     fn ws_request(&self) -> tokio_tungstenite::tungstenite::handshake::client::Request {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let url = format!(
-            "ws://{}/v1/ws",
-            self.origin.as_str().trim_start_matches("http://")
-        );
-        let mut request = url.into_client_request().expect("valid ws URL");
+        let mut request = self
+            .origin
+            .ws_url()
+            .into_client_request()
+            .expect("valid ws URL");
         request
             .headers_mut()
             .insert(AUTHORIZATION, self.auth.clone());
@@ -204,7 +204,12 @@ impl Client {
                 _ = events.closed() => return,
                 result = tokio::time::timeout(
                     HANDSHAKE,
-                    tokio_tungstenite::connect_async(self.ws_request()),
+                    tokio_tungstenite::connect_async_tls_with_config(
+                        self.ws_request(),
+                        None,
+                        false,
+                        Some(tokio_tungstenite::Connector::Rustls(self.tls.clone())),
+                    ),
                 ) => result,
             };
             let mut socket = match connected {

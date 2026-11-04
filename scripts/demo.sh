@@ -51,6 +51,7 @@ api) exec cargo run -q -p else-api -- serve ;;
 desktop)
 	export ELSE_API_URL="http://127.0.0.1:$PORT"
 	export ELSE_OWNER_TOKEN_FILE="$DEMO/data/owner-token"
+	export ELSE_DESKTOP_CONFIG_FILE="$DEMO/desktop/desktop.json"
 	exec cargo run -q -p else-desktop
 	;;
 curl)

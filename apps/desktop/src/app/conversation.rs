@@ -48,7 +48,7 @@ impl ConversationView {
 
 impl ElseApp {
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(view)) = (self.client.clone(), self.view.as_mut()) else {
+        let (client, Some(view)) = (self.client.clone(), self.view.as_mut()) else {
             return;
         };
         let bot = view.bot_id;
@@ -150,9 +150,7 @@ impl ElseApp {
     }
 
     pub(super) fn load_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         let Some(view) = self.view.as_mut() else {
             return;
         };

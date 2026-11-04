@@ -14,7 +14,7 @@ This procedure exercises the real desktop, API, PostgreSQL, and host Codex on a 
 
 Run each command from the repository root. Use a second terminal for the desktop.
 
-1. **Fresh installation.** `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop`. The window shows Connected and the main bot Assistant with its Main marker. The header offers Codex (selected) and Synthetic (test).
+1. **Fresh installation.** `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop`. The connection editor opens first, filled in with the demo API: press **Check connection**, then **Continue**. The window shows Connected and the main bot Assistant with its Main marker. The header offers Codex (selected) and Synthetic (test).
 2. **Two bots.** Press Ctrl+Shift+N, create Work ("Help with my work projects"), then Family ("Family logistics: school, appointments, reminders"). Each new bot is selected with the composer focused, and opening it starts no provider.
 3. **Separate context through Codex.** In Work send "Synthetic test: my project codename is BLUEFIN. Reply OK." In Family send "Synthetic test: the school is Maple Elementary. Reply OK." Then ask Work "What is my project codename? One word." (BLUEFIN) and Family "Do you know a project codename? Answer NONE if not." (NONE). Replies stream into the transcript.
 4. **Profile.** `scripts/demo.sh sql "select reported_profile from turns where provider_id='codex'"` shows `gpt-6.1-sol`, `medium`, `priority` for every Codex turn.
