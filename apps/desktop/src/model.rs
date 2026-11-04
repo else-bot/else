@@ -385,11 +385,15 @@ impl Conversation {
         }
     }
 
+    pub fn turns_in_order(&self) -> Vec<&Turn> {
+        let mut turns: Vec<_> = self.turns.values().collect();
+        turns.sort_by_key(|turn| turn.turn_no);
+        turns
+    }
+
     /// Every secret request of the loaded turns, by turn number.
     pub fn secret_requests(&self) -> Vec<(&Turn, &SecretRequest)> {
-        let mut turns: Vec<&Turn> = self.turns.values().collect();
-        turns.sort_by_key(|t| t.turn_no);
-        turns
+        self.turns_in_order()
             .into_iter()
             .flat_map(|t| t.secret_requests.iter().map(move |r| (t, r)))
             .collect()
@@ -404,9 +408,7 @@ impl Conversation {
 
     /// Every question of the loaded turns, by turn number.
     pub fn questions(&self) -> Vec<(&Turn, &Question)> {
-        let mut turns: Vec<&Turn> = self.turns.values().collect();
-        turns.sort_by_key(|t| t.turn_no);
-        turns
+        self.turns_in_order()
             .into_iter()
             .flat_map(|t| t.questions.iter().map(move |q| (t, q)))
             .collect()

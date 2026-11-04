@@ -260,29 +260,29 @@ impl ElseApp {
         }
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        // Settled question cards stay before the continuation they authorized.
-        let mut requests: Vec<(Uuid, RowKey, Option<Uuid>)> = conversation
+        let mut requests: Vec<(RowKey, Option<Uuid>)> = conversation
             .into_iter()
             .flat_map(|c| {
-                c.secret_requests()
-                    .into_iter()
-                    .map(|(turn, request)| (turn.id, RowKey::SecretRequest(request.id), None))
-                    .chain(c.questions().into_iter().map(|(turn, question)| {
-                        (
-                            turn.id,
-                            RowKey::Question(question.id),
-                            c.question_anchor(turn.id, question.settled_at),
-                        )
-                    }))
+                c.turns_in_order().into_iter().flat_map(move |turn| {
+                    turn.secret_requests
+                        .iter()
+                        .map(move |request| {
+                            (
+                                RowKey::SecretRequest(request.id),
+                                c.question_anchor(turn.id, None),
+                            )
+                        })
+                        .chain(turn.questions.iter().map(move |question| {
+                            (
+                                RowKey::Question(question.id),
+                                c.question_anchor(turn.id, question.settled_at),
+                            )
+                        }))
+                })
             })
             .collect();
-        requests.sort_by_key(|(turn, _, _)| {
-            conversation
-                .and_then(|c| c.turn(*turn))
-                .map_or(i64::MAX, |t| t.turn_no)
-        });
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
-        for (ix, item) in items.iter().enumerate() {
+        for item in &items {
             rows.push(RowKey::Item(item.id));
             let format = if item.kind == "assistant" {
                 RowFormat::Markdown
@@ -290,18 +290,15 @@ impl ElseApp {
                 RowFormat::Plain
             };
             texts.push((RowKey::Item(item.id), item.text.clone(), format));
-            let last_in_turn = items
-                .get(ix + 1)
-                .is_none_or(|next| next.turn_id != item.turn_id);
-            requests.retain(|(turn, key, anchor)| {
-                let here = anchor.map_or(*turn == item.turn_id && last_in_turn, |id| id == item.id);
+            requests.retain(|(key, anchor)| {
+                let here = *anchor == Some(item.id);
                 if here {
                     rows.push(*key);
                 }
                 !here
             });
         }
-        rows.extend(requests.into_iter().map(|(_, key, _)| key));
+        rows.extend(requests.into_iter().map(|(key, _)| key));
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
             texts.push((
