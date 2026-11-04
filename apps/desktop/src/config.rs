@@ -1,5 +1,5 @@
 //! Desktop configuration: the saved server profile (API origin and owner
-//! token), and the launcher settings that seed it on first launch.
+//! token) and the private files it is read from.
 //!
 //! The token never appears in URLs, logs, or error messages, and it is only
 //! ever sent to the one configured origin.
@@ -78,6 +78,11 @@ impl Origin {
         &self.serialized
     }
 
+    /// Whether the owner token sent here stays on this machine.
+    pub fn is_loopback(&self) -> bool {
+        Url::parse(&self.serialized).is_ok_and(|url| is_loopback(&url))
+    }
+
     /// The WebSocket endpoint: `wss://` for an `https://` origin.
     pub fn ws_url(&self) -> String {
         let (_, rest) = self
@@ -138,6 +143,15 @@ pub struct Profile {
     pub token: OwnerToken,
 }
 
+impl Profile {
+    pub fn parse(origin: &str, token: &str) -> Result<Self, String> {
+        Ok(Self {
+            origin: Origin::parse(origin)?,
+            token: OwnerToken::parse(token)?,
+        })
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredProfile {
     origin: String,
@@ -153,6 +167,15 @@ pub struct ProfileStore {
 }
 
 impl ProfileStore {
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    #[cfg(test)]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let path = match (
             get("ELSE_DESKTOP_CONFIG_FILE"),
@@ -250,47 +273,12 @@ impl ProfileStore {
     }
 }
 
-/// What the connection editor starts with on first launch: the launcher's
-/// `ELSE_API_URL` and owner token (`ELSE_OWNER_TOKEN`, else the token file),
-/// each empty when unset or unreadable.
-#[derive(Debug, Clone, Default)]
-pub struct Seed {
-    pub origin: String,
-    pub token: Option<OwnerToken>,
-}
-
-impl Seed {
-    pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
-        let token = match get("ELSE_OWNER_TOKEN") {
-            Some(value) => OwnerToken::parse(&value).ok(),
-            None => token_file(&get).and_then(|path| read_token_file(&path).ok()),
-        };
-        Self {
-            origin: get("ELSE_API_URL").unwrap_or_default(),
-            token,
-        }
-    }
-}
-
-fn token_file(get: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    if let Some(path) = get("ELSE_OWNER_TOKEN_FILE").or_else(|| get("OWNER_TOKEN_FILE")) {
-        return Some(PathBuf::from(path));
-    }
-    let data = match (get("ELSE_DATA_DIR"), get("XDG_DATA_HOME"), get("HOME")) {
-        (Some(dir), _, _) => PathBuf::from(dir),
-        (None, Some(xdg), _) => Path::new(&xdg).join("else-bot"),
-        (None, None, Some(home)) => Path::new(&home).join(".local/share/else-bot"),
-        _ => return None,
-    };
-    Some(data.join("owner-token"))
-}
-
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: getuid has no preconditions.
     unsafe { libc::getuid() }
 }
 
-fn read_private(path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {
     let shown = path.display();
     let mut file = match OpenOptions::new()
         .read(true)
@@ -319,7 +307,7 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-fn read_token_file(path: &Path) -> Result<OwnerToken, String> {
+pub(crate) fn read_token_file(path: &Path) -> Result<OwnerToken, String> {
     let text = read_private(path)?.ok_or_else(|| {
         format!(
             "Owner token file {} not found; run `else-api setup` or set ELSE_OWNER_TOKEN_FILE.",
@@ -560,25 +548,5 @@ mod tests {
             format!("{:?}", OwnerToken::parse(&token).unwrap()),
             "OwnerToken(<redacted>)"
         );
-    }
-
-    #[test]
-    fn seed_reads_the_launcher_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("owner-token");
-        std::fs::write(&file, "B".repeat(43)).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let file: &'static str = Box::leak(file.to_str().unwrap().to_owned().into_boxed_str());
-        let seed = Seed::from_env(env(Box::leak(Box::new([
-            ("ELSE_API_URL", "http://127.0.0.1:7878"),
-            ("ELSE_OWNER_TOKEN_FILE", file),
-        ]))));
-        assert_eq!(seed.origin, "http://127.0.0.1:7878");
-        assert_eq!(seed.token.unwrap().expose(), "B".repeat(43));
-        let seed = Seed::from_env(env(&[("HOME", "/nonexistent")]));
-        assert_eq!((seed.origin.as_str(), seed.token), ("", None));
-        let token: &'static str = Box::leak("C".repeat(43).into_boxed_str());
-        let seed = Seed::from_env(env(Box::leak(Box::new([("ELSE_OWNER_TOKEN", token)]))));
-        assert_eq!(seed.token.unwrap().expose(), token);
     }
 }

@@ -7,6 +7,7 @@ mod avatar;
 mod config;
 mod connection;
 mod inbox;
+mod launch;
 mod model;
 mod preferences;
 mod profile_picker;
@@ -33,7 +34,10 @@ gpui_kit::assets::icon_assets!(
         ArrowUp,
         ArrowDown,
         SquarePen,
-        FolderPlus
+        FolderPlus,
+        Laptop,
+        Eye,
+        EyeOff
     ]
 );
 
@@ -58,6 +62,21 @@ impl AssetSource for AppAssets {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn settings() -> impl Fn(&str) -> Option<String> {
+    let dotenv: Vec<(String, String)> = dotenvy::dotenv_iter()
+        .map(|iter| iter.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    move |name| {
+        env(name).or_else(|| {
+            dotenv
+                .iter()
+                .rev()
+                .find(|(key, value)| key == name && !value.is_empty())
+                .map(|(_, value)| value.clone())
+        })
+    }
 }
 
 /// macOS draws its traffic lights over the app's own title bar; elsewhere
@@ -89,7 +108,6 @@ fn main() {
         println!("else-desktop {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let _ = dotenvy::dotenv();
     // HTTP and streaming run on this runtime, separate from GPUI's executor.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -97,10 +115,11 @@ fn main() {
         .thread_name("else-api-client")
         .build()
         .expect("start the API client runtime");
-    let store = config::ProfileStore::from_env(env);
-    let seed = config::Seed::from_env(env);
+    let get = settings();
+    let exe = std::env::current_exe().ok();
+    let launch = launch::Launch::discover(&get, exe.as_deref());
     let handle = runtime.handle().clone();
-    let title = env("ELSE_DESKTOP_TITLE").unwrap_or_else(|| "else.bot".into());
+    let title = get("ELSE_DESKTOP_TITLE").unwrap_or_else(|| "else.bot".into());
 
     gpui_kit::application()
         .with_assets(AppAssets)
@@ -129,7 +148,7 @@ fn main() {
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 appearance::observe_window(window, cx);
-                cx.new(|cx| connection::Shell::new(store, seed, handle, window, cx))
+                cx.new(|cx| connection::Shell::new(launch, handle, window, cx))
             })
             .expect("open the else.bot window");
         });

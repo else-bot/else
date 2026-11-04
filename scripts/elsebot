@@ -30,11 +30,34 @@ RUN="$ELSE_HOME/run"
 ELSEBOT_SERVICE=else-api
 ELSEBOT_MANAGER=process
 ELSEBOT_AUTOSTART=0
+ELSEBOT_APP=""
 # shellcheck disable=SC1091
 [ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
 
 die() { echo "elsebot: $1" >&2; exit 1; }
-setting() { [ -f "$CONFIG/.env" ] && sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1; }
+dotenv_value() {
+	local in="$1" out="" quote="" c i
+	for ((i = 0; i < ${#in}; i++)); do
+		c="${in:i:1}"
+		if [ "$quote" = "'" ]; then
+			if [ "$c" = "'" ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = '\' ]; then
+			i=$((i + 1))
+			c="${in:i:1}"
+			if [ "$c" = n ]; then out+=$'\n'; else out+="$c"; fi
+		elif [ "$quote" = '"' ]; then
+			if [ "$c" = '"' ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+			quote="$c"
+		elif [ "$c" = ' ' ] || [ "$c" = $'\t' ]; then
+			break
+		else
+			out+="$c"
+		fi
+	done
+	printf '%s' "$out"
+}
+setting() { [ -f "$CONFIG/.env" ] && dotenv_value "$(sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1)"; }
 api_addr() { local bind; bind="$(setting ELSE_API_BIND)"; echo "${bind:-127.0.0.1:7878}"; }
 installed() { [ -x "$CURRENT/bin/$1" ] && "$CURRENT/bin/$1" --version 2>/dev/null | awk '{print $2}'; }
 running_version() {
@@ -279,17 +302,20 @@ update)
 	;;
 desktop)
 	[ -x "$CURRENT/bin/else-desktop" ] || die "the app is not installed; add it with: elsebot update --both"
-	# From the configuration folder: the desktop also reads a `.env` in its
-	# working directory, and a checkout's (development settings) must not
-	# seed it with another API or token.
-	cd "$CONFIG"
-	export ELSE_DESKTOP_CONFIG_FILE="$CONFIG/desktop.json"
-	# This machine's API only seeds the first launch; the server saved in
-	# the app wins.
-	if [ -x "$CURRENT/bin/else-api" ]; then
-		export ELSE_API_URL="http://$(api_addr)" ELSE_OWNER_TOKEN_FILE="$ELSE_HOME/data/owner-token"
+	case "${1:-}" in version | --version | -V) exec "$CURRENT/bin/else-desktop" "$@" ;; esac
+	cd /
+	unset ELSE_DESKTOP_CONFIG_FILE ELSE_API_URL ELSE_OWNER_TOKEN ELSE_OWNER_TOKEN_FILE OWNER_TOKEN_FILE ELSE_DATA_DIR
+	if [ "$(uname -s)" = Darwin ]; then
+		[ -n "$ELSEBOT_APP" ] && [ -d "$ELSEBOT_APP" ] ||
+			die "the app is missing${ELSEBOT_APP:+ at $ELSEBOT_APP}; publish it again with: elsebot update"
+		# macOS runs it like Finder does: it outlives this terminal, and it
+		# finds this installation from the app itself.
+		if [ $# -gt 0 ]; then exec open -a "$ELSEBOT_APP" --args "$@"; fi
+		exec open -a "$ELSEBOT_APP"
 	fi
-	exec "$CURRENT/bin/else-desktop" "$@"
+	# This installation's settings only: none of a development shell's, and
+	# from / so no checkout's .env applies.
+	ELSE_HOME="$ELSE_HOME" exec "$CURRENT/bin/else-desktop" "$@"
 	;;
 start) start ;;
 stop) stop ;;
@@ -329,7 +355,8 @@ source:      $ELSE_HOME/src
 release:     $(readlink "$CURRENT" 2>/dev/null || echo none)
 settings:    $CONFIG/.env
 app server:  $CONFIG/desktop.json
-data:        $ELSE_HOME/data
+${ELSEBOT_APP:+app:         $ELSEBOT_APP
+}data:        $ELSE_HOME/data
 logs:        $LOGS
 service:     $ELSEBOT_MANAGER ($where)
 EOF

@@ -33,9 +33,9 @@ which macOS can write outside the private HOME. It never installs the app or
 a service.
 
 Select that exact app bundle when manually operating the host session.
-Check connection, then Continue. With `--welcome`, complete onboarding through
+Choose **Connect locally**. With `--welcome`, complete onboarding through
 the actual screen. Without it, the helper seeds onboarding as a fixture.
-The generated server address and token are already filled in.
+The generated server address and key are already loaded in the local card.
 
 `--fixture-provider` supplies [fake-codex.py](fake-codex.py) through the real
 Codex adapter. Its private auth file contains only `{}`. No provider account
@@ -112,3 +112,24 @@ TMPDIR=/tmp ELSE_LIVE_VM=1 cargo test -p else-api --locked --test computers_live
 
 Keep this result separate from offline or container coverage. Report missing
 virtualization, image, or runtime prerequisites as unavailable, never passed.
+
+### Check production close actions in a Lume guest
+
+After publishing an installation bundle and starting its disposable launchd API,
+run this check with the host's pinned Lume client environment. Substitute the
+owned run directory, guest app path, and fixture service label.
+
+```sh
+.else-dev/lume-client/bin/python scripts/test-macos-launch.py \
+    --run RUN \
+    --app /Users/lume/Applications/else.bot.app \
+    --service bot.else.YOUR_FIXTURE_SERVICE \
+    --output target/verification/production-close
+```
+
+The check launches the installed bundle for each action. Cmd+W, the Close Window
+menu item, and Cmd+Q must each end the desktop process while the same API PID
+survives. It preserves screenshots, action records, and results. It requires an
+existing owned Lume guest and never sends input to the host desktop. This check
+covers close actions only. Finder, pinned Dock launch, installed PATH commands,
+startup, updates, and credential isolation need separate production journeys.

@@ -1,0 +1,20 @@
+[2m2026-11-04T18:20:58.515767Z[0m [33m WARN[0m [2melse_api[0m[2m:[0m bot computers unavailable [3merror[0m[2m=[0mthe computer runtime is unavailable: this msb is not the verified runtime (msb 0.7.13); set ELSE_MSB_ALLOW_UNVERIFIED=1 after checking it
+[2m2026-11-04T18:20:58.519260Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API listening [3maddr[0m[2m=[0m127.0.0.1:7878
+[2m2026-11-04T18:20:58.571906Z[0m [32m INFO[0m [2melse_api::backup::worker[0m[2m:[0m backup set completed [3mset[0m[2m=[0m20261104T182058525Z-083b5bee [3mbytes[0m[2m=[0m504251
+[2m2026-11-04T18:21:37.407878Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m shutdown requested; draining connections
+[2m2026-11-04T18:21:37.408583Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API stopped
+[2m2026-11-04T18:21:37.983184Z[0m [33m WARN[0m [2melse_api[0m[2m:[0m bot computers unavailable [3merror[0m[2m=[0mthe computer runtime is unavailable: this msb is not the verified runtime (msb 0.7.13); set ELSE_MSB_ALLOW_UNVERIFIED=1 after checking it
+[2m2026-11-04T18:21:37.992983Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API listening [3maddr[0m[2m=[0m127.0.0.1:7878
+[2m2026-11-04T18:25:05.514832Z[0m [33m WARN[0m [2melse_api::memory_worker[0m[2m:[0m memory summary failed [3mbot[0m[2m=[0mb3cf8ecd-612d-491e-808d-7512b4c43ae9 [3mnode[0m[2m=[0mNodeId { start: 0, span: 1 } [3merror[0m[2m=[0mCodex returned an empty summary
+[2m2026-11-04T18:25:54.323736Z[0m [32m INFO[0m [2melse_api::http::maintenance[0m[2m:[0m prepared for an update; new work is refused until exit
+[2m2026-11-04T18:25:54.375840Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m shutdown requested; draining connections
+[2m2026-11-04T18:25:54.376309Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API stopped
+[2m2026-11-04T18:25:54.946006Z[0m [33m WARN[0m [2melse_api[0m[2m:[0m bot computers unavailable [3merror[0m[2m=[0mthe computer runtime is unavailable: this msb is not the verified runtime (msb 0.7.13); set ELSE_MSB_ALLOW_UNVERIFIED=1 after checking it
+[2m2026-11-04T18:25:54.948177Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API listening [3maddr[0m[2m=[0m127.0.0.1:7878
+[2m2026-11-04T18:26:08.174657Z[0m [32m INFO[0m [2melse_api::scheduler[0m[2m:[0m turn finished [3mturn[0m[2m=[0m5bc5e6a0-ce8e-45c5-b0a4-e45dc646e388 [3mprovider[0m[2m=[0mcodex [3moutcome[0m[2m=[0mCompleted
+[2m2026-11-04T18:26:13.414785Z[0m [33m WARN[0m [2melse_api::memory_worker[0m[2m:[0m memory summary failed [3mbot[0m[2m=[0mb3cf8ecd-612d-491e-808d-7512b4c43ae9 [3mnode[0m[2m=[0mNodeId { start: 0, span: 1 } [3merror[0m[2m=[0mCodex returned an empty summary
+[2m2026-11-04T18:28:21.101752Z[0m [33m WARN[0m [2melse_api::memory_worker[0m[2m:[0m memory summary failed [3mbot[0m[2m=[0mb3cf8ecd-612d-491e-808d-7512b4c43ae9 [3mnode[0m[2m=[0mNodeId { start: 0, span: 1 } [3merror[0m[2m=[0mCodex returned an empty summary
+[2m2026-11-04T18:32:28.759365Z[0m [33m WARN[0m [2melse_api::memory_worker[0m[2m:[0m memory summary failed [3mbot[0m[2m=[0mb3cf8ecd-612d-491e-808d-7512b4c43ae9 [3mnode[0m[2m=[0mNodeId { start: 0, span: 1 } [3merror[0m[2m=[0mCodex returned an empty summary
+[2m2026-11-04T18:36:11.104863Z[0m [32m INFO[0m [2melse_api::scheduler[0m[2m:[0m turn finished [3mturn[0m[2m=[0m0ff6fe10-7cc8-4b90-9daf-34ebca854067 [3mprovider[0m[2m=[0mcodex [3moutcome[0m[2m=[0mCompleted
+[2m2026-11-04T18:38:47.169650Z[0m [32m INFO[0m [2melse_api::scheduler[0m[2m:[0m turn finished [3mturn[0m[2m=[0m4fa30bd5-7877-4b9c-80bb-03b0314d6e65 [3mprovider[0m[2m=[0mcodex [3moutcome[0m[2m=[0mCompleted
+[2m2026-11-04T18:40:36.325749Z[0m [33m WARN[0m [2melse_api::memory_worker[0m[2m:[0m memory summary failed [3mbot[0m[2m=[0mb3cf8ecd-612d-491e-808d-7512b4c43ae9 [3mnode[0m[2m=[0mNodeId { start: 0, span: 1 } [3merror[0m[2m=[0mCodex returned an empty summary

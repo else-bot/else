@@ -1,0 +1,30 @@
+{
+  "tool": "type_text",
+  "arguments": {
+    "element_token": "s00000069:2",
+    "text": "https://other.example.com",
+    "delivery_mode": "background"
+  },
+  "is_error": false,
+  "text": "\u2705 Inserted 25 char(s) via CGEvent (30ms delay).",
+  "structured": {
+    "delivery": {
+      "delivered_count": 25,
+      "mode": "background"
+    },
+    "effect": "confirmed",
+    "evidence": [
+      {
+        "kind": "value_readback"
+      }
+    ],
+    "hint": "Three single actions in a row: send the next ones as one run_steps call. It runs them in order, stops at the first failure and returns what changed.",
+    "route": "synthetic_events",
+    "summary": "\u2705 Inserted 25 char(s) via CGEvent (30ms delay)."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

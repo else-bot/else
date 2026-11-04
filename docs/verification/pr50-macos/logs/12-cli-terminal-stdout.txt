@@ -1,0 +1,7 @@
+/Users/lume/.local/bin/elsebot
+else-desktop 0.0.12
+repeated CLI launches reuse PID=1014
+	runs = 1
+	pid = 1041
+cli-returned
+desktop alive after terminal quit

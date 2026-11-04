@@ -1,0 +1,33 @@
+[
+  {
+    "archive_member": "logs/35-running-old-after-update/before.json",
+    "sha256": "c37a75d7849f3b195a47ab9f7b62471e81f8dbbb58a1641324eb568169846195",
+    "captured_at": "2026-11-04T18:25:36Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 678.0,
+        "width": 1024.0,
+        "x": 0.0,
+        "y": 30.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 1014,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 60,
+      "z_index": 4
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_0000000000000023",
+    "window_title": "else.bot",
+    "screenshot_width": 1024,
+    "screenshot_height": 678
+  }
+]

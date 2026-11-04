@@ -1,0 +1,64 @@
+[
+  {
+    "archive_member": "logs/52-unreadable-error/before.json",
+    "sha256": "9c6a22214d11a7776dbd9d483f10b651fe2fdc2c8146e4e9276a0cb08a3e97f0",
+    "captured_at": "2026-11-04T18:28:18Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 680.0,
+        "width": 1024.0,
+        "x": 0.0,
+        "y": 30.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 1897,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 131,
+      "z_index": 4
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_0000000000000031",
+    "window_title": "else.bot",
+    "screenshot_width": 1024,
+    "screenshot_height": 680
+  },
+  {
+    "archive_member": "logs/52-unreadable-error/after.json",
+    "sha256": "cc52231b115300a7ab64fdef3a6de0b21ca65805b2c3cacb718f379109698857",
+    "captured_at": "2026-11-04T18:28:21Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 680.0,
+        "width": 1024.0,
+        "x": 0.0,
+        "y": 30.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 1897,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 131,
+      "z_index": 4
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_0000000000000032",
+    "window_title": "else.bot",
+    "screenshot_width": 1024,
+    "screenshot_height": 680
+  }
+]

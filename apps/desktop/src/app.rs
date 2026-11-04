@@ -112,7 +112,9 @@ pub fn install_menus(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &CloseWindow, cx| {
         if let Some(window) = cx.active_window() {
-            let _ = window.update(cx, |_, window, _| window.remove_window());
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            });
         }
     });
     cx.set_menus(vec![
@@ -214,7 +216,12 @@ pub struct ElseApp {
 }
 
 impl ElseApp {
-    pub fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: Arc<Client>,
+        preferences: crate::preferences::Preferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sidebar_focus = cx.focus_handle();
         sidebar_focus.focus(window, cx);
         let composer = cx.new(|cx| {
@@ -266,7 +273,7 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
-            preferences: crate::preferences::Preferences::load(),
+            preferences,
             _save_preferences: None,
             settings_open: false,
             settings: HashMap::new(),

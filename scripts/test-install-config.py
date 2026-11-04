@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Offline checks for installer components, database configuration, and release switching."""
+import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import plistlib
 import pty
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -395,6 +399,299 @@ class InstallerComponentTests(unittest.TestCase):
         self.assertFalse((self.else_home / "config/components").exists())
         self.assert_ok(self.install("--yes"))
         self.assertEqual(self.components(), "both")
+
+
+APP_HARNESS = DEFINITIONS + r'''
+DISTRO=macos
+COMPONENTS="${TEST_COMPONENTS:-both}"
+for version in "$@"; do
+    switch_to "$version"
+    install_commands
+done
+'''
+
+
+def stub(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+
+
+class MacAppTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home = Path(directory.name)
+        self.else_home = self.home / "custom"
+        for script in ("elsebot", "macos_app.py"):
+            stub(self.else_home / "src/scripts" / script, (ROOT / "scripts" / script).read_text())
+        for version in ("0.0.5", "0.0.6"):
+            stub(self.else_home / f"versions/{version}/bin/else-desktop",
+                 f'#!/bin/sh\necho "else-desktop {version}"\n')
+        self.app = self.else_home / "Applications/else.bot.app"
+
+    def install(self, *versions, else_home=None, **overrides):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "USER": "tester",
+               "ELSE_HOME": str(else_home or self.else_home), "ELSE_INSTALL_NO_SYSTEMD": "1",
+               "ELSE_AUTOSTART": "0", **overrides}
+        result = subprocess.run(["bash", "-c", APP_HARNESS, "install.sh", *versions], env=env,
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def executable(self, app=None):
+        return (app or self.app) / "Contents/MacOS/else-desktop"
+
+    def leftovers(self):
+        return sorted(p.name for p in self.app.parent.iterdir()
+                      if p.name not in {self.app.name, f".{self.app.name}.lock"})
+
+    def test_the_app_is_a_complete_copy_with_only_the_installation_root(self):
+        self.install("0.0.5")
+        parts = self.app / "Contents"
+        info = plistlib.loads((parts / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleIdentifier"], "bot.else.desktop")
+        self.assertEqual(info["CFBundleExecutable"], "else-desktop")
+        self.assertEqual(info["CFBundleShortVersionString"], "0.0.5")
+        self.assertNotIn("LSEnvironment", info)
+        self.assertEqual(json.loads((parts / "Resources/installation.json").read_text()),
+                         {"home": str(self.else_home.resolve())})
+        self.assertFalse(self.executable().is_symlink())
+        self.assertIn("0.0.5", self.executable().read_text())
+        self.assertIn(f"ELSEBOT_APP={self.app}\n", (self.else_home / "config/elsebot.env").read_text())
+        inode = self.executable().stat().st_ino
+        self.install("0.0.5")
+        self.assertEqual(self.executable().stat().st_ino, inode, "an unchanged app is kept")
+        self.assertEqual(self.leftovers(), [])
+
+    def test_update_and_rollback_republish_and_keep_a_running_copy(self):
+        self.install("0.0.5")
+        running = self.executable().open()
+        self.addCleanup(running.close)
+        self.install("0.0.6")
+        self.assertIn("0.0.6", self.executable().read_text())
+        info = plistlib.loads((self.app / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleVersion"], "0.0.6")
+        self.assertIn("0.0.5", running.read(), "the running app's file is unchanged")
+        self.install("0.0.6", "0.0.5")
+        self.assertIn("0.0.5", self.executable().read_text())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_an_interrupted_publication_is_recovered(self):
+        self.install("0.0.5")
+        old = self.app.parent / f".else.bot.app.{'0' * 32}.old"
+        self.app.rename(old)
+        staged = self.app.parent / f".else.bot.app.{'0' * 32}.new"
+        stub(staged / "Contents/MacOS/else-desktop", "partial")
+        (staged / "Contents/Resources").mkdir()
+        (staged / "Contents/Resources/installation.json").write_text(json.dumps({"home": str(self.else_home)}))
+        self.install("0.0.6")
+        self.assertIn("0.0.6", self.executable().read_text())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_an_app_of_another_installation_is_left_alone(self):
+        stub(self.executable(), "someone else's app")
+        result = subprocess.run([sys.executable, ROOT / "scripts/macos_app.py", "--binary",
+                                 self.else_home / "versions/0.0.5/bin/else-desktop", "--app", self.app,
+                                 "--home", self.else_home, "--version", "0.0.5"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(self.executable().read_text(), "someone else's app")
+
+    def test_recovery_preserves_unrelated_and_foreign_backups(self):
+        self.app.parent.mkdir(parents=True)
+        unrelated = self.app.parent / ".else.bot.app.backup"
+        stub(unrelated / "keep", "personal backup")
+        foreign = self.app.parent / f".else.bot.app.{'f' * 32}.old"
+        stub(foreign / "Contents/Resources/installation.json", '{"home":"/another-installation"}')
+        self.install("0.0.5")
+        self.assertEqual((unrelated / "keep").read_text(), "personal backup")
+        self.assertTrue(foreign.exists())
+        self.assertIn("0.0.5", self.executable().read_text())
+
+    def test_an_occupied_public_app_uses_this_installations_private_app(self):
+        default = self.home / ".else"
+        shutil.copytree(self.else_home, default, symlinks=True)
+        public = self.home / "Applications/else.bot.app"
+        stub(public / "Contents/MacOS/else-desktop", "someone else's app")
+        self.install("0.0.5", else_home=default)
+        private = default / "Applications/else.bot.app"
+        self.assertIn("0.0.5", (private / "Contents/MacOS/else-desktop").read_text())
+        self.assertIn(f"ELSEBOT_APP={private}\n", (default / "config/elsebot.env").read_text())
+        self.assertEqual((public / "Contents/MacOS/else-desktop").read_text(), "someone else's app")
+
+    def test_concurrent_publishers_leave_one_complete_app(self):
+        def publish(index):
+            version = ("0.0.5", "0.0.6")[index % 2]
+            return subprocess.run([sys.executable, ROOT / "scripts/macos_app.py", "--binary",
+                                   self.else_home / f"versions/{version}/bin/else-desktop", "--app", self.app,
+                                   "--home", self.else_home, "--version", version],
+                                  capture_output=True, text=True)
+        with ThreadPoolExecutor(4) as workers:
+            results = list(workers.map(publish, range(16)))
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        version = plistlib.loads((self.app / "Contents/Info.plist").read_bytes())["CFBundleVersion"]
+        self.assertIn(version, self.executable().read_text())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_the_default_installation_uses_the_users_applications(self):
+        default = self.home / ".else"
+        shutil.copytree(self.else_home, default, symlinks=True)
+        self.install("0.0.5", else_home=default)
+        app = self.home / "Applications/else.bot.app"
+        self.assertEqual(json.loads((app / "Contents/Resources/installation.json").read_text()),
+                         {"home": str(default.resolve())})
+
+    def test_an_update_through_a_home_alias_refreshes_the_same_public_app(self):
+        default = self.home / ".else"
+        shutil.copytree(self.else_home, default, symlinks=True)
+        self.install("0.0.5", else_home=default)
+        alias = self.home / "home-alias"
+        alias.symlink_to(self.home, target_is_directory=True)
+        self.install("0.0.6", else_home=default, HOME=str(alias))
+        app = self.home / "Applications/else.bot.app"
+        self.assertIn("0.0.6", (app / "Contents/MacOS/else-desktop").read_text())
+        self.assertFalse((default / "Applications/else.bot.app").exists())
+
+    def test_the_app_is_not_published_without_the_app_component(self):
+        self.install("0.0.5", TEST_COMPONENTS="server")
+        self.assertFalse(self.app.exists())
+        self.assertNotIn("ELSEBOT_APP", (self.else_home / "config/elsebot.env").read_text())
+
+
+class DesktopCommandTests(unittest.TestCase):
+    """`elsebot desktop` with stub uname, open, and desktop binaries."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.home = self.root / "else"
+        self.app = self.root / "Applications/else.bot.app"
+        stub(self.home / "bin/elsebot", (ROOT / "scripts/elsebot").read_text())
+        stub(self.home / "versions/0.0.6/bin/else-desktop", '#!/bin/sh\n'
+             'echo "desktop pwd=$(pwd) home=$ELSE_HOME url=${ELSE_API_URL:-none} '
+             'data=${ELSE_DATA_DIR:-none} args=$*" >"$RECORD"\n')
+        (self.home / "current").symlink_to("versions/0.0.6")
+        (self.home / "config").mkdir()
+        (self.home / "config/elsebot.env").write_text(f"ELSEBOT_MANAGER=process\nELSEBOT_APP={self.app}\n")
+        self.stubs = self.root / "stubs"
+        stub(self.stubs / "open", '#!/bin/sh\necho "open $*" >"$RECORD"\n')
+        self.app.mkdir(parents=True)
+
+    def desktop(self, system, *args):
+        stub(self.stubs / "uname", f"#!/bin/sh\necho {system}\n")
+        record = self.root / "record"
+        record.unlink(missing_ok=True)
+        env = {"PATH": f"{self.stubs}:{os.environ['PATH']}", "HOME": str(self.root), "RECORD": str(record),
+               "ELSE_API_URL": "http://127.0.0.1:1", "ELSE_DATA_DIR": "/checkout/data"}
+        result = subprocess.run([self.home / "bin/elsebot", "desktop", *args], env=env,
+                                capture_output=True, text=True, cwd=self.root)
+        return result, record.read_text().strip() if record.exists() else None
+
+    def test_macos_opens_the_installed_app_and_forwards_arguments(self):
+        result, record = self.desktop("Darwin", "--flag", "two words")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record, f"open -a {self.app} --args --flag two words")
+        _, record = self.desktop("Darwin")
+        self.assertEqual(record, f"open -a {self.app}")
+
+    def test_version_queries_run_the_binary_directly(self):
+        _, record = self.desktop("Darwin", "--version")
+        self.assertTrue(record.startswith("desktop "), record)
+        self.assertTrue(record.endswith("args=--version"), record)
+
+    def test_macos_without_the_app_says_how_to_publish_it(self):
+        self.app.rmdir()
+        result, record = self.desktop("Darwin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("elsebot update", result.stderr)
+        self.assertIsNone(record)
+
+    def test_linux_runs_the_binary_with_only_this_installation(self):
+        result, record = self.desktop("Linux", "--flag")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record, f"desktop pwd=/ home={self.home.resolve()} url=none data=none args=--flag")
+
+
+CONFIG_HARNESS = DEFINITIONS + r'''
+API_PORT=7878
+step() { :; }
+ok() { :; }
+write_config
+config_set ELSE_CODEX_BIN "$CODEX"
+config_set ELSE_CODEX_BIN "$CODEX"
+for key in DATABASE_URL ELSE_DATA_DIR ELSE_MSB_BIN ELSE_CODEX_BIN; do
+    printf '%s\0' "$(env_value "$key")"
+done
+'''
+TRICKY = "custom install it's \"x\" $HOME \\ #1"
+
+
+class DotenvConfigTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def write_config(self, home, codex="/usr/bin/codex"):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "USER": "tester",
+               "ELSE_HOME": str(home), "CODEX": codex}
+        result = subprocess.run(["bash", "-c", CONFIG_HARNESS], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split("\0")[:-1]
+
+    def test_special_characters_read_back_verbatim(self):
+        home = self.root / TRICKY
+        codex = "/opt/a b/co'dex\\"
+        self.assertEqual(self.write_config(home, codex), [
+            f"sqlite://{home}/data/else.sqlite3", f"{home}/data",
+            f"{home}/microsandbox/bin/msb", codex,
+        ])
+        config = (home / "config/.env").read_text()
+        self.assertIn("\nELSE_API_BIND=127.0.0.1:7878\n", config)
+        self.assertEqual(config.count("ELSE_CODEX_BIN="), 1)
+
+    def test_simple_values_stay_unquoted(self):
+        home = self.root / "plain"
+        self.write_config(home)
+        config = (home / "config/.env").read_text()
+        self.assertIn(f"\nDATABASE_URL=sqlite://{home}/data/else.sqlite3\n", config)
+        self.assertIn("\nELSE_CODEX_BIN=/usr/bin/codex\n", config)
+
+    def test_multiline_setting_is_rejected_without_echoing_it(self):
+        home = self.root / "multiline"
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "USER": "tester",
+               "ELSE_HOME": str(home), "CODEX": "/private-value\nsecond-line"}
+        result = subprocess.run(["bash", "-c", CONFIG_HARNESS], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a setting cannot span lines", result.stderr)
+        self.assertNotIn("private-value", result.stdout + result.stderr)
+        self.assertNotIn("ELSE_CODEX_BIN=", (home / "config/.env").read_text())
+
+    def test_elsebot_db_opens_the_configured_database(self):
+        home = self.root / TRICKY
+        self.write_config(home)
+        stub(home / "bin/elsebot", (ROOT / "scripts/elsebot").read_text())
+        stubs, record = self.root / "stubs", self.root / "record"
+        stub(stubs / "sqlite3", '#!/bin/sh\nfor a in "$@"; do printf "%s\\0" "$a"; done >"$RECORD"\n')
+        env = {"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(self.root), "RECORD": str(record)}
+        result = subprocess.run([home / "bin/elsebot", "db", "select 1"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record.read_text().split("\0")[:-1],
+                         ["-readonly", f"{home}/data/else.sqlite3", "select 1"])
+
+    @unittest.skipUnless(os.environ.get("ELSE_API_BIN"), "set ELSE_API_BIN to a built else-api")
+    def test_else_api_setup_reads_the_written_configuration(self):
+        home = self.root / "custom install it's"
+        self.write_config(home)
+        result = subprocess.run([os.environ["ELSE_API_BIN"], "setup"], cwd=home / "config",
+                                env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / "data/else.sqlite3").is_file(), result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

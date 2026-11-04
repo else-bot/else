@@ -1,0 +1,38 @@
+{
+  "tool": "press_key",
+  "arguments": {
+    "target": {
+      "kind": "window",
+      "pid": 3308,
+      "window_id": 354
+    },
+    "key": "w",
+    "modifiers": [
+      "cmd"
+    ]
+  },
+  "is_error": false,
+  "text": "\u2705 Pressed w on pid 3308.",
+  "structured": {
+    "delivery": {
+      "mode": "background"
+    },
+    "effect": "unverifiable",
+    "hint": "The key was sent but its effect is not confirmed. Read what changed before sending it again.",
+    "next_call": {
+      "arguments": {
+        "pid": 3308,
+        "since": "latest",
+        "window_id": 354
+      },
+      "tool": "get_window_state"
+    },
+    "route": "synthetic_events",
+    "summary": "\u2705 Pressed w on pid 3308."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

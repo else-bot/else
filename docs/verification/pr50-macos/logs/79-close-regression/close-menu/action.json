@@ -1,0 +1,22 @@
+{
+  "tool": "click",
+  "arguments": {
+    "element_token": "s00000043:77"
+  },
+  "is_error": false,
+  "text": "\u2705 Performed AXPress on [77] AXMenuItem \"Close Window\".\n\n\ud83d\udd00 Action caused a different app to become frontmost.",
+  "structured": {
+    "delivery": {
+      "mode": "background"
+    },
+    "effect": "unverifiable",
+    "hint": "The click was sent but nothing confirmed it. Read what changed before clicking again; a repeat can toggle or double-fire. Three single actions in a row: send the next ones as one run_steps call. It runs them in order, stops at the first failure and returns what changed.",
+    "route": "accessibility",
+    "summary": "\u2705 Performed AXPress on [77] AXMenuItem \"Close Window\".\n\n\ud83d\udd00 Action caused a different app to become frontmost."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

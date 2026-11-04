@@ -1,0 +1,91 @@
+{
+  "capabilities_authenticated": true,
+  "onboarding_required": true,
+  "profile_mode": "0o600",
+  "profile_fields": [
+    "origin",
+    "owner_token"
+  ],
+  "profile_origin": "http://127.0.0.1:7878",
+  "profile_key_matches": true
+}
+gui/501/bot.else.pr50-local = {
+	active count = 1
+	path = /Users/lume/.else/config/bot.else.pr50-local.plist
+	type = LaunchAgent
+	state = running
+
+	program = /Users/lume/.else/current/bin/else-api
+	arguments = {
+		/Users/lume/.else/current/bin/else-api
+		serve
+	}
+
+	working directory = /Users/lume/.else/config
+
+	stdout path = /Users/lume/.else/logs/else-api.log
+	stderr path = /Users/lume/.else/logs/else-api.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.RuXA374x91/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		PATH => /Users/lume/.else/bin:/Users/lume/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+		XPC_SERVICE_NAME => bot.else.pr50-local
+	}
+
+	domain = gui/501 [100002]
+	asid = 100002
+	minimum runtime = 5
+	exit timeout = 60
+	runs = 1
+	pid = 916
+	immediate reason = speculative
+	forks = 1
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 958
+		type = resource
+		state = active
+		active count = 1
+		name = bot.else.pr50-local
+	}
+
+	jetsam coalition = {
+		ID = 959
+		type = jetsam
+		state = active
+		active count = 1
+		name = bot.else.pr50-local
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+
+	properties = runatload | inferred program | system service | tle system
+}
+  PID  PPID COMMAND
+  835     1 /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop

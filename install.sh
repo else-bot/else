@@ -35,9 +35,9 @@
 # in Docker, the API's service (Linux: the systemd user unit
 # ~/.config/systemd/user/else-api.service, and lingering for your user when
 # it starts at boot; macOS: the launchd agent
-# ~/Library/LaunchAgents/bot.else.else-api.plist), and the links
-# ~/.local/bin/elsebot and ~/.local/share/applications/else-bot.desktop
-# (Linux).
+# ~/Library/LaunchAgents/bot.else.else-api.plist), the link
+# ~/.local/bin/elsebot, and the app: ~/.local/share/applications/else-bot.desktop
+# on Linux, a copy of the desktop in ~/Applications/else.bot.app on macOS.
 #
 # The API can start by itself (asked once, remembered; --autostart or
 # --no-autostart to choose): at boot on Linux, at login on macOS, where the
@@ -115,6 +115,8 @@ DATA="$ELSE_HOME/data"
 LOGS="$ELSE_HOME/logs"
 ENV_FILE="$CONFIG/.env"
 COMPONENTS_FILE="$CONFIG/components"
+APP="$ELSE_HOME/Applications/else.bot.app"
+[ "$ELSE_HOME" = "$HOME/.else" ] && APP="$HOME/Applications/else.bot.app"
 export RUSTUP_HOME="$TOOLCHAIN/rustup"
 export CARGO_HOME="$TOOLCHAIN/cargo"
 MSB="$MSB_PREFIX/bin/msb"
@@ -636,6 +638,13 @@ install_commands() {
 	fi
 	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\n' \
 		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env"
+	if [ "$DISTRO" = macos ] && want_app; then
+		if [ -d "$HOME/.else" ] && [ "$(cd "$ELSE_HOME" && pwd -P)" = "$(cd "$HOME/.else" && pwd -P)" ]; then
+			APP="$HOME/Applications/else.bot.app"
+		fi
+		publish_app
+		printf 'ELSEBOT_APP=%q\n' "$APP" >>"$CONFIG/elsebot.env"
+	fi
 	if want_server; then ln -sfn ../current/bin/else-api "$BIN/else-api"; fi
 	if want_app; then ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"; fi
 	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
@@ -656,17 +665,70 @@ EOF
 	fi
 }
 
+publish_app() {
+	local status=0
+	python3 "$SRC/scripts/macos_app.py" --binary "$CURRENT/bin/else-desktop" --app "$APP" \
+		--home "$ELSE_HOME" --version "$("$CURRENT/bin/else-desktop" --version | awk '{print $2}')" || status=$?
+	case "$status" in
+	0) ;;
+	3)
+		local fallback="$ELSE_HOME/Applications/else.bot.app"
+		[ "$APP" != "$fallback" ] || die "$APP belongs to another installation; choose a different ELSE_HOME"
+		warn "$APP belongs to another installation; publishing this app at $fallback"
+		APP="$fallback"
+		publish_app
+		;;
+	*) die "could not publish the app at $APP" ;;
+	esac
+}
+
 # --- Configuration and services ---------------------------------------------
 
-env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+dotenv_quote() {
+	local v="$1"
+	case "$v" in
+	*$'\n'*) die "a setting cannot span lines" ;;
+	*[!A-Za-z0-9_./:@%+,=-]*)
+		v="${v//\\/\\\\}"
+		v="${v//\"/\\\"}"
+		v="${v//\$/\\\$}"
+		printf '"%s"' "$v"
+		;;
+	*) printf '%s' "$v" ;;
+	esac
+}
+dotenv_value() {
+	local in="$1" out="" quote="" c i
+	for ((i = 0; i < ${#in}; i++)); do
+		c="${in:i:1}"
+		if [ "$quote" = "'" ]; then
+			if [ "$c" = "'" ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = '\' ]; then
+			i=$((i + 1))
+			c="${in:i:1}"
+			if [ "$c" = n ]; then out+=$'\n'; else out+="$c"; fi
+		elif [ "$quote" = '"' ]; then
+			if [ "$c" = '"' ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+			quote="$c"
+		elif [ "$c" = ' ' ] || [ "$c" = $'\t' ]; then
+			break
+		else
+			out+="$c"
+		fi
+	done
+	printf '%s' "$out"
+}
+env_value() { dotenv_value "$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -1)"; }
 config_set() {
-	local tmp
+	local tmp value
+	value="$(dotenv_quote "$2")"
 	tmp="$(mktemp "$CONFIG/.env.XXXXXX")"
 	if grep -q "^$1=" "$ENV_FILE"; then
-		awk -v k="$1" -v v="$2" 'index($0, k"=")==1{print k"="v; next} {print}' "$ENV_FILE" >"$tmp"
+		VALUE="$value" awk -v k="$1" 'index($0, k"=")==1{print k"="ENVIRON["VALUE"]; next} {print}' "$ENV_FILE" >"$tmp"
 	else
 		cat "$ENV_FILE" >"$tmp"
-		printf '%s=%s\n' "$1" "$2" >>"$tmp"
+		printf '%s=%s\n' "$1" "$value" >>"$tmp"
 	fi
 	chmod 600 "$tmp"
 	mv -f "$tmp" "$ENV_FILE"
@@ -685,15 +747,19 @@ write_config() {
 	chmod 700 "$CONFIG" "$DATA"
     local database_url="${ELSE_DATABASE_URL:-sqlite://$DATA/else.sqlite3}"
     case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
+	local url_value data_value msb_value
+	url_value="$(dotenv_quote "$database_url")"
+	data_value="$(dotenv_quote "$DATA")"
+	msb_value="$(dotenv_quote "$MSB")"
 	(
 		umask 077
 		cat >"$ENV_FILE" <<EOF
 # else.bot settings, written by the installer. The API reads this file from
 # its working directory ($CONFIG). SQLite needs no server.
-DATABASE_URL=$database_url
+DATABASE_URL=$url_value
 ELSE_API_BIND=127.0.0.1:$API_PORT
-ELSE_DATA_DIR=$DATA
-ELSE_MSB_BIN=$MSB
+ELSE_DATA_DIR=$data_value
+ELSE_MSB_BIN=$msb_value
 EOF
 
 	)
@@ -975,7 +1041,7 @@ stage2() {
 	fi
 	if want_app; then
 		if [ "$DISTRO" = macos ]; then
-			next "open the app: elsebot desktop"
+			next "open the app: else.bot in $(dirname "$APP"), or elsebot desktop"
 		else
 			next "open the app: elsebot desktop (or else.bot in your launcher)"
 		fi

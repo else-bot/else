@@ -82,9 +82,8 @@ read-only setup share, control token, payload, guest paths, API data, and app
 bundle. The default guest has four CPUs and 8 GiB of memory. Budget CPU and
 memory across simultaneous runs.
 
-The desktop starts on its connection editor. Click **Check connection**, then
-**Continue**. The helper supplies a fresh installation and an offline Codex
-fixture. Add `--welcome` to complete onboarding through the actual screen.
+The desktop starts on its welcome screen. Click **Connect locally**.
+The helper supplies a fresh installation and an offline Codex fixture. Add `--welcome` to complete onboarding through the actual screen.
 The fixture proves streaming and cancellation through the real application.
 It does not establish a live provider login or real bot-computer behavior.
 
@@ -108,9 +107,7 @@ the trial, despite reporting delivery.
 
 ```sh
 .else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py click \
-	--run "$RUN" --name check-connection --label 'Check connection'
-.else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py click \
-	--run "$RUN" --name continue --label Continue
+	--run "$RUN" --name connect-local --label 'Connect locally'
 .else-dev/lume-client/bin/python .agents/skills/verify-else/lume.py type \
 	--run "$RUN" --name compose --role AXTextArea \
 	--label 'Message… (Enter to send, Shift+Enter for a new line)' \

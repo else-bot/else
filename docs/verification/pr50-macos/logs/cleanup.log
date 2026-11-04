@@ -1,0 +1,33 @@
+{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-b7243307-b56df29d9074",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "ea:31:29:46:d1:be",
+      "machineIdentifier": "YnBsaXN0MDDRAQJURUNJRBQAAAAAAAAAAIx5rsDJZxI7CAsQAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAACE=",
+      "locationName": "/Users/iam4x/.t3/worktrees/else/t3-85e87aaa/.else-dev/pr50-lume/vms"
+    },
+    "absent": {
+      "at": "2026-11-04T18:55:48Z",
+      "lume_get": "not found",
+      "directory": "/Users/iam4x/.t3/worktrees/else/t3-85e87aaa/.else-dev/pr50-lume/vms/else-verify-b7243307-b56df29d9074",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-04T18:55:46Z",
+    "status": "failed",
+    "error": "guest evidence collection failed: /bin/sh: line 7: cd: /tmp/else-lume-b56df29d9074423f89a3b560fbf864c8: No such file or directory\n"
+  },
+  "base_after": {
+    "at": "2026-11-04T18:55:48Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}

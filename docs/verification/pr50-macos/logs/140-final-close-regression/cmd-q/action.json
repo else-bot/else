@@ -1,0 +1,38 @@
+{
+  "tool": "press_key",
+  "arguments": {
+    "target": {
+      "kind": "window",
+      "pid": 3580,
+      "window_id": 394
+    },
+    "key": "q",
+    "modifiers": [
+      "cmd"
+    ]
+  },
+  "is_error": false,
+  "text": "\u2705 Pressed q on pid 3580.\n\n\ud83d\udd00 Action caused a different app to become frontmost.",
+  "structured": {
+    "delivery": {
+      "mode": "background"
+    },
+    "effect": "unverifiable",
+    "hint": "The key was sent but its effect is not confirmed. Read what changed before sending it again. Three single actions in a row: send the next ones as one run_steps call. It runs them in order, stops at the first failure and returns what changed.",
+    "next_call": {
+      "arguments": {
+        "pid": 3580,
+        "since": "latest",
+        "window_id": 394
+      },
+      "tool": "get_window_state"
+    },
+    "route": "synthetic_events",
+    "summary": "\u2705 Pressed q on pid 3580.\n\n\ud83d\udd00 Action caused a different app to become frontmost."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

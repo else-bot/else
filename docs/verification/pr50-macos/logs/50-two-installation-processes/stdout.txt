@@ -1,0 +1,5 @@
+  PID  PPID COMMAND
+ 1897     1 /Users/lume/pr50/custom/Applications/else.bot.app/Contents/MacOS/else-desktop
+ 1949     1 /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop
+5dff600aeb1e0a69e66007b5375c12f572b02d5d992516dc2e674efaf655e537  /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop
+else-desk 1949 lume  txt      REG               1,19 115611488              374939 /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop

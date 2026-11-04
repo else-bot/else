@@ -7,6 +7,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    #[serde(skip)]
+    path: Option<PathBuf>,
     pub sidebar_width: f32,
     pub details_width: f32,
     pub category_order: Vec<Uuid>,
@@ -16,6 +18,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            path: None,
             sidebar_width: 240.,
             details_width: 336.,
             category_order: Vec::new(),
@@ -25,29 +28,27 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    fn path() -> Result<PathBuf, String> {
-        crate::config::ProfileStore::from_env(|key| std::env::var(key).ok())
-            .map(|store| store.preferences_path())
-    }
-
-    pub fn load() -> Self {
-        let mut saved: Self = Self::path()
+    pub fn load(path: PathBuf) -> Self {
+        let mut saved: Self = std::fs::read(&path)
             .ok()
-            .and_then(|p| std::fs::read(p).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        saved.path = Some(path);
         saved.sidebar_width = saved.sidebar_width.clamp(180., 420.);
         saved.details_width = saved.details_width.clamp(280., 560.);
         saved
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path()?;
+        let path = self
+            .path
+            .as_ref()
+            .ok_or("The layout has no profile storage path.")?;
         let staged = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let bytes =
             serde_json::to_vec(self).map_err(|err| format!("Could not serialize layout: {err}"))?;
         let result = std::fs::write(&staged, bytes)
-            .and_then(|_| std::fs::rename(&staged, &path))
+            .and_then(|_| std::fs::rename(&staged, path))
             .map_err(|err| format!("Could not save layout: {err}"));
         if result.is_err() {
             let _ = std::fs::remove_file(staged);
@@ -71,6 +72,24 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layouts_stay_beside_their_resolved_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let first =
+            crate::config::ProfileStore::at(dir.path().join("first.json")).preferences_path();
+        let second =
+            crate::config::ProfileStore::at(dir.path().join("second.json")).preferences_path();
+        let mut a = Preferences::load(first.clone());
+        a.sidebar_width = 310.;
+        a.save().unwrap();
+        let mut b = Preferences::load(second.clone());
+        assert_eq!(b.sidebar_width, 240.);
+        b.sidebar_width = 390.;
+        b.save().unwrap();
+        assert_eq!(Preferences::load(first).sidebar_width, 310.);
+        assert_eq!(Preferences::load(second).sidebar_width, 390.);
+    }
 
     #[test]
     fn category_moves_reach_both_ends_and_preferences_round_trip() {

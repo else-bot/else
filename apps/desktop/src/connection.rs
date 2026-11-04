@@ -1,22 +1,26 @@
-//! The window's root: which server the desktop uses, and the editor that
-//! changes it. A connection is saved only after the server accepted its
+//! The window's root: which server the desktop uses, and the setup screens
+//! that choose it. A connection is saved only after the server accepted its
 //! owner token, and saving replaces the whole messaging view, so nothing
 //! started for the previous server can reach the new one.
 
+mod view;
+
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::api::{Client, ClientError};
 use crate::app::ElseApp;
-use crate::config::{Origin, OwnerToken, Profile, ProfileStore, Seed};
+use crate::config::{Origin, Profile};
+use crate::launch::{
+    KeyState, Launch, Limits, LocalServer, NoLocal, Phase, RemoteSeed, Step, this_machine,
+};
+
+/// Below this width the story column gives its room to the form.
+const STORY_MIN_WIDTH: f32 = 760.;
 
 /// A connection the server accepted, with the client that checked it.
 struct Verified {
@@ -26,13 +30,10 @@ struct Verified {
 
 enum Check {
     Unchecked,
-    Checking,
-    Ready(Verified),
+    Checking(Phase),
     Failed(String),
 }
 
-/// The editor's validation state. Every edit and every new check advances
-/// the revision, and a check's outcome applies only to its own revision.
 struct Draft {
     revision: u64,
     check: Check,
@@ -51,22 +52,33 @@ impl Draft {
         self.check = Check::Unchecked;
     }
 
-    fn begin(
-        &mut self,
-        origin: &str,
-        token: &str,
-        runtime: &tokio::runtime::Handle,
-    ) -> Option<(u64, Profile, Arc<Client>)> {
+    fn begin(&mut self) -> u64 {
         self.revision += 1;
-        let parsed = Origin::parse(origin).and_then(|origin| {
-            let token = OwnerToken::parse(token)?;
-            let client = Client::new(origin.clone(), &token, runtime.clone())?;
-            Ok((Profile { origin, token }, Arc::new(client)))
-        });
-        match parsed {
-            Ok((profile, client)) => {
-                self.check = Check::Checking;
-                Some((self.revision, profile, client))
+        self.check = Check::Checking(Phase::Connecting);
+        self.revision
+    }
+
+    fn fail(&mut self, err: String) {
+        self.revision += 1;
+        self.check = Check::Failed(err);
+    }
+
+    fn progress(&mut self, revision: u64, phase: Phase) -> bool {
+        if !self.accepts(revision) {
+            return false;
+        }
+        self.check = Check::Checking(phase);
+        true
+    }
+
+    fn finish(&mut self, revision: u64, outcome: Result<Verified, String>) -> Option<Verified> {
+        if !self.accepts(revision) {
+            return None;
+        }
+        match outcome {
+            Ok(verified) => {
+                self.check = Check::Unchecked;
+                Some(verified)
             }
             Err(err) => {
                 self.check = Check::Failed(err);
@@ -75,24 +87,15 @@ impl Draft {
         }
     }
 
-    fn finish(&mut self, revision: u64, outcome: Result<Verified, String>) -> bool {
-        if revision != self.revision || !matches!(self.check, Check::Checking) {
-            return false;
+    fn busy(&self) -> Option<Phase> {
+        match self.check {
+            Check::Checking(phase) => Some(phase),
+            _ => None,
         }
-        self.check = match outcome {
-            Ok(verified) => Check::Ready(verified),
-            Err(err) => Check::Failed(err),
-        };
-        true
     }
 
-    fn ready_for(&self, origin: &str, token: &str) -> Option<&Verified> {
-        let Check::Ready(verified) = &self.check else {
-            return None;
-        };
-        let same = Origin::parse(origin).ok()? == verified.profile.origin
-            && OwnerToken::parse(token).ok()? == verified.profile.token;
-        same.then_some(verified)
+    fn accepts(&self, revision: u64) -> bool {
+        revision == self.revision && self.busy().is_some()
     }
 }
 
@@ -110,33 +113,45 @@ struct Active {
     _app: Subscription,
 }
 
-struct Editor {
+struct RemoteForm {
     origin: Entity<InputState>,
     token: Entity<InputState>,
-    draft: Draft,
-    error: Option<String>,
-    _probe: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
 }
 
+enum Page {
+    /// The story column and this machine's server.
+    Welcome,
+    /// A server elsewhere, typed in.
+    Remote(RemoteForm),
+}
+
+struct Setup {
+    page: Page,
+    draft: Draft,
+    error: Option<String>,
+    focus: FocusHandle,
+    _attempt: Option<Task<()>>,
+}
+
 pub struct Shell {
-    store: Result<ProfileStore, String>,
+    launch: Launch,
+    key: Option<KeyState>,
     runtime: tokio::runtime::Handle,
     active: Option<Active>,
-    editor: Option<Editor>,
+    setup: Option<Setup>,
 }
 
 impl Shell {
     /// Connect with the saved profile; without one (the first launch) or
-    /// with an unusable one, open the editor with the launcher's settings.
+    /// with an unusable one, open the welcome screen.
     pub fn new(
-        store: Result<ProfileStore, String>,
-        seed: Seed,
+        launch: Launch,
         runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let loaded = store.clone().and_then(|store| store.load());
+        let loaded = launch.store.clone().and_then(|store| store.load());
         // The platform keeps one handler for the whole process.
         let this = cx.weak_entity();
         let handle = window.window_handle();
@@ -151,17 +166,29 @@ impl Shell {
                 });
             });
         });
+        let key = launch
+            .local
+            .as_ref()
+            .ok()
+            .map(|local| LocalServer::key_state(&local.key()));
         let mut shell = Self {
-            store,
+            launch,
+            key,
             runtime,
             active: None,
-            editor: None,
+            setup: None,
         };
-        let seed_token = seed
-            .token
-            .map(|t| t.expose().to_owned())
-            .unwrap_or_default();
         match loaded {
+            Ok(Some(profile))
+                if shell
+                    .launch
+                    .local
+                    .as_ref()
+                    .is_ok_and(|local| local.owns(&profile)) =>
+            {
+                shell.open_setup(None, window, cx);
+                shell.start_local(window, cx);
+            }
             Ok(Some(profile)) => {
                 match Client::new(
                     profile.origin.clone(),
@@ -169,19 +196,36 @@ impl Shell {
                     shell.runtime.clone(),
                 ) {
                     Ok(client) => shell.activate(profile, Arc::new(client), window, cx),
-                    Err(err) => shell.open_editor(
-                        profile.origin.as_str().to_owned(),
-                        profile.token.expose().to_owned(),
-                        Some(err),
-                        window,
-                        cx,
-                    ),
+                    Err(err) => {
+                        shell.open_setup(Some(err), window, cx);
+                        shell.open_remote(Some(&profile), window, cx);
+                    }
                 }
             }
-            Ok(None) => shell.open_editor(seed.origin, seed_token, None, window, cx),
-            Err(err) => shell.open_editor(seed.origin, seed_token, Some(err), window, cx),
+            Ok(None) => shell.open_first(None, window, cx),
+            Err(err) => shell.open_first(Some(err), window, cx),
         }
         shell
+    }
+
+    fn open_first(&mut self, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_setup(error, window, cx);
+        if self.launch.local.is_err() && self.launch.remote_seed.is_some() {
+            self.open_remote(None, window, cx);
+        }
+    }
+
+    fn open_setup(&mut self, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        self.setup = Some(Setup {
+            page: Page::Welcome,
+            draft: Draft::new(),
+            error,
+            focus,
+            _attempt: None,
+        });
+        cx.notify();
     }
 
     fn activate(
@@ -196,7 +240,13 @@ impl Shell {
                 .app
                 .update(cx, |app, cx| app.dismiss_notifications(cx));
         }
-        let app = cx.new(|cx| ElseApp::new(client, window, cx));
+        let preferences = self
+            .launch
+            .store
+            .as_ref()
+            .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
+            .unwrap_or_default();
+        let app = cx.new(|cx| ElseApp::new(client, preferences, window, cx));
         let observer = cx.observe(&app, |_, _, cx| cx.notify());
         self.active = Some(Active {
             profile,
@@ -208,16 +258,14 @@ impl Shell {
 
     fn change_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = &self.active else { return };
-        let (origin, token) = (
-            active.profile.origin.as_str().to_owned(),
-            active.profile.token.expose().to_owned(),
-        );
+        let profile = active.profile.clone();
         // The messaging view's dialogs belong to the hidden view.
         window.close_dialog(cx);
         active
             .app
             .update(cx, |app, cx| app.set_hidden(true, window, cx));
-        self.open_editor(origin, token, None, window, cx);
+        self.open_setup(None, window, cx);
+        self.open_remote(Some(&profile), window, cx);
     }
 
     /// Show the notification's conversation, unless it belongs to another
@@ -236,27 +284,30 @@ impl Shell {
         }
         cx.activate(true);
         window.activate_window();
-        if self.editor.is_some() {
+        if self.setup.is_some() {
             self.cancel(window, cx);
         }
     }
 
-    fn open_editor(
+    fn open_remote(
         &mut self,
-        origin: String,
-        token: String,
-        error: Option<String>,
+        profile: Option<&Profile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(setup) = self.setup.as_mut() else {
+            return;
+        };
+        let (origin, token) = remote_values(profile, self.launch.remote_seed.as_ref());
+        let credential_origin = Origin::parse(&origin).ok();
         let origin = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("https://else.example.com or 127.0.0.1:7878")
+                .placeholder("https://else.example.com")
                 .default_value(origin)
         });
         let token = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Owner token")
+                .placeholder("Paste your owner key")
                 .masked(true)
                 .default_value(token)
         });
@@ -267,272 +318,227 @@ impl Shell {
                         cx: &mut Context<Self>| {
             match event {
                 InputEvent::Change => {
-                    if let Some(editor) = shell.editor.as_mut() {
-                        editor.draft.edited();
-                        editor.error = None;
-                        editor._probe = None;
+                    if let Some(setup) = shell.setup.as_mut() {
+                        setup.draft.edited();
+                        setup._attempt = None;
                         cx.notify();
                     }
                 }
-                InputEvent::PressEnter { .. } => shell.confirm(window, cx),
+                InputEvent::PressEnter { .. } => shell.connect_remote(window, cx),
                 _ => {}
             }
         };
+        let token_for_origin = token.clone();
         let subscriptions = [
-            cx.subscribe_in(&origin, window, on_input),
+            cx.subscribe_in(&origin, window, move |shell, field, event, window, cx| {
+                if matches!(event, InputEvent::Change)
+                    && prefill_origin_changed(credential_origin.as_ref(), &field.read(cx).value())
+                {
+                    token_for_origin.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                on_input(shell, field, event, window, cx);
+            }),
             cx.subscribe_in(&token, window, on_input),
         ];
         origin.read(cx).focus_handle(cx).focus(window, cx);
-        self.editor = Some(Editor {
+        setup.draft.edited();
+        setup._attempt = None;
+        setup.page = Page::Remote(RemoteForm {
             origin,
             token,
-            draft: Draft::new(),
-            error,
-            _probe: None,
             _subscriptions: subscriptions,
         });
         cx.notify();
     }
 
-    fn inputs(editor: &Editor, cx: &App) -> (SharedString, SharedString) {
-        (
-            editor.origin.read(cx).value(),
-            editor.token.read(cx).value(),
-        )
-    }
-
-    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = &self.editor else { return };
-        let (origin, token) = Self::inputs(editor, cx);
-        if editor.draft.ready_for(&origin, &token).is_some() {
-            self.save(window, cx);
-        } else if !matches!(editor.draft.check, Check::Checking) {
-            self.check(window, cx);
-        }
-    }
-
-    fn check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.as_mut() else {
+    fn back_to_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(setup) = self.setup.as_mut() else {
             return;
         };
-        let (origin, token) = Self::inputs(editor, cx);
-        editor.error = None;
-        let started = editor.draft.begin(&origin, &token, &self.runtime);
-        editor._probe = started.map(|(revision, profile, client)| {
-            cx.spawn_in(window, async move |this, cx| {
-                let outcome = verify(profile, client).await;
-                let _ = this.update(cx, |shell, cx| {
-                    if let Some(editor) = shell.editor.as_mut()
-                        && editor.draft.finish(revision, outcome)
-                    {
-                        cx.notify();
-                    }
-                });
-            })
-        });
+        setup.draft.edited();
+        setup._attempt = None;
+        setup.page = Page::Welcome;
+        setup.focus.focus(window, cx);
         cx.notify();
     }
 
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.as_mut() else {
+    fn start_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(local) = &self.launch.local else {
             return;
         };
-        let (origin, token) = Self::inputs(editor, cx);
-        let Some(verified) = editor.draft.ready_for(&origin, &token) else {
+        let Some(setup) = self.setup.as_mut() else {
             return;
         };
-        let (profile, client) = (verified.profile.clone(), verified.client.clone());
-        if let Err(err) = self.store.clone().and_then(|store| store.save(&profile)) {
-            editor.error = Some(err);
-            cx.notify();
+        if setup.draft.busy().is_some() {
             return;
         }
-        self.editor = None;
+        setup.error = None;
+        let key = local.key();
+        self.key = Some(LocalServer::key_state(&key));
+        let prepared = key.map_err(|err| err.to_string()).and_then(|token| {
+            let profile = Profile {
+                origin: local.origin().clone(),
+                token,
+            };
+            let client = Client::new(profile.origin.clone(), &profile.token, self.runtime.clone())?;
+            Ok((profile, Arc::new(client)))
+        });
+        let (profile, client) = match prepared {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                setup.draft.fail(err);
+                cx.notify();
+                return;
+            }
+        };
+        let revision = setup.draft.begin();
+        let mut steps = local.connect(client.clone(), &self.runtime, Limits::default());
+        setup._attempt = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = loop {
+                match steps.recv().await {
+                    Some(Step::Phase(phase)) => {
+                        let _ = this.update(cx, |shell, cx| shell.progress(revision, phase, cx));
+                    }
+                    Some(Step::Done(result)) => {
+                        break result
+                            .map(|()| Verified { profile, client })
+                            .map_err(|err| err.to_string());
+                    }
+                    None => break Err("The local connection was interrupted.".into()),
+                }
+            };
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.finish(revision, outcome, window, cx)
+            });
+        }));
+        cx.notify();
+    }
+
+    fn connect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(setup) = self.setup.as_mut() else {
+            return;
+        };
+        let Page::Remote(form) = &setup.page else {
+            return;
+        };
+        if setup.draft.busy().is_some() {
+            return;
+        }
+        setup.error = None;
+        let (origin, token) = (form.origin.read(cx).value(), form.token.read(cx).value());
+        let prepared = Profile::parse(&origin, &token).and_then(|profile| {
+            let client = Client::new(profile.origin.clone(), &profile.token, self.runtime.clone())?;
+            Ok((profile, Arc::new(client)))
+        });
+        let (profile, client) = match prepared {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                setup.draft.fail(err);
+                cx.notify();
+                return;
+            }
+        };
+        let revision = setup.draft.begin();
+        setup._attempt = Some(cx.spawn_in(window, async move |this, cx| {
+            let outcome = verify(profile, client).await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.finish(revision, outcome, window, cx)
+            });
+        }));
+        cx.notify();
+    }
+
+    fn progress(&mut self, revision: u64, phase: Phase, cx: &mut Context<Self>) {
+        if let Some(setup) = self.setup.as_mut()
+            && setup.draft.progress(revision, phase)
+        {
+            cx.notify();
+        }
+    }
+
+    fn finish(
+        &mut self,
+        revision: u64,
+        outcome: Result<Verified, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(setup) = self.setup.as_mut() else {
+            return;
+        };
+        if !setup.draft.accepts(revision) {
+            return;
+        }
+        let verified = setup.draft.finish(revision, outcome);
+        setup._attempt = None;
+        if let Ok(local) = &self.launch.local
+            && matches!(setup.page, Page::Welcome)
+        {
+            self.key = Some(LocalServer::key_state(&local.key()));
+        }
+        cx.notify();
+        let Some(Verified { profile, client }) = verified else {
+            return;
+        };
+        if let Err(err) = self
+            .launch
+            .store
+            .clone()
+            .and_then(|store| store.save(&profile))
+        {
+            setup.error = Some(err);
+            return;
+        }
+        self.setup = None;
         self.activate(profile, client, window, cx);
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active) = &self.active {
-            self.editor = None;
+            self.setup = None;
             active
                 .app
                 .update(cx, |app, cx| app.set_hidden(false, window, cx));
             cx.notify();
         }
     }
+}
 
-    /// The server and its connection state. On macOS this is the window's
-    /// title bar, beside the traffic lights; elsewhere a slim strip under the
-    /// desktop's own decorations.
-    fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let app = active.app.read(cx);
-        let (connected, (status, _)) = (app.connected(), app.status_text());
-        let origin = active.profile.origin.as_str().to_owned();
-        let detail: SharedString = format!("{origin} · {status}").into();
-        let tooltip = detail.clone();
-        let label: SharedString = if connected { origin.into() } else { status };
-        let content = h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .child(
-                h_flex()
-                    .id("server-status")
-                    .min_w_0()
-                    .gap_1p5()
-                    .items_center()
-                    .aria_label(detail)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size_1p5()
-                            .rounded_full()
-                            .bg(if connected {
-                                theme.success
-                            } else {
-                                theme.danger
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(label),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("server-change")
-                    .cursor_pointer()
-                    .label("Change server")
-                    .xsmall()
-                    .ghost()
-                    .on_click(cx.listener(|shell, _, window, cx| shell.change_server(window, cx))),
-            );
-        if cfg!(target_os = "macos") {
-            return TitleBar::new().pr_2().child(content).into_any_element();
-        }
-        h_flex()
-            .flex_none()
-            .h(px(30.))
-            .px_3()
-            .border_b_1()
-            .border_color(theme.title_bar_border)
-            .bg(theme.title_bar)
-            .child(content)
-            .into_any_element()
+fn remote_values(profile: Option<&Profile>, seed: Option<&RemoteSeed>) -> (String, String) {
+    if let Some(profile) = profile {
+        let token = if profile.origin.is_loopback() {
+            String::new()
+        } else {
+            profile.token.expose().to_owned()
+        };
+        return (profile.origin.as_str().to_owned(), token);
     }
+    seed.map(|seed| {
+        (
+            seed.origin.clone(),
+            seed.token
+                .as_ref()
+                .map(|token| token.expose().to_owned())
+                .unwrap_or_default(),
+        )
+    })
+    .unwrap_or_default()
+}
 
-    fn render_editor(&self, editor: &Editor, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (origin, token) = Self::inputs(editor, cx);
-        let ready = editor.draft.ready_for(&origin, &token).is_some();
-        let checking = matches!(editor.draft.check, Check::Checking);
-        let first = self.active.is_none();
-        let (status, color) = match &editor.draft.check {
-            Check::Unchecked => (
-                "Check the connection before saving.".to_owned(),
-                theme.muted_foreground,
-            ),
-            Check::Checking => ("Checking…".to_owned(), theme.muted_foreground),
-            Check::Ready(_) => (
-                "Connected: the server accepted the owner token.".to_owned(),
-                theme.success,
-            ),
-            Check::Failed(err) => (err.clone(), theme.danger),
-        };
-        let field = |label: &'static str, input: Input| {
-            v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-                .child(input)
-        };
-        let mut actions = h_flex().justify_end().gap_2();
-        if !first {
-            actions = actions.child(
-                Button::new("connection-cancel")
-                    .cursor_pointer()
-                    .label("Cancel")
-                    .ghost()
-                    .on_click(cx.listener(|shell, _, window, cx| shell.cancel(window, cx))),
-            );
-        }
-        actions = actions
-            .child(
-                Button::new("connection-check")
-                    .cursor_pointer()
-                    .label("Check connection")
-                    .loading(checking)
-                    .disabled(checking)
-                    .on_click(cx.listener(|shell, _, window, cx| shell.check(window, cx))),
-            )
-            .child(
-                Button::new("connection-save")
-                    .cursor_pointer()
-                    .label(if first { "Continue" } else { "Save" })
-                    .primary()
-                    .disabled(!ready)
-                    .on_click(cx.listener(|shell, _, window, cx| shell.save(window, cx))),
-            );
-        let mut card = v_flex()
-            .w(px(560.))
-            .gap_4()
-            .p_6()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .child(div().text_xl().child("Connect to your else.bot server"))
-            .child(div().text_sm().text_color(theme.muted_foreground).child(
-                "Enter the address of the machine that runs the else.bot server and its \
-                 owner token. On that machine, show the token with: \
-                 cat ~/.else/data/owner-token. Use https:// for a remote server; \
-                 http:// works only for this machine or an SSH tunnel to it.",
-            ))
-            .child(field("Server address", Input::new(&editor.origin)))
-            .child(field(
-                "Owner token",
-                Input::new(&editor.token).mask_toggle(),
-            ));
-        if let Some(error) = &editor.error {
-            card = card.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
-            );
-        }
-        card = card
-            .child(div().text_sm().text_color(color).child(status))
-            .child(actions);
-        h_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .bg(theme.muted)
-            .child(card)
-            .into_any_element()
-    }
+fn prefill_origin_changed(bound: Option<&Origin>, raw: &str) -> bool {
+    bound.is_some_and(|bound| Origin::parse(raw).ok().as_ref() != Some(bound))
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let root = v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground);
-        if let Some(editor) = &self.editor {
+        if let Some(setup) = &self.setup {
+            let wide = window.viewport_size().width >= px(STORY_MIN_WIDTH);
+            let start_on_enter = matches!(setup.page, Page::Welcome) && self.launch.local.is_ok();
             // macOS still needs a title bar to drag the window by.
             return root
                 .when(cfg!(target_os = "macos"), |root| {
@@ -542,7 +548,17 @@ impl Render for Shell {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .child(self.render_editor(editor, cx)),
+                        .track_focus(&setup.focus)
+                        .when(start_on_enter, |panel| {
+                            panel.on_key_down(cx.listener(
+                                |shell, event: &KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "enter" {
+                                        shell.start_local(window, cx);
+                                    }
+                                },
+                            ))
+                        })
+                        .child(self.render_setup(setup, wide, cx)),
                 );
         }
         let Some(active) = &self.active else {
@@ -561,83 +577,118 @@ mod tests {
     const TOKEN: &str = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
     const CAPABILITIES: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 50\r\n\r\n{\"providers\":[],\"limits\":{\"max_text_bytes\":32768}}";
 
+    #[::core::prelude::v1::test]
+    fn local_credentials_are_not_prefilled_when_changing_servers() {
+        for address in [
+            "http://127.0.0.1:7878",
+            "https://localhost:7878",
+            "http://[::1]:7878",
+        ] {
+            let profile = Profile::parse(address, TOKEN).unwrap();
+            let (origin, token) = remote_values(Some(&profile), None);
+            assert_eq!(origin, profile.origin.as_str());
+            assert!(token.is_empty());
+        }
+        let remote = Profile::parse("https://server.example.com", TOKEN).unwrap();
+        assert_eq!(remote_values(Some(&remote), None).1, TOKEN);
+        assert!(prefill_origin_changed(
+            Some(&remote.origin),
+            "https://another.example.com"
+        ));
+        assert!(prefill_origin_changed(Some(&remote.origin), "invalid"));
+        assert!(!prefill_origin_changed(
+            Some(&remote.origin),
+            "https://server.example.com/"
+        ));
+    }
+
+    fn prepare(origin: &str, token: &str) -> Result<(Profile, Arc<Client>), String> {
+        let profile = Profile::parse(origin, token)?;
+        let client = Client::new(
+            profile.origin.clone(),
+            &profile.token,
+            tokio::runtime::Handle::current(),
+        )?;
+        Ok((profile, Arc::new(client)))
+    }
+
     #[tokio::test]
-    async fn only_the_current_verified_inputs_can_be_saved() {
+    async fn only_the_current_attempt_is_saved() {
         let (origin, server) = serve_once(CAPABILITIES).await;
-        let runtime = tokio::runtime::Handle::current();
         let mut draft = Draft::new();
-        let (revision, profile, client) = draft.begin(origin.as_str(), TOKEN, &runtime).unwrap();
-        assert!(matches!(draft.check, Check::Checking));
+        let (profile, client) = prepare(origin.as_str(), TOKEN).unwrap();
+        let revision = draft.begin();
+        assert_eq!(draft.busy(), Some(Phase::Connecting));
+        assert!(draft.progress(revision, Phase::Starting));
         assert!(
-            draft.ready_for(origin.as_str(), TOKEN).is_none(),
-            "not while checking"
+            !draft.progress(revision - 1, Phase::Waiting),
+            "an older attempt"
         );
-        let outcome = verify(profile, client).await;
+        assert_eq!(draft.busy(), Some(Phase::Starting));
+        let outcome = verify(profile.clone(), client).await;
         assert!(
             server
                 .await
                 .unwrap()
                 .contains(&format!("authorization: Bearer {TOKEN}"))
         );
-        assert!(draft.finish(revision, outcome));
-        assert!(draft.ready_for(origin.as_str(), TOKEN).is_some());
+        let verified = draft
+            .finish(revision, outcome)
+            .expect("the current attempt");
+        assert_eq!(verified.profile, profile);
+        assert!(draft.busy().is_none());
         assert!(
-            draft.ready_for(origin.as_str(), &"U".repeat(43)).is_none(),
-            "other token"
-        );
-        assert!(
-            draft.ready_for("http://127.0.0.1:1", TOKEN).is_none(),
-            "other origin"
-        );
-        draft.edited();
-        assert!(matches!(draft.check, Check::Unchecked));
-        assert!(
-            draft.ready_for(origin.as_str(), TOKEN).is_none(),
-            "an edit invalidates"
+            draft.finish(revision, Err("late".into())).is_none(),
+            "an attempt finishes once"
         );
     }
 
     #[tokio::test]
-    async fn a_stale_check_never_applies() {
+    async fn a_stale_attempt_never_applies() {
         let (origin, server) = serve_once(CAPABILITIES).await;
-        let runtime = tokio::runtime::Handle::current();
         let mut draft = Draft::new();
-        let (revision, profile, client) = draft.begin(origin.as_str(), TOKEN, &runtime).unwrap();
+        let (profile, client) = prepare(origin.as_str(), TOKEN).unwrap();
+        let revision = draft.begin();
         let outcome = verify(profile.clone(), client.clone()).await;
         server.await.unwrap();
         draft.edited();
-        assert!(!draft.finish(revision, outcome), "edited while checking");
+        assert!(
+            draft.finish(revision, outcome).is_none(),
+            "edited while checking"
+        );
         assert!(matches!(draft.check, Check::Unchecked));
+        assert!(!draft.progress(revision, Phase::Waiting));
 
-        let (newer, ..) = draft.begin(origin.as_str(), TOKEN, &runtime).unwrap();
+        let newer = draft.begin();
         let late = Ok(Verified { profile, client });
-        assert!(!draft.finish(newer - 1, late), "an older check");
-        assert!(matches!(draft.check, Check::Checking));
-        assert!(draft.finish(newer, Err("refused".into())));
+        assert!(draft.finish(newer - 1, late).is_none(), "an older attempt");
+        assert!(matches!(draft.check, Check::Checking(_)));
+        assert!(draft.finish(newer, Err("refused".into())).is_none());
         assert!(matches!(&draft.check, Check::Failed(e) if e == "refused"));
-        assert!(draft.ready_for(origin.as_str(), TOKEN).is_none());
     }
 
     #[tokio::test]
-    async fn rejected_token_and_invalid_inputs_fail_the_check() {
+    async fn rejected_token_and_invalid_inputs_fail() {
         let (origin, _server) = serve_once(
             "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         )
         .await;
-        let runtime = tokio::runtime::Handle::current();
         let mut draft = Draft::new();
-        let (revision, profile, client) = draft.begin(origin.as_str(), TOKEN, &runtime).unwrap();
+        let (profile, client) = prepare(origin.as_str(), TOKEN).unwrap();
+        let revision = draft.begin();
         let outcome = verify(profile, client).await;
-        assert!(draft.finish(revision, outcome));
+        assert!(draft.finish(revision, outcome).is_none());
         assert!(matches!(&draft.check, Check::Failed(e) if e.contains("rejected")));
 
+        let err = prepare("http://10.0.0.2:7878", TOKEN).err().unwrap();
+        assert!(err.contains("unencrypted"), "{err}");
+        let err = prepare(origin.as_str(), "short").err().unwrap();
+        assert!(err.contains("malformed"), "{err}");
+        let before = draft.revision;
+        draft.fail(err);
         assert!(
-            draft
-                .begin("http://10.0.0.2:7878", TOKEN, &runtime)
-                .is_none()
+            draft.revision > before,
+            "a failure also ends older attempts"
         );
-        assert!(matches!(&draft.check, Check::Failed(e) if e.contains("unencrypted")));
-        assert!(draft.begin(origin.as_str(), "short", &runtime).is_none());
-        assert!(matches!(&draft.check, Check::Failed(e) if e.contains("malformed")));
     }
 }
