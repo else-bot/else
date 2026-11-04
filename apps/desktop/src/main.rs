@@ -35,7 +35,9 @@ gpui_kit::assets::icon_assets!(
         ArrowDown,
         SquarePen,
         FolderPlus,
-        Laptop
+        Laptop,
+        Eye,
+        EyeOff
     ]
 );
 
