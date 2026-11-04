@@ -44,8 +44,9 @@ pub const APPROVE_FOREVER: &str = "approve_forever";
 /// The one standing grant a bot can hold.
 pub const DESTRUCTIVE_SCOPE: &str = "destructive";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum Kind {
     Choice,
     Destructive,
@@ -61,14 +62,6 @@ impl Kind {
         }
     }
 
-    fn parse(text: &str) -> Self {
-        match text {
-            "destructive" => Self::Destructive,
-            "external" => Self::External,
-            _ => Self::Choice,
-        }
-    }
-
     /// The effect a bot may declare for an approval: never `choice`.
     pub fn approval(text: &str) -> Option<Self> {
         match text {
@@ -79,8 +72,9 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum Status {
     Pending,
     Answered,
@@ -95,15 +89,6 @@ impl Status {
             Self::Answered => "answered",
             Self::Skipped => "skipped",
             Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn parse(text: &str) -> Self {
-        match text {
-            "answered" => Self::Answered,
-            "skipped" => Self::Skipped,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
         }
     }
 }
@@ -323,12 +308,12 @@ type Row = (
     Uuid,
     Uuid,
     Uuid,
-    String,
+    Kind,
     String,
     Option<String>,
     Json<Vec<Choice>>,
     Option<Json<Value>>,
-    String,
+    Status,
     Option<String>,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
@@ -357,12 +342,12 @@ fn info(
         id,
         bot_id,
         turn_id,
-        kind: Kind::parse(&kind),
+        kind,
         title,
         context,
         choices: choices.0,
         action: action.map(|a| a.0),
-        status: Status::parse(&status),
+        status,
         answer,
         created_at,
         settled_at,
