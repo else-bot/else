@@ -106,6 +106,57 @@ impl ElseApp {
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
                 let run = conversation.run(id);
+                let status = turn
+                    .filter(|turn| {
+                        conversation
+                            .items()
+                            .rev()
+                            .find(|i| i.turn_id == turn.id)
+                            .is_some_and(|i| i.id == id)
+                    })
+                    .and_then(|turn| {
+                        let (label, error) = turn_label(turn);
+                        if label.is_empty() {
+                            return None;
+                        }
+                        let active =
+                            matches!(turn.status.as_str(), "preparing" | "sending" | "running");
+                        Some(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .children(
+                                    active
+                                        .then(|| self.bots.iter().find(|b| b.id == view.bot_id))
+                                        .flatten()
+                                        .map(|bot| {
+                                            bot_avatar(
+                                                SharedString::from(format!("working-{}", turn.id)),
+                                                bot.avatar,
+                                                px(20.),
+                                            )
+                                            .working()
+                                        }),
+                                )
+                                .child(
+                                    h_flex()
+                                        .text_color(theme.muted_foreground)
+                                        .child(note(label, error))
+                                        .children(active.then(|| working_dots(turn.id))),
+                                ),
+                        )
+                    });
+                // A reaction's feedback prompt is generated for the bot. The
+                // badge on the reacted message stands for it.
+                if item.reaction.is_some() {
+                    return match status {
+                        Some(status) => super::view::reading_column()
+                            .py_1p5()
+                            .child(status)
+                            .into_any_element(),
+                        None => div().into_any_element(),
+                    };
+                }
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
                 let mut column = super::view::reading_column().gap_1().py_1p5();
@@ -192,43 +243,7 @@ impl ElseApp {
                 column = column
                     .child(side(user, card))
                     .children(footer.map(|at| beside(user, note(at, false))));
-                if let Some(turn) = turn {
-                    let last_in_turn = conversation
-                        .items()
-                        .rev()
-                        .find(|i| i.turn_id == turn.id)
-                        .is_some_and(|i| i.id == id);
-                    if last_in_turn {
-                        let (label, error) = turn_label(turn);
-                        if !label.is_empty() {
-                            let active =
-                                matches!(turn.status.as_str(), "preparing" | "sending" | "running");
-                            let status = h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .children(
-                                    active
-                                        .then(|| self.bots.iter().find(|b| b.id == view.bot_id))
-                                        .flatten()
-                                        .map(|bot| {
-                                            bot_avatar(
-                                                SharedString::from(format!("working-{}", turn.id)),
-                                                bot.avatar,
-                                                px(20.),
-                                            )
-                                            .working()
-                                        }),
-                                )
-                                .child(
-                                    h_flex()
-                                        .text_color(theme.muted_foreground)
-                                        .child(note(label, error))
-                                        .children(active.then(|| working_dots(turn.id))),
-                                );
-                            column = column.child(status);
-                        }
-                    }
-                }
+                column = column.children(status);
                 column.into_any_element()
             }
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
@@ -244,35 +259,36 @@ impl ElseApp {
                 let Some(text) = view.texts.get(&key) else {
                     return div().into_any_element();
                 };
-                let mut column = super::view::reading_column()
-                    .gap_1()
-                    .py_1p5()
-                    .child(side(
-                        true,
-                        card(text, true)
-                            .id(SharedString::from(format!("pending-{request_id}")))
-                            .into_any_element(),
-                    ))
-                    .children(footer.map(|at| beside(true, note(at, false))));
+                let mark = pending.reaction.map(|r| r.kind.mark());
+                let mut column = super::view::reading_column().gap_1().py_1p5();
+                if mark.is_none() {
+                    column = column
+                        .child(side(
+                            true,
+                            card(text, true)
+                                .id(SharedString::from(format!("pending-{request_id}")))
+                                .into_any_element(),
+                        ))
+                        .children(footer.map(|at| beside(true, note(at, false))));
+                }
+                let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
                 if let Some(reason) = &pending.rejected {
                     return column
-                        .child(note(format!("Not sent. {reason}"), true).w_full())
+                        .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
                         .child(
                             h_flex()
                                 .w_full()
                                 .justify_end()
                                 .gap_2()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "restore-{request_id}"
-                                    )))
-                                    .cursor_pointer()
-                                    .label("Restore to composer")
-                                    .xsmall()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.take_rejected(request_id, true, window, cx)
-                                    })),
-                                )
+                                .children(mark.is_none().then(|| {
+                                    Button::new(SharedString::from(format!("restore-{request_id}")))
+                                        .cursor_pointer()
+                                        .label("Restore to composer")
+                                        .xsmall()
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.take_rejected(request_id, true, window, cx)
+                                        }))
+                                }))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "dismiss-{request_id}"
@@ -293,10 +309,10 @@ impl ElseApp {
                         h_flex()
                             .w_full()
                             .justify_end()
-                            .child(note("Sending…".into(), false)),
+                            .child(note(format!("{subject}Sending…"), false)),
                     ),
                     Some(reason) => column
-                        .child(note(format!("Not confirmed. {reason}"), true).w_full())
+                        .child(note(format!("{subject}Not confirmed. {reason}"), true).w_full())
                         .child(
                             h_flex().w_full().justify_end().gap_2().child(
                                 Button::new(SharedString::from(format!("retry-{request_id}")))

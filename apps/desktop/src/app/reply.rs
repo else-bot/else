@@ -82,12 +82,13 @@ impl ReactionKind {
     pub(super) fn message(self, reference: &MessageReference) -> String {
         let request = match self {
             ReactionKind::ThumbsUp => {
-                "This worked well for me. Work out what made it work, and remember that \
-                 behavior so you keep doing it in similar situations."
+                "I reacted 👍 to this message. Work out what made it work, and remember that \
+                 behavior so you keep doing it in similar situations. Reply with one short \
+                 acknowledgement, such as \"Thanks, noted.\" Don't explain what you remembered."
             }
             ReactionKind::ThumbsDown => {
-                "This didn't work for me. Ask me what went wrong and how you can correct it. \
-                 Don't assume a cause. Use my feedback to improve."
+                "I reacted 👎 to this message. Don't assume a cause. Reply with one short \
+                 question asking me what went wrong, then use my answer to improve."
             }
         };
         format!(
@@ -180,6 +181,7 @@ mod tests {
         );
         assert!(message.contains("what made it work"));
         assert!(message.contains("remember"));
+        assert!(message.contains("one short acknowledgement"));
     }
 
     #[test]
@@ -187,8 +189,7 @@ mod tests {
         let message = ReactionKind::ThumbsDown.message(&reference(Author::Bot, "Step 1"));
         assert!(message.starts_with("👎 Feedback on your earlier message:\n> Step 1\n\n"));
         assert!(message.contains("Don't assume a cause"));
-        assert!(message.contains("what went wrong"));
-        assert!(message.contains("Ask me what went wrong and how you can correct it"));
+        assert!(message.contains("one short question asking me what went wrong"));
     }
 
     #[test]
