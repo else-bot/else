@@ -389,6 +389,7 @@ print(json.dumps({"reason":"compiler-artifact","target":{"name":name},"executabl
                 if path == session.state:
                     remove(path)
                     return
+                self.assertIsNone(dev.try_lock(Path(path) / "data/api.lock", create=False))
                 session.prepare(str(self.api), host_providers=False)
                 (session.state / "new-api-state").write_text("new installation")
                 remove(path, *args, **kwargs)

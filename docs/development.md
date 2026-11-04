@@ -179,8 +179,6 @@ measured application and full-lane times and cache conditions.
 
 ## Run the API
 
-The commands below use the root `.env` and `~/.else` defaults. To run beside another checkout without sharing a port, database, or credentials, use [isolated development sessions](#run-isolated-development-sessions) instead.
-
 For normal development, use [isolated sessions](#run-isolated-development-sessions). The following direct commands are for an explicitly configured installation. Set unique data and project directories and a unique API bind for every checkout before running them:
 
 ```sh

@@ -465,18 +465,23 @@ async fn tool(app: &TestApp, path: &str, token: Option<&str>) -> common::Reply {
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_secrets_stay_off_host_command_lines() {
     let fx = fixture();
-    let mut spec = shell(&fx, Uuid::new_v4(), "echo \"$GRANT_CANARY\"; sleep 3");
+    let mut spec = shell(&fx, Uuid::new_v4(), "echo \"$GRANT_CANARY\"; read release");
     spec.env
         .push(("GRANT_CANARY".into(), "tg_canary_secret".into()));
     let mut command = fx.host.command(&spec);
-    command.stdout(std::process::Stdio::piped());
-    let process = Supervised::spawn(command).unwrap();
-    for _ in 0..100 {
-        if !fx.host.live_processes(spec.turn_id).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut process = Supervised::spawn(command).unwrap();
+    let mut stdout = tokio::io::BufReader::new(process.child.stdout.take().unwrap());
+    let mut seen = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncBufReadExt::read_line(&mut stdout, &mut seen),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(!fx.host.live_processes(spec.turn_id).is_empty());
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
         if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
@@ -484,12 +489,6 @@ async fn launch_secrets_stay_off_host_command_lines() {
             assert!(!text.contains("tg_canary_secret"), "{text}");
         }
     }
-    let mut process = process;
-    let mut stdout = process.child.stdout.take().unwrap();
-    let mut seen = String::new();
-    tokio::io::AsyncReadExt::read_to_string(&mut stdout, &mut seen)
-        .await
-        .unwrap();
     assert_eq!(
         seen.trim(),
         "tg_canary_secret",

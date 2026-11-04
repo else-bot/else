@@ -67,6 +67,15 @@ fn commands_refuse_held_ownership_before_writing_anything() {
             "already running with data directory",
         );
     }
+    let untouched = root.join("must-not-create/else.sqlite3");
+    refused(
+        api(root, &data, Some(&untouched))
+            .arg("migrate")
+            .output()
+            .unwrap(),
+        "already running with data directory",
+    );
+    assert!(!untouched.parent().unwrap().exists());
     let other = root.join("b");
     for command in ["setup", "migrate", "serve"] {
         refused(

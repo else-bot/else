@@ -153,12 +153,13 @@ class Session:
 
     def runtime_locks(self):
         """Hold the API's own data and database locks so no independently started API is running."""
+        self.data.mkdir(mode=0o700, exist_ok=True)
         paths = [self.data / "api.lock"]
         if os.path.lexists(self.database):
             paths.append(Path(f"{os.path.realpath(self.database)}.api.lock"))
         held = []
         for path in paths:
-            fd = try_lock(path, create=False)
+            fd = try_lock(path, create=True)
             if fd is None:
                 for other in held:
                     os.close(other)
@@ -319,7 +320,8 @@ def host_api(session, args):
 def owned_window(box, pid, alive, timeout=60):
     def find():
         require(alive(), "the boxed session exited before its window appeared")
-        windows = json.loads(subprocess.check_output(["omabox", "windows", "-b", box, "--json"], text=True))
+        windows = json.loads(subprocess.check_output(["omabox", "windows", "-b", box, "--json"],
+                                                    cwd=ROOT, text=True))
         mine = [w["address"] for w in windows if w.get("pid") == pid]
         foreign = [w["address"] for w in windows if w.get("class") == "else-bot" and w.get("pid") != pid]
         require(len(mine) <= 1 and not foreign,
@@ -350,7 +352,7 @@ def run_box(args):
         up = subprocess.check_output(["omabox", "up", "--new", "--net", "isolated", "--json",
                                       *[a for m in sorted(mounts) for a in ("--ro-bind", m)]], cwd=ROOT, text=True)
         box = report["box"] = json.loads(up)["name"]
-        home = Path(subprocess.check_output(["omabox", "path", "-b", box, "--home"], text=True).strip())
+        home = Path(subprocess.check_output(["omabox", "path", "-b", box, "--home"], cwd=ROOT, text=True).strip())
         spec = json.dumps({"run": run_id, "api": api, "desktop": desktop})
         with (evidence / "worker.log").open("w") as log:
             worker = subprocess.Popen(["omabox", "run", "-b", box, "--", "python3", str(SCRIPT), "box-worker", spec],
@@ -390,7 +392,7 @@ def run_box(args):
                 report.update(status="failed", evidence_error=str(error))
             finally:
                 try:
-                    subprocess.run(["omabox", "down", "-b", box], check=True, timeout=45)
+                    subprocess.run(["omabox", "down", "-b", box], cwd=ROOT, check=True, timeout=45)
                 except (OSError, subprocess.SubprocessError) as error:
                     report.update(status="failed", cleanup_error=str(error))
         (evidence / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")

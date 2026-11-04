@@ -90,11 +90,11 @@ fn canonical_database(url: &DatabaseUrl) -> Result<Option<PathBuf>, LockError> {
 /// process that held these locks earlier is stale and removed.
 pub fn acquire(data_dir: &Path, database: &DatabaseUrl) -> Result<RuntimeLock, LockError> {
     ensure_private_dir(data_dir)?;
-    let database = canonical_database(database)?;
     let mut files = vec![lock(
         &data_dir.join("api.lock"),
         LockError::StorageInUse(data_dir.display().to_string()),
     )?];
+    let database = canonical_database(database)?;
     if let Some(path) = database {
         let db_lock = PathBuf::from(format!("{}.api.lock", path.display()));
         files.push(lock(&db_lock, LockError::DatabaseInUse)?);
