@@ -62,9 +62,10 @@ pub(super) struct CreateFormHolder {
 impl ElseApp {
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Research"));
-        let profile = self.caps.clone().map(|caps| {
-            cx.new(|cx| ProfilePicker::new(&caps, caps.defaults.as_ref(), window, cx).stacked())
-        });
+        let profile = self
+            .caps
+            .clone()
+            .map(|caps| cx.new(|cx| ProfilePicker::new(&caps, caps.defaults.as_ref(), window, cx)));
         let choices = category_choices(&self.categories);
         let category =
             cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));
@@ -284,7 +285,7 @@ impl ElseApp {
             form.in_doubt.clone().unwrap_or_else(|| CreateBotRequest {
                 request_id: form.request_id,
                 name: form.name.read(cx).value().to_string(),
-                profile: form.profile.as_ref().and_then(|p| p.read(cx).choice(cx)),
+                profile: form.profile.as_ref().and_then(|p| p.read(cx).choice()),
                 category_id: form.category.read(cx).selected_value().copied().flatten(),
                 avatar: self
                     .caps

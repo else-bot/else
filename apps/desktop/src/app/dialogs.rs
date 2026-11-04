@@ -68,8 +68,8 @@ impl ElseApp {
             cx.notify();
             return;
         }
-        let Some(profile) = welcome.picker.read(cx).choice(cx) else {
-            welcome.error = Some("Choose a provider and a model.".into());
+        let Some(profile) = welcome.picker.read(cx).choice() else {
+            welcome.error = Some("Choose a model.".into());
             cx.notify();
             return;
         };
