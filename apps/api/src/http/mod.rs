@@ -11,6 +11,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;
+pub mod routines;
 pub mod settings;
 pub mod task_secrets;
 pub mod tools;
@@ -99,6 +100,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(computers::routes())
         .merge(settings::routes())
         .merge(task_secrets::routes())
+        .merge(routines::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())
         .fallback(|| async { ApiError::not_found() })

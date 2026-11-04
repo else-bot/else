@@ -17,7 +17,7 @@ pub async fn previous_provider(
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT t.provider_id FROM turns t JOIN items i ON i.id = t.owner_item_id
-         WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind = 'user'
+         WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'routine')
          ORDER BY t.turn_no DESC LIMIT 1",
     )
     .bind(conversation_id)

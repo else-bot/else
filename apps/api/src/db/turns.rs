@@ -443,13 +443,14 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .bind(turn.bot_id)
         .fetch_one(&mut *conn)
         .await?;
-    let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1 AND kind = 'user'")
-        .bind(turn.source_item_id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let text: String =
+        sqlx::query_scalar("SELECT text FROM items WHERE id = ?1 AND kind IN ('user', 'routine')")
+            .bind(turn.source_item_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let history = sqlx::query_as::<_, (i64, String, String, String)>(
         "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'assistant')
+         WHERE i.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'routine', 'assistant')
          ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)
@@ -501,6 +502,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
+        routine: crate::db::routines::run_of(&mut conn, turn_id).await?,
     };
     // Return this connection before memory loading checks out others.
     drop(conn);

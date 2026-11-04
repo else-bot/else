@@ -85,6 +85,7 @@ pub async fn endpoint(
                 Some("delegate") => Tool::Delegate,
                 Some("create_bot") => Tool::CreateBot,
                 Some("request_secret") => Tool::RequestSecret,
+                Some(name) if name.starts_with("routine_") => Tool::Routines,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 _ => Tool::ReadMemory,
             };
@@ -260,6 +261,10 @@ fn tool_list() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
+        super::routines::create_schema(),
+        super::routines::list_schema(),
+        super::routines::update_schema(),
+        super::routines::delete_schema(),
         {
             "name": "memory_date",
             "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
@@ -421,6 +426,10 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "delegate" => delegate(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
         "request_secret" => request_secret(state, grant, args).await,
+        "routine_create" => super::routines::create(state, grant, args).await,
+        "routine_list" => super::routines::list(state, grant).await,
+        "routine_update" => super::routines::update(state, grant, args).await,
+        "routine_delete" => super::routines::delete(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }

@@ -123,6 +123,17 @@ pub struct TurnInput {
     /// The bot's active and unresolved guest jobs, given with any rebuilt
     /// or handed-off context regardless of which history was selected.
     pub jobs: Vec<JobReceipt>,
+    /// Set when this turn runs a saved routine: `text` is its prompt, not
+    /// an owner message.
+    pub routine: Option<RoutineRun>,
+}
+
+/// The routine occurrence a turn runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineRun {
+    pub routine_id: Uuid,
+    pub name: String,
+    pub due_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A provider's native session for one conversation.

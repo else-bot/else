@@ -84,7 +84,7 @@ async fn history(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2)
+         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2) AND i.kind <> 'routine'
          ORDER BY i.seq DESC LIMIT ?3"
     )))
     .bind(grant.conversation_id)
@@ -106,7 +106,7 @@ async fn item(
     // A foreign object is indistinguishable from a missing one.
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.id = ?1 AND i.conversation_id = ?2"
+         WHERE i.id = ?1 AND i.conversation_id = ?2 AND i.kind <> 'routine'"
     )))
     .bind(item_id)
     .bind(grant.conversation_id)

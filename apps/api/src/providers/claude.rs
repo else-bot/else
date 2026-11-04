@@ -58,7 +58,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "claude";
 /// Bump when the system prompt or packet format change.
-const PROMPT_VERSION: &str = "else-claude-v8";
+const PROMPT_VERSION: &str = "else-claude-v9";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -167,7 +167,7 @@ impl Claude {
             &self.version,
             &runtime,
             if self.tool_url.is_some() {
-                "tools:host+elsebot-v3"
+                "tools:host+elsebot-v4"
             } else {
                 "tools:host"
             },
