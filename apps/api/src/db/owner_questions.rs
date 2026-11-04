@@ -168,38 +168,6 @@ fn only_keys(args: &Value, allowed: &[&str]) -> Result<(), ()> {
     }
 }
 
-/// JSON with object keys in sorted order at every depth, so the same
-/// arguments hash the same however the model ordered them.
-fn canonical(value: &Value, out: &mut String) {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (index, key) in keys.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                out.push_str(&Value::String((*key).clone()).to_string());
-                out.push(':');
-                canonical(&map[*key], out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                canonical(item, out);
-            }
-            out.push(']');
-        }
-        other => out.push_str(&other.to_string()),
-    }
-}
-
 fn hash(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -299,8 +267,9 @@ impl Spec {
         title: String,
         context: String,
     ) -> Self {
-        let mut canonical = String::new();
-        self::canonical(args, &mut canonical);
+        let mut canonical = args.clone();
+        canonical.sort_all_objects();
+        let canonical = canonical.to_string();
         Self {
             kind,
             title,
