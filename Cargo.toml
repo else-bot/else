@@ -8,3 +8,8 @@ resolver = "3"
 [workspace.package]
 version = "0.0.5"
 edition = "2024"
+
+# Prefer fast checkout builds over generating debug information for GPUI's
+# large dependency graph. Use CARGO_PROFILE_DEV_DEBUG=2 for full debugging.
+[profile.dev]
+debug = 0

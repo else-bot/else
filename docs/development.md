@@ -4,7 +4,7 @@ The repository contains the Rust API, the GPUI desktop client, and a PostgreSQL 
 
 ## Prerequisites
 
-For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else` and is tested by `scripts/test-install.sh` in Debian, Ubuntu, and Arch containers (the macOS path is checked by hand). A development checkout uses the root `.env` and `~/.local/share/else-bot` as below.
+For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else`. Use the [native ARM64 E2E lanes](#native-arm64-e2e) for automated macOS and Ubuntu coverage; `scripts/test-install.sh` retains the existing Debian, Ubuntu, and Arch container matrix. A development checkout uses the root `.env` and `~/.local/share/else-bot` as below.
 
 Install Rust with Cargo and rustfmt, Docker Engine with Docker Compose, and the PostgreSQL 18 client tools (`pg_dump`, `pg_restore`; checked with 18.6) for backups. Checked with Rust 1.98.0 and Compose 5.6.1. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run the commands below from the repository root.
 
@@ -24,7 +24,7 @@ Bot computers need Microsandbox 0.7.13 (its installer puts `msb` in `~/.microsan
 brew install postgresql@18 && brew link --force postgresql@18   # pg_dump, pg_restore on PATH
 ```
 
-Use any Docker with Compose (Docker Desktop or OrbStack) for `docker compose up -d --wait`. The backup tools are looked up on the API's `PATH`, or set `ELSE_PG_DUMP` and `ELSE_PG_RESTORE` to absolute paths. The desktop builds with the Command Line Tools; Xcode is not required. Use `ELSE_SYNTHETIC_PROVIDER=1` to chat without a host provider.
+Use any Docker with Compose (Docker Desktop or OrbStack) for `docker compose up -d --wait`. The backup tools are looked up on the API's `PATH`, or set `ELSE_PG_DUMP` and `ELSE_PG_RESTORE` to absolute paths. The desktop needs Xcode with the Metal compiler available to `xcrun`; the API alone builds with the Command Line Tools. Use `ELSE_SYNTHETIC_PROVIDER=1` to chat without a host provider.
 
 Codex needs the verified version (0.166; `brew upgrade --cask codex`) and `codex login`. Claude Code needs the verified version (2.1.316; `claude install 2.1.316`) and a login, as in a terminal: bots use the host's Claude configuration, so the Keychain login works. Leftover provider processes from a crashed API are swept at startup on macOS too (through libproc; see [security](security.md#host-provider-processes)).
 
@@ -80,6 +80,109 @@ cargo check --workspace --locked
 cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
+
+### Build speed
+
+Default checkout builds (`cargo build` / `cargo run`) skip debug information for
+the large desktop dependency graph. Runtime optimization, assertions, overflow
+checks, and incremental compilation keep Cargo's development defaults. Release
+builds keep Cargo's full default optimization. Application dependencies are
+unchanged.
+
+For source-line backtraces and full debugger support, opt in when needed:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=2 cargo build --workspace --locked
+CARGO_PROFILE_DEV_DEBUG=2 cargo run -p else-api -- serve
+CARGO_PROFILE_TEST_DEBUG=2 cargo test --workspace --locked
+```
+
+Without that override, backtraces retain function names but omit debugger
+variable/type information and source-line tables.
+
+Reproduce the [clean-build benchmark](experiments/build-speed.md) with Python 3
+and the normal build prerequisites:
+
+```sh
+cargo fetch --locked
+python3 scripts/benchmark-build.py --baseline-ref fbb9f3a --output /tmp/else-build-benchmark --runs 2 --profiles dev
+```
+
+The output directory must be new. The runner exports the baseline Git revision
+without changing this checkout, alternates build order, uses a fresh target
+directory for every build, and disables compiler wrappers. Each variant uses
+its own source, lockfile, and Cargo profiles. It retains logs, Cargo HTML timings,
+binary sizes, and `results.json`. Downloads, Rust installation, and the guest
+image are excluded; registry sources and filesystem caches stay warm.
+Use `--profiles release` to measure release builds, and `--packages else-api`
+to measure an API-only checkout.
+
+## Native ARM64 E2E
+
+Run both native lanes on an Apple silicon development machine:
+
+```sh
+python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --repeat 2
+```
+
+The Ubuntu lane runs Ubuntu 26.04 aarch64 in Docker; macOS runs native arm64
+binaries and a temporary launchd service. Both build the API and desktop, run
+the application tests against fresh PostgreSQL/S3 services, and exercise the
+real installer with local v0.0.1/v0.0.2 Git tags: installation, busy-update
+refusal, backup-before-migration, preserved conversations, read-only database
+access, native binaries, and an idempotent reinstall. Ubuntu uses a managed
+API process, as the container has no systemd. Desktop rendering is not driven.
+
+The default development profile keeps assertions and overflow checks enabled.
+It avoids release optimization during functional testing; use `--profile
+release` to validate optimized artifacts. Normal installations still build
+with the release profile. Four independent integration binaries run at once,
+with four test threads each. S3 tests use separate buckets and shared emulator access; outage/restart
+checks take exclusive access to the emulator process. Set `--test-jobs 1` for
+serial Cargo test binaries, `--test-threads N` for their inner concurrency,
+`--parallel 1` for serial platforms, and `--build-jobs N` for Ubuntu's CPU/build
+budget (default 4).
+
+Mac prerequisites: arm64 Rust/rustup, Docker with Compose, PostgreSQL 18 or
+newer client tools on PATH, and the Xcode Metal compiler (`xcrun -sdk macosx -f
+metal`). The runner checks prerequisites and does not install host packages.
+Ubuntu prerequisites and Rust are layered in a reusable Docker image before
+source is mounted; source edits do not invalidate those layers. Only native
+ARM64 hosts and Docker engines are accepted. On Linux ARM64, run the Ubuntu
+lane alone.
+
+```sh
+python3 scripts/test-e2e.py ubuntu-arm64 --suite application
+python3 scripts/test-e2e.py macos-arm64 --suite installer
+python3 scripts/test-e2e.py macos-arm64 --compile-live
+python3 scripts/e2e/test_runner.py
+```
+
+Application runs include unit tests, integration targets, and doctests. By
+default, `*_live` targets that require authorized providers/VMs are not compiled;
+`--compile-live` adds their build checks. All `ELSE_LIVE_*` gates, including real
+S3, remain disabled in these isolated lanes. Run live-provider/VM scenarios
+separately using their documented authorization and prerequisites.
+
+Each run has its own Compose project, PostgreSQL/S3 volumes, ports, installation,
+credentials, and service name. Services and data are removed on completion,
+failure, or Ctrl-C. The checkout's `.env` and the owner's installation links
+are untouched; ignored files are excluded from fake release snapshots. The
+installer's test-only `ELSE_INSTALL_TEST_CACHE` keeps toolchains, Microsandbox,
+and Cargo artifacts outside the disposable installation, while linking commands
+inside it. A non-release `ELSE_INSTALL_TEST_PROFILE` requires that cache.
+
+The macOS cache defaults to `target/e2e-cache/macos-arm64` (`--cache-dir` changes
+its parent). Ubuntu uses a named `else-e2e-ubuntu-arm64-<sdk-id>` volume recorded
+in the results. Keep these caches for fast reruns; remove the specific cache or
+volume when a clean build is needed. Fresh databases and installation state are
+never reused. Run one invocation per cache to avoid competing version builds; the two
+platforms in a matrix use separate caches.
+
+Logs and machine-readable phase/per-target timings are written beneath
+`target/e2e/<timestamp>-<pid>` or `--output <new-directory>`. Image preparation
+is timed separately. See the [ARM64 benchmark](experiments/e2e-speed.md) for
+measured application and full-lane times and cache conditions.
 
 ## Run the API
 

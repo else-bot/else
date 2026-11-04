@@ -91,9 +91,10 @@ impl Drop for TestDb {
         let pool = self.pool.clone();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
-                // `close` waits for checked-out connections (such as the event
-                // listener's). Bound it; `WITH (FORCE)` ends the rest.
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), pool.close()).await;
+                // Mark the pool closed before terminating its connections, so
+                // background listeners cannot reconnect to the test database.
+                // Do not wait for those listeners before FORCE disconnects them.
+                let closed = pool.close();
                 if let Ok(admin_pool) = PgPoolOptions::new()
                     .max_connections(1)
                     .connect_with(admin)
@@ -106,6 +107,7 @@ impl Drop for TestDb {
                     .await;
                     admin_pool.close().await;
                 }
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), closed).await;
             })
         });
     }

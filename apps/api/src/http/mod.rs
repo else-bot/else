@@ -339,8 +339,11 @@ pub mod tests {
             32
         );
         let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        // A lazy pool never connects unless a handler queries it.
+        // Auth tests deliberately have no database. Authorized capability
+        // requests query defaults; fail those queries promptly rather than
+        // spending the production pool's 30-second timeout on each one.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgresql://unused@127.0.0.1:1/unused")
             .unwrap();
         let scheduler = Scheduler::new(pool.clone(), crate::providers::Registry::new(vec![]), 1);

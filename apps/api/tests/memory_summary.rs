@@ -92,6 +92,22 @@ fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {
     Compactor::with_summaries(app.db.pool.clone(), summarizer, app.scheduler.clone())
 }
 
+async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::SummaryPermit {
+    // A terminal database row precedes provider cleanup, and dispatch also
+    // briefly reserves slots while checking the queue. Wait for the resource
+    // being asserted instead of assuming either task has already yielded it.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(permit) = app.scheduler.try_begin_summary(limit) {
+                break permit;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the scheduler releases a summary slot")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn summaries_fill_long_ranges_with_a_complete_audit() {
     let app = TestApp::installed().await;
@@ -228,10 +244,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     )
     .await;
     app.wait_turn(&turn, &["interrupted"]).await;
-    let permit = app
-        .scheduler
-        .try_begin_summary(1)
-        .expect("the slot is free");
+    let permit = summary_slot(&app, 1).await;
     let next = app
         .send(&bot, Uuid::new_v4(), "after the summary", Some("synthetic"))
         .await;
@@ -386,10 +399,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     // take every slot with retries.
     let mut held = Vec::new();
     while held.len() < 4 {
-        match app.scheduler.try_begin_summary(4) {
-            Some(permit) => held.push(permit),
-            None => tokio::time::sleep(Duration::from_millis(5)).await,
-        }
+        held.push(summary_slot(&app, 4).await);
     }
     for _ in 0..10 {
         sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")

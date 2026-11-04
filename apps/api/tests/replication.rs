@@ -1,8 +1,8 @@
 //! POC-023: bucket replication, end to end against the SeaweedFS emulator in
 //! Compose (`docker compose up -d --wait seaweedfs`). Like the PostgreSQL
 //! tests, these require the emulator: a missing one fails with a message.
-//! Each test uses its own bucket; they run one at a time because some stop
-//! or restart the container.
+//! Each test uses its own bucket. Normal operations share access to the
+//! emulator; tests that stop or restart its container take exclusive access.
 
 mod common;
 
@@ -28,7 +28,8 @@ use else_api::credentials::SecretKey;
 use sqlx::Connection;
 use uuid::Uuid;
 
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// The only shared resource is the emulator process, not the per-test buckets.
+static EMULATOR: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -68,9 +69,14 @@ async fn bucket() -> S3 {
 }
 
 fn compose(args: &[&str]) {
+    // The native matrix owns a distinct stack per run; never stop a shared
+    // developer service when this test exercises outages and recovery.
+    let env_file = std::env::var("ELSE_TEST_COMPOSE_ENV_FILE").unwrap_or(".env".into());
+    let compose_file =
+        std::env::var("ELSE_TEST_COMPOSE_FILE").unwrap_or("infra/compose.yaml".into());
     let status = std::process::Command::new("docker")
         .current_dir(root())
-        .args(["compose", "--env-file", ".env", "-f", "infra/compose.yaml"])
+        .args(["compose", "--env-file", &env_file, "-f", &compose_file])
         .args(args)
         .status()
         .unwrap();
@@ -131,7 +137,7 @@ fn set_key(s3: &S3, set: &str, object: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sets_are_verified_by_readback_and_published_create_only() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -191,7 +197,7 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_object_altered_before_publication_is_detected() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -241,7 +247,7 @@ async fn an_object_altered_before_publication_is_detected() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -318,7 +324,7 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.write().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -366,7 +372,7 @@ async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_retention_keeps_the_newest_complete_sets() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -466,7 +472,7 @@ impl ComputerRuntime for Fake {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_restart() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.write().await;
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -643,7 +649,6 @@ async fn a_real_bucket_round_trip_when_authorized() {
         eprintln!("SKIPPED: set ELSE_LIVE_S3=1 and ELSE_LIVE_S3_* for a real bucket");
         return;
     }
-    let _serial = SERIAL.lock().await;
     let var = |n: &str| std::env::var(format!("ELSE_LIVE_S3_{n}")).unwrap();
     let s3 = S3::new(S3Config {
         endpoint: var("ENDPOINT"),
@@ -694,7 +699,7 @@ async fn a_real_bucket_round_trip_when_authorized() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recorded_completion_is_not_trusted_without_its_payload() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -726,7 +731,7 @@ async fn a_recorded_completion_is_not_trusted_without_its_payload() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn another_destination_is_replicated_afresh() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let first = bucket().await;
     let dir = tempfile::tempdir().unwrap();
@@ -759,7 +764,7 @@ async fn another_destination_is_replicated_afresh() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -829,7 +834,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_start() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     // An unreachable bucket: captures still happen on schedule.
@@ -883,7 +888,7 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_remote_works_without_the_source_database() {
-    let _serial = SERIAL.lock().await;
+    let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
