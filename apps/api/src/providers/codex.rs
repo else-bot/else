@@ -74,9 +74,6 @@ pub struct Codex {
     tool_url: Option<String>,
 }
 
-/// Codex versions whose policy controls were verified (see POC-010).
-const VERIFIED_VERSIONS: &[&str] = &["codex-cli 0.166."];
-
 /// Settings Codex reported for a thread or turn; absent fields are unknown.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Reported {
@@ -119,9 +116,9 @@ impl Reported {
 }
 
 impl Codex {
-    /// Locate the CLI and the host login and check the CLI version. A
-    /// missing piece or an unverified version makes the provider unavailable
-    /// with a reason instead of failing startup.
+    /// Locate the CLI and the host login and check that the CLI runs. A
+    /// missing piece makes the provider unavailable with a reason instead of
+    /// failing startup. The version is only session identity.
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
         // Run the version check the way turns run: this both reads the
         // version and proves the executable starts with the passed
@@ -132,7 +129,6 @@ impl Codex {
             }
             _ => String::new(),
         };
-        let allow_unverified = std::env::var("ELSE_CODEX_ALLOW_UNVERIFIED").as_deref() == Ok("1");
         let unavailable = match (&host, &program, &auth) {
             (None, _, _) => Some("Codex is not configured on this host".to_owned()),
             (_, None, _) => Some("the codex CLI was not found on the host".to_owned()),
@@ -145,13 +141,6 @@ impl Codex {
                  set ELSE_CODEX_BIN to the native codex binary"
                     .to_owned(),
             ),
-            _ if !allow_unverified && !VERIFIED_VERSIONS.iter().any(|v| version.starts_with(v)) => {
-                Some(format!(
-                    "{} is not a verified Codex version (verified: 0.166); set \
-                     ELSE_CODEX_ALLOW_UNVERIFIED=1 after checking its policy controls",
-                    if version.is_empty() { "this" } else { &version }
-                ))
-            }
             _ => None,
         };
         Self {
@@ -911,5 +900,53 @@ mod tests {
         b.bot_role = "Different".into();
         assert_ne!(base, codex.fingerprint(&profile, &b, "chatgpt:a"));
         assert_eq!(base, codex.fingerprint(&profile, &a.clone(), "chatgpt:a"));
+        let dir = tempfile::tempdir().unwrap();
+        let version = |v: &str| {
+            detect_with(dir.path(), &format!("echo '{v}'"), true).fingerprint(
+                &profile,
+                &a,
+                "chatgpt:a",
+            )
+        };
+        assert_ne!(version("codex-cli 9.0.0"), version("codex-cli 9.0.1"));
+    }
+
+    fn detect_with(dir: &std::path::Path, script: &str, logged_in: bool) -> Codex {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("codex");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let auth = dir.join("auth.json");
+        if logged_in {
+            std::fs::write(&auth, "{}").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&auth);
+        }
+        Codex::detect(Some(Host::new(dir, dir)), Some(program), Some(auth))
+    }
+
+    #[test]
+    fn any_running_logged_in_version_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = detect_with(dir.path(), "echo 'codex-cli 9.0.0'", true);
+        let availability = codex.availability();
+        assert!(
+            matches!(availability, Availability::Available),
+            "{availability:?}"
+        );
+        assert_eq!(codex.version, "codex-cli 9.0.0");
+        for (script, logged_in) in [
+            ("exit 1", true),
+            ("true", true),
+            ("echo 'codex-cli 9.0.0'", false),
+        ] {
+            assert!(
+                matches!(
+                    detect_with(dir.path(), script, logged_in).availability(),
+                    Availability::Unavailable(_)
+                ),
+                "{script} {logged_in}"
+            );
+        }
     }
 }

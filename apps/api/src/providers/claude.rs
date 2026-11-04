@@ -69,8 +69,6 @@ pub const MODELS: &[&str] = &[
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Fast mode needs an SDK opt-in this adapter does not use.
 const TIERS: &[&str] = &["default"];
-/// Claude Code versions whose flags and events were verified (POC-020).
-const VERIFIED_VERSIONS: &[&str] = &["2.1.316"];
 const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 /// How long an interrupted turn may take to report its result.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
@@ -107,10 +105,11 @@ impl Session {
 }
 
 impl Claude {
-    /// Locate the CLI, check its version, and ask it whether the host login
-    /// works (`claude auth status`, with the configuration turns use).
-    /// Anything missing makes the provider unavailable with a reason instead
-    /// of failing startup.
+    /// Locate the CLI, check that it runs (`claude --version`), and ask it
+    /// whether the host login works (`claude auth status`, with the
+    /// configuration turns use). Anything missing makes the provider
+    /// unavailable with a reason instead of failing startup. The version is
+    /// only session identity.
     pub fn detect(
         host: Option<Host>,
         program: Option<PathBuf>,
@@ -134,15 +133,10 @@ impl Claude {
             Some("Claude Code (`claude`) was not found on PATH.".to_owned())
         } else if version.is_some() && !logged_in {
             Some("Claude Code is not logged in on the host (run `claude` and log in).".to_owned())
+        } else if version.is_none() {
+            Some("Claude Code does not run (`claude --version` failed).".to_owned())
         } else {
-            match &version {
-                None => Some("Claude Code does not run (`claude --version` failed).".to_owned()),
-                Some(v) if !VERIFIED_VERSIONS.iter().any(|ok| v.starts_with(ok)) => Some(format!(
-                    "Claude Code {v} is not a verified version (verified: {}).",
-                    VERIFIED_VERSIONS.join(", ")
-                )),
-                Some(_) => None,
-            }
+            None
         };
         Self {
             host,
