@@ -1,10 +1,11 @@
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
-use crate::api::{Bot, BotProfile, ClientError};
+use crate::api::{Bot, BotProfile, ClientError, ProfileChoice};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::*;
 use uuid::Uuid;
@@ -79,24 +80,24 @@ impl Details {
     }
 }
 
-struct Model {
-    saved: Option<BotProfile>,
-    picker: Option<(Entity<ProfilePicker>, Subscription)>,
-    save: Save,
-}
-
-impl Model {
-    fn dirty(&self, cx: &App) -> bool {
-        self.picker.as_ref().is_some_and(|(picker, _)| {
-            picker.read(cx).choice(cx) != self.saved.as_ref().map(|p| p.choice.clone())
-        })
-    }
-}
-
 enum ModelState {
     Loading(Uuid),
     Failed(String),
-    Ready(Model),
+    Ready(Option<BotProfile>),
+}
+
+pub(super) struct ModelDialog {
+    bot: Uuid,
+    saved: Option<ProfileChoice>,
+    picker: Entity<ProfilePicker>,
+    save: Save,
+    _picker: Subscription,
+}
+
+impl ModelDialog {
+    fn dirty(&self, cx: &App) -> bool {
+        self.picker.read(cx).choice(cx) != self.saved
+    }
 }
 
 pub(super) struct BotSettings {
@@ -111,11 +112,7 @@ impl ElseApp {
             if let Some(bot) = self.selected.filter(|id| {
                 self.settings
                     .get(id)
-                    .is_some_and(|entry| match &entry.model {
-                        ModelState::Ready(model) => !model.dirty(cx) && !model.save.busy(),
-                        ModelState::Failed(_) => true,
-                        ModelState::Loading(_) => false,
-                    })
+                    .is_some_and(|entry| !matches!(entry.model, ModelState::Loading(_)))
             }) {
                 self.load_profile(bot, window, cx);
             }
@@ -252,7 +249,7 @@ impl ElseApp {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.bot_profile(bot).await;
-            let _ = this.update_in(cx, |app, window, cx| {
+            let _ = this.update(cx, |app, cx| {
                 let Some(entry) = app.settings.get_mut(&bot) else {
                     return;
                 };
@@ -260,87 +257,148 @@ impl ElseApp {
                     return;
                 }
                 entry.model = match result {
-                    Ok(saved) => ModelState::Ready(Model {
-                        saved,
-                        picker: None,
-                        save: Save::Idle,
-                    }),
+                    Ok(saved) => ModelState::Ready(saved),
                     Err(err) => ModelState::Failed(err.to_string()),
                 };
-                app.build_pickers(window, cx);
                 cx.notify();
             });
         })
         .detach();
     }
 
-    pub(super) fn build_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_model_dialog(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(caps) = self.caps.clone() else {
             return;
         };
-        for entry in self.settings.values_mut() {
-            if let ModelState::Ready(model) = &mut entry.model
-                && model.picker.is_none()
-            {
-                model.picker = Some(new_picker(&caps, model.saved.as_ref(), window, cx));
-            }
-        }
-    }
-
-    fn apply_model(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let Some(ModelState::Ready(model)) = self.settings.get_mut(&bot).map(|s| &mut s.model)
-        else {
+        let Some(ModelState::Ready(saved)) = self.settings.get(&bot).map(|s| &s.model) else {
             return;
         };
-        let Some((picker, _)) = &model.picker else {
+        let saved = saved.as_ref().map(|p| p.choice.clone());
+        let picker = cx.new(|cx| ProfilePicker::new(&caps, saved.as_ref(), window, cx).stacked());
+        let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
+        let holder = cx.new(|_| ModelDialog {
+            bot,
+            saved,
+            picker: picker.clone(),
+            save: Save::Idle,
+            _picker: observer,
+        });
+        self.model_dialog = Some(holder.clone());
+        let app = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let form = holder.read(cx);
+            let saving = form.save.busy();
+            let connected = app
+                .upgrade()
+                .is_some_and(|app| app.read(cx).connection == Connection::Connected);
+            let ready = form.dirty(cx) && form.picker.read(cx).choice(cx).is_some();
+            let body = v_flex()
+                .gap_3()
+                .child(picker.clone())
+                .child(muted(
+                    "Changes apply from the bot's next message; work already running is unaffected.",
+                    cx,
+                ))
+                .children(match &form.save {
+                    Save::Failed(err) => Some(note(format!("Couldn't apply. {err}"), true, cx)),
+                    _ => None,
+                });
+            let app_ok = app.clone();
+            let app_apply = app.clone();
+            let app_close = app.clone();
+            let mine = holder.clone();
+            dialog
+                .title("Change model")
+                .w(px(420.))
+                .on_ok(move |_, window, cx| {
+                    let _ = app_ok.update(cx, |app, cx| app.apply_model(window, cx));
+                    false
+                })
+                // Dismissed: a late result must not close another dialog.
+                .on_close(move |_, _, cx| {
+                    let _ = app_close.update(cx, |app, _| {
+                        if app.model_dialog.as_ref() == Some(&mine) {
+                            app.model_dialog = None;
+                        }
+                    });
+                })
+                .child(body)
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("model-cancel")
+                                .label("Cancel")
+                                .ghost()
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("model-apply")
+                                .label("Apply")
+                                .primary()
+                                .loading(saving)
+                                .disabled(!ready || saving || !connected)
+                                .on_click(move |_, window, cx| {
+                                    let _ = app_apply.update(cx, |app, cx| app.apply_model(window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn apply_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (client, Some(holder)) = (self.client.clone(), self.model_dialog.clone()) else {
             return;
+        };
+        let (bot, picker) = {
+            let form = holder.read(cx);
+            (form.bot, form.picker.clone())
         };
         let Some(choice) = picker.read(cx).choice(cx) else {
             return;
         };
-        if model.save.busy() || !model.dirty(cx) {
+        if holder.read(cx).save.busy() || !holder.read(cx).dirty(cx) {
             return;
         }
-        let picker = picker.clone();
-        picker.update(cx, |picker, cx| picker.set_disabled(true, cx));
         let attempt = Uuid::new_v4();
-        model.save = Save::Saving(attempt);
-        cx.notify();
+        picker.update(cx, |picker, cx| picker.set_disabled(true, cx));
+        holder.update(cx, |form, cx| {
+            form.save = Save::Saving(attempt);
+            cx.notify();
+        });
+        window.refresh();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_bot_profile(bot, choice).await;
-            let _ = this.update_in(cx, |app, _, cx| {
-                picker.update(cx, |picker, cx| picker.set_disabled(false, cx));
-                let Some(ModelState::Ready(model)) =
-                    app.settings.get_mut(&bot).map(|s| &mut s.model)
-                else {
-                    return;
-                };
-                if model.save != Save::Saving(attempt) {
+            let _ = this.update_in(cx, |app, window, cx| {
+                if holder.read(cx).save != Save::Saving(attempt) {
                     return;
                 }
                 match result {
                     Ok(saved) => {
-                        model.saved = Some(saved);
-                        model.save = Save::Saved;
+                        if let Some(entry) = app.settings.get_mut(&bot)
+                            && matches!(entry.model, ModelState::Ready(_))
+                        {
+                            entry.model = ModelState::Ready(Some(saved));
+                        }
+                        if app.model_dialog.as_ref() == Some(&holder) {
+                            app.model_dialog = None;
+                            window.close_dialog(cx);
+                        }
+                        cx.notify();
                     }
-                    Err(err) => model.save = Save::Failed(err.to_string()),
+                    Err(err) => {
+                        picker.update(cx, |picker, cx| picker.set_disabled(false, cx));
+                        holder.update(cx, |form, cx| {
+                            form.save = Save::Failed(err.to_string());
+                            cx.notify();
+                        });
+                        window.refresh();
+                    }
                 }
-                cx.notify();
             });
         })
         .detach();
-    }
-
-    fn cancel_model(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(caps) = self.caps.clone() else {
-            return;
-        };
-        if let Some(ModelState::Ready(model)) = self.settings.get_mut(&bot).map(|s| &mut s.model) {
-            model.picker = Some(new_picker(&caps, model.saved.as_ref(), window, cx));
-            model.save = Save::Idle;
-            cx.notify();
-        }
     }
 
     pub(super) fn render_settings(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
@@ -479,7 +537,7 @@ impl ElseApp {
 
     fn render_model(&self, bot: Uuid, state: &ModelState, cx: &mut Context<Self>) -> AnyElement {
         let body = section("Model", cx);
-        let model = match state {
+        let saved = match state {
             ModelState::Loading(_) => return body.child(muted("Loading…", cx)).into_any_element(),
             ModelState::Failed(err) => {
                 return body
@@ -497,105 +555,80 @@ impl ElseApp {
                     )
                     .into_any_element();
             }
-            ModelState::Ready(model) => model,
+            ModelState::Ready(saved) => saved,
         };
-        let body = body.child(self.render_current_model(model.saved.as_ref(), cx));
-        let Some((picker, _)) = &model.picker else {
-            return body.child(muted("Loading models…", cx)).into_any_element();
-        };
-        let dirty = model.dirty(cx);
-        let saving = model.save.busy();
-        let choosable = picker.read(cx).choice(cx).is_some();
-        let status = match &model.save {
-            Save::Failed(err) => Some(note(format!("Couldn't apply. {err}"), true, cx)),
-            Save::Saved if !dirty => Some(note("Applied. New messages use this model.", false, cx)),
-            _ => None,
-        };
-        let actions = h_flex()
-            .gap_2()
-            .child(
-                Button::new("apply-model")
-                    .label(if saving { "Applying…" } else { "Apply model" })
-                    .small()
-                    .primary()
-                    .disabled(
-                        !dirty || !choosable || saving || self.connection != Connection::Connected,
-                    )
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.apply_model(bot, window, cx)),
-                    ),
-            )
-            .child(
-                Button::new("cancel-model")
-                    .label("Cancel")
-                    .small()
-                    .ghost()
-                    .disabled(!dirty || saving)
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.cancel_model(bot, window, cx)),
-                    ),
-            );
-        body.child(picker.clone())
-            .child(muted(
-                "Changes apply from the bot's next message; work already running is unaffected.",
-                cx,
-            ))
-            .children(status)
-            .child(actions)
+        body.child(self.render_current_model(bot, saved.as_ref(), cx))
             .into_any_element()
     }
 
-    fn render_current_model(&self, saved: Option<&BotProfile>, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme().clone();
-        let Some(saved) = saved else {
-            return v_flex().child(muted(
+    fn render_current_model(
+        &self,
+        bot: Uuid,
+        saved: Option<&BotProfile>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let content = match saved {
+            None => v_flex().child(muted(
                 "No model yet. The bot uses the defaults once they are set.",
                 cx,
-            ));
+            )),
+            Some(saved) => {
+                let choice = &saved.choice;
+                let speed = if choice.service_tier == "priority" {
+                    "Fast"
+                } else {
+                    "Standard speed"
+                };
+                let offered = self.caps.as_ref().is_none_or(|caps| {
+                    caps.providers.iter().any(|p| {
+                        p.id == choice.provider_id && p.catalog.models.contains(&choice.model)
+                    })
+                });
+                v_flex()
+                    .gap_1()
+                    .child(muted("Now using", cx))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(model_label(&choice.model)),
+                    )
+                    .child(div().text_xs().child(format!(
+                        "{} · {} reasoning · {speed}",
+                        self.provider_label(&choice.provider_id),
+                        effort_label(&choice.reasoning_effort),
+                    )))
+                    .children(
+                        (!saved.own).then(|| muted("Follows the defaults for new bots", cx)),
+                    )
+                    .children((!offered).then(|| {
+                        note(
+                            "This provider no longer offers the saved model. It stays until you apply another.",
+                            true,
+                            cx,
+                        )
+                    }))
+            }
         };
-        let choice = &saved.choice;
-        let speed = if choice.service_tier == "priority" {
-            "Fast"
-        } else {
-            "Standard speed"
-        };
-        let source = if saved.own {
-            "This bot's own choice"
-        } else {
-            "Follows the defaults for new bots"
-        };
-        let offered = self.caps.as_ref().is_none_or(|caps| {
-            caps.providers
-                .iter()
-                .any(|p| p.id == choice.provider_id && p.catalog.models.contains(&choice.model))
-        });
-        v_flex()
-            .gap_1()
+        // Button centers and nowraps its content; the card reads as a left-aligned block.
+        Button::new("change-model")
+            .outline()
+            .with_size(Size::Size(px(16.)))
+            .w_full()
             .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .child(muted("Now using", cx))
+            .tooltip("Change model")
+            .disabled(self.caps.is_none() || self.connection != Connection::Connected)
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(model_label(&choice.model)),
+                content
+                    .flex_1()
+                    .min_w_0()
+                    .items_start()
+                    .text_left()
+                    .whitespace_normal(),
             )
-            .child(div().text_xs().child(format!(
-                "{} · {} reasoning · {speed}",
-                self.provider_label(&choice.provider_id),
-                effort_label(&choice.reasoning_effort),
-            )))
-            .child(muted(source, cx))
-            .children((!offered).then(|| {
-                note(
-                    "This provider no longer offers the saved model. It stays until you apply another.",
-                    true,
-                    cx,
-                )
-            }))
+            .child(Icon::new(IconName::ChevronRight).flex_none())
+            .on_click(cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)))
+            .into_any_element()
     }
 }
 
@@ -624,18 +657,6 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
         role,
         save: Save::Idle,
     }
-}
-
-fn new_picker(
-    caps: &crate::api::Capabilities,
-    saved: Option<&BotProfile>,
-    window: &mut Window,
-    cx: &mut Context<ElseApp>,
-) -> (Entity<ProfilePicker>, Subscription) {
-    let picker =
-        cx.new(|cx| ProfilePicker::new(caps, saved.map(|p| &p.choice), window, cx).stacked());
-    let observer = cx.observe(&picker, |_, _, cx| cx.notify());
-    (picker, observer)
 }
 
 fn section(title: &'static str, cx: &App) -> Div {
