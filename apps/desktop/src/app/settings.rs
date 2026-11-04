@@ -1,3 +1,4 @@
+use super::view::FOOTER_CONTROL_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
 
@@ -757,12 +758,14 @@ impl ElseApp {
             panel = panel.child(
                 div()
                     .flex_none()
-                    .p_4()
+                    .px_4()
+                    .py_3()
                     .border_t_1()
                     .border_color(theme.sidebar_border)
                     .child(
                         Button::new("delete-bot")
                             .label("Delete bot")
+                            .h(FOOTER_CONTROL_HEIGHT)
                             .danger()
                             .w_full()
                             .disabled(
