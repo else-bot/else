@@ -154,3 +154,102 @@ async fn bots_use_their_own_model_or_the_defaults() {
         .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn creation_is_atomic_and_retries_never_overwrite_later_choices() {
+    let app = TestApp::installed().await;
+    let category = app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({
+                "request_id": Uuid::new_v4(), "name": "Work"
+            })),
+        )
+        .await
+        .body["category"]["id"]
+        .clone();
+    let request_id = Uuid::new_v4();
+    let payload = json!({
+        "request_id": request_id, "name": "Created", "role": "works",
+        "profile": choice("high", "priority"), "category_id": category
+    });
+    // A failure after inserting the bot must roll back its receipt, profile,
+    // category, conversation, and notification along with it.
+    sqlx::query(
+        "CREATE TRIGGER reject_profile BEFORE INSERT ON bot_profiles
+                 BEGIN SELECT RAISE(ABORT, 'test profile failure'); END",
+    )
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    let failed = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
+    assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bots WHERE name = 'Created'")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM request_receipts WHERE request_id = ?1")
+            .bind(request_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(receipts, 0);
+    sqlx::query("DROP TRIGGER reject_profile")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    let created = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(created.body["bot"]["category_id"], category);
+    let bot = created.body["bot"]["id"].as_str().unwrap();
+    let path = format!("/v1/bots/{bot}/profile");
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["profile"]["reasoning_effort"],
+        "high"
+    );
+    assert_eq!(
+        app.owner("PUT", &path, Some(choice("low", "default")))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.owner(
+            "PATCH",
+            &format!("/v1/bots/{bot}/category"),
+            Some(json!({"category_id": null}))
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+
+    let retry = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body["bot"]["id"], bot);
+    assert!(retry.body["bot"]["category_id"].is_null());
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["profile"]["reasoning_effort"],
+        "low"
+    );
+    for (field, value) in [
+        ("profile", choice("medium", "default")),
+        ("category_id", json!(null)),
+    ] {
+        let mut changed = payload.clone();
+        changed[field] = value;
+        let conflict = app.owner("POST", "/v1/bots", Some(changed)).await;
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.body["error"]["code"], "request_conflict");
+    }
+    let mut missing = payload;
+    missing["request_id"] = json!(Uuid::new_v4());
+    missing["category_id"] = json!(Uuid::new_v4());
+    let refused = app.owner("POST", "/v1/bots", Some(missing)).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    assert_eq!(refused.body["error"]["code"], "category_not_found");
+}

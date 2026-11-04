@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::installation::insert_bot;
 use crate::app::bots::{BotName, BotRole};
+use crate::app::providers::Profile;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, serde::Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -66,18 +67,34 @@ pub enum BotError {
     RequestConflict,
     #[error("bot not found")]
     NotFound,
+    #[error("no such category")]
+    CategoryNotFound,
     #[error("the main bot cannot be deleted")]
     MainBot,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
-fn create_hash(name: &BotName, role: &BotRole) -> Vec<u8> {
+pub struct NewBot<'a> {
+    pub name: &'a BotName,
+    pub role: &'a BotRole,
+    pub profile: Option<(&'a str, &'a Profile)>,
+    pub category_id: Option<Uuid>,
+}
+
+fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(b"create_bot\0");
-    hasher.update(name.as_str().as_bytes());
+    hasher.update(bot.name.as_str().as_bytes());
     hasher.update(b"\0");
-    hasher.update(role.as_str().as_bytes());
+    hasher.update(bot.role.as_str().as_bytes());
+    // Keep receipts for plain creates compatible with earlier releases.
+    if bot.profile.is_some() || bot.category_id.is_some() {
+        hasher.update(b"\0options\0");
+        hasher.update(
+            serde_json::to_vec(&(bot.profile, bot.category_id)).expect("serializable options"),
+        );
+    }
     hasher.finalize().to_vec()
 }
 
@@ -93,10 +110,9 @@ pub(crate) async fn lock_request(
 pub async fn create(
     pool: &SqlitePool,
     request_id: Uuid,
-    name: &BotName,
-    role: &BotRole,
+    bot: NewBot<'_>,
 ) -> Result<Created, BotError> {
-    let hash = create_hash(name, role);
+    let hash = create_hash(&bot);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     lock_request(&mut tx, request_id).await?;
     let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
@@ -119,7 +135,33 @@ pub async fn create(
         ));
     }
     let bot_id = Uuid::new_v4();
-    insert_bot(&mut tx, bot_id, name, role).await?;
+    if let Some(category) = bot.category_id {
+        let available: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM bot_categories WHERE id = ?1 AND NOT deleting)",
+        )
+        .bind(category)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !available {
+            return Err(BotError::CategoryNotFound);
+        }
+    }
+    insert_bot(&mut tx, bot_id, bot.name, bot.role).await?;
+    if let Some((provider, profile)) = bot.profile {
+        super::bot_profiles::put_in(&mut tx, bot_id, provider, profile)
+            .await
+            .map_err(|err| match err {
+                super::bot_profiles::BotProfileError::Db(err) => BotError::Db(err),
+                super::bot_profiles::BotProfileError::NotFound => BotError::NotFound,
+            })?;
+    }
+    if let Some(category) = bot.category_id {
+        sqlx::query("UPDATE bots SET category_id = ?2 WHERE id = ?1")
+            .bind(bot_id)
+            .bind(category)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query(
         "INSERT INTO request_receipts (request_id, operation, bot_id, payload_hash)
          VALUES (?1, 'create_bot', ?2, ?3)",

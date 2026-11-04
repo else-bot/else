@@ -57,18 +57,29 @@ pub async fn put(
     profile: &Profile,
 ) -> Result<BotProfile, BotProfileError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let record = put_in(&mut tx, bot_id, provider_id, profile).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Write a validated profile as part of a larger atomic operation.
+pub(super) async fn put_in(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    provider_id: &str,
+    profile: &Profile,
+) -> Result<BotProfile, BotProfileError> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     if status.as_deref() != Some("active") {
         return Err(BotProfileError::NotFound);
     }
-    if let Some(current) = own(&mut tx, bot_id).await?
+    if let Some(current) = own(conn, bot_id).await?
         && current.provider_id == provider_id
         && current.profile == *profile
     {
-        tx.commit().await?;
         return Ok(current);
     }
     let revision: i64 = sqlx::query_scalar(
@@ -85,14 +96,13 @@ pub async fn put(
     .bind(&profile.model)
     .bind(&profile.reasoning_effort)
     .bind(&profile.service_tier)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     let record = BotProfile {
         provider_id: provider_id.to_owned(),
         profile: profile.clone(),
         revision,
     };
-    tx.commit().await?;
     Ok(record)
 }
 

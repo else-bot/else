@@ -18,8 +18,8 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::{
-    Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent,
-    ProfileChoice, Sent, StreamMessage,
+    Bot, BotList, Capabilities, Category, Client, ClientError, CreateBotRequest, Live, LiveCommand,
+    LiveEvent, Sent, StreamMessage,
 };
 use crate::model::{Applied, Conversation, Snapshot};
 use crate::profile_picker::ProfilePicker;
@@ -129,7 +129,7 @@ struct CreateForm {
     /// The exact payload of a request whose outcome is unknown. Retries
     /// resend it unchanged under the same request ID, whatever the fields
     /// now say, until the server gives a definite answer.
-    in_doubt: Option<(String, String, Option<ProfileChoice>)>,
+    in_doubt: Option<CreateBotRequest>,
     name: Entity<InputState>,
     role: Entity<TextareaState>,
     /// The new bot's provider and model, starting from the defaults.
@@ -1193,17 +1193,15 @@ impl ElseApp {
         if holder.read(cx).form.busy {
             return;
         }
-        let category = holder.read(cx).form.category;
-        let (request_id, name, role, profile) = {
+        let payload = {
             let form = &holder.read(cx).form;
-            let (name, role, profile) = form.in_doubt.clone().unwrap_or_else(|| {
-                (
-                    form.name.read(cx).value().to_string(),
-                    form.role.read(cx).value().to_string(),
-                    form.profile.as_ref().and_then(|p| p.read(cx).choice(cx)),
-                )
-            });
-            (form.request_id, name, role, profile)
+            form.in_doubt.clone().unwrap_or_else(|| CreateBotRequest {
+                request_id: form.request_id,
+                name: form.name.read(cx).value().to_string(),
+                role: form.role.read(cx).value().to_string(),
+                profile: form.profile.as_ref().and_then(|p| p.read(cx).choice(cx)),
+                category_id: form.category,
+            })
         };
         holder.update(cx, |h, cx| {
             h.form.busy = true;
@@ -1211,18 +1209,14 @@ impl ElseApp {
             cx.notify();
         });
         window.refresh();
-        let payload = (name.clone(), role.clone(), profile.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.create_bot(request_id, name, role, profile).await;
+            let result = client.create_bot(payload.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(bot) => {
                     // Close only the dialog this request came from.
                     if app.create.as_ref() == Some(&holder) {
                         app.create = None;
                         window.close_dialog(cx);
-                    }
-                    if category.is_some() {
-                        app.assign_category(bot.id, category, window, cx);
                     }
                     if app.bots.iter().any(|b| b.id == bot.id) {
                         return;

@@ -27,6 +27,11 @@ impl From<BotError> for ApiError {
     fn from(err: BotError) -> Self {
         match err {
             BotError::NotFound => ApiError::not_found(),
+            BotError::CategoryNotFound => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "category_not_found",
+                "No such category.",
+            ),
             BotError::MainBot => ApiError::new(
                 StatusCode::CONFLICT,
                 "main_bot",
@@ -72,6 +77,8 @@ struct CreateBot {
     /// The bot's own provider and model; without one it uses the defaults.
     #[serde(default)]
     profile: Option<super::settings::ProfileChoice>,
+    #[serde(default)]
+    category_id: Option<Uuid>,
 }
 
 async fn create(
@@ -96,17 +103,20 @@ async fn create(
         )),
         None => None,
     };
-    let created = bots::create(&state.db, body.request_id, &name, &role)
-        .await
-        .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
-    if let Some((provider_id, profile)) = &choice {
-        let bot = match &created {
-            Created::New(bot) | Created::Existing(bot) => bot.id,
-        };
-        crate::db::bot_profiles::put(&state.db, bot, provider_id, profile)
-            .await
-            .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
-    }
+    let created = bots::create(
+        &state.db,
+        body.request_id,
+        bots::NewBot {
+            name: &name,
+            role: &role,
+            profile: choice
+                .as_ref()
+                .map(|(provider, profile)| (*provider, profile)),
+            category_id: body.category_id,
+        },
+    )
+    .await
+    .map_err(|err| ApiError::from(err).with_request_id(body.request_id))?;
     Ok(match created {
         Created::New(bot) => {
             let location = HeaderValue::from_str(&format!("/v1/bots/{}", bot.id))

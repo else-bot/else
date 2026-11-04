@@ -21,6 +21,16 @@ use crate::model::Frame;
 use crate::model::{Item, Snapshot, Turn};
 use std::collections::HashMap;
 
+/// The complete create payload, retained unchanged when delivery is uncertain.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreateBotRequest {
+    pub request_id: Uuid,
+    pub name: String,
+    pub role: String,
+    pub profile: Option<ProfileChoice>,
+    pub category_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -497,16 +507,9 @@ impl Client {
 
     pub async fn create_bot(
         self: Arc<Self>,
-        request_id: Uuid,
-        name: String,
-        role: String,
-        profile: Option<ProfileChoice>,
+        request: CreateBotRequest,
     ) -> Result<Bot, ClientError> {
-        let mut body = json!({ "request_id": request_id, "name": name, "role": role });
-        if let Some(profile) = profile {
-            body["profile"] = json!(profile);
-        }
-        self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(body))
+        self.call::<BotEnvelope>(Method::POST, "/v1/bots".into(), Some(json!(request)))
             .await
             .map(|(_, v)| v.bot)
     }
