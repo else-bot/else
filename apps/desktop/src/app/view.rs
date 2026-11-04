@@ -192,7 +192,8 @@ impl ElseApp {
             .child(list)
             .child(
                 div()
-                    .p_2()
+                    .px_2()
+                    .py_3()
                     .border_t_1()
                     .border_color(theme.sidebar_border)
                     .child(
@@ -201,6 +202,7 @@ impl ElseApp {
                             .child(
                                 Button::new("new-bot")
                                     .label("New bot")
+                                    .h(FOOTER_CONTROL_HEIGHT)
                                     .flex_1()
                                     .disabled(!can_create)
                                     .on_click(cx.listener(|app, _, window, cx| {
@@ -210,6 +212,7 @@ impl ElseApp {
                             .child(
                                 Button::new("new-category")
                                     .label("New category")
+                                    .h(FOOTER_CONTROL_HEIGHT)
                                     .ghost()
                                     .disabled(!can_create)
                                     .on_click(cx.listener(|app, _, window, cx| {
@@ -675,7 +678,7 @@ impl ElseApp {
                     Button::new("send")
                         .label("Send")
                         .primary()
-                        .h(COMPOSER_ROW)
+                        .h(FOOTER_CONTROL_HEIGHT)
                         .disabled(!can_send)
                         .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
                 ),
@@ -841,8 +844,9 @@ const NARROW: Pixels = px(1000.);
 
 /// One row of the composer: gpui-kit's medium Textarea draws a 1.25rem line
 /// (20px at the default rem) with 8px padding above and below inside a 1px
-/// border. A medium Button is only 32px, so Send takes this height to line up.
-const COMPOSER_ROW: Pixels = px(38.);
+/// border. A medium Button is only 32px, so every panel footer's buttons take
+/// this height to line up with a one-line composer.
+pub(super) const FOOTER_CONTROL_HEIGHT: Pixels = px(38.);
 
 fn beside(user: bool, note: Div) -> Div {
     let row = h_flex().w_full().child(note);
