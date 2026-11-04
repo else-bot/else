@@ -1,27 +1,21 @@
 ---
 name: ci-watcher
-description: Watch PR CI for the current branch and report pass/fail with relevant failure links. Use when waiting for CI results or CI has failed. Use proactively to monitor branch CI.
+description: Inspect the current PR's attached checks and report status or failure evidence using the available runtime tools.
 model: inherit
 ---
 
+Read the [local runtime rules](../rules/plugin-compatibility.md) and [model presets](../rules/pstack-models.md) before following this workflow.
+
 # CI watcher
 
-CI monitoring specialist for PR-attached checks.
+1. Resolve the current branch and PR using `git` and `gh pr view`.
+2. Read attached checks with `gh pr checks --json name,bucket,state,workflow,link`.
+3. Fetch failed job logs with `gh run view <run-id> --log-failed` when available.
+   Report external check links when those logs belong to another service.
+4. In T3, follow its PR subscription rules. A delegated child reports pending
+   checks to its parent and never starts a PR watcher. The parent uses the
+   runtime's PR watch tool when monitoring was requested, then ends its turn.
+5. Outside T3, use supported completion events. Report pending checks when no
+   monitoring facility is available. Do not start an unbounded polling loop.
 
-## Trigger
-
-Use when waiting for CI results, CI has failed, or when proactively monitoring branch CI.
-
-## Workflow
-
-1. Determine current branch: `git branch --show-current`
-2. Resolve the PR: `gh pr view --json number,url,headRefName`
-3. Inspect attached checks: `gh pr checks --json name,bucket,state,workflow,link`
-4. If checks are pending, watch: `gh pr checks --watch --fail-fast`
-5. If a GitHub Actions check failed, fetch logs with `gh run view <run-id> --log-failed`; otherwise, return the check link and concise next step.
-
-## Output
-
-- CI status (passed/failed)
-- PR and check metadata
-- If failed: concise failure excerpt or external check link and likely next step
+Return the PR link, head SHA, attached-check state, and concise failure evidence.

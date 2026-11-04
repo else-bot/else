@@ -4,11 +4,12 @@ This repository installs [pstack](https://github.com/cursor/plugins/tree/main/ps
 and [cursor-team-kit](https://github.com/cursor/plugins/tree/main/cursor-team-kit)
 in `.agents`. `.claude` points to the same directory.
 
-The installation contains 76 skills and four agent definitions. Full upstream
-copies, licenses, guides, scripts, and supporting files are in `plugins/`.
-`sources.json` records their shared source revision. Relative symlinks expose
-the skills and agents through the directories used by Codex and Claude Code.
-The CI watcher is a local copy with compatible Claude agent frontmatter.
+The installation contains 76 bundled skills, a local `create-skill` helper,
+and four agent definitions. Active instructions in `skills/`, `agents/`, and
+`docs/` are generated local adaptations. Supporting scripts and assets use
+relative symlinks to the pinned upstream copies in `plugins/`.
+`sources.json` records the upstream revision and file hashes. Original
+marketplace files remain there as provenance and are not active instructions.
 
 Edit [rules/pstack-models.md](rules/pstack-models.md) to change the five model
 presets or their role assignments. Sol uses xhigh reasoning and fast service.
@@ -18,9 +19,19 @@ explanations, and synthesis. Opus high handles the hardest tasks.
 Cross-provider panels require T3 delegation support.
 
 Codex reads the shared rules through the root `AGENTS.md`. Claude Code loads
-them through `.claude/rules/`. The compatibility rule maps Cursor-specific
-instructions to the current runtime without changing the upstream copies.
+them through `.claude/rules/`. Every bundled skill and agent links directly
+to the local runtime rules and model presets.
 
 Run `python scripts/verify-agent-setup.py` from the repository root to check
-the source hashes, discovery links, rules, and model assignments. Skills are
-available when the next turn or session reloads the repository's skill catalog.
+source hashes, local links, generation consistency, rules, and model assignments.
+Run `python scripts/sync-agent-plugins.py --write` to regenerate active files.
+Keep document changes in `adaptations/`, using the same path below `.agents`.
+The generator handles shared path and tool mappings; leave the snapshots intact.
+
+Transcripts come from workspace-scoped runtime tools or an explicitly supplied
+path. The worktree audit accepts `PSTACK_TRANSCRIPTS_DIR` and leaves chat
+evidence unknown when no directory is supplied. Native runtimes may lack
+cross-provider delegation, scheduling, or a hosted automation integration;
+workflows report those gaps rather than inventing tools or changing models.
+
+Skills are available when the next turn or session reloads the repository's catalog.

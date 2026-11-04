@@ -2,32 +2,44 @@
 
 The canonical directory is `.agents`. `.claude` is a relative symlink to it.
 Skills live in `.agents/skills/<name>/SKILL.md`, and agent definitions live
-in `.agents/agents/<name>.md`. Both directories expose relative symlinks to
-the complete upstream copies in `.agents/plugins/`.
+in `.agents/agents/<name>.md`. These are generated local adaptations.
+Supporting scripts and assets use relative links to pinned source files.
+The original snapshots in `.agents/plugins/` are provenance, not active instructions.
 
-This is a repository installation, not a marketplace installation. Invoke
-skills by their local name, such as `/poteto-mode`, and agents by their local
-name, such as `poteto-agent`. Do not add `pstack:` prefixes. Read another
-skill's local `SKILL.md` when the runtime cannot invoke it directly.
+Invoke skills by their local name, such as `/poteto-mode`, and agents by
+their local name, such as `poteto-agent`. Read another skill's local
+`SKILL.md` when the runtime cannot invoke it directly. Resolve relative file
+references from the instruction file's own directory, not the shell's cwd.
 
 Use `.agents/rules/pstack-models.md` for model selection. It overrides upstream
 model defaults, budget adjustments, and home-directory configuration paths.
 The other `.agents/rules/*.md` apply here too. The TypeScript rule applies
-only to TypeScript files. Preserve vendored upstream files when applying
-repository coding rules.
+only to TypeScript files. Preserve the pinned upstream files. To change a
+bundled document, add or edit its corresponding file in `.agents/adaptations/`
+and run `python scripts/sync-agent-plugins.py --write`. New project skills
+live directly in `.agents/skills/`. Use the local `create-skill` workflow.
 
-Cursor tool names describe intent. Use the current runtime's corresponding
-tools and accepted arguments. In Claude Code, `Task` maps to `Agent`,
-`generalPurpose` maps to `general-purpose`, and `AskQuestion` maps to
-`AskUserQuestion` when available. Read-only work must say not to edit files.
-In Codex, use its available tools and respect the session's delegation limits.
-T3 orchestration instructions take precedence over upstream agent lifecycle,
-background, model fallback, and PR monitoring instructions. Cursor's agent
-frontmatter `model: fast` and `is_background` do not select a model or enable
-background execution in these runtimes. Use the configured role preset and
-the current tool schema instead.
+Workflow verbs describe intent. Use only the current runtime's tools and
+accepted arguments. In Claude Code, delegation uses `Agent` and supported
+agent types. In Codex, use its available agent tools. For a local specialized
+agent without a matching tool type, include its definition's absolute path in
+the brief and require that it be read before work. Read-only briefs prohibit
+file edits while retaining the tools needed for evidence. Start agents only
+when the user or an applicable skill authorizes them and session instructions permit it.
 
-For additional Claude mappings, read
-`.agents/plugins/pstack/docs/harness/claude-code.md`. The local paths, agent
-names, and model choices above take precedence over that marketplace adapter.
-Report unavailable Cursor-only features and continue with independent work.
+In T3, follow the session's native-agent and `delegate_task` routing rules.
+Cross-provider settings belong in `target.options`. Follow the session's
+completion, cancellation, linking, and PR subscription instructions instead
+of CLI watch loops. Scheduling requires a user request. If an event or
+scheduling facility is absent, report that limitation and preserve a checkpoint.
+
+Use workspace-scoped transcript tools or an explicitly supplied transcript
+path. In T3, read a thread before describing it and cite its returned link.
+Do not guess a home-directory transcript layout. When history is unavailable,
+use this conversation and current repository state and report the gap.
+The worktree audit accepts `PSTACK_TRANSCRIPTS_DIR` for an explicitly scoped
+transcript directory and otherwise leaves chat evidence unknown.
+
+For browser, GUI, or desktop work, follow the session's browser and desktop
+containment instructions before running an app or test that can open a window.
+Report unavailable integrations and continue with independent work.

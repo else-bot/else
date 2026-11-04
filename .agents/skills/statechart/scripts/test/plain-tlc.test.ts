@@ -1,0 +1,1 @@
+../../../../plugins/pstack/skills/statechart/scripts/test/plain-tlc.test.ts

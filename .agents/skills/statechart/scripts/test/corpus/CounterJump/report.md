@@ -1,0 +1,1 @@
+../../../../../../plugins/pstack/skills/statechart/scripts/test/corpus/CounterJump/report.md
