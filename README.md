@@ -72,12 +72,14 @@ Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The 
 
 ### Update
 
-Run the same command again, or `elsebot update`. It builds the new release while the current one keeps running, then:
+Run the same command again, or `elsebot update`. For SQLite installations, it builds the new release while the current one keeps running, then:
 - refuses, changing nothing, while a bot is working (a turn running or a command running in a bot computer); run it again later;
 - otherwise stops the API from taking new work, stops it, backs up first when the release changes the database, switches to the new release, and starts it; if it does not come up, it switches back;
 - keeps the previous release in `~/.else/versions`.
 
 Messages queued during the update run afterwards; background jobs in the bot computers keep running. `elsebot update --version 0.0.1` (or `ELSE_VERSION=0.0.1`) installs a given release.
+
+Alpha installations with a non-SQLite database URL stop the API and set up SQLite at `~/.else/data/else.sqlite3`, or `ELSE_DATABASE_URL` if set. Previous database history is not imported. Other settings, credentials, and files are kept. This setup skips the previous release's database backup and rollback.
 
 ### Where things are
 
@@ -86,8 +88,8 @@ Messages queued during the update run afterwards; background jobs in the bot com
   src/          the release's source (git checkout at the release tag)
   versions/     built releases; current -> versions/<version>
   bin/          elsebot, else-api, else-desktop
-  config/       .env (settings and database password), readonly.env (elsebot db), both 0600; compose.yaml
-  data/         credentials, bot computers, artifacts, backups
+  config/       .env (settings, 0600), elsebot.env (service settings)
+  data/         else.sqlite3, credentials, bot computers, artifacts, backups
   bots/         each bot's project directory (bots/<bot id>), mounted as ~/work in its computer
   toolchain/    Rust, only for building else.bot
   microsandbox/ the VM runtime
@@ -95,9 +97,9 @@ Messages queued during the update run afterwards; background jobs in the bot com
   logs/         install, update, and build logs
 ```
 
-`elsebot db` logs in as `else_readonly`, a database role with SELECT on every table (new ones included) whose sessions are read-only; it cannot change anything, which makes it the way to inspect an installation, for example when reporting a bug.
+`elsebot db` opens this installation's SQLite database in read-only mode, for example `elsebot db 'select count(*) from bots'`.
 
-Outside `~/.else`: the system packages, the database's Docker volume and the guest image in Docker, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
+Outside `~/.else`: the system packages, the guest image in Docker, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
 
 ### elsebot
 
@@ -129,7 +131,7 @@ cargo run -p else-api -- serve     # leave running
 cargo run -p else-desktop          # in another terminal
 ```
 
-The API creates `~/.else/else.sqlite3` by default. Installed releases set `ELSE_DATA_DIR=~/.else/data` and store it there instead. Override `ELSE_DATA_DIR` for an isolated checkout, or `DATABASE_URL=sqlite:///absolute/path/else.sqlite3` for another file. SQLite is bundled; no database service or Compose is needed. This alpha change starts with a fresh database; PostgreSQL data and old PostgreSQL backup sets are not imported.
+The API creates `~/.else/else.sqlite3` by default. Installed releases set `ELSE_DATA_DIR=~/.else/data` and store it there instead. Override `ELSE_DATA_DIR` for an isolated checkout, or `DATABASE_URL=sqlite:///absolute/path/else.sqlite3` for another file. SQLite is bundled; no database service or Compose is needed.
 
 The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs on the host in the bot's project directory, with its own shell and file tools, scoped else.bot tools, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
 

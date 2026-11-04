@@ -6,7 +6,7 @@ The repository contains the Rust API, the GPUI desktop client, and bundled SQLit
 
 For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else`. Use the [native ARM64 E2E lanes](#native-arm64-e2e) for automated macOS and Ubuntu coverage; `scripts/test-install.sh` retains the existing Debian, Ubuntu, and Arch container matrix. A development checkout uses the root `.env` and `~/.else` as below.
 
-Install Rust with Cargo and rustfmt. SQLite is bundled into the API; no database server, PostgreSQL client, or Docker Compose is needed. Docker is optional for building guest images and for the S3 replication test emulator. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run commands from the repository root.
+Install Rust with Cargo and rustfmt. SQLite is bundled into the API; no database server or Docker Compose is needed. Docker is optional for building guest images and for the S3 replication test emulator. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run commands from the repository root.
 
 To chat through Claude as well, install Claude Code (verified with 2.1.316), log in once by running `claude` as the API user, and save an explicit Claude profile (see [Claude provider](#claude-provider)).
 
@@ -36,7 +36,13 @@ Edit `.env` for your local setup. Git ignores this file. By default, the API use
 
 SQLite uses WAL mode, full synchronous commits, foreign keys on every connection, bounded SQLx worker channels, and a busy timeout. Write transactions start with `BEGIN IMMEDIATE` so receipt checks, queues, cancellation, job claims, and delegation settlement remain atomic. Readers can run alongside the single database writer. Process lifetime locks are scoped to the data directory and canonical database path.
 
-This alpha replacement starts with a fresh database. Existing PostgreSQL data and PostgreSQL backup sets are not imported. Reset the alpha installation explicitly before switching; the installer refuses a PostgreSQL `DATABASE_URL` without changing it.
+The alpha installer replaces a non-SQLite `DATABASE_URL` with its SQLite file URL and runs setup with the new release. It stops the old API first and skips that release's database backup and rollback. Previous database history is not imported; other configuration and files are kept.
+
+Run the offline installer configuration checks without building binaries or starting services:
+
+```sh
+python3 scripts/test-install-config.py
+```
 
 Optional S3 tests use the `seaweedfs` service in `infra/compose.yaml`. Copy `.env.example`, then run `docker compose up -d --wait seaweedfs` only when running those tests. No application data is stored in Compose.
 

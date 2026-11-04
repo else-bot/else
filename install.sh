@@ -41,6 +41,8 @@
 # if bots are working. Otherwise it stops the API, backs up first when the
 # release changes the database, switches versions, starts the new API, and
 # switches back if it does not come up. The previous release is kept.
+# Alpha installations with a non-SQLite database URL start with SQLite instead;
+# their previous database history is not imported.
 #
 # Settings (environment): ELSE_VERSION=0.0.2 installs that release instead
 # of the latest; ELSE_HOME, ELSE_REPO, ELSE_API_PORT, ELSE_SERVICE_NAME,
@@ -585,9 +587,6 @@ config_set() {
 write_config() {
 	step "Configuration ($ENV_FILE)"
 	if [ -f "$ENV_FILE" ]; then
-        case "$(env_value DATABASE_URL)" in
-            postgres://* | postgresql://*) die "this alpha installation uses PostgreSQL; stop the API and reset the alpha installation with a fresh SQLite database. The existing database was kept" ;;
-        esac
 		ok "kept"
 		return
 	fi
@@ -824,12 +823,15 @@ macos_prerequisites() {
 
 NO_MSB=0
 stage2() {
-	local target installed mode
+	local target installed mode database_url=""
 	target="$(source_version)"
 	[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
 	installed="$(installed_version || true)"
+	[ ! -f "$ENV_FILE" ] || database_url="$(env_value DATABASE_URL)"
 	if [ ! -f "$ENV_FILE" ]; then
 		mode=install
+	elif [ -n "$database_url" ] && [[ "$database_url" != sqlite:* ]]; then
+		mode=reset
 	elif [ "$installed" = "$target" ]; then
 		mode=current
 	else
@@ -837,6 +839,7 @@ stage2() {
 	fi
 	case "$mode" in
 	install) info "Installing else.bot $target into $ELSE_HOME" ;;
+	reset) info "Setting up SQLite for else.bot $target; previous database history is not imported" ;;
 	update) info "Updating else.bot ${installed:-?} -> $target" ;;
 	current) info "else.bot $target is installed; checking the installation" ;;
 	esac
@@ -850,6 +853,15 @@ stage2() {
 	ensure_rust
 	[ "$NO_MSB" = 1 ] || ensure_msb
 	build_release "$target"
+	if [ "$mode" = reset ]; then
+		database_url="${ELSE_DATABASE_URL:-sqlite://$DATA/else.sqlite3}"
+		case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
+		step "Set up SQLite"
+		elsebot stop || die "could not stop the API before setting up SQLite"
+		# Switch first so a retry cannot run the old binary against SQLite.
+		switch_to "$target"
+		config_set DATABASE_URL "$database_url"
+	fi
 	write_config
 	ensure_bots_dir
 	refresh_provider_paths
