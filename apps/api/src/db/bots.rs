@@ -41,6 +41,10 @@ pub struct BotRecord {
     pub queued_count: i64,
     /// Its sidebar category (POC-030), if any.
     pub category_id: Option<Uuid>,
+    /// When the newest owner or bot message in its owner conversation was
+    /// created; `None` before the first message.
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub metadata_revision: i64,
     avatar_shape: Option<AvatarShape>,
     avatar_color: Option<AvatarColor>,
 }
@@ -60,7 +64,11 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
         b.avatar_shape, b.avatar_color,
         a.id AS active_turn_id, a.status AS active_turn_status,
-        (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
+        (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
+        (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
+            AND m.kind IN ('user', 'assistant') ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
+        coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
+            AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
     LEFT JOIN turns a ON a.bot_id = b.id
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')

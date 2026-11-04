@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -125,6 +126,8 @@ pub struct Cleanup {
 pub struct Bot {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub metadata_revision: Option<i64>,
     /// Absent from older servers, which draw every bot the same.
     #[serde(default)]
     pub avatar: Avatar,
@@ -140,6 +143,13 @@ pub struct Bot {
     /// unassigned.
     #[serde(default)]
     pub category_id: Option<Uuid>,
+    /// Absent from receipts and older servers.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    /// The newest owner or bot message; `None` before the first one and
+    /// from older servers.
+    #[serde(default)]
+    pub last_message_at: Option<DateTime<Utc>>,
 }
 
 /// A sidebar category (POC-030).

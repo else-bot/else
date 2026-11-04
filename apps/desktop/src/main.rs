@@ -17,6 +17,8 @@ gpui_kit::assets::icon_assets!(
         FolderInput,
         BellDot,
         PencilLine,
+        PanelRightOpen,
+        PanelRightClose,
         Trash,
         TriangleAlert,
         Check,

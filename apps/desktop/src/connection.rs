@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -105,6 +106,7 @@ async fn verify(profile: Profile, client: Arc<Client>) -> Result<Verified, Strin
 struct Active {
     profile: Profile,
     app: Entity<ElseApp>,
+    _app: Subscription,
 }
 
 struct Editor {
@@ -175,7 +177,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let app = cx.new(|cx| ElseApp::new(client, window, cx));
-        self.active = Some(Active { profile, app });
+        let observer = cx.observe(&app, |_, _, cx| cx.notify());
+        self.active = Some(Active {
+            profile,
+            app,
+            _app: observer,
+        });
         cx.notify();
     }
 
@@ -309,6 +316,10 @@ impl Shell {
 
     fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let app = active.app.read(cx);
+        let (connected, (status, _)) = (app.connected(), app.status_text());
+        let detail: SharedString = format!("{} · {status}", active.profile.origin.as_str()).into();
+        let tooltip = detail.clone();
         h_flex()
             .px_3()
             .py_1()
@@ -318,19 +329,25 @@ impl Shell {
             .border_color(theme.border)
             .bg(theme.sidebar)
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Server"),
+                h_flex()
+                    .id("server-status")
+                    .gap_2()
+                    .items_center()
+                    .aria_label(detail)
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .child(div().flex_none().size_2().rounded_full().bg(if connected {
+                        theme.success
+                    } else {
+                        theme.danger
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("else.bot"),
+                    ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .truncate()
-                    .child(active.profile.origin.as_str().to_owned()),
-            )
+            .child(div().flex_1())
             .child(
                 Button::new("server-change")
                     .label("Change server")

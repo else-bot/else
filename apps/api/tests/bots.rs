@@ -303,6 +303,9 @@ async fn metadata_update_saves_once_and_keeps_everything_else() {
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
     let bot = &saved.body["bot"];
     assert_eq!(bot["name"], "Planner", "the name is trimmed");
+    assert!(
+        bot["metadata_revision"].as_i64().unwrap() > before["metadata_revision"].as_i64().unwrap()
+    );
     assert_eq!(bot["category_id"], category);
     assert_eq!(bot["conversation_id"], before["conversation_id"]);
     let events = updated_events(&app, &id).await;
@@ -313,6 +316,7 @@ async fn metadata_update_saves_once_and_keeps_everything_else() {
     );
     let last = events.last().unwrap();
     assert_eq!(last["bot"]["name"], "Planner");
+    assert_eq!(last["bot"]["metadata_revision"], bot["metadata_revision"]);
 
     let again = update(&app, &id, json!({ "name": "Planner" })).await;
     assert_eq!(again.status, StatusCode::OK);
@@ -518,5 +522,82 @@ async fn avatar_updates_validate_and_refuse_deleted_bots() {
     assert_eq!(
         receipt.body["bot"]["avatar"], before["avatar"],
         "never revived or changed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn last_message_at_follows_messages_not_metadata_edits() {
+    let app = TestApp::installed().await;
+    let id = app.create_bot("Quiet").await;
+    let read = async |app: &TestApp, id: String| {
+        app.owner("GET", &format!("/v1/bots/{id}"), None).await.body["bot"].clone()
+    };
+    let fresh = read(&app, id.clone()).await;
+    assert!(fresh["last_message_at"].is_null(), "never messaged");
+    assert!(fresh["created_at"].is_string());
+
+    update(&app, &id, json!({ "name": "Renamed" })).await;
+    assert!(
+        read(&app, id.clone()).await["last_message_at"].is_null(),
+        "a rename is not a message"
+    );
+
+    let reply = app
+        .send(&id, Uuid::new_v4(), "hello", Some("synthetic"))
+        .await;
+    assert_eq!(reply.status, StatusCode::ACCEPTED);
+    let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&turn, &["completed"]).await;
+    let history = app
+        .owner("GET", &format!("/v1/bots/{id}/conversation"), None)
+        .await;
+    let newest = history.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|item| item["kind"] == "assistant")
+        .unwrap()["created_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    let messaged = read(&app, id.clone()).await;
+    let at = |bot: &serde_json::Value| {
+        bot["last_message_at"]
+            .as_str()
+            .unwrap()
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+    };
+    assert_eq!(
+        at(&messaged),
+        newest,
+        "the bot's reply is the newest message"
+    );
+
+    update(
+        &app,
+        &id,
+        json!({ "avatar": { "shape": "egg", "color": "green" } }),
+    )
+    .await;
+    assert_eq!(
+        at(&read(&app, id.clone()).await),
+        newest,
+        "an avatar change keeps the recency"
+    );
+    let listed = app.owner("GET", "/v1/bots", None).await.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(at(&listed), newest, "the list carries it too");
+    let main = app.main_bot().await;
+    assert!(
+        read(&app, main).await["last_message_at"].is_null(),
+        "other bots are unaffected"
     );
 }
