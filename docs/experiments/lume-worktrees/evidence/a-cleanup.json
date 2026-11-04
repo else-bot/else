@@ -1,0 +1,33 @@
+{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-f08e8d2b-c25a459cb786",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "a6:4b:fc:f6:b2:f6",
+      "machineIdentifier": "YnBsaXN0MDDRAQJURUNJRBN4pmTwz60N6QgLEAAAAAAAAAEBAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAZ",
+      "locationName": "/Users/iam4x/.t3/worktrees/else/t3-ebfd6779/.else-dev/lume/worktree-proof-ab8776e3-a/vms"
+    },
+    "absent": {
+      "at": "2026-11-04T14:47:15Z",
+      "lume_get": "not found",
+      "directory": "/Users/iam4x/.t3/worktrees/else/t3-ebfd6779/.else-dev/lume/worktree-proof-ab8776e3-a/vms/else-verify-f08e8d2b-c25a459cb786",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-04T14:47:13Z",
+    "status": "collected",
+    "path": "/Users/iam4x/.t3/worktrees/else/t3-ebfd6779/.else-dev/lume/worktree-proof-ab8776e3-a/guest"
+  },
+  "base_after": {
+    "at": "2026-11-04T14:47:15Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}

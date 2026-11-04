@@ -14,3 +14,9 @@ changes. Use the feature files to select all affected entry points. A missing
 precondition or driver is an uncovered path, never a passing shortcut. Real
 provider, VM, guest browser, installer and remote-backup checks remain in the
 existing live targets and `scripts/test-e2e.py`; this map does not claim them.
+
+For native input on macOS without driving the owner's desktop, use
+[one Lume guest per run](../lume.md). Several worktrees may use the same session
+name because they have separate VMs, APIs, app bundles, and evidence. Guest
+desktop verification does not establish real bot-computer behavior or a live
+provider connection.

@@ -5,7 +5,14 @@ Use the actual executable paths when selecting a different Cargo cache.
 
 ## macOS arm64
 
-Start an owned API and desktop from the repository root. The output directory
+For automated computer use, follow [the Lume workflow](lume.md). It gives each
+run its own background macOS VM and guest-side input driver. Use that workflow
+when the owner is using the host desktop or several worktrees need native input
+at the same time. Never point the host computer-use driver at these checks.
+
+### Run a human-operated host session
+
+From your own terminal, start an owned API and desktop. The output directory
 must be new.
 
 ```sh
@@ -25,7 +32,7 @@ the desktop stops, the helper removes that identifier's macOS preferences,
 which macOS can write outside the private HOME. It never installs the app or
 a service.
 
-Use the session's native computer controls to select that exact app bundle.
+Select that exact app bundle when manually operating the host session.
 Check connection, then Continue. With `--welcome`, complete onboarding through
 the actual screen. Without it, the helper seeds onboarding as a fixture.
 The generated server address and token are already filled in.

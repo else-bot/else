@@ -76,6 +76,11 @@ inside an owned Linux container or VM. Logs and results survive teardown
 under `target/verification/`. The skill also documents native desktop input
 checks and explicit live-provider, VM, S3, installer, and platform exclusions.
 
+For macOS desktop automation, use the skill's [Lume workflow](../.agents/skills/verify-else/lume.md).
+It runs each checkout's API and GPUI desktop in its own headless macOS arm64
+guest. Input and screenshots go through the guest driver, so verification
+does not need the host's computer-use driver or a VM viewer.
+
 ### Build speed
 
 Default checkout builds (`cargo build` / `cargo run`) skip debug information for
@@ -549,6 +554,15 @@ A session never reads `.env`. Its API and desktop start in `/`, so their own `.e
 - a directory where any else.bot API holds its data or database lock, however that API was started.
 
 ### Test the desktop in a private box
+
+On macOS, use [a private Lume guest](../.agents/skills/verify-else/lume.md).
+Each invocation gets a separate VM, even when multiple worktrees use the same
+session name. Build artifacts, API data, desktop profiles, and input state
+belong to that run. Stop one run through its own manifest while the others
+continue. Host development windows remain available through `dev.py api` and
+`dev.py desktop` above.
+
+On Linux, use omabox as follows.
 
 Agents testing the GUI use one foreground command instead of the host commands. Read the installed omabox skill first.
 
