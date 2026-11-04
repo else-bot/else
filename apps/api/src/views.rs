@@ -90,6 +90,7 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "created_at": item.created_at,
         "reaction": item.reaction.as_ref().map(|reaction| reaction.0),
         "bot_task": item.bot_task,
+        "bot_reply": item.bot_reply,
     })
 }
 

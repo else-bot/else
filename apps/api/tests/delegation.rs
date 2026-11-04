@@ -1573,3 +1573,279 @@ async fn stopping_a_peer_cancels_its_task_on_the_main_bot() {
     let (_, _, status, _, _) = delegation_of(&h.app, root).await;
     assert_eq!(status, "cancelled");
 }
+
+/// Main-bot events, oldest first, as (kind, data).
+async fn bot_events(pool: &sqlx::SqlitePool, bot: Uuid) -> Vec<(String, Value)> {
+    sqlx::query_as("SELECT kind, data FROM bot_events WHERE bot_id = ?1 ORDER BY seq")
+        .bind(bot)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parent_chat_shows_the_childs_reply_once_before_its_continuation() {
+    let app = app_with(1).await;
+    let school = leaf(&app, "School").await;
+    let (main, root, token) = running_main(&app).await;
+    let main_id: Uuid = main.parse().unwrap();
+    let task = "Collect the planetarium form details.";
+    let reply = delegate(&app, &token, &school, task).await;
+    let task_id = tool_text(&reply)["task_id"].as_str().unwrap().to_owned();
+    app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
+        .await;
+    let result: String = sqlx::query_scalar("SELECT result FROM delegations WHERE id = ?1")
+        .bind(task_id.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    let items = snapshot["items"].as_array().unwrap();
+    let root_items: Vec<&Value> = items
+        .iter()
+        .filter(|i| i["turn_id"] == root.to_string().as_str())
+        .collect();
+    let kinds: Vec<&str> = root_items
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["user", "assistant", "status", "assistant"],
+        "{snapshot}"
+    );
+    let shown = root_items[2];
+    assert_eq!(shown["id"], task_id.as_str(), "the reply is the delegation");
+    assert_eq!(shown["text"], result.as_str());
+    assert!(result.contains("planetarium form details"), "{result}");
+    assert_eq!(
+        shown["bot_reply"],
+        json!({ "sender_bot_id": school, "sender_name": "School",
+                "prompt": task, "status": "completed" })
+    );
+    assert_eq!(shown["bot_task"], Value::Null);
+    assert!(
+        items
+            .iter()
+            .filter(|i| i["id"] != task_id.as_str())
+            .all(|i| i["bot_reply"].is_null()),
+        "{snapshot}"
+    );
+
+    let paged = app
+        .owner(
+            "GET",
+            &format!(
+                "/v1/bots/{main}/conversation?limit=1&before_seq={}",
+                shown["seq"].as_i64().unwrap() + 1
+            ),
+            None,
+        )
+        .await
+        .body;
+    assert_eq!(
+        paged["items"],
+        json!([shown]),
+        "pagination shows the same item"
+    );
+
+    let events = bot_events(&app.db.pool, main_id).await;
+    let upserts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, (kind, data))| kind == "item.upsert" && data["item"]["id"] == task_id.as_str())
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(upserts.len(), 1, "journaled once");
+    let at = upserts[0];
+    assert_eq!(events[at].1["item"], *shown, "replay matches the snapshot");
+    assert_eq!(
+        events[at].1["conversation_id"],
+        owner_conversation(&app.db.pool, main_id)
+            .await
+            .to_string()
+            .as_str()
+    );
+    let root_status = |range: &[(String, Value)]| -> Vec<String> {
+        range
+            .iter()
+            .filter(|(kind, data)| {
+                kind == "turn.updated" && data["turn"]["id"] == root.to_string().as_str()
+            })
+            .map(|(_, data)| data["turn"]["status"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        root_status(&events[..at]).last().map(String::as_str),
+        Some("waiting"),
+        "the root was parked"
+    );
+    assert_eq!(
+        root_status(&events[at..]).first().map(String::as_str),
+        Some("preparing"),
+        "the root resumes after the reply"
+    );
+    let continuation = root_items[3]["id"].as_str().unwrap();
+    assert!(
+        events[..at]
+            .iter()
+            .all(|(_, data)| data["item"]["id"] != continuation),
+        "the continuation's text comes after the reply"
+    );
+
+    let target = app
+        .owner("GET", &format!("/v1/bots/{school}/conversation"), None)
+        .await
+        .body;
+    assert!(
+        target["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["bot_reply"].is_null() && i["id"] != task_id.as_str()),
+        "the child's own history has no parent reply card: {target}"
+    );
+
+    let logged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memory_entry WHERE bot_id = ?1 AND request_key = ?2",
+    )
+    .bind(main_id)
+    .bind(format!("item:{task_id}"))
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(logged, 0, "the display item creates no memory entry");
+    let next = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "[synthetic:hang] and now?",
+            Some("synthetic"),
+        )
+        .await;
+    let next: Uuid = next.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let input = else_api::db::turns::input(&app.db.pool, next)
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = input.history.iter().map(|h| h.kind.as_str()).collect();
+    assert!(!kinds.contains(&"status"), "{kinds:?}");
+}
+
+/// The delegating bot's shown replies and their item.upsert events.
+async fn parent_replies(db: &TestDb, main: Uuid) -> (Vec<(String, String, Uuid)>, usize) {
+    let snapshot = else_api::db::conversation::snapshot(&db.pool, main, 50, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let shown = snapshot
+        .items
+        .iter()
+        .filter_map(|i| {
+            let reply = i.bot_reply.as_ref()?;
+            assert_eq!(reply.sender_name, "Target");
+            assert_eq!(reply.prompt, "seeded task");
+            Some((reply.status.clone(), i.text.clone(), i.turn_id))
+        })
+        .collect();
+    let upserts = bot_events(&db.pool, main)
+        .await
+        .iter()
+        .filter(|(kind, data)| kind == "item.upsert" && !data["item"]["bot_reply"].is_null())
+        .count();
+    (shown, upserts)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_child_shows_its_error_once_however_often_it_is_settled() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, _) = seed(&db).await;
+    sqlx::query("UPDATE turns SET status = 'preparing' WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    else_api::db::turns::fail_unstarted(&db.pool, child, "no input")
+        .await
+        .unwrap();
+    else_api::db::turns::fail_unstarted(&db.pool, child, "no input")
+        .await
+        .unwrap();
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::events::turn_changed(&mut tx, target, child)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (shown, upserts) = parent_replies(&db, main).await;
+    assert_eq!(shown, [("failed".to_owned(), "no input".to_owned(), root)]);
+    assert_eq!(upserts, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, _) = seed(&db).await;
+    let (conversation, seq): (Uuid, i64) = sqlx::query_as(
+        "SELECT c.id, c.last_item_seq + 1 FROM turns t
+         JOIN conversations c ON c.bot_id = t.bot_id AND c.kind = 'owner' WHERE t.id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'assistant', 'Half of the form')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(conversation)
+    .bind(seq)
+    .bind(child)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
+        .bind(conversation)
+        .bind(seq)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    else_api::db::turns::recover_after_restart(&db.pool)
+        .await
+        .unwrap();
+    let (shown, upserts) = parent_replies(&db, main).await;
+    assert_eq!(
+        shown,
+        [("cancelled".to_owned(), "Half of the form".to_owned(), root)]
+    );
+    assert_eq!(upserts, 1);
+
+    let db = TestDb::migrated().await;
+    let (main, root, child, _) = seed(&db).await;
+    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    else_api::db::events::turn_changed(&mut tx, target, child)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (shown, upserts) = parent_replies(&db, main).await;
+    assert_eq!(shown, [("completed".to_owned(), String::new(), root)]);
+    assert_eq!(upserts, 1);
+}

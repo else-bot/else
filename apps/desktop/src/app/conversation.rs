@@ -291,7 +291,7 @@ impl ElseApp {
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
         for item in &items {
             rows.push(RowKey::Item(item.id));
-            let format = if item.kind == "assistant" {
+            let format = if item.kind == "assistant" || item.bot_reply.is_some() {
                 RowFormat::Markdown
             } else {
                 RowFormat::Plain
