@@ -98,15 +98,6 @@ fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Serialize all operations that use one request ID within a transaction.
-pub(crate) async fn lock_request(
-    _tx: &mut sqlx::SqliteConnection,
-    _request_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    // The caller's immediate transaction already serializes receipt checks/inserts.
-    Ok(())
-}
-
 pub async fn create(
     pool: &SqlitePool,
     request_id: Uuid,
@@ -114,7 +105,6 @@ pub async fn create(
 ) -> Result<Created, BotError> {
     let hash = create_hash(&bot);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    lock_request(&mut tx, request_id).await?;
     let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
         "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = ?1",
     )

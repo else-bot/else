@@ -16,7 +16,8 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::app::providers::TurnOutcome;
-use crate::db::turns::{self, FLUSH_INTERVAL, PgSink};
+use crate::db::turn_sink::{FLUSH_INTERVAL, SqliteSink};
+use crate::db::turns;
 use crate::grants::{Grants, Tool};
 
 /// Longer than a provider turn's own deadline.
@@ -347,7 +348,7 @@ impl Scheduler {
                 }
             }
         }
-        let sink = PgSink::new(self.pool.clone(), &input, &provider_id);
+        let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {
                 code: "provider_unavailable".into(),
