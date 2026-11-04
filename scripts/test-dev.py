@@ -190,6 +190,37 @@ class DevSessions(unittest.TestCase):
             self.assertEqual(process.wait(timeout=20), 130)
             self.assertTrue(dead(info["pid"]), "API outlived its launcher")
 
+    def test_desktop_profiles_are_private_and_follow_api_restarts(self):
+        a, b = self.checkout("profile-a"), self.checkout("profile-b")
+        first = self.start(a)
+        self.start(b)
+        one, two = self.status(a), self.status(b)
+        printer = executable(self.tmp / "profile-desktop", "#!/usr/bin/env python3\nimport os\nprint(os.environ['ELSE_DESKTOP_CONFIG_FILE'])\n")
+        foreign = self.tmp / "foreign-profile.json"
+        foreign.write_text("untouched")
+
+        def profile(root, info):
+            result = self.dev(root, "desktop", "--desktop-binary", printer,
+                              env={"ELSE_DESKTOP_CONFIG_FILE": str(foreign)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = Path(result.stdout.strip())
+            self.assertEqual(path, Path(info["state"]) / "desktop/desktop.json")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            stored = json.loads(path.read_text())
+            self.assertEqual(stored["origin"], info["url"])
+            self.assertEqual(stored["owner_token"], (Path(info["state"]) / "data/owner-token").read_text().strip())
+            return path
+
+        original = profile(a, one)
+        self.assertNotEqual(original, profile(b, two))
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(first.wait(timeout=20), 130)
+        self.start(a)
+        restarted = self.status(a)
+        self.assertEqual(original, profile(a, restarted))
+        self.assertEqual(foreign.read_text(), "untouched")
+
     def test_restart_replaces_a_stale_manifest_and_status_proves_ownership(self):
         root = self.checkout("a")
         self.assertEqual(self.dev(root, "reset").returncode, 0)
@@ -330,6 +361,7 @@ class DevSessions(unittest.TestCase):
         self.assertEqual(json.loads((evidence / "box/onboarding.json").read_text())["name"],
                          "Development Assistant")
         self.assertFalse((evidence / "box/data").exists(), "live SQLite must stay in the box")
+        self.assertFalse((evidence / "box/desktop").exists(), "the saved owner token must stay in the box")
         state = boxes / "box-7/home/else-dev" / manifest["run"]
         self.assertTrue(dead(manifest["api_pid"]) and dead(manifest["desktop_pid"]))
         env = json.loads((state / "env-serve.json").read_text())["env"]

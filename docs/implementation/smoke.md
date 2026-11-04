@@ -13,7 +13,7 @@ The `smoke` session of [`scripts/dev.py`](../development.md#run-isolated-develop
 
 Run each command from the repository root. Use a second terminal for the desktop.
 
-1. **Fresh installation.** `scripts/dev.py reset --session smoke`, then `scripts/dev.py api --session smoke` and `scripts/dev.py desktop --session smoke`. The connection editor opens first, filled in with this session's API: press **Check connection**, then **Continue**. The window shows Connected and the main bot Assistant with its Main marker. The header offers Codex (selected) and Synthetic (test).
+1. **Fresh installation.** `scripts/dev.py reset --session smoke`, then `scripts/dev.py api --session smoke` and `scripts/dev.py desktop --session smoke`. The launcher verifies this session's API and refreshes its private desktop profile. The window shows Connected and the main bot Assistant with its Main marker. The header offers Codex (selected) and Synthetic (test).
 2. **Two bots.** Press Ctrl+Shift+N, create Work ("Help with my work projects"), then Family ("Family logistics: school, appointments, reminders"). Each new bot is selected with the composer focused, and opening it starts no provider.
 3. **Separate context through Codex.** In Work send "Synthetic test: my project codename is BLUEFIN. Reply OK." In Family send "Synthetic test: the school is Maple Elementary. Reply OK." Then ask Work "What is my project codename? One word." (BLUEFIN) and Family "Do you know a project codename? Answer NONE if not." (NONE). Replies stream into the transcript.
 4. **Profile.** `scripts/dev.py sql --session smoke "select reported_profile from turns where provider_id='codex'"` shows `gpt-6.1-sol`, `medium`, `priority` for every Codex turn.

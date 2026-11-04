@@ -242,6 +242,21 @@ class Session:
         return {"session": self.name, "checkout": str(self.checkout), "state": str(self.state),
                 "pid": pid, "url": published_url(self.data, pid), "main_bot_id": main}
 
+    def desktop_profile(self, url):
+        path = self.state / "desktop/desktop.json"
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        staged = path.with_name(f".desktop-{uuid.uuid4().hex}.tmp")
+        try:
+            fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as output:
+                json.dump({"origin": url, "owner_token": self.token_file.read_text().strip()}, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(staged, path)
+        finally:
+            staged.unlink(missing_ok=True)
+        return path
+
 
 def holds(pid, lock):
     try:
@@ -297,7 +312,8 @@ def build(package, explicit):
 
 def desktop_env(session, url):
     env = clean_env(host_providers=False)
-    env.update(ELSE_API_URL=url, ELSE_OWNER_TOKEN_FILE=str(session.token_file))
+    env.update(ELSE_API_URL=url, ELSE_OWNER_TOKEN_FILE=str(session.token_file),
+               ELSE_DESKTOP_CONFIG_FILE=str(session.desktop_profile(url)))
     return env
 
 
@@ -387,7 +403,7 @@ def run_box(args):
                 source = home / "else-dev" / run_id if home else None
                 if source and source.is_dir():
                     shutil.copytree(source, evidence / "box", symlinks=True,
-                                    ignore=lambda d, names: {"data", "projects"} if Path(d) == source else set())
+                                    ignore=lambda d, names: {"data", "projects", "desktop"} if Path(d) == source else set())
             except OSError as error:
                 report.update(status="failed", evidence_error=str(error))
             finally:
