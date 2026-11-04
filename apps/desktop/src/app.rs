@@ -4,6 +4,7 @@
 //! results and apply them to this view. The conversation model accepts only
 //! contiguous committed events, and any inconsistency reloads a snapshot.
 
+mod bot_mention;
 mod bot_menu;
 mod categories;
 mod conversation;
@@ -12,6 +13,7 @@ mod delete_dialog;
 mod dialogs;
 mod layout;
 mod link_target;
+mod mentions;
 mod message_menu;
 mod message_row;
 mod question_card;
@@ -183,6 +185,7 @@ pub struct ElseApp {
     selected: Option<Uuid>,
     view: Option<ConversationView>,
     composer: Entity<TextareaState>,
+    mentions: mentions::MentionMenu,
     drafts: HashMap<Uuid, Draft>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
@@ -234,14 +237,17 @@ impl ElseApp {
         let subscription = cx.subscribe_in(
             &composer,
             window,
-            |app, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    app.send(window, cx);
-                }
+            |app, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => app.send(window, cx),
+                InputEvent::Focus | InputEvent::Blur => app.sync_mentions(window, cx),
+                _ => {}
             },
         );
         let activation =
             cx.observe_window_activation(window, |app, window, cx| app.check_reading(window, cx));
+        let composer_observer = cx.observe_in(&composer, window, |app, _, window, cx| {
+            app.sync_mentions(window, cx);
+        });
         let visibility = cx
             .observe_window_visibility(window, |app, _, window, cx| app.check_reading(window, cx));
         let bounds =
@@ -256,6 +262,7 @@ impl ElseApp {
             selected: None,
             view: None,
             composer,
+            mentions: Default::default(),
             drafts: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
@@ -281,7 +288,13 @@ impl ElseApp {
             sidebar_focus,
             live: None,
             _live: None,
-            _subscriptions: vec![subscription, activation, visibility, bounds],
+            _subscriptions: vec![
+                subscription,
+                composer_observer,
+                activation,
+                visibility,
+                bounds,
+            ],
         };
         app.start_live(window, cx);
         app
@@ -408,6 +421,8 @@ impl ElseApp {
         self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
         self.sync_settings(window, cx);
+        self.sync_mentions(window, cx);
+        self.sync_rows(window, cx);
         cx.notify();
     }
 
@@ -445,6 +460,7 @@ impl ElseApp {
                 self.composer.read(cx).value().to_string();
         }
         self.selected = id;
+        self.mentions = Default::default();
         let draft = id
             .and_then(|id| self.drafts.get(&id))
             .map(|draft| draft.text.clone())

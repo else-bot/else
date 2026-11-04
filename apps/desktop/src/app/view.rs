@@ -1,6 +1,7 @@
 //! Rendering of the sidebar, header, conversation, and composer.
 
 use super::layout::{CategoryDrag, SidebarEdge};
+use super::mentions::MentionAction;
 use super::reply::{Author, MessageReference};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
@@ -12,7 +13,7 @@ use crate::avatar::bot_avatar;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -533,6 +534,26 @@ impl ElseApp {
             && !self.composer.read(cx).value().trim().is_empty();
         let mut frame = v_flex()
             .key_context(COMPOSER_CONTEXT)
+            .capture_action(cx.listener(|app, _: &MoveDown, window, cx| {
+                app.mention_action(MentionAction::Next, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &MoveUp, window, cx| {
+                app.mention_action(MentionAction::Previous, window, cx);
+            }))
+            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                if !action.shift && !action.secondary {
+                    app.mention_action(MentionAction::Accept, window, cx);
+                }
+            }))
+            .capture_action(cx.listener(|app, _: &IndentInline, window, cx| {
+                app.mention_action(MentionAction::Accept, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &Escape, window, cx| {
+                app.mention_action(MentionAction::Dismiss, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &FocusSidebar, window, cx| {
+                app.mention_action(MentionAction::Dismiss, window, cx);
+            }))
             .w_full()
             .gap_1()
             .px_2()
@@ -574,7 +595,12 @@ impl ElseApp {
             .pt_1()
             .pb_3()
             .child(notices)
-            .child(frame)
+            .child(
+                div()
+                    .relative()
+                    .child(frame)
+                    .children(self.render_mentions(cx)),
+            )
             .child(
                 div()
                     .px_1()
