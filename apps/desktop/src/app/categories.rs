@@ -3,10 +3,14 @@
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Category};
 use crate::sidebar::known_category;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -78,6 +82,47 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+
+    /// Rename and Delete for a category, from its header's menu button or a
+    /// right click.
+    pub(super) fn category_menu(
+        owner: WeakEntity<Self>,
+        category: &Category,
+        menu: PopupMenu,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        let editable = owner
+            .upgrade()
+            .is_some_and(|app| app.read(cx).connection == Connection::Connected);
+        let danger = if editable {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
+        let (rename, delete) = (category.clone(), category.clone());
+        let rename_owner = owner.clone();
+        menu.item(
+            PopupMenuItem::new("Rename category…")
+                .icon(IconName::PencilLine)
+                .disabled(!editable)
+                .on_click(move |_, window, cx| {
+                    let _ = rename_owner.update(cx, |app, cx| {
+                        app.open_category_dialog(Some(rename.clone()), window, cx)
+                    });
+                }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::element(move |_, _| div().text_color(danger).child("Delete category…"))
+                .icon(Icon::new(IconName::Trash).text_color(danger))
+                .disabled(!editable)
+                .on_click(move |_, window, cx| {
+                    let _ = owner.update(cx, |app, cx| {
+                        app.open_delete_category_dialog(delete.clone(), window, cx)
+                    });
+                }),
+        )
     }
 
     /// The dialog for a new category, or (with `renaming`) a new name.

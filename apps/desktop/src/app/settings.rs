@@ -1,4 +1,4 @@
-use super::view::FOOTER_CONTROL_HEIGHT;
+use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
 
@@ -233,11 +233,10 @@ impl ElseApp {
         self.settings_open && self.selected_bot().is_some_and(|b| b.is_active())
     }
 
+    /// Loads the selected bot's details and model, which the composer shows
+    /// even while the details panel is closed.
     pub(super) fn ensure_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.settings_shown() {
-            return;
-        }
-        let Some(bot) = self.selected_bot().cloned() else {
+        let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
             return;
         };
         if self.settings.contains_key(&bot.id) {
@@ -706,24 +705,23 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let header = h_flex()
             .flex_none()
+            .h(HEADER_HEIGHT)
             .px_4()
-            .py_2()
             .gap_2()
             .items_center()
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .flex_1()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Bot settings"),
+                    .child("Bot details"),
             )
             .child(
                 Button::new("close-settings")
                     .icon(IconName::PanelRightClose)
                     .small()
                     .ghost()
-                    .tooltip_with_action("Hide settings", &ToggleSettings, Some(APP_CONTEXT))
+                    .accessibility_label("Hide bot details")
+                    .tooltip_with_action("Hide bot details", &ToggleSettings, Some(APP_CONTEXT))
                     .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
             );
         let mut body = v_flex()
@@ -765,7 +763,6 @@ impl ElseApp {
                     .child(
                         Button::new("delete-bot")
                             .label("Delete bot")
-                            .h(FOOTER_CONTROL_HEIGHT)
                             .danger()
                             .w_full()
                             .disabled(
@@ -779,6 +776,34 @@ impl ElseApp {
             );
         }
         panel.into_any_element()
+    }
+
+    /// The composer's shortcut to the model dialog, once the model is known.
+    pub(super) fn render_model_chip(
+        &self,
+        bot: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Some(ModelState::Ready(Some(saved))) = self.settings.get(&bot).map(|s| &s.model) else {
+            return None;
+        };
+        let choice = &saved.choice;
+        Some(
+            Button::new("composer-model")
+                .label(format!(
+                    "{} · {}",
+                    model_label(&choice.model),
+                    effort_label(&choice.reasoning_effort)
+                ))
+                .xsmall()
+                .ghost()
+                .tooltip("Change model")
+                .disabled(self.caps.is_none() || self.connection != Connection::Connected)
+                .on_click(
+                    cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_details(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
@@ -801,7 +826,7 @@ impl ElseApp {
                 .max_w_full()
                 .px_2()
                 .py_0p5()
-                .rounded_md()
+                .rounded(theme.radius)
                 .border_1()
                 .border_color(transparent_black())
                 .cursor_text()
@@ -1103,7 +1128,7 @@ impl ElseApp {
             .items_center()
             .px_3()
             .py_2()
-            .rounded_lg()
+            .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.sidebar_border)
             .bg(theme.sidebar_accent.opacity(0.4))

@@ -125,7 +125,7 @@ impl RowText {
             Widget::Markdown { state, .. } => TextView::new(state)
                 .w_full()
                 .text_sm()
-                .line_height(rems(1.25))
+                .line_height(rems(1.375))
                 .scrollable(false)
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))

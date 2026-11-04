@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod appearance;
 mod avatar;
 mod config;
 mod connection;
@@ -26,7 +27,12 @@ gpui_kit::assets::icon_assets!(
         ChevronRight,
         Reply,
         Copy,
-        Close
+        Close,
+        ArrowUp,
+        ArrowDown,
+        Ellipsis,
+        SquarePen,
+        FolderPlus
     ]
 );
 
@@ -51,6 +57,27 @@ impl AssetSource for AppAssets {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// macOS draws its traffic lights over the app's own title bar; elsewhere
+/// the desktop keeps its usual decorations.
+fn window_chrome(title: String) -> WindowOptions {
+    let title = Some(title.into());
+    if cfg!(target_os = "macos") {
+        let base = gpui_kit::component::TitleBar::window_options();
+        WindowOptions {
+            titlebar: base.titlebar.map(|bar| TitlebarOptions { title, ..bar }),
+            ..base
+        }
+    } else {
+        WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 }
 
 fn main() {
@@ -79,7 +106,9 @@ fn main() {
         .run(move |cx| {
             cx.set_app_identity("else-bot", "else.bot");
             gpui_kit::init(cx);
+            appearance::init(cx);
             app::bind_keys(cx);
+            app::install_menus(cx);
             // Closing the window ends the desktop only; API work continues.
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -88,10 +117,6 @@ fn main() {
             })
             .detach();
             let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some(title.into()),
-                    ..Default::default()
-                }),
                 app_id: Some("else-bot".into()),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
@@ -99,9 +124,10 @@ fn main() {
                     cx,
                 ))),
                 window_min_size: Some(size(px(640.), px(420.))),
-                ..Default::default()
+                ..window_chrome(title)
             };
             gpui_kit::open_window(options, cx, |window, cx| {
+                appearance::observe_window(window, cx);
                 cx.new(|cx| connection::Shell::new(store, seed, handle, window, cx))
             })
             .expect("open the else.bot window");

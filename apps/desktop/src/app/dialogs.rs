@@ -135,7 +135,7 @@ impl ElseApp {
             .w(px(560.))
             .gap_4()
             .p_6()
-            .rounded_lg()
+            .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
