@@ -1,7 +1,8 @@
-//! POC-023: bucket replication, end to end against the SeaweedFS emulator in
-//! Compose (`docker compose up -d --wait seaweedfs`). Run with `--ignored`;
-//! these optional tests require the emulator and synthetic S3 credentials.
-//! Each test uses its own bucket. Normal operations share access to the
+//! POC-023: bucket replication, end to end against a SeaweedFS emulator.
+//! Run through `scripts/test-replication.py`, which starts a private
+//! emulator per run and passes its endpoint, synthetic credentials, and
+//! Compose project; these optional tests are `#[ignore]`d otherwise. Each
+//! test uses its own bucket. Normal operations share access to the run's
 //! emulator; tests that stop or restart its container take exclusive access.
 
 mod common;
@@ -28,7 +29,8 @@ use else_api::credentials::SecretKey;
 use sqlx::Connection;
 use uuid::Uuid;
 
-// The only shared resource is the emulator process, not the per-test buckets.
+// The emulator belongs to this test process (one runner, one Compose
+// project); the per-test buckets are not shared.
 static EMULATOR: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 fn root() -> PathBuf {
@@ -36,10 +38,8 @@ fn root() -> PathBuf {
 }
 
 fn env(name: &str) -> String {
-    let _ = dotenvy::from_path(root().join(".env"));
-    std::env::var(name).unwrap_or_else(|_| {
-        panic!("{name} is not set: copy the ELSE_TEST_S3_* entries from .env.example into .env")
-    })
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} is not set: run scripts/test-replication.py"))
 }
 
 fn s3_config(bucket: &str) -> S3Config {
@@ -60,8 +60,8 @@ async fn bucket() -> S3 {
     let s3 = S3::new(s3_config(&name)).unwrap();
     if let Err(err) = s3.create_bucket().await {
         panic!(
-            "the S3 emulator is not reachable at {} ({err}); start it with \
-             `docker compose up -d --wait seaweedfs`",
+            "the S3 emulator is not reachable at {} ({err}); run \
+             scripts/test-replication.py",
             s3.config().endpoint
         );
     }
@@ -69,20 +69,17 @@ async fn bucket() -> S3 {
 }
 
 fn compose(args: &[&str]) {
-    // The native matrix owns a distinct stack per run; never stop a shared
-    // developer service when this test exercises outages and recovery.
-    let env_file = std::env::var("ELSE_TEST_COMPOSE_ENV_FILE").unwrap_or_else(|_| {
-        if root().join(".env").exists() {
-            ".env".into()
-        } else {
-            ".env.example".into()
-        }
-    });
-    let compose_file =
-        std::env::var("ELSE_TEST_COMPOSE_FILE").unwrap_or("infra/compose.yaml".into());
+    // Outages target only the Compose project this run owns, never a
+    // service another checkout or developer shares.
     let status = std::process::Command::new("docker")
         .current_dir(root())
-        .args(["compose", "--env-file", &env_file, "-f", &compose_file])
+        .args([
+            "compose",
+            "--project-name",
+            &env("ELSE_TEST_COMPOSE_PROJECT"),
+        ])
+        .args(["--env-file", &env("ELSE_TEST_COMPOSE_ENV_FILE")])
+        .args(["-f", &env("ELSE_TEST_COMPOSE_FILE")])
         .args(args)
         .status()
         .unwrap();

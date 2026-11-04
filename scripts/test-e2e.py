@@ -9,6 +9,7 @@ Examples:
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import fcntl
 import hashlib
 import json
 import os
@@ -182,9 +183,8 @@ def worker(args):
         installation = work / "installation"
         cli = installation / "bin/elsebot"
         env_file = work / "compose.env"
-        env_file.write_text("\n".join(f"{key}={env[key]}" for key in
-                                     ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT"]) + "\n")
-        env.update(ELSE_TEST_COMPOSE_ENV_FILE=str(env_file),
+        env_file.write_text("")
+        env.update(ELSE_TEST_COMPOSE_PROJECT=env["COMPOSE_PROJECT_NAME"], ELSE_TEST_COMPOSE_ENV_FILE=str(env_file),
                    ELSE_TEST_COMPOSE_FILE=str(ROOT / "infra/e2e/compose.yaml"))
 
         def phase(name, command):
@@ -280,6 +280,24 @@ def native_cache(cache):
                 shutil.copy2(library, runtime / "lib" / library.name, follow_symlinks=False)
 
 
+def own_cache(cache_dir):
+    """Hold the cache directory for this run; released when the process exits."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    handle = (cache_dir / "owner.lock").open("w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError(f"another E2E run owns {cache_dir}; wait for it or pass a different --cache-dir")
+    return handle
+
+
+def ubuntu_cache_volume(cache_dir, sdk_key):
+    """The Ubuntu build cache belongs to the same owner as the cache directory."""
+    owner = hashlib.sha256(str(cache_dir).encode()).hexdigest()[:12]
+    return f"else-e2e-{owner}-ubuntu-arm64-{sdk_key}"
+
+
 def clean_environment():
     env = dict(os.environ)
     for key in list(env):
@@ -305,19 +323,17 @@ def host_guard():
     return result
 
 
-def lane(args, variant, output, image, sdk_key, cancel):
+def lane(args, variant, output, image, volume, cancel):
     project = "else-e2e-" + variant + "-" + uuid.uuid4().hex[:8]
     env = clean_environment()
-    env.update(COMPOSE_PROJECT_NAME=project, ELSE_TEST_S3_PORT=str(free_port()),
-               ELSE_TEST_S3_REGION="us-east-1", ELSE_TEST_S3_ACCESS_KEY_ID="elsetestaccess01",
+    env.update(COMPOSE_PROJECT_NAME=project, ELSE_TEST_S3_REGION="us-east-1", ELSE_TEST_S3_ACCESS_KEY_ID="elsetestaccess01",
                ELSE_TEST_S3_SECRET_ACCESS_KEY="elsetestsecret0123456789abcdef")
     before = host_guard()
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="else-e2e-") as directory, (output / f"{variant}.log").open("w") as log:
         work = Path(directory)
         config = work / "compose.env"
-        config.write_text("\n".join(f"{key}={env[key]}" for key in
-                                   ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT"]) + "\n")
+        config.write_text("")
         compose = ["docker", "compose", "--project-name", project, "--env-file", str(config),
                    "-f", str(ROOT / "infra/e2e/compose.yaml")]
         container = project + "-runner"
@@ -338,7 +354,7 @@ def lane(args, variant, output, image, sdk_key, cancel):
                            CARGO_TARGET_DIR=str(cache / "build"), ELSE_E2E_CACHE=str(cache),
                            RUSTUP_TOOLCHAIN="e2e-host",
                            PATH=str(cache / "toolchain/cargo/bin") + os.pathsep + env["PATH"])
-                s3 = capture(compose + ["port", "seaweedfs", "8333"], env=env).rsplit(":", 1)[1]
+                s3 = capture(compose + ["port", "s3", "8333"], env=env).rsplit(":", 1)[1]
                 env["ELSE_TEST_S3_ENDPOINT"] = f"http://127.0.0.1:{s3}"
                 command = [sys.executable, str(source / "scripts/test-e2e.py"), *worker_args]
                 run(command, cancel=cancel, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -355,11 +371,11 @@ def lane(args, variant, output, image, sdk_key, cancel):
                 command = ["docker", "run", "--rm", "--init", "--platform", "linux/arm64", "--name", container,
                            "--network", project + "_default", "--group-add", socket_group, "--cpus", str(args.build_jobs),
                            "-v", str(source) + ":/src:ro", "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                           "-v", f"else-e2e-ubuntu-arm64-{sdk_key}:/cache", "-e", "ELSE_E2E_CACHE=/cache",
+                           "-v", f"{volume}:/cache", "-e", "ELSE_E2E_CACHE=/cache",
                            "-e", "CARGO_TARGET_DIR=/cache/build",
                            "-e", f"CARGO_BUILD_JOBS={args.build_jobs}"]
-                env["ELSE_TEST_S3_ENDPOINT"] = "http://seaweedfs:8333"
-                for key in ["COMPOSE_PROJECT_NAME", "ELSE_TEST_S3_PORT",
+                env["ELSE_TEST_S3_ENDPOINT"] = "http://s3:8333"
+                for key in ["COMPOSE_PROJECT_NAME",
                             "ELSE_TEST_S3_ENDPOINT", "ELSE_TEST_S3_REGION", "ELSE_TEST_S3_ACCESS_KEY_ID", "ELSE_TEST_S3_SECRET_ACCESS_KEY"]:
                     command += ["-e", key]
                 command += [image, "python3", "/src/scripts/test-e2e.py", *worker_args]
@@ -426,6 +442,10 @@ def main():
     if capture(["docker", "version", "--format", "{{.Server.Arch}}"]) != "arm64":
         parser.error("the Docker engine must be arm64")
     args.cache_dir = args.cache_dir.resolve()
+    try:
+        cache_owner = own_cache(args.cache_dir)
+    except RuntimeError as error:
+        parser.error(str(error))
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"revision": capture(["git", "rev-parse", "HEAD"], cwd=ROOT),
@@ -436,7 +456,7 @@ def main():
               "test_threads": args.test_threads, "parallel": args.parallel,
               "test_jobs": args.test_jobs,
               "compile_live": args.compile_live, "runs": []}
-    image = sdk_key = None
+    image = volume = None
     if "ubuntu-arm64" in variants:
         start = time.perf_counter()
         image_file = args.output / "ubuntu-image.id"
@@ -445,7 +465,7 @@ def main():
         except subprocess.CalledProcessError:
             run(["docker", "pull", "--platform", "linux/arm64", "rust:1"])
             sdk_image = capture(["docker", "image", "inspect", "rust:1", "--format", "{{.Id}}"])
-        sdk_key = sdk_image.split(":")[-1][:12]
+        volume = ubuntu_cache_volume(args.cache_dir, sdk_image.split(":")[-1][:12])
         print("Preparing cached Ubuntu 26.04 arm64 worker image", flush=True)
         with (args.output / "image-build.log").open("w") as log:
             run(["docker", "build", "--platform", "linux/arm64", "--iidfile", str(image_file),
@@ -453,7 +473,7 @@ def main():
         image = image_file.read_text().strip()
         report["ubuntu_image"] = image
         report["image_prepare_seconds"] = round(time.perf_counter() - start, 3)
-        report["ubuntu_cache_volume"] = f"else-e2e-ubuntu-arm64-{sdk_key}"
+        report["ubuntu_cache_volume"] = volume
     for number in range(1, args.repeat + 1):
         output = args.output / f"run-{number}"
         output.mkdir()
@@ -468,7 +488,7 @@ def main():
                 print(f"Running {variant}, pass {number}; log: {output / (variant + '.log')}", flush=True)
                 cancel = queue.Queue(maxsize=1)
                 mailboxes.append(cancel)
-                pending[pool.submit(lane, args, variant, output, image, sdk_key, cancel)] = variant
+                pending[pool.submit(lane, args, variant, output, image, volume, cancel)] = variant
             def collect(future):
                 nonlocal failed
                 result = future.result()

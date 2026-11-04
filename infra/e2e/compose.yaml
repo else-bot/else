@@ -1,15 +1,23 @@
 # Disposable services for the native E2E lanes. The runner always supplies a
 # unique project name. SQLite files belong to each disposable test/installation.
 services:
+  # Owns the network namespace and the kernel-assigned host port, so the
+  # endpoint survives the outage tests stopping and restarting seaweedfs.
+  s3:
+    image: chrislusf/seaweedfs:4.50
+    platform: linux/arm64
+    entrypoint: ["sleep", "2147483647"]
+    init: true
+    ports:
+      - "127.0.0.1::8333"
   seaweedfs:
     image: chrislusf/seaweedfs:4.50
     platform: linux/arm64
+    network_mode: service:s3
     command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-volume.max=0", "-master.volumeSizeLimitMB=64"]
     environment:
       AWS_ACCESS_KEY_ID: elsetestaccess01
       AWS_SECRET_ACCESS_KEY: elsetestsecret0123456789abcdef
-    ports:
-      - "127.0.0.1:${ELSE_TEST_S3_PORT:?}:8333"
     volumes:
       - seaweedfs_data:/data
     healthcheck:

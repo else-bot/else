@@ -115,6 +115,18 @@ class RunnerTests(unittest.TestCase):
                     self.assertNotIn("--ignored", command)
             self.assertEqual(set(result["test_targets"]), {"unit", "replication", "sqlite"})
 
+    def test_each_cache_directory_has_one_owner_and_its_own_ubuntu_volume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first", Path(directory) / "second"
+            self.assertNotEqual(runner.ubuntu_cache_volume(first, "sdk"), runner.ubuntu_cache_volume(second, "sdk"))
+            self.assertEqual(runner.ubuntu_cache_volume(first, "sdk"), runner.ubuntu_cache_volume(first, "sdk"))
+            owner = runner.own_cache(first)
+            with self.assertRaisesRegex(RuntimeError, "another E2E run owns"):
+                runner.own_cache(first)
+            runner.own_cache(second).close()
+            owner.close()
+            runner.own_cache(first).close()
+
     def test_installer_rejects_unscoped_fast_profile_and_relative_cache(self):
         for extra, message in [({"ELSE_INSTALL_TEST_PROFILE": "dev"}, "requires ELSE_INSTALL_TEST_CACHE"),
                                ({"ELSE_INSTALL_TEST_CACHE": "relative"}, "must be an absolute path")]:
