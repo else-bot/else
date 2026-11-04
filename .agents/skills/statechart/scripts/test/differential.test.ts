@@ -1,1 +1,0 @@
-../../../../plugins/pstack/skills/statechart/scripts/test/differential.test.ts

@@ -7,9 +7,11 @@ in `.agents`. `.claude` points to the same directory.
 The installation contains 76 bundled skills, a local `create-skill` helper,
 and four agent definitions. Active instructions in `skills/`, `agents/`, and
 `docs/` are generated local adaptations. Supporting scripts and assets use
-relative symlinks to the pinned upstream copies in `plugins/`.
-`sources.json` records the upstream revision and file hashes. Original
-marketplace files remain there as provenance and are not active instructions.
+relative symlinks to the pinned runtime sources in `plugins/`.
+`sources.json` records the upstream revision, retained file hashes, and excluded
+development paths. Test suites, fixtures, saved test output, and compiler-only
+files are omitted. Package manifests and the watcher lockfile contain only runtime
+dependencies. Marketplace metadata remains as provenance, not active instructions.
 
 Edit [rules/pstack-models.md](rules/pstack-models.md) to change the five model
 presets or their role assignments. Sol uses xhigh reasoning and fast service.
@@ -24,7 +26,8 @@ to the local runtime rules and model presets.
 
 Run `python scripts/sync-agent-plugins.py --write` to regenerate active files.
 Keep document changes in `adaptations/`, using the same path below `.agents`.
-The generator handles shared path and tool mappings; leave the snapshots intact.
+The generator handles shared path and tool mappings and omits excluded development
+files. Preserve the retained runtime sources when changing workflow instructions.
 
 Transcripts come from workspace-scoped runtime tools or an explicitly supplied
 path. The worktree audit accepts `PSTACK_TRANSCRIPTS_DIR` and leaves chat

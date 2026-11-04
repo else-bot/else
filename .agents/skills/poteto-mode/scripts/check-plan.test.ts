@@ -1,1 +1,0 @@
-../../../plugins/pstack/skills/poteto-mode/scripts/check-plan.test.ts

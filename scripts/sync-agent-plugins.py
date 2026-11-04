@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
-"""Generate portable local instructions from the pinned plugin snapshots."""
+"""Generate portable local instructions from the pinned runtime sources."""
 
 import argparse
+import fnmatch
+import json
 import os
 from pathlib import Path
 import re
+import shutil
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SHARED = ROOT / ".agents"
 ADAPTATIONS = SHARED / "adaptations"
+EXCLUDED_SKILL_PATHS = json.loads((SHARED / "sources.json").read_text())["excluded_skill_paths"]
+
+
+def excluded_skill_path(relative):
+    return relative.parts[0] == "skills" and any(
+        fnmatch.fnmatch(relative.as_posix(), pattern)
+        or fnmatch.fnmatch(relative.as_posix() + "/", pattern)
+        for pattern in EXCLUDED_SKILL_PATHS
+    )
 
 
 def replace_paragraph(text, prefix, replacement):
@@ -247,10 +259,13 @@ def artifacts():
 
 
 def walk(source, relative):
+    if excluded_skill_path(relative):
+        return
     override = ADAPTATIONS / relative
     if source.is_dir():
         portable = any(p.suffix == ".md" and "scripts" not in p.relative_to(source).parts for p in source.rglob("*"))
-        if not portable and not override.is_dir():
+        has_excluded = any(excluded_skill_path(relative / p.relative_to(source)) for p in source.rglob("*"))
+        if not portable and not override.is_dir() and not has_excluded:
             yield relative, source, None
             return
         for child in sorted(source.iterdir()):
@@ -268,6 +283,14 @@ def walk(source, relative):
 
 def sync(check):
     stale = []
+    excluded = [p for p in (SHARED / "skills").rglob("*") if excluded_skill_path(p.relative_to(SHARED))]
+    for destination in sorted(excluded, key=lambda p: len(p.parts), reverse=True):
+        stale.append(str(destination.relative_to(SHARED)))
+        if not check:
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            else:
+                shutil.rmtree(destination)
     for relative, source, content in artifacts():
         destination = SHARED / relative
         target = Path(os.path.relpath(source, destination.parent))
@@ -288,6 +311,8 @@ def sync(check):
         if destination.is_symlink():
             destination.unlink()
         if content is None:
+            if destination.is_dir():
+                shutil.rmtree(destination)
             destination.symlink_to(target, target_is_directory=source.is_dir())
         else:
             destination.write_text(content)
