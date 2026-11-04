@@ -1,5 +1,6 @@
 //! Provider adapters and the registry the API exposes through capabilities.
 
+pub mod attachments;
 pub mod claude;
 pub mod claude_home;
 pub mod codex;

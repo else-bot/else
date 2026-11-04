@@ -379,6 +379,8 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         turn_no: 3,
         bot_name: "GitHub".into(),
         text: "Clean up the stale branches.".into(),
+        parts: Vec::new(),
+        files: Vec::new(),
         profile: Some(Profile {
             model: MODELS[0].into(),
             reasoning_effort: "medium".into(),
@@ -453,4 +455,84 @@ async fn a_warm_session_receives_memory_whenever_its_revision_changed() {
             assert_eq!(state.native_id, native, "the same native session");
         }
     }
+}
+
+#[tokio::test]
+async fn files_reach_claude_in_order_with_images_inline() {
+    use crate::app::messages::{Attachment, MessagePart};
+    use crate::app::providers::InputFile;
+    let dir = tempfile::tempdir().unwrap();
+    let (claude, received) = fake_claude(dir.path());
+    let file = |name: &str, media_type: &str, data: Vec<u8>| InputFile {
+        attachment: Attachment {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            media_type: media_type.into(),
+            size: data.len() as u64,
+        },
+        data: data.into(),
+    };
+    let image = file("shot.png", "image/png", b"\x89PNG fake".to_vec());
+    let report = file("report.pdf", "application/pdf", b"%PDF-1.7".to_vec());
+    let huge = file(
+        "huge.png",
+        "image/png",
+        vec![0; super::attachments::MAX_INLINE_IMAGE_BYTES + 1],
+    );
+    let text = |t: &str| MessagePart::Text { text: t.into() };
+    let as_part = |f: &InputFile| MessagePart::File {
+        file: f.attachment.clone(),
+    };
+    let parts = vec![
+        as_part(&image),
+        text(" see "),
+        as_part(&report),
+        text(" and "),
+        as_part(&huge),
+        text("  "),
+    ];
+    let mut input = specialist_turn(None);
+    input.text = crate::app::messages::flatten(&parts);
+    input.parts = parts;
+    input.files = vec![image.clone(), report.clone(), huge.clone()];
+    let bot_id = input.bot_id;
+    let sink = super::super::recording::Recorded::default();
+    let outcome = claude.run(input, &sink, CancellationToken::new()).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let project = claude.host.as_ref().unwrap().project_path(bot_id);
+    for f in [&image, &report, &huge] {
+        let staged = project.join(super::attachments::relative_path(&f.attachment));
+        assert_eq!(
+            std::fs::read(staged).unwrap(),
+            *f.data,
+            "{}",
+            f.attachment.name
+        );
+    }
+    let line = std::fs::read_to_string(&received).unwrap();
+    let content: Value = serde_json::from_str(line.lines().last().unwrap()).unwrap();
+    let blocks = content.as_array().expect("content blocks");
+    assert_eq!(blocks.len(), 3, "{content}");
+    assert_eq!(blocks[0]["type"], "text");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(&prompt::file_reference(&image.attachment))
+    );
+    assert_eq!(
+        blocks[1],
+        json!({ "type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "iVBORyBmYWtl",
+        } })
+    );
+    assert_eq!(
+        blocks[2]["text"],
+        format!(
+            " see {} and {}  ",
+            prompt::file_reference(&report.attachment),
+            prompt::file_reference(&huge.attachment)
+        )
+    );
 }

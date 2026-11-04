@@ -42,15 +42,15 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::claude_home;
 use super::host::{Host, LaunchSpec, Supervised};
 use super::prompt;
+use super::{attachments, claude_home};
 use crate::app::providers::{
     Availability, CheckpointRequest, Profile, Provider, SessionState, TurnInput, TurnOutcome,
     TurnSink,
@@ -307,15 +307,52 @@ fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
 }
 
 /// A user message on the CLI's stdin, with the UUID its echo carries.
-fn user_message(uuid: &str, text: &str) -> String {
+fn user_message(uuid: &str, content: Value) -> String {
     let mut line = json!({
         "type": "user",
         "uuid": uuid,
-        "message": { "role": "user", "content": text },
+        "message": { "role": "user", "content": content },
     })
     .to_string();
     line.push('\n');
     line
+}
+
+/// Message content in the owner's order: plain text, or text blocks with
+/// each small enough image inline after its reference. Every file is also
+/// named by its staged copy, so the bot can open it with its tools.
+fn message_content(segments: &[prompt::Segment<'_>]) -> Value {
+    use base64::Engine;
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            prompt::Segment::Text(t) => text.push_str(t),
+            prompt::Segment::File(file) => {
+                text.push_str(&prompt::file_reference(&file.attachment));
+                if attachments::is_image(&file.attachment)
+                    && file.data.len() <= attachments::MAX_INLINE_IMAGE_BYTES
+                {
+                    blocks.push(json!({ "type": "text", "text": std::mem::take(&mut text) }));
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": file.attachment.media_type,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&file.data),
+                        },
+                    }));
+                }
+            }
+        }
+    }
+    if blocks.is_empty() {
+        return Value::String(text);
+    }
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
+    Value::Array(blocks)
 }
 
 fn interrupt_request() -> String {
@@ -486,9 +523,16 @@ impl Provider for Claude {
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (packet, selection) = prompt::turn_packet(&input, considered, inject);
+        let (segments, selection) = prompt::turn_content(&input, considered, inject);
+        let packet = prompt::segments_text(&segments);
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
+        }
+        if let Err(err) = attachments::stage(&dirs.project, &input.files).await {
+            return failed(
+                "attachment_unavailable",
+                format!("The attached files could not be prepared: {err}"),
+            );
         }
         let tools = true;
         let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
@@ -517,7 +561,7 @@ impl Provider for Claude {
             child.terminate(EXIT_GRACE).await;
             return TurnOutcome::Interrupted;
         }
-        let line = user_message(&message_uuid, &packet);
+        let line = user_message(&message_uuid, message_content(&segments));
         let written = match stdin.as_mut() {
             Some(pipe) => tokio::time::timeout(PIPE_TIMEOUT, async {
                 pipe.write_all(line.as_bytes()).await?;
@@ -729,7 +773,7 @@ impl Claude {
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
         let mut events = Events::new(BufReader::new(stdout));
         let uuid = Uuid::new_v4().to_string();
-        send(&mut stdin, &user_message(&uuid, prompt_text)).await;
+        send(&mut stdin, &user_message(&uuid, Value::from(prompt_text))).await;
         let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
         let result = loop {
             let event = tokio::select! {
