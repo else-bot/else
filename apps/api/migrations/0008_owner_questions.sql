@@ -37,6 +37,18 @@ CREATE TABLE bot_permissions (
     PRIMARY KEY (bot_id, scope)
 ) STRICT;
 
+CREATE VIEW turn_holds AS
+    SELECT root_turn_id AS turn_id, parent_attempt AS attempt,
+           status IN ('queued', 'running') AS pending,
+           delivered_attempt IS NULL AND status IN ('completed', 'failed', 'cancelled') AS unseen
+    FROM delegations
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
+    FROM secret_requests
+    UNION ALL
+    SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
+    FROM owner_questions;
+
 -- A question outlives no turn: whatever ends the turn withdraws what is
 -- still pending. A newer owner message marks it skipped first (turns.rs).
 CREATE TRIGGER turns_end_owner_questions AFTER UPDATE OF status ON turns
@@ -59,7 +71,5 @@ WHEN OLD.status <> NEW.status AND NEW.status IN ('completed', 'interrupted', 'fa
     WHERE child_turn_id = NEW.id AND status NOT IN ('completed', 'failed', 'cancelled');
     UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
     WHERE id IN (SELECT root_turn_id FROM delegations WHERE child_turn_id = NEW.id) AND status = 'waiting'
-      AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.root_turn_id = turns.id AND d.status IN ('queued', 'running'))
-      AND NOT EXISTS (SELECT 1 FROM secret_requests r WHERE r.turn_id = turns.id AND r.status = 'pending')
-      AND NOT EXISTS (SELECT 1 FROM owner_questions q WHERE q.turn_id = turns.id AND q.status = 'pending');
+      AND NOT EXISTS (SELECT 1 FROM turn_holds h WHERE h.turn_id = turns.id AND h.pending);
 END;

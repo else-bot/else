@@ -316,30 +316,10 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        // A root that delegated or asked the owner (a secret, a question, an
-        // approval) parks instead of finishing: `waiting` while a child
-        // works or the owner has not answered, or `queued` again (a
-        // continuation) when every one has an outcome this attempt did not
-        // see. A Stop (`cancelling`) ends it normally, and ending withdraws
-        // pending secret requests and questions.
         let (current, pending, unseen): (String, i64, i64) = sqlx::query_as(
-            "SELECT t.status,
-                    (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = t.id AND d.status IN ('queued', 'running'))
-                  + (SELECT count(*) FROM secret_requests r
-                     WHERE r.turn_id = t.id AND r.status = 'pending')
-                  + (SELECT count(*) FROM owner_questions q
-                     WHERE q.turn_id = t.id AND q.status = 'pending'),
-                    (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
-                       AND d.status IN ('completed', 'failed', 'cancelled'))
-                  + (SELECT count(*) FROM secret_requests r
-                     WHERE r.turn_id = t.id AND r.delivered_attempt IS NULL
-                       AND r.status <> 'pending')
-                  + (SELECT count(*) FROM owner_questions q
-                     WHERE q.turn_id = t.id AND q.delivered_attempt IS NULL
-                       AND q.status <> 'pending')
-             FROM turns t WHERE t.id = ?1",
+            "SELECT t.status, coalesce(sum(h.pending), 0), coalesce(sum(h.unseen), 0)
+             FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
+             WHERE t.id = ?1 GROUP BY t.id",
         )
         .bind(self.turn_id)
         .fetch_one(&mut *tx)

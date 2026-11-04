@@ -659,6 +659,35 @@ async fn approval_records_never_store_typed_text() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_turn_continues_only_after_all_owner_requests_settle() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    let secret = Uuid::new_v4();
+    sqlx::query("INSERT INTO secret_requests (id, bot_id, turn_id, attempt, name, reason, env_names)
+        SELECT ?1, bot_id, id, attempt, 'login', 'Authenticate', '[\"LOGIN_TOKEN\"]' FROM turns WHERE id = ?2")
+        .bind(secret).bind(turn).execute(&app.db.pool).await.unwrap();
+    wait(&app, turn, "waiting").await;
+    let declined = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/secret-requests/{secret}/cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(declined.status, StatusCode::OK, "{}", declined.body);
+    assert_eq!(status(&app, turn).await, "waiting");
+    assert_eq!(question_row(&app, question).await.0, "pending");
+    assert_eq!(
+        answer(&app, &main, question, "a").await.status,
+        StatusCode::OK
+    );
+    wait(&app, turn, "completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_host_permission_waits_and_the_answer_names_the_action() {
     let Harness { app, synthetic } = harness().await;
     let main = app.main_bot().await;

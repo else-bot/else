@@ -326,9 +326,7 @@ pub async fn attempt_parked(
     attempt: i32,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM delegations WHERE root_turn_id = ?1 AND parent_attempt = ?2)
-             OR EXISTS (SELECT 1 FROM secret_requests WHERE turn_id = ?1 AND attempt = ?2)
-             OR EXISTS (SELECT 1 FROM owner_questions WHERE turn_id = ?1 AND attempt = ?2)",
+        "SELECT EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = ?1 AND attempt = ?2)",
     )
     .bind(turn_id)
     .bind(attempt)
@@ -345,12 +343,7 @@ pub async fn continue_waiting(
     let requeued = sqlx::query(
         "UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'waiting'
-           AND NOT EXISTS (SELECT 1 FROM delegations d
-                           WHERE d.root_turn_id = ?1 AND d.status IN ('queued', 'running'))
-           AND NOT EXISTS (SELECT 1 FROM secret_requests r
-                           WHERE r.turn_id = ?1 AND r.status = 'pending')
-           AND NOT EXISTS (SELECT 1 FROM owner_questions q
-                           WHERE q.turn_id = ?1 AND q.status = 'pending')",
+           AND NOT EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = ?1 AND pending)",
     )
     .bind(turn_id)
     .execute(&mut *conn)
