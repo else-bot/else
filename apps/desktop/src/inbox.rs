@@ -145,7 +145,7 @@ pub struct Inbox {
     reads: HashMap<Uuid, ReadSync>,
     /// The bot the owner explicitly opened. Its explicit unread mark is
     /// cleared once its replies are seen; any other is kept.
-    opened: Option<Uuid>,
+    opening: Option<Uuid>,
     /// Whether the first bot list has been seen: what it shows is restored,
     /// never announced.
     baseline: bool,
@@ -171,14 +171,14 @@ impl Inbox {
 
     /// The owner opened this bot: seeing its replies now clears its mark.
     pub fn open(&mut self, bot: Uuid) {
-        self.opened = Some(bot);
+        self.opening = Some(bot);
     }
 
     /// The owner's explicit choice. Marking the open bot unread keeps it
     /// unread until it is opened again.
     pub fn mark(&mut self, bot: &Bot, mark: Mark) {
-        if mark == Mark::Unread && self.opened == Some(bot.id) {
-            self.opened = None;
+        if mark == Mark::Unread && self.opening == Some(bot.id) {
+            self.opening = None;
         }
         let sync = self.reads.entry(bot.id).or_default();
         if mark == Mark::Read
@@ -193,7 +193,8 @@ impl Inbox {
     /// The owner saw the bot's replies up to `position`. Returns whether
     /// that changed anything to send.
     pub fn saw(&mut self, bot: &Bot, position: ReplyPosition) -> bool {
-        let clear = self.opened == Some(bot.id) && self.is_marked(bot);
+        let opened = self.opening.take_if(|id| *id == bot.id).is_some();
+        let clear = opened && self.is_marked(bot);
         let server = bot
             .read_state
             .as_ref()
@@ -657,6 +658,28 @@ mod tests {
                 position: at(3, 40)
             })
         );
+    }
+
+    #[test]
+    fn seeing_an_open_chat_does_not_erase_a_later_manual_mark() {
+        let mut inbox = Inbox::default();
+        let read = bot(1, Some((1, at(3, 40))), at(3, 40));
+        inbox.observe(std::slice::from_ref(&read));
+        inbox.open(read.id);
+        assert!(!inbox.saw(&read, at(3, 40)));
+
+        let marked_elsewhere = flagged(read);
+        inbox.observe(std::slice::from_ref(&marked_elsewhere));
+        assert!(!inbox.saw(&marked_elsewhere, at(3, 40)));
+        assert_eq!(inbox.next_command(marked_elsewhere.id), None);
+        assert!(inbox.is_unread(&marked_elsewhere));
+
+        inbox.open(marked_elsewhere.id);
+        assert!(inbox.saw(&marked_elsewhere, at(3, 40)));
+        assert!(matches!(
+            inbox.next_command(marked_elsewhere.id),
+            Some(ReadCommand::MarkRead { .. })
+        ));
     }
 
     #[test]

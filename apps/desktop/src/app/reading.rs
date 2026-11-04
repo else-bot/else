@@ -172,17 +172,6 @@ impl ElseApp {
                 {
                     app.notice = Some(format!("Could not save read state: {error}"));
                 }
-                // Only the read fields: the list may already be newer.
-                if let Some(fresh) = result.ok().and_then(|b| b.read_state)
-                    && let Some(saved) = app
-                        .bots
-                        .iter_mut()
-                        .find(|b| b.id == bot)
-                        .and_then(|b| b.read_state.as_mut())
-                {
-                    saved.read_through = saved.read_through.max(fresh.read_through);
-                    saved.marked_unread = fresh.marked_unread;
-                }
                 app.inbox.finished(bot, outcome);
                 app.send_reads(bot, cx);
                 app.settle_alerts(cx);

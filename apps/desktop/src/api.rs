@@ -645,18 +645,14 @@ impl Client {
     }
 
     /// Change the owner's read state. Every command is safe to repeat.
-    pub async fn read(
-        self: Arc<Self>,
-        bot: Uuid,
-        command: ReadCommand,
-    ) -> Result<Bot, ClientError> {
+    pub async fn read(self: Arc<Self>, bot: Uuid, command: ReadCommand) -> Result<(), ClientError> {
         self.call::<BotEnvelope>(
             Method::POST,
             format!("/v1/bots/{bot}/read"),
             Some(json!(command)),
         )
         .await
-        .map(|(_, v)| v.bot)
+        .map(|_| ())
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {
