@@ -231,6 +231,7 @@ impl ElseApp {
             };
             let choice_id = choice.id.clone();
             let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
+                .cursor_pointer()
                 .label(label)
                 .small()
                 .disabled(locked)
