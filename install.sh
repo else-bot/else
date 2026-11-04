@@ -10,6 +10,13 @@
 # they need. macOS needs Xcode, and a running Docker (OrbStack or Docker Desktop)
 # only when building the optional guest image. SQLite is bundled in the API.
 #
+# It asks once what this machine runs (--both, --server-only, --app-only;
+# Enter or --yes: both on a fresh machine, the installed choice on an
+# update): the server (the API and everything bots need), the app (the
+# desktop, which connects to a server here or elsewhere), or both. Adding a
+# component keeps what is installed: choosing the app on a server installs
+# both. An app-only installation has no server settings, data, or service.
+#
 # Everything it installs or keeps lives in ~/.else:
 #   src/        the release's source (a git checkout at the release tag)
 #   versions/   built releases, versions/<version>/bin/{else-api,else-desktop}
@@ -57,7 +64,9 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
 
   -y, --yes            do not ask for confirmation (sudo may still ask for a password)
   --version X.Y.Z      install or update to this release instead of the latest
-  --server-only        no desktop client (headless servers)
+  --both               the server and the app (the default on a fresh machine)
+  --server-only        the server only (home hardware or a VPS)
+  --app-only           the app only, connecting to a server elsewhere
   --autostart          start the API by itself: at boot (Linux) or at login (macOS)
   --no-autostart       only start it with: elsebot start
   --skip-guest-image   do not build the guest VM image (bot computers then use a plain image)
@@ -77,7 +86,9 @@ API_PORT="${ELSE_API_PORT:-7878}"
 SERVICE="${ELSE_SERVICE_NAME:-else-api}"
 WANT_VERSION="${ELSE_VERSION:-}"
 ASSUME_YES=0
-SERVER_ONLY=0
+# server, app, or both: asked in stage 2 unless a flag chose (COMPONENTS_FLAG).
+COMPONENTS=""
+COMPONENTS_FLAG=""
 SKIP_GUEST=0
 AUTOSTART="${ELSE_AUTOSTART:-}"
 ARGS=("$@")
@@ -104,6 +115,7 @@ CONFIG="$ELSE_HOME/config"
 DATA="$ELSE_HOME/data"
 LOGS="$ELSE_HOME/logs"
 ENV_FILE="$CONFIG/.env"
+COMPONENTS_FILE="$CONFIG/components"
 export RUSTUP_HOME="$TOOLCHAIN/rustup"
 export CARGO_HOME="$TOOLCHAIN/cargo"
 MSB="$MSB_PREFIX/bin/msb"
@@ -146,6 +158,73 @@ ask_yes() {
 	local answer
 	read -r answer </dev/tty
 	case "$answer" in n | N | no | NO) return 1 ;; *) return 0 ;; esac
+}
+
+want_server() { [ "$COMPONENTS" != app ]; }
+want_app() { [ "$COMPONENTS" != server ]; }
+
+set_components_flag() {
+	[ -z "$COMPONENTS_FLAG" ] || [ "$COMPONENTS_FLAG" = "$1" ] ||
+		die "choose one of --both, --server-only, and --app-only"
+	COMPONENTS_FLAG="$1"
+}
+
+installed_components() {
+	local server=0 app=0 remembered
+	if [ -f "$COMPONENTS_FILE" ]; then
+		remembered="$(cat "$COMPONENTS_FILE")"
+		case "$remembered" in
+		both) server=1; app=1 ;;
+		server) server=1 ;;
+		app) app=1 ;;
+		*) die "invalid saved install components in $COMPONENTS_FILE" ;;
+		esac
+	fi
+	if [ -f "$ENV_FILE" ] || [ -x "$CURRENT/bin/else-api" ]; then server=1; fi
+	[ -x "$CURRENT/bin/else-desktop" ] && app=1
+	case "$server$app" in
+	11) echo both ;;
+	10) echo server ;;
+	01) echo app ;;
+	esac
+}
+
+# Asked once in stage 2; a component already installed is kept.
+choose_components() {
+	local installed choice answer
+	installed="$(installed_components)"
+	choice="$COMPONENTS_FLAG"
+	if [ -z "$choice" ]; then
+		choice="${installed:-both}"
+		if [ "$ASSUME_YES" = 0 ] && { true </dev/tty; } 2>/dev/null; then
+			step "What this machine runs"
+			info "1) both    the server and the app"
+			info "2) server  the server only (home hardware or a VPS)"
+			info "3) app     the app only, connecting to a server elsewhere"
+			while true; do
+				printf '    Choose 1-3 [%s]: ' "$choice"
+				read -r answer </dev/tty
+				case "$answer" in
+				"") break ;;
+				1 | both) choice=both; break ;;
+				2 | server) choice=server; break ;;
+				3 | app) choice=app; break ;;
+				*) info "answer 1, 2, or 3" ;;
+				esac
+			done
+		fi
+	fi
+	COMPONENTS="$choice"
+	if [ -n "$installed" ] && [ "$installed" != "$choice" ]; then
+		COMPONENTS=both
+		info "Keeping the installed $installed: installing both"
+	fi
+}
+
+# Recorded once the installation succeeded.
+remember_components() {
+	printf '%s\n' "$COMPONENTS" >"$COMPONENTS_FILE.tmp"
+	mv -f "$COMPONENTS_FILE.tmp" "$COMPONENTS_FILE"
 }
 
 # version_ge A B: A >= B for dotted numbers.
@@ -255,7 +334,7 @@ ensure_bootstrap_tools() {
 
 apt_packages() {
 	local list="build-essential pkg-config curl ca-certificates git jq tar gzip sqlite3"
-	if [ "$SERVER_ONLY" = 0 ]; then
+	if want_app; then
 		list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
 	fi
 	echo "$list"
@@ -263,7 +342,7 @@ apt_packages() {
 
 pacman_packages() {
 	local list="base-devel pkgconf curl ca-certificates git jq tar gzip sqlite"
-	if [ "$SERVER_ONLY" = 0 ]; then
+	if want_app; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
 	echo "$list"
@@ -452,44 +531,53 @@ fetch_source() {
 	ok "checked out v$WANT_VERSION"
 }
 
+# Both binaries report the one version; an app-only installation has no API.
 installed_version() {
-	[ -x "$CURRENT/bin/else-api" ] && "$CURRENT/bin/else-api" version 2>/dev/null | awk '{print $2}'
+	local bin
+	for bin in else-api else-desktop; do
+		if [ -x "$CURRENT/bin/$bin" ]; then
+			"$CURRENT/bin/$bin" --version 2>/dev/null | awk '{print $2}'
+			return
+		fi
+	done
+	return 1
 }
 
 source_version() {
 	sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1
 }
 
+# Builds only the binaries this installation needs and lacks, so adding a
+# component to an installed release leaves the other binary in place.
 build_release() {
-	local version="$1" dest="$VERSIONS/$1"
-	local packages="else-api else-desktop"
-	[ "$SERVER_ONLY" = 1 ] && packages="else-api"
-	local pkg built=1
+	local version="$1" dest="$VERSIONS/$1" pkg missing=""
 	local built_profile output="$BUILD_PROFILE"
 	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
-	[ "$built_profile" = "$BUILD_PROFILE" ] || built=0
 	[ "$BUILD_PROFILE" != dev ] || output=debug
-	for pkg in $packages; do
-		if ! [ -x "$dest/bin/$pkg" ] || [ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
-			built=0
+	for pkg in $(want_server && echo else-api) $(want_app && echo else-desktop); do
+		if [ "$built_profile" != "$BUILD_PROFILE" ] || ! [ -x "$dest/bin/$pkg" ] ||
+			[ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+			missing="$missing $pkg"
 		fi
 	done
 	step "Build else.bot $version"
-	if [ "$built" = 1 ]; then
+	if [ -z "$missing" ]; then
 		ok "already built ($dest)"
 		return
 	fi
-	info "Building ${packages} ($BUILD_PROFILE); the first build takes several minutes"
+	info "Building${missing} ($BUILD_PROFILE); the first build takes several minutes"
 	local args="" log="$LOGS/build-$version.log"
-	for pkg in $packages; do args="$args -p $pkg"; done
+	for pkg in $missing; do args="$args -p $pkg"; done
 	# shellcheck disable=SC2086
 	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
 		tail -20 "$log" >&2
 		die "the build failed; the full log is $log"
 	fi
 	mkdir -p "$dest/bin"
-	for pkg in $packages; do
-		install -m 755 "$BUILD/$output/$pkg" "$dest/bin/$pkg"
+	# Renamed into place: the API may be running from this release.
+	for pkg in $missing; do
+		install -m 755 "$BUILD/$output/$pkg" "$dest/bin/.$pkg.new"
+		mv -f "$dest/bin/.$pkg.new" "$dest/bin/$pkg"
 	done
 	printf '%s\n' "$BUILD_PROFILE" >"$dest/.build-profile"
 	ok "built into $dest"
@@ -517,6 +605,7 @@ prune_versions() {
 
 install_commands() {
 	mkdir -p "$BIN" "$LINK_PREFIX/bin" "$CONFIG"
+	chmod 700 "$CONFIG"
 	install -m 755 "$SRC/scripts/elsebot" "$BIN/elsebot"
 	# How elsebot runs the API here: a systemd user unit (Linux), a launchd
 	# agent (macOS), or a process it manages itself where there is neither.
@@ -537,9 +626,9 @@ install_commands() {
 	if [ -n "$previous" ] && [ "$previous" != "$manager" ] && [ -x "$BIN/elsebot" ]; then
 		elsebot stop >/dev/null 2>&1 || true
 	fi
-	# Asked once; the answer is kept for updates.
+	# Asked once with the server; the answer is kept for updates.
 	if [ -z "$AUTOSTART" ]; then AUTOSTART="$previous_autostart"; fi
-	if [ -z "$AUTOSTART" ]; then
+	if [ -z "$AUTOSTART" ] && want_server; then
 		AUTOSTART=0
 		if [ "$manager" != process ]; then
 			local when="at boot"
@@ -549,13 +638,13 @@ install_commands() {
 	fi
 	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\n' \
 		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env"
-	ln -sfn ../current/bin/else-api "$BIN/else-api"
-	[ "$SERVER_ONLY" = 1 ] || ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"
+	if want_server; then ln -sfn ../current/bin/else-api "$BIN/else-api"; fi
+	if want_app; then ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"; fi
 	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
 		ln -sfn "$BIN/elsebot" "$LINK_PREFIX/bin/elsebot"
 	fi
 	case ":$PATH:" in *":$LINK_PREFIX/bin:"*) ;; *) next "add $LINK_PREFIX/bin to your PATH to use the elsebot command" ;; esac
-	if [ "$DISTRO" != macos ] && [ "$SERVER_ONLY" = 0 ]; then
+	if [ "$DISTRO" != macos ] && want_app; then
 		mkdir -p "$LINK_PREFIX/share/applications"
 		cat >"$LINK_PREFIX/share/applications/else-bot.desktop" <<EOF
 [Desktop Entry]
@@ -816,7 +905,7 @@ macos_prerequisites() {
 		xcode-select --install >/dev/null 2>&1 || true
 		die "install the Xcode command line tools (a dialog was opened), then run the installer again"
 	fi
-	if [ "$SERVER_ONLY" = 0 ]; then
+	if want_app; then
 		# GPUI compiles its Metal shaders at build time, which needs Xcode itself.
 		xcrun -sdk macosx -f metal >/dev/null 2>&1 ||
 			die "the Metal compiler is missing: install Xcode, run 'sudo xcode-select -s /Applications/Xcode.app' and 'xcodebuild -downloadComponent MetalToolchain', then run the installer again"
@@ -840,34 +929,69 @@ stage2() {
 	local target installed mode database_url=""
 	target="$(source_version)"
 	[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
+	choose_components
 	installed="$(installed_version || true)"
-	[ ! -f "$ENV_FILE" ] || database_url="$(env_value DATABASE_URL)"
-	if [ ! -f "$ENV_FILE" ]; then
+	if want_server; then
+		[ ! -f "$ENV_FILE" ] || database_url="$(env_value DATABASE_URL)"
+		if [ ! -f "$ENV_FILE" ]; then
+			mode=install
+		elif [ -n "$database_url" ] && [[ "$database_url" != sqlite:* ]]; then
+			mode=reset
+		elif [ "$installed" = "$target" ]; then
+			mode=current
+		else
+			mode=update
+		fi
+	elif [ -z "$installed" ]; then
 		mode=install
-	elif [ -n "$database_url" ] && [[ "$database_url" != sqlite:* ]]; then
-		mode=reset
 	elif [ "$installed" = "$target" ]; then
 		mode=current
 	else
 		mode=update
 	fi
 	case "$mode" in
-	install) info "Installing else.bot $target into $ELSE_HOME" ;;
+	install) info "Installing else.bot $target ($COMPONENTS) into $ELSE_HOME" ;;
 	reset) info "Setting up SQLite for else.bot $target; previous database history is not imported" ;;
-	update) info "Updating else.bot ${installed:-?} -> $target" ;;
-	current) info "else.bot $target is installed; checking the installation" ;;
+	update) info "Updating else.bot ${installed:-?} -> $target ($COMPONENTS)" ;;
+	current) info "else.bot $target is installed; checking the installation ($COMPONENTS)" ;;
 	esac
 
-	decide_guest_image
+	if want_server; then decide_guest_image; else GUEST_IMAGE_STATE=skip; fi
 	if [ "$DISTRO" = macos ]; then
 		macos_prerequisites
 	else
 		linux_packages
-		linux_access
+		if want_server; then linux_access; fi
 	fi
 	ensure_rust
-	[ "$NO_MSB" = 1 ] || ensure_msb
+	if want_server && [ "$NO_MSB" != 1 ]; then ensure_msb; fi
 	build_release "$target"
+	if want_server; then
+		install_server "$mode" "$installed" "$target"
+	else
+		step "Switch to $target"
+		switch_to "$target"
+		install_commands
+		if [ -n "$installed" ] && [ "$installed" != "$target" ]; then prune_versions "$target" "$installed"; fi
+		ok "the app is installed; no server runs on this machine"
+	fi
+	if want_app; then
+		if [ "$DISTRO" = macos ]; then
+			next "open the app: elsebot desktop"
+		else
+			next "open the app: elsebot desktop (or else.bot in your launcher)"
+		fi
+	fi
+	if ! want_server; then
+		next "on first launch, enter your server's address and owner token (on the server: cat ~/.else/data/owner-token)"
+	fi
+	remember_components
+	return 0
+}
+
+# The API, its settings, data, service, and computers; then the switch.
+install_server() {
+	local mode="$1" installed="$2" target="$3" database_url
 	if [ "$mode" = reset ]; then
 		database_url="${ELSE_DATABASE_URL:-sqlite://$DATA/else.sqlite3}"
 		case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
@@ -920,14 +1044,6 @@ stage2() {
 		fi
 	fi
 	check_providers
-	if [ "$SERVER_ONLY" = 0 ]; then
-		if [ "$DISTRO" = macos ]; then
-			next "open the app: elsebot desktop"
-		else
-			next "open the app: elsebot desktop (or else.bot in your launcher)"
-		fi
-	fi
-	return 0
 }
 
 summary() {
@@ -949,7 +1065,9 @@ main() {
 		case "$1" in
 		-y | --yes) ASSUME_YES=1 ;;
 		--version) WANT_VERSION="${2:?--version needs a value}"; shift ;;
-		--server-only) SERVER_ONLY=1 ;;
+		--both) set_components_flag both ;;
+		--server-only) set_components_flag server ;;
+		--app-only) set_components_flag app ;;
 		--autostart) AUTOSTART=1 ;;
 		--no-autostart) AUTOSTART=0 ;;
 		--skip-guest-image) SKIP_GUEST=1 ;;
