@@ -417,6 +417,24 @@ impl Client {
             .map(|(_, v)| v["state"].as_str().unwrap_or_default().to_owned())
     }
 
+    /// Answer a bot's secret request: store `env` (exactly the requested
+    /// variables) or, with `None`, decline it. Values are never returned.
+    pub async fn answer_secret(
+        self: Arc<Self>,
+        bot: Uuid,
+        request: Uuid,
+        env: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<(), ClientError> {
+        let (action, body) = match env {
+            Some(env) => ("fulfill", Some(json!({ "env": env }))),
+            None => ("cancel", None),
+        };
+        let path = format!("/v1/bots/{bot}/secret-requests/{request}/{action}");
+        self.call::<serde_json::Value>(Method::POST, path, body)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn create_bot(
         self: Arc<Self>,
         request: CreateBotRequest,

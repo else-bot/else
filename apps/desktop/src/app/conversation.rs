@@ -5,7 +5,7 @@ use super::row_text::{RowFormat, RowText};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -13,6 +13,8 @@ use uuid::Uuid;
 pub(super) enum RowKey {
     Item(Uuid),
     Pending(Uuid),
+    /// A bot's request for credentials, by request ID.
+    SecretRequest(Uuid),
 }
 
 /// The selected bot's transcript and its live subscription.
@@ -24,6 +26,8 @@ pub(super) struct ConversationView {
     pub(super) rows: Vec<RowKey>,
     pub(super) list: ListState,
     pub(super) texts: HashMap<RowKey, RowText>,
+    pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
+    pub(super) answered: HashSet<Uuid>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -40,6 +44,8 @@ impl ConversationView {
             rows: Vec::new(),
             list,
             texts: HashMap::new(),
+            secret_forms: HashMap::new(),
+            answered: HashSet::new(),
             _load: None,
             _older: None,
         }
@@ -201,15 +207,39 @@ impl ElseApp {
         }
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        for item in conversation.into_iter().flat_map(|c| c.items()) {
+        // A turn's secret requests follow its last loaded item.
+        let mut requests: Vec<(Uuid, Uuid)> = conversation
+            .into_iter()
+            .flat_map(|c| c.secret_requests())
+            .map(|(turn, request)| (turn.id, request.id))
+            .collect();
+        let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
+        for (ix, item) in items.iter().enumerate() {
+            rows.push(RowKey::Item(item.id));
             let format = if item.kind == "assistant" {
                 RowFormat::Markdown
             } else {
                 RowFormat::Plain
             };
-            rows.push(RowKey::Item(item.id));
             texts.push((RowKey::Item(item.id), item.text.clone(), format));
+            if items
+                .get(ix + 1)
+                .is_none_or(|next| next.turn_id != item.turn_id)
+            {
+                requests.retain(|(turn, request)| {
+                    let here = *turn == item.turn_id;
+                    if here {
+                        rows.push(RowKey::SecretRequest(*request));
+                    }
+                    !here
+                });
+            }
         }
+        rows.extend(
+            requests
+                .into_iter()
+                .map(|(_, request)| RowKey::SecretRequest(request)),
+        );
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
             texts.push((
@@ -268,6 +298,7 @@ impl ElseApp {
             }
         }
         view.rows = rows;
+        self.sync_secret_forms(window, cx);
         cx.notify();
     }
 

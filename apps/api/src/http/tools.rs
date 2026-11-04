@@ -60,7 +60,7 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "attempt_parked",
-            "This attempt delegated work; end it now. The result arrives in a continuation.",
+            "This attempt is waiting on delegated work or the owner; end it now. The answer arrives in a continuation.",
         ));
     }
     Ok(())

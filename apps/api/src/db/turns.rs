@@ -36,6 +36,9 @@ pub struct TurnRecord {
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub attempt: i32,
+    /// The bot's requests for secrets during this turn (metadata only).
+    #[sqlx(skip)]
+    pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -248,12 +251,27 @@ pub async fn load_turn(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<TurnRecord, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let mut turn: TurnRecord = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t WHERE t.id = ?1"
     )))
     .bind(turn_id)
-    .fetch_one(conn)
-    .await
+    .fetch_one(&mut *conn)
+    .await?;
+    attach_secret_requests(conn, std::slice::from_mut(&mut turn)).await?;
+    Ok(turn)
+}
+
+/// Fill in each turn's secret requests.
+pub async fn attach_secret_requests(
+    conn: &mut SqliteConnection,
+    turns: &mut [TurnRecord],
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = turns.iter().map(|t| t.id).collect();
+    let mut by_turn = crate::db::secret_requests::for_turns(conn, &ids).await?;
+    for turn in turns {
+        turn.secret_requests = by_turn.remove(&turn.id).unwrap_or_default();
+    }
+    Ok(())
 }
 
 pub async fn load_item(
@@ -482,6 +500,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         memory: None,
         attempt: turn.attempt,
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
+        secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
     };

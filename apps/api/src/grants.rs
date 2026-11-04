@@ -33,6 +33,8 @@ pub enum Tool {
     CreateBot,
     /// Use the bot's own computer (commands, jobs, files, browser).
     Computer,
+    /// Ask the owner for credentials (owner conversations only).
+    RequestSecret,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +63,7 @@ pub struct Grants {
 #[derive(Default)]
 struct State {
     by_digest: HashMap<[u8; 32], Grant>,
-    /// Turns whose current attempt delegated: every further tool call of
+    /// Turns whose current attempt delegated or asked for a secret: every further tool call of
     /// that attempt is refused (it must end). A new attempt's grant clears it.
     parked: std::collections::HashSet<Uuid>,
 }
@@ -136,7 +138,7 @@ impl Grants {
             .await
     }
 
-    /// The attempt of `turn_id` delegated and must end.
+    /// The attempt of `turn_id` delegated or asked for a secret and must end.
     pub async fn park(&self, turn_id: Uuid) {
         self.state
             .call(move |state| {

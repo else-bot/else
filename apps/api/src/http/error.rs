@@ -130,6 +130,35 @@ impl From<JsonRejection> for ApiError {
 #[from_request(via(axum::Json), rejection(ApiError))]
 pub struct ApiJson<T>(pub T);
 
+/// JSON extractor for bodies that carry secret values: a rejection never
+/// echoes any part of the body.
+#[derive(axum::extract::FromRequest)]
+#[from_request(via(axum::Json), rejection(SecretBodyRejection))]
+pub struct SecretJson<T>(pub T);
+
+pub struct SecretBodyRejection(ApiError);
+
+impl From<JsonRejection> for SecretBodyRejection {
+    fn from(rejection: JsonRejection) -> Self {
+        let status = rejection.status();
+        Self(match status {
+            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::UNSUPPORTED_MEDIA_TYPE => {
+                ApiError::from(rejection)
+            }
+            _ => ApiError::bad_request(
+                "invalid_body",
+                "Send a JSON object with only env, a map of variable names to text values.",
+            ),
+        })
+    }
+}
+
+impl IntoResponse for SecretBodyRejection {
+    fn into_response(self) -> Response {
+        self.0.into_response()
+    }
+}
+
 /// Path extractor. A malformed object ID is reported as an unknown object.
 #[derive(axum::extract::FromRequestParts)]
 #[from_request(via(axum::extract::Path), rejection(ApiError))]

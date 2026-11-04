@@ -12,6 +12,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_date",
     "delegate",
     "create_bot",
+    "request_secret",
     "computer_run",
     "computer_job_start",
     "computer_job",
@@ -24,3 +25,6 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_screenshot",
     "computer_input",
 ];
+/// Tools whose pending result means the attempt must end: the turn waits
+/// for the outcome and continues in a new attempt.
+pub const PARKING_TOOLS: &[&str] = &["delegate", "request_secret"];

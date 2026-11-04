@@ -24,7 +24,7 @@ pub(super) enum Step {
     Accepted,
     /// A permission prompt or other request the CLI waits on.
     Control(String),
-    DelegationPending,
+    Parked,
     Result(ResultInfo),
 }
 
@@ -152,11 +152,13 @@ impl Tracker {
                         continue;
                     }
                     let id = block["tool_use_id"].as_str().unwrap_or_default();
-                    let delegate = format!("mcp__{}__delegate", crate::app::tools::SERVER_NAME);
-                    if self.tools_by_id.get(id) == Some(&delegate)
-                        && block["content"].to_string().contains("pending")
-                    {
-                        steps.push(Step::DelegationPending);
+                    let prefix = format!("mcp__{}__", crate::app::tools::SERVER_NAME);
+                    let parks = self.tools_by_id.get(id).is_some_and(|name| {
+                        name.strip_prefix(&prefix)
+                            .is_some_and(|t| crate::app::tools::PARKING_TOOLS.contains(&t))
+                    });
+                    if parks && block["content"].to_string().contains("pending") {
+                        steps.push(Step::Parked);
                     }
                 }
             }

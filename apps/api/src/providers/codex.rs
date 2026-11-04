@@ -663,7 +663,9 @@ impl Codex {
                 _ if other_thread || other_turn => {}
                 "item/completed"
                     if params["item"]["type"] == "mcpToolCall"
-                        && params["item"]["tool"] == "delegate"
+                        && params["item"]["tool"]
+                            .as_str()
+                            .is_some_and(|t| crate::app::tools::PARKING_TOOLS.contains(&t))
                         && park_at.is_none()
                         && params["item"]["result"].to_string().contains("pending") =>
                 {
@@ -771,6 +773,7 @@ mod tests {
             memory: None,
             attempt: 1,
             delegation: Default::default(),
+            secrets: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
         }

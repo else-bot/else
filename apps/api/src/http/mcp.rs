@@ -84,6 +84,7 @@ pub async fn endpoint(
             let needs = match params["name"].as_str() {
                 Some("delegate") => Tool::Delegate,
                 Some("create_bot") => Tool::CreateBot,
+                Some("request_secret") => Tool::RequestSecret,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 _ => Tool::ReadMemory,
             };
@@ -229,6 +230,33 @@ fn tool_list() -> Value {
                                   job description. A role grants no permissions." },
                 },
                 "required": ["name", "role"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "request_secret",
+            "description": "Ask the owner for credentials a task needs (an API key, a password, \
+                a private key) when computer_secrets does not list them. The owner sees a private \
+                form in the conversation for exactly these variables and types the values there; \
+                they are stored as the task secret `name`, never shown to you, and never belong \
+                in chat. Returns status pending at once. Then tell the owner briefly what you \
+                need and why, and end this attempt; you continue automatically once they answer. \
+                Never ask the owner to paste credentials into the chat. At most one per attempt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$",
+                              "description": "The task secret to store, e.g. smtp or github." },
+                    "reason": { "type": "string", "minLength": 1,
+                                "maxLength": crate::db::secret_requests::MAX_REASON,
+                                "description": "Shown to the owner: what it is for." },
+                    "env": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
+                             "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" },
+                             "description": "Environment variable names, e.g. SMTP_PASSWORD." },
+                },
+                "required": ["name", "reason", "env"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
@@ -394,6 +422,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_date" => date(state, grant, args).await,
         "delegate" => delegate(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
+        "request_secret" => request_secret(state, grant, args).await,
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
@@ -932,6 +961,60 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "UNAVAILABLE",
                 "bots cannot be created right now; try again shortly.",
             )
+        }
+    }
+}
+
+async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::secret_requests::{self, RequestError, Spec, Status};
+    // Arguments that are not exact metadata are never logged: they might
+    // carry a value.
+    let spec = match Spec::parse(args) {
+        Ok(spec) => spec,
+        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+    };
+    match secret_requests::create(&state.db, grant.turn_id, &spec).await {
+        Ok(request) if request.status != Status::Pending => {
+            let stored = request.status == Status::Stored;
+            let log = format!("already {:?} {}", request.status, request.id).to_lowercase();
+            let result = json!({
+                "status": request.status,
+                "request_id": request.id,
+                "secret": request.name,
+                "env": request.env,
+                "next": if stored {
+                    "The owner stored this secret; name it in the secrets argument of computer_run or computer_job_start."
+                } else {
+                    "The owner declined this request; continue without it and do not ask again unless they do."
+                },
+            });
+            (tool_result(result), Some(log))
+        }
+        Ok(request) => {
+            // This attempt must now end; the API refuses its further calls.
+            state.scheduler.grants().park(grant.turn_id).await;
+            let log = format!("pending {} for {}", request.id, request.name);
+            let result = json!({
+                "status": "pending",
+                "request_id": request.id,
+                "secret": request.name,
+                "env": request.env,
+                "next": "Tell the owner briefly what you need and end this attempt now. Do not \
+                         wait, poll, or call more tools; the answer arrives in a continuation.",
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => {
+            let code = match err {
+                RequestError::NotAllowed => "NOT_ALLOWED",
+                RequestError::AttemptParked => "ATTEMPT_PARKED",
+                RequestError::BudgetExhausted => "BUDGET_EXHAUSTED",
+                RequestError::Conflict => "CONFLICT",
+                RequestError::NotRunning => "NOT_RUNNING",
+                RequestError::Db => "UNAVAILABLE",
+            };
+            let log = format!("rejected {code}");
+            (tool_error(&format!("{code}: {err}")), Some(log))
         }
     }
 }

@@ -49,16 +49,17 @@ pub async fn snapshot(
     items.reverse();
     let older_before_seq = has_older.then(|| items[0].seq);
     let turn_ids: Vec<Uuid> = items.iter().map(|item| item.turn_id).collect();
-    let turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let mut turns: Vec<TurnRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TURN_COLUMNS} FROM turns t
          WHERE t.conversation_id = ?1
-           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN ('queued', 'preparing', 'sending', 'running', 'cancelling'))
+           AND (lower(hex(t.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) OR t.status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting'))
          ORDER BY t.turn_no"
     )))
     .bind(bot.conversation_id)
     .bind(sqlx::types::Json(&turn_ids))
     .fetch_all(&mut *tx)
     .await?;
+    super::turns::attach_secret_requests(&mut tx, &mut turns).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
         bot,

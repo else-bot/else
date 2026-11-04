@@ -8,15 +8,16 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::AppState;
-use super::error::{ApiError, ApiJson, ApiPath};
+use super::error::{ApiError, ApiPath, SecretJson};
 use super::turns::bot_deleted;
+use crate::db::secret_requests::{self, SettleError, Settled};
 use crate::db::task_secrets::{self, SecretError};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -25,6 +26,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/bots/{bot_id}/task-secrets/{name}",
             put(store).delete(remove),
+        )
+        .route(
+            "/bots/{bot_id}/secret-requests/{request_id}/fulfill",
+            post(fulfill),
+        )
+        .route(
+            "/bots/{bot_id}/secret-requests/{request_id}/cancel",
+            post(cancel),
         )
 }
 
@@ -76,7 +85,7 @@ async fn list(
 async fn store(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, name)): ApiPath<(Uuid, String)>,
-    ApiJson(body): ApiJson<Body>,
+    SecretJson(body): SecretJson<Body>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     active_bot(&state, bot_id).await?;
     let key = state
@@ -117,4 +126,61 @@ async fn remove(
     } else {
         Err(ApiError::not_found())
     }
+}
+
+fn settle_error(err: SettleError) -> ApiError {
+    match err {
+        SettleError::NotFound => ApiError::not_found(),
+        SettleError::Settled(status) => ApiError::new(
+            StatusCode::CONFLICT,
+            "secret_request_settled",
+            format!(
+                "This request was already {}.",
+                serde_json::to_value(status)
+                    .unwrap_or_default()
+                    .as_str()
+                    .unwrap_or_default()
+            ),
+        ),
+        err @ SettleError::EnvMismatch(_) => {
+            ApiError::bad_request("invalid_secret", err.to_string())
+        }
+        SettleError::Secret(err) => error(err),
+    }
+}
+
+fn settled(state: &AppState, settled: Settled) -> Json<Value> {
+    if settled.requeued {
+        state.scheduler.wake();
+    }
+    Json(json!({ "request": settled.request, "requeued": settled.requeued }))
+}
+
+/// Answer a bot's secret request: store exactly the requested variables as
+/// its task secret and continue the waiting turn. Values are never returned.
+async fn fulfill(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
+    SecretJson(body): SecretJson<Body>,
+) -> Result<Json<Value>, ApiError> {
+    let done = secret_requests::fulfill(
+        &state.db,
+        state.secret_key.as_deref(),
+        bot_id,
+        request_id,
+        &body.env,
+    )
+    .await
+    .map_err(settle_error)?;
+    Ok(settled(&state, done))
+}
+
+async fn cancel(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let done = secret_requests::cancel(&state.db, bot_id, request_id)
+        .await
+        .map_err(settle_error)?;
+    Ok(settled(&state, done))
 }
