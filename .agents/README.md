@@ -22,8 +22,6 @@ Codex reads the shared rules through the root `AGENTS.md`. Claude Code loads
 them through `.claude/rules/`. Every bundled skill and agent links directly
 to the local runtime rules and model presets.
 
-Run `python scripts/verify-agent-setup.py` from the repository root to check
-source hashes, local links, generation consistency, rules, and model assignments.
 Run `python scripts/sync-agent-plugins.py --write` to regenerate active files.
 Keep document changes in `adaptations/`, using the same path below `.agents`.
 The generator handles shared path and tool mappings; leave the snapshots intact.

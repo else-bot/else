@@ -21,5 +21,4 @@ Read [the runtime rules](../../rules/plugin-compatibility.md) before working.
 For bundled skills, put changes in `.agents/adaptations/` using the same path
 below `.agents`, then run `python scripts/sync-agent-plugins.py --write`.
 Do not edit the pinned snapshots in `.agents/plugins/`. New project skills
-live directly in `.agents/skills/`. Run `python scripts/verify-agent-setup.py`
-before reporting completion.
+live directly in `.agents/skills/`.

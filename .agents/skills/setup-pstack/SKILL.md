@@ -21,7 +21,7 @@ repository-local file. Preserve the JSON preset table and role lines.
 4. Write the local file. Keep each role on one line. A panel list runs one agent
    per entry; the cross-judge pool chooses one eligible model from another family.
    Preserve each preset's configured reasoning level and speed.
-5. Run `python scripts/verify-agent-setup.py`. Report the changed assignments
+5. Check that every role names an existing preset. Report the changed assignments
    and any unsupported runtime capability.
 
 Do not write global configuration or flatten provider options into model slugs.
