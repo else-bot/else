@@ -1,8 +1,13 @@
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
+use std::collections::HashMap;
+
 use crate::api::{Bot, BotProfile, ClientError, ProfileChoice};
+use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
+use chrono::{DateTime, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
     v_flex,
@@ -92,9 +97,16 @@ impl ModelDialog {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum RoutineSave {
+    Saving { attempt: Uuid, enabled: bool },
+    Failed(String),
+}
+
 pub(super) struct BotSettings {
     details: Details,
     model: ModelState,
+    routines: HashMap<Uuid, RoutineSave>,
 }
 
 impl ElseApp {
@@ -151,6 +163,7 @@ impl ElseApp {
             BotSettings {
                 details,
                 model: ModelState::Loading(Uuid::nil()),
+                routines: HashMap::new(),
             },
         );
         self.load_profile(bot.id, window, cx);
@@ -261,6 +274,64 @@ impl ElseApp {
                     Ok(saved) => ModelState::Ready(saved),
                     Err(err) => ModelState::Failed(err.to_string()),
                 };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_routine(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        let Some(entry) = self.settings.get_mut(&bot) else {
+            return;
+        };
+        if matches!(
+            entry.routines.get(&routine),
+            Some(RoutineSave::Saving { .. })
+        ) {
+            return;
+        }
+        let attempt = Uuid::new_v4();
+        entry
+            .routines
+            .insert(routine, RoutineSave::Saving { attempt, enabled });
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.set_routine_enabled(bot, routine, enabled).await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(entry) = app.settings.get_mut(&bot) else {
+                    return;
+                };
+                if !matches!(entry.routines.get(&routine),
+                             Some(RoutineSave::Saving { attempt: a, .. }) if *a == attempt)
+                {
+                    return;
+                }
+                match result {
+                    Ok(saved) => {
+                        entry.routines.remove(&routine);
+                        if let Some(conversation) = app
+                            .view
+                            .as_mut()
+                            .filter(|view| view.bot_id == bot)
+                            .and_then(|view| view.conversation.as_mut())
+                        {
+                            conversation.apply_routine(saved);
+                        }
+                    }
+                    Err(err) => {
+                        entry
+                            .routines
+                            .insert(routine, RoutineSave::Failed(err.to_string()));
+                    }
+                }
                 cx.notify();
             });
         })
@@ -438,7 +509,8 @@ impl ElseApp {
                 body = body
                     .child(self.render_details(bot.id, &entry.details, cx))
                     .child(self.render_category(bot, cx))
-                    .child(self.render_model(bot.id, &entry.model, cx));
+                    .child(self.render_model(bot.id, &entry.model, cx))
+                    .child(self.render_routines(bot.id, &entry.routines, cx));
             }
             None => body = body.child(muted("Loading…", cx)),
         }
@@ -624,6 +696,146 @@ impl ElseApp {
             .child(Icon::new(IconName::ChevronRight).flex_none())
             .on_click(cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)))
             .into_any_element()
+    }
+}
+
+impl ElseApp {
+    fn render_routines(
+        &self,
+        bot: Uuid,
+        saves: &HashMap<Uuid, RoutineSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = section("Routines", cx);
+        let Some(conversation) = self
+            .view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+        else {
+            return body.child(muted("Loading…", cx)).into_any_element();
+        };
+        let routines = conversation.routines();
+        if routines.is_empty() {
+            return body
+                .child(muted(
+                    "No routines yet. Ask the bot in chat to do something on a schedule, for \
+                     example \"every weekday at 9, summarize my unread mail\". Its routines \
+                     appear here.",
+                    cx,
+                ))
+                .into_any_element();
+        }
+        let connected = self.connection == Connection::Connected;
+        body.children(routines.iter().map(|routine| {
+            self.render_routine(bot, routine, saves.get(&routine.id), connected, cx)
+        }))
+        .into_any_element()
+    }
+
+    fn render_routine(
+        &self,
+        bot: Uuid,
+        routine: &Routine,
+        save: Option<&RoutineSave>,
+        connected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let saving = match save {
+            Some(RoutineSave::Saving { enabled, .. }) => Some(*enabled),
+            _ => None,
+        };
+        let id = routine.id;
+        let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
+            .checked(saving.unwrap_or(routine.enabled))
+            .accessibility_label(format!("Run {}", routine.name))
+            .disabled(saving.is_some() || !connected)
+            .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
+                app.set_routine(bot, id, *enabled, window, cx)
+            }));
+        let next = match (routine.enabled, routine.next_run_at) {
+            (false, _) => "Paused".to_owned(),
+            (true, Some(at)) => format!("Next run {}", local_time(at, &routine.timezone)),
+            (true, None) => "No further runs".to_owned(),
+        };
+        let details = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(routine.name.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .truncate()
+                    .child(format!("{} · {}", routine.cron, routine.timezone)),
+            )
+            .child(muted(routine.prompt.clone(), cx).line_clamp(2))
+            .child(muted(next, cx))
+            .children(
+                routine
+                    .last_run
+                    .as_ref()
+                    .map(|run| last_run(run, &routine.timezone, cx)),
+            )
+            .children(match save {
+                Some(RoutineSave::Failed(err)) => {
+                    Some(note(format!("Couldn't save. {err}"), true, cx))
+                }
+                _ => None,
+            });
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(details)
+            .child(div().flex_none().pt_0p5().child(switch))
+            .into_any_element()
+    }
+}
+
+fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
+    match timezone.parse::<chrono_tz::Tz>() {
+        Ok(tz) => at.with_timezone(&tz).format("%a %-d %b, %H:%M").to_string(),
+        Err(_) => at.format("%a %-d %b, %H:%M UTC").to_string(),
+    }
+}
+
+fn last_run(run: &LastRun, timezone: &str, cx: &App) -> Div {
+    let when = local_time(run.due_at, timezone);
+    let reason = |code: &str| match code {
+        "overlap" => "the previous run was still going",
+        "queue_full" => "too many messages were waiting",
+        "provider_unavailable" => "no provider was available",
+        _ => "it could not start",
+    };
+    match run.status.as_str() {
+        "failed" | "uncertain" | "interrupted" => {
+            let detail = run
+                .error
+                .as_ref()
+                .and_then(|e| e.message.clone())
+                .unwrap_or_else(|| run.status.clone());
+            note(
+                format!("Last run {when} {}: {detail}", run.status),
+                true,
+                cx,
+            )
+        }
+        "skipped" => note(
+            format!(
+                "Skipped {when}: {}",
+                reason(run.skip_reason.as_deref().unwrap_or_default())
+            ),
+            true,
+            cx,
+        ),
+        "queued" | "running" => muted(format!("Running now (due {when})"), cx),
+        status => muted(format!("Last run {when}: {status}"), cx),
     }
 }
 

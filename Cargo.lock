@@ -1863,6 +1863,8 @@ name = "else-desktop"
 version = "0.0.8"
 dependencies = [
  "anyhow",
+ "chrono",
+ "chrono-tz",
  "dotenvy",
  "futures-util",
  "gpui-kit",

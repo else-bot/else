@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -74,6 +75,31 @@ impl Turn {
     }
 }
 
+/// The last due occurrence of a routine: the turn it started, or why it
+/// was skipped.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LastRun {
+    pub due_at: DateTime<Utc>,
+    /// `queued`, `running`, `skipped`, or the turn's terminal status.
+    pub status: String,
+    pub skip_reason: Option<String>,
+    pub error: Option<TurnError>,
+}
+
+/// A bot's saved task, run on a cron schedule in its conversation.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Routine {
+    pub id: Uuid,
+    pub name: String,
+    pub prompt: String,
+    pub cron: String,
+    pub timezone: String,
+    pub enabled: bool,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub last_run: Option<LastRun>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Snapshot {
     pub selected_provider_id: Option<String>,
@@ -82,6 +108,9 @@ pub struct Snapshot {
     pub turns: Vec<Turn>,
     pub activity: Activity,
     pub older_before_seq: Option<i64>,
+    /// Absent from servers without routines.
+    #[serde(default)]
+    pub routines: Vec<Routine>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +147,7 @@ pub struct Conversation {
     pub older_before_seq: Option<i64>,
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
+    routines: Vec<Routine>,
 }
 
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
@@ -137,6 +167,7 @@ impl Conversation {
             older_before_seq: snapshot.older_before_seq,
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
+            routines: snapshot.routines,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -213,6 +244,10 @@ impl Conversation {
                 if bot.selected_provider_id.is_some() {
                     self.selected_provider_id = bot.selected_provider_id;
                 }
+                if let Some(routines) = data.get("routines") {
+                    self.routines =
+                        serde_json::from_value(routines.clone()).map_err(|_| Reset::Malformed)?;
+                }
             }
             other => return Err(Reset::UnknownKind(other.to_owned())),
         }
@@ -220,8 +255,8 @@ impl Conversation {
         Ok(Applied::Changed)
     }
 
-    /// Merge an older page. It never replaces newer loaded text or moves
-    /// the live cursor.
+    /// Merge an older page. It never replaces newer loaded text, the
+    /// current routines, or the live cursor.
     pub fn merge_older(&mut self, page: Snapshot) {
         for item in page.items {
             if !self.seq_of.contains_key(&item.id) {
@@ -292,6 +327,20 @@ impl Conversation {
             .values()
             .flat_map(|t| &t.secret_requests)
             .find(|r| r.id == id)
+    }
+
+    pub fn routines(&self) -> &[Routine] {
+        &self.routines
+    }
+
+    /// A routine from a change response. Only a newer version replaces the
+    /// one the stream delivered, so a late response never undoes an event.
+    pub fn apply_routine(&mut self, routine: Routine) {
+        if let Some(current) = self.routines.iter_mut().find(|r| r.id == routine.id)
+            && routine.updated_at > current.updated_at
+        {
+            *current = routine;
+        }
     }
 
     pub fn has_request(&self, request_id: Uuid) -> bool {
@@ -452,6 +501,81 @@ mod tests {
         assert_eq!(c.older_before_seq, None);
         assert_eq!(c.cursor(), format!("{PREFIX}:9"), "live cursor unchanged");
         assert!(c.has_request(Uuid::from_u128(501)));
+    }
+
+    fn routine(enabled: bool, updated: &str, status: Option<&str>) -> serde_json::Value {
+        json!({
+            "id": Uuid::from_u128(40), "bot_id": bot(), "name": "Morning digest",
+            "prompt": "Summarize my mail.", "cron": "0 9 * * *", "timezone": "Europe/Paris",
+            "enabled": enabled, "next_run_at": if enabled { json!("2026-11-05T08:00:00Z") } else { json!(null) },
+            "created_at": "2026-11-01T00:00:00Z", "updated_at": updated,
+            "last_run": status.map(|s| json!({ "due_at": "2026-11-04T08:00:00Z", "status": s,
+                "skip_reason": null, "turn_id": Uuid::from_u128(41),
+                "error": if s == "failed" { json!({ "code": "provider_refused", "message": "Refused." }) } else { json!(null) },
+                "finished_at": null })),
+        })
+    }
+
+    fn bot_updated(seq: i64, routines: Option<Vec<serde_json::Value>>) -> Frame {
+        let mut data = json!({ "bot_id": bot(), "bot": {
+            "id": bot(), "name": "Assistant",
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 } } });
+        if let Some(routines) = routines {
+            data["routines"] = json!(routines);
+        }
+        frame(seq, "bot.updated", data)
+    }
+
+    #[test]
+    fn routines_come_from_the_snapshot_and_each_bot_update() {
+        let mut first = snapshot(1, vec![], Some(5));
+        first.routines =
+            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        let mut c = Conversation::from_snapshot(first).unwrap();
+        assert_eq!(c.routines().len(), 1);
+        assert!(c.routines()[0].enabled);
+
+        c.apply(&bot_updated(
+            2,
+            Some(vec![routine(true, "2026-11-01T00:00:00Z", Some("failed"))]),
+        ))
+        .unwrap();
+        let last = c.routines()[0].last_run.as_ref().unwrap();
+        assert_eq!(last.status, "failed");
+        assert_eq!(last.error.as_ref().unwrap().code, "provider_refused");
+
+        c.apply(&bot_updated(3, None)).unwrap();
+        assert_eq!(c.routines().len(), 1);
+        c.merge_older(snapshot(3, vec![], None));
+        assert_eq!(c.routines().len(), 1);
+
+        c.apply(&bot_updated(4, Some(vec![]))).unwrap();
+        assert!(c.routines().is_empty(), "deleted");
+        let malformed = frame(
+            5,
+            "bot.updated",
+            json!({ "bot": { "id": bot(), "name": "A" }, "routines": [{ "id": 1 }] }),
+        );
+        assert_eq!(c.apply(&malformed), Err(Reset::Malformed));
+    }
+
+    #[test]
+    fn a_late_change_response_never_undoes_a_newer_event() {
+        let mut first = snapshot(1, vec![], None);
+        first.routines =
+            vec![serde_json::from_value(routine(true, "2026-11-01T00:00:00Z", None)).unwrap()];
+        let mut c = Conversation::from_snapshot(first).unwrap();
+        let paused: Routine =
+            serde_json::from_value(routine(false, "2026-11-02T00:00:00Z", None)).unwrap();
+        c.apply_routine(paused.clone());
+        assert!(!c.routines()[0].enabled, "a newer response applies");
+        c.apply(&bot_updated(
+            2,
+            Some(vec![routine(true, "2026-11-03T00:00:00Z", None)]),
+        ))
+        .unwrap();
+        c.apply_routine(paused);
+        assert!(c.routines()[0].enabled);
     }
 
     #[test]

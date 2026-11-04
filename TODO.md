@@ -70,4 +70,4 @@ Open work from [providers running on the host](docs/decisions/0001-providers-run
 
 ## Outside this backlog
 
-The built-in email client, notes, kanban, routines and webhooks, mobile apps, push notifications, rich transcript rendering, remote desktop tabs, multi-user accounts, granular permission editors, provider-native sub-agents, data purge, and key-recovery screens remain later product work. Keep their existing research. Do not add them to complete a POC task.
+The built-in email client, notes, kanban, webhooks, mobile apps, push notifications, rich transcript rendering, remote desktop tabs, multi-user accounts, granular permission editors, provider-native sub-agents, data purge, and key-recovery screens remain later product work. Keep their existing research. Do not add them to complete a POC task.
