@@ -615,5 +615,86 @@ class DesktopCommandTests(unittest.TestCase):
         self.assertEqual(record, f"desktop pwd=/ home={self.home.resolve()} url=none data=none args=--flag")
 
 
+# write_config, config_set, and env_value as the installer runs them.
+CONFIG_HARNESS = DEFINITIONS + r'''
+API_PORT=7878
+step() { :; }
+ok() { :; }
+write_config
+config_set ELSE_CODEX_BIN "$CODEX"
+config_set ELSE_CODEX_BIN "$CODEX"
+for key in DATABASE_URL ELSE_DATA_DIR ELSE_MSB_BIN ELSE_CODEX_BIN; do
+    printf '%s\0' "$(env_value "$key")"
+done
+'''
+TRICKY = "custom install it's \"x\" $HOME \\ #1"
+
+
+class DotenvConfigTests(unittest.TestCase):
+    """Settings under an installation root with spaces, quotes, and other dotenv syntax."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def write_config(self, home, codex="/usr/bin/codex"):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "USER": "tester",
+               "ELSE_HOME": str(home), "CODEX": codex}
+        result = subprocess.run(["bash", "-c", CONFIG_HARNESS], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split("\0")[:-1]
+
+    def test_special_characters_read_back_verbatim(self):
+        home = self.root / TRICKY
+        codex = "/opt/a b/co'dex\\"
+        self.assertEqual(self.write_config(home, codex), [
+            f"sqlite://{home}/data/else.sqlite3", f"{home}/data",
+            f"{home}/microsandbox/bin/msb", codex,
+        ])
+        config = (home / "config/.env").read_text()
+        self.assertIn("\nELSE_API_BIND=127.0.0.1:7878\n", config)
+        self.assertEqual(config.count("ELSE_CODEX_BIN="), 1)
+
+    def test_simple_values_stay_unquoted(self):
+        home = self.root / "plain"
+        self.write_config(home)
+        config = (home / "config/.env").read_text()
+        self.assertIn(f"\nDATABASE_URL=sqlite://{home}/data/else.sqlite3\n", config)
+        self.assertIn("\nELSE_CODEX_BIN=/usr/bin/codex\n", config)
+
+    def test_multiline_setting_is_rejected_without_echoing_it(self):
+        home = self.root / "multiline"
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.root), "USER": "tester",
+               "ELSE_HOME": str(home), "CODEX": "/private-value\nsecond-line"}
+        result = subprocess.run(["bash", "-c", CONFIG_HARNESS], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a setting cannot span lines", result.stderr)
+        self.assertNotIn("private-value", result.stdout + result.stderr)
+        self.assertNotIn("ELSE_CODEX_BIN=", (home / "config/.env").read_text())
+
+    def test_elsebot_db_opens_the_configured_database(self):
+        home = self.root / TRICKY
+        self.write_config(home)
+        stub(home / "bin/elsebot", (ROOT / "scripts/elsebot").read_text())
+        stubs, record = self.root / "stubs", self.root / "record"
+        stub(stubs / "sqlite3", '#!/bin/sh\nfor a in "$@"; do printf "%s\\0" "$a"; done >"$RECORD"\n')
+        env = {"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(self.root), "RECORD": str(record)}
+        result = subprocess.run([home / "bin/elsebot", "db", "select 1"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record.read_text().split("\0")[:-1],
+                         ["-readonly", f"{home}/data/else.sqlite3", "select 1"])
+
+    @unittest.skipUnless(os.environ.get("ELSE_API_BIN"), "set ELSE_API_BIN to a built else-api")
+    def test_else_api_setup_reads_the_written_configuration(self):
+        home = self.root / "custom install it's"
+        self.write_config(home)
+        result = subprocess.run([os.environ["ELSE_API_BIN"], "setup"], cwd=home / "config",
+                                env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / "data/else.sqlite3").is_file(), result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

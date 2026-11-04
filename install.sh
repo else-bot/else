@@ -684,15 +684,56 @@ publish_app() {
 
 # --- Configuration and services ---------------------------------------------
 
-env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+# A value written so the API's dotenv reads it back verbatim: as is when it
+# holds nothing dotenv treats specially, otherwise double-quoted with \, "
+# and $ escaped (dotenv splits lines on a backslash even in single quotes).
+dotenv_quote() {
+	local v="$1"
+	case "$v" in
+	*$'\n'*) die "a setting cannot span lines" ;;
+	*[!A-Za-z0-9_./:@%+,=-]*)
+		v="${v//\\/\\\\}"
+		v="${v//\"/\\\"}"
+		v="${v//\$/\\\$}"
+		printf '"%s"' "$v"
+		;;
+	*) printf '%s' "$v" ;;
+	esac
+}
+# A dotenv value as the API reads it (quotes and escapes, no substitution);
+# scripts/elsebot has the same reader.
+dotenv_value() {
+	local in="$1" out="" quote="" c i
+	for ((i = 0; i < ${#in}; i++)); do
+		c="${in:i:1}"
+		if [ "$quote" = "'" ]; then
+			if [ "$c" = "'" ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = '\' ]; then
+			i=$((i + 1))
+			c="${in:i:1}"
+			if [ "$c" = n ]; then out+=$'\n'; else out+="$c"; fi
+		elif [ "$quote" = '"' ]; then
+			if [ "$c" = '"' ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+			quote="$c"
+		elif [ "$c" = ' ' ] || [ "$c" = $'\t' ]; then
+			break
+		else
+			out+="$c"
+		fi
+	done
+	printf '%s' "$out"
+}
+env_value() { dotenv_value "$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -1)"; }
 config_set() {
-	local tmp
+	local tmp value
+	value="$(dotenv_quote "$2")"
 	tmp="$(mktemp "$CONFIG/.env.XXXXXX")"
 	if grep -q "^$1=" "$ENV_FILE"; then
-		awk -v k="$1" -v v="$2" 'index($0, k"=")==1{print k"="v; next} {print}' "$ENV_FILE" >"$tmp"
+		VALUE="$value" awk -v k="$1" 'index($0, k"=")==1{print k"="ENVIRON["VALUE"]; next} {print}' "$ENV_FILE" >"$tmp"
 	else
 		cat "$ENV_FILE" >"$tmp"
-		printf '%s=%s\n' "$1" "$2" >>"$tmp"
+		printf '%s=%s\n' "$1" "$value" >>"$tmp"
 	fi
 	chmod 600 "$tmp"
 	mv -f "$tmp" "$ENV_FILE"
@@ -711,15 +752,19 @@ write_config() {
 	chmod 700 "$CONFIG" "$DATA"
     local database_url="${ELSE_DATABASE_URL:-sqlite://$DATA/else.sqlite3}"
     case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
+	local url_value data_value msb_value
+	url_value="$(dotenv_quote "$database_url")"
+	data_value="$(dotenv_quote "$DATA")"
+	msb_value="$(dotenv_quote "$MSB")"
 	(
 		umask 077
 		cat >"$ENV_FILE" <<EOF
 # else.bot settings, written by the installer. The API reads this file from
 # its working directory ($CONFIG). SQLite needs no server.
-DATABASE_URL=$database_url
+DATABASE_URL=$url_value
 ELSE_API_BIND=127.0.0.1:$API_PORT
-ELSE_DATA_DIR=$DATA
-ELSE_MSB_BIN=$MSB
+ELSE_DATA_DIR=$data_value
+ELSE_MSB_BIN=$msb_value
 EOF
 
 	)

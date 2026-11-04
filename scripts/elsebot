@@ -35,7 +35,31 @@ ELSEBOT_APP=""
 [ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
 
 die() { echo "elsebot: $1" >&2; exit 1; }
-setting() { [ -f "$CONFIG/.env" ] && sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1; }
+# A dotenv value as the API reads it (quotes and escapes, no substitution);
+# install.sh has the same reader.
+dotenv_value() {
+	local in="$1" out="" quote="" c i
+	for ((i = 0; i < ${#in}; i++)); do
+		c="${in:i:1}"
+		if [ "$quote" = "'" ]; then
+			if [ "$c" = "'" ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = '\' ]; then
+			i=$((i + 1))
+			c="${in:i:1}"
+			if [ "$c" = n ]; then out+=$'\n'; else out+="$c"; fi
+		elif [ "$quote" = '"' ]; then
+			if [ "$c" = '"' ]; then quote=""; else out+="$c"; fi
+		elif [ "$c" = "'" ] || [ "$c" = '"' ]; then
+			quote="$c"
+		elif [ "$c" = ' ' ] || [ "$c" = $'\t' ]; then
+			break
+		else
+			out+="$c"
+		fi
+	done
+	printf '%s' "$out"
+}
+setting() { [ -f "$CONFIG/.env" ] && dotenv_value "$(sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1)"; }
 api_addr() { local bind; bind="$(setting ELSE_API_BIND)"; echo "${bind:-127.0.0.1:7878}"; }
 installed() { [ -x "$CURRENT/bin/$1" ] && "$CURRENT/bin/$1" --version 2>/dev/null | awk '{print $2}'; }
 running_version() {
