@@ -133,7 +133,8 @@ pub(in crate::app) fn chip(
                                 .iter()
                                 .find(|span| {
                                     span.range() == range
-                                        && span.token().id().as_ref() == id.to_string()
+                                        && crate::attachments::file_id(span.token().id())
+                                            == Some(id)
                                 })
                                 .map(|span| span.range());
                             if let Some(range) = current {
@@ -156,9 +157,7 @@ pub(in crate::app) fn draft_chip(
     owner: WeakEntity<ElseApp>,
     cx: &App,
 ) -> AnyElement {
-    let Some(file) = Uuid::parse_str(token.token().id())
-        .ok()
-        .and_then(|id| files.get(&id))
+    let Some(file) = crate::attachments::file_id(token.token().id()).and_then(|id| files.get(&id))
     else {
         return div()
             .child(token.token().label().clone())

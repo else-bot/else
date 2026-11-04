@@ -22,8 +22,14 @@ impl Attachment {
     }
 
     pub fn token(&self) -> InlineToken {
-        InlineToken::new(self.id.to_string(), self.fallback()).with_label(self.name.clone())
+        InlineToken::new(format!("file:{}", self.id), self.fallback()).with_label(self.name.clone())
     }
+}
+
+pub fn file_id(token_id: &str) -> Option<Uuid> {
+    token_id
+        .strip_prefix("file:")
+        .and_then(|id| Uuid::parse_str(id).ok())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

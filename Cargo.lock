@@ -1870,6 +1870,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "libc",
+ "markdown",
  "mime_guess",
  "notify",
  "rand 0.10.3",

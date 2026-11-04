@@ -1,5 +1,6 @@
 //! Category forms, assignment, and move dialogs.
 
+use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Category};
 use crate::sidebar::known_category;
@@ -302,63 +303,20 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let count = self
+        let bots = self
             .bots
             .iter()
             .filter(|b| b.is_active() && b.category_id == Some(category.id))
             .count();
-        let app = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let text = format!(
-                "Delete the category {}? {} Only the grouping is removed: no bot, \
-                 conversation, memory, or file is deleted.",
-                category.name,
-                match count {
-                    0 => "It has no bots.".to_owned(),
-                    1 => "Its bot is kept and moves to Unassigned.".to_owned(),
-                    n => format!("Its {n} bots are kept and move to Unassigned."),
-                }
-            );
-            let id = category.id;
-            let app_ok = app.clone();
-            let app_confirm = app.clone();
-            dialog
-                .title("Delete category")
-                .w(px(460.))
-                .on_ok(move |_, window, cx| {
-                    let _ = app_ok.update(cx, |app, cx| app.delete_category(id, window, cx));
-                    true
-                })
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().foreground)
-                        .child(text),
-                )
-                .footer(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("category-delete-cancel")
-                                .cursor_pointer()
-                                .label("Cancel")
-                                .ghost()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("category-delete-confirm")
-                                .cursor_pointer()
-                                .label("Delete category")
-                                .danger()
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = app_confirm
-                                        .update(cx, |app, cx| app.delete_category(id, window, cx));
-                                }),
-                        ),
-                )
-        });
+        self.open_delete_confirmation(
+            DeleteTarget::Category {
+                name: category.name,
+                bots,
+            },
+            window,
+            cx,
+            move |app, window, cx| app.delete_category(category.id, window, cx),
+        );
     }
 
     fn delete_category(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {

@@ -1,3 +1,4 @@
+use super::delete_dialog::DeleteTarget;
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
@@ -463,76 +464,14 @@ impl ElseApp {
         else {
             return;
         };
-        let app = cx.entity().downgrade();
-        let cancel = cx.focus_handle();
-        let confirm = cx.focus_handle();
-        let focus_once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if focus_once.replace(false) {
-                cancel.focus(window, cx);
-            }
-            let theme = cx.theme();
-            let consequence = |text: &'static str| {
-                h_flex()
-                    .gap_2()
-                    .items_start()
-                    .child(div().text_color(theme.muted_foreground).child("•"))
-                    .child(text)
-            };
-            let app = app.clone();
-            let app_ok = app.clone();
-            let confirm_ok = confirm.clone();
-            dialog
-                .title(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
-                        .child(div().truncate().child(format!("Delete routine {name}?"))),
-                )
-                .w(px(460.))
-                .on_ok(move |_, window, cx| {
-                    if confirm_ok.is_focused(window) {
-                        let _ = app_ok
-                            .update(cx, |app, cx| app.delete_routine(bot, routine, window, cx));
-                    }
-                    true
-                })
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .child(consequence("It never runs again and leaves this list."))
-                        .child(consequence("A run already in progress finishes.")),
-                )
-                .footer(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("routine-delete-cancel")
-                                .cursor_pointer()
-                                .label("Cancel")
-                                .outline()
-                                .track_focus(&cancel)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("routine-delete-confirm")
-                                .cursor_pointer()
-                                .label("Delete routine")
-                                .danger()
-                                .track_focus(&confirm)
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ = app.update(cx, |app, cx| {
-                                        app.delete_routine(bot, routine, window, cx)
-                                    });
-                                }),
-                        ),
-                )
-        });
+        self.open_delete_confirmation(
+            DeleteTarget::Routine(name),
+            window,
+            cx,
+            move |app, window, cx| {
+                app.delete_routine(bot, routine, window, cx);
+            },
+        );
     }
 
     fn delete_routine(

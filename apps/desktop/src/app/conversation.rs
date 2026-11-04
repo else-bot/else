@@ -2,7 +2,7 @@
 
 use super::ElseApp;
 use super::reply::Author;
-use super::row_text::{RowFormat, RowText};
+use super::row_text::{RowFormat, RowSource, RowText};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
@@ -398,13 +398,23 @@ impl ElseApp {
         for (key, text, format, parts) in texts {
             match view.texts.get_mut(&key) {
                 Some(row) if row.format() == format => {
-                    if row.sync(text, parts, window, cx) {
+                    if row.sync(RowSource { text, parts }, &self.mention_bots, window, cx) {
                         changed.push(key);
                     }
                 }
                 _ => {
-                    view.texts
-                        .insert(key, RowText::new(key, text, format, parts, bot, window, cx));
+                    view.texts.insert(
+                        key,
+                        RowText::new(
+                            key,
+                            RowSource { text, parts },
+                            format,
+                            &self.mention_bots,
+                            bot,
+                            window,
+                            cx,
+                        ),
+                    );
                     created = true;
                 }
             }

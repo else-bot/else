@@ -46,7 +46,12 @@ gpui_kit::assets::icon_assets!(
         Circle,
         Search,
         ChevronUp,
-        FileText
+        FileText,
+        Pause,
+        MessageSquareOff,
+        Folder,
+        ArrowRight,
+        CalendarX
     ]
 );
 

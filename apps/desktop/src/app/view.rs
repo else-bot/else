@@ -1,6 +1,7 @@
 //! Rendering of the sidebar, header, conversation, and composer.
 
 use super::layout::{CategoryDrag, SidebarEdge};
+use super::mentions::MentionAction;
 use super::reply::{Author, MessageReference};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
@@ -12,7 +13,7 @@ use crate::avatar::bot_avatar;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -541,8 +542,7 @@ impl ElseApp {
         let can_send = self.connection == Connection::Connected
             && !self.composer.read(cx).value().trim().is_empty()
             && self.composer.read(cx).tokens().iter().all(|span| {
-                Uuid::parse_str(span.token().id())
-                    .ok()
+                crate::attachments::file_id(span.token().id())
                     .and_then(|id| files.get(&id))
                     .is_some_and(|file| {
                         matches!(file.state, super::attachments::UploadState::Ready)
@@ -557,6 +557,26 @@ impl ElseApp {
                     }
                 }),
             )
+            .capture_action(cx.listener(|app, _: &MoveDown, window, cx| {
+                app.mention_action(MentionAction::Next, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &MoveUp, window, cx| {
+                app.mention_action(MentionAction::Previous, window, cx);
+            }))
+            .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                if !action.shift && !action.secondary {
+                    app.mention_action(MentionAction::Accept, window, cx);
+                }
+            }))
+            .capture_action(cx.listener(|app, _: &IndentInline, window, cx| {
+                app.mention_action(MentionAction::Accept, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &Escape, window, cx| {
+                app.mention_action(MentionAction::Dismiss, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &FocusSidebar, window, cx| {
+                app.mention_action(MentionAction::Dismiss, window, cx);
+            }))
             .w_full()
             .gap_1()
             .px_2()
@@ -581,8 +601,7 @@ impl ElseApp {
                         super::attachments::draft_chip(token, &files, owner.clone(), cx)
                     })
                     .on_token_click(move |event, window, cx| {
-                        if let Some(file) = Uuid::parse_str(event.token().id())
-                            .ok()
+                        if let Some(file) = crate::attachments::file_id(event.token().id())
                             .and_then(|id| preview_files.get(&id))
                         {
                             let _ = preview_owner.update(cx, |app, cx| {
@@ -611,7 +630,12 @@ impl ElseApp {
             .pt_1()
             .pb_3()
             .child(notices)
-            .child(frame)
+            .child(
+                div()
+                    .relative()
+                    .child(frame)
+                    .children(self.render_mentions(cx)),
+            )
             .child(
                 div()
                     .px_1()

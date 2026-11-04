@@ -103,7 +103,7 @@ pub(super) fn parts(
     let mut parts = Vec::new();
     let mut offset = 0;
     for span in content.tokens() {
-        let id = Uuid::parse_str(span.token().id()).map_err(|e| e.to_string())?;
+        let id = crate::attachments::file_id(span.token().id()).ok_or("Invalid file token.")?;
         let file = files
             .get(&id)
             .ok_or("The attached file is no longer available. Paste it again.")?;
@@ -172,7 +172,7 @@ impl ElseApp {
             let active: std::collections::HashSet<_> = content
                 .tokens()
                 .iter()
-                .filter_map(|s| Uuid::parse_str(s.token().id()).ok())
+                .filter_map(|s| crate::attachments::file_id(s.token().id()))
                 .collect();
             for (id, file) in &mut draft.files {
                 if !active.contains(id) {
@@ -362,7 +362,7 @@ impl ElseApp {
             .read(cx)
             .tokens()
             .iter()
-            .filter_map(|span| Uuid::parse_str(span.token().id()).ok())
+            .filter_map(|span| crate::attachments::file_id(span.token().id()))
             .collect();
         if let Some(draft) = self.drafts.get_mut(&bot) {
             for (id, file) in &mut draft.files {
@@ -416,7 +416,7 @@ impl ElseApp {
                     let active = content
                         .tokens()
                         .iter()
-                        .any(|span| span.token().id().as_ref() == id.to_string());
+                        .any(|span| crate::attachments::file_id(span.token().id()) == Some(id));
                     let file = app.drafts.get_mut(&bot)?.files.get_mut(&id)?;
                     file.file.size = loaded.len() as u64;
                     file.source = Some(snapshot);

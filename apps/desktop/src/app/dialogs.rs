@@ -1,13 +1,12 @@
 //! Onboarding and bot deletion dialogs.
 
+use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -190,77 +189,14 @@ impl ElseApp {
         let Some(bot) = self.deletable_bot(id, cx) else {
             return;
         };
-        let app = cx.entity().downgrade();
-        let cancel = cx.focus_handle();
-        let confirm = cx.focus_handle();
-        let focus_once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if focus_once.replace(false) {
-                cancel.focus(window, cx);
-            }
-            let theme = cx.theme();
-            let consequence = |text: &'static str| {
-                h_flex()
-                    .gap_2()
-                    .items_start()
-                    .child(div().text_color(theme.muted_foreground).child("•"))
-                    .child(text)
-            };
-            let app = app.clone();
-            let app_ok = app.clone();
-            let confirm_ok = confirm.clone();
-            dialog
-                .title(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
-                        .child(div().truncate().child(format!("Delete {}?", bot.name))),
-                )
-                .w(px(460.))
-                .on_ok(move |_, window, cx| {
-                    if confirm_ok.is_focused(window) {
-                        let _ = app_ok.update(cx, |app, cx| app.delete_bot(id, window, cx));
-                    }
-                    true
-                })
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .child(consequence("Its work in progress stops."))
-                        .child(consequence(
-                            "It leaves the sidebar and can no longer be messaged.",
-                        ))
-                        .child(consequence("Its history, memory, and files are kept.")),
-                )
-                .footer(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("delete-cancel")
-                                .cursor_pointer()
-                                .label("Cancel")
-                                .outline()
-                                .track_focus(&cancel)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("delete-confirm")
-                                .cursor_pointer()
-                                .label("Delete bot")
-                                .danger()
-                                .track_focus(&confirm)
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let _ =
-                                        app.update(cx, |app, cx| app.delete_bot(id, window, cx));
-                                }),
-                        ),
-                )
-        });
+        self.open_delete_confirmation(
+            DeleteTarget::Bot(bot.name),
+            window,
+            cx,
+            move |app, window, cx| {
+                app.delete_bot(id, window, cx);
+            },
+        );
     }
 
     fn delete_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {

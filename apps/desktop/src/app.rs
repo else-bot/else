@@ -5,13 +5,16 @@
 //! contiguous committed events, and any inconsistency reloads a snapshot.
 
 mod attachments;
+mod bot_mention;
 mod bot_menu;
 mod categories;
 mod conversation;
 mod create_bot;
+mod delete_dialog;
 mod dialogs;
 mod layout;
 mod link_target;
+mod mentions;
 mod message_menu;
 mod message_row;
 mod question_card;
@@ -179,12 +182,14 @@ pub struct ElseApp {
     connection: Connection,
     caps: Option<Capabilities>,
     bots: Vec<Bot>,
+    mention_bots: Arc<bot_mention::MentionRegistry>,
     categories: Vec<Category>,
     default_bot_id: Option<Uuid>,
     selected: Option<Uuid>,
     view: Option<ConversationView>,
     composer: Entity<TextareaState>,
     clipboard_read: Option<Task<()>>,
+    mentions: mentions::MentionMenu,
     drafts: HashMap<Uuid, Draft>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
@@ -236,17 +241,18 @@ impl ElseApp {
         let subscription = cx.subscribe_in(
             &composer,
             window,
-            |app, _, event: &InputEvent, window, cx| {
-                if let InputEvent::Change = event {
-                    app.composer_changed(cx);
-                }
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    app.send(window, cx);
-                }
+            |app, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => app.composer_changed(cx),
+                InputEvent::PressEnter { shift: false, .. } => app.send(window, cx),
+                InputEvent::Focus | InputEvent::Blur => app.sync_mentions(window, cx),
+                _ => {}
             },
         );
         let activation =
             cx.observe_window_activation(window, |app, window, cx| app.check_reading(window, cx));
+        let composer_observer = cx.observe_in(&composer, window, |app, _, window, cx| {
+            app.sync_mentions(window, cx);
+        });
         let visibility = cx
             .observe_window_visibility(window, |app, _, window, cx| app.check_reading(window, cx));
         let bounds =
@@ -256,12 +262,14 @@ impl ElseApp {
             connection: Connection::Connecting,
             caps: None,
             bots: Vec::new(),
+            mention_bots: Default::default(),
             categories: Vec::new(),
             default_bot_id: None,
             selected: None,
             view: None,
             composer,
             clipboard_read: None,
+            mentions: Default::default(),
             drafts: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
@@ -287,7 +295,13 @@ impl ElseApp {
             sidebar_focus,
             live: None,
             _live: None,
-            _subscriptions: vec![subscription, activation, visibility, bounds],
+            _subscriptions: vec![
+                subscription,
+                composer_observer,
+                activation,
+                visibility,
+                bounds,
+            ],
         };
         app.start_live(window, cx);
         app
@@ -405,6 +419,10 @@ impl ElseApp {
     fn apply_bots(&mut self, list: BotList, window: &mut Window, cx: &mut Context<Self>) {
         self.default_bot_id = list.default_bot_id;
         self.bots = list.bots;
+        let mention_bots = bot_mention::MentionRegistry::new(&self.bots);
+        if *self.mention_bots != mention_bots {
+            self.mention_bots = Arc::new(mention_bots);
+        }
         self.categories = list.categories;
         self.stopping.retain(|id| {
             self.bots
@@ -414,6 +432,8 @@ impl ElseApp {
         self.observe_replies(window, cx);
         self.reconcile_selection(window, cx);
         self.sync_settings(window, cx);
+        self.sync_mentions(window, cx);
+        self.sync_rows(window, cx);
         cx.notify();
     }
 
@@ -450,6 +470,7 @@ impl ElseApp {
             self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
         }
         self.selected = id;
+        self.mentions = Default::default();
         let draft = id
             .and_then(|id| self.drafts.get(&id))
             .map(|draft| draft.content.clone())
