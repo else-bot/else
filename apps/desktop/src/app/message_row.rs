@@ -20,7 +20,7 @@ impl ElseApp {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
-        let Some(row) = view.rows.get(ix).copied() else {
+        let Some(row) = view.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
         let key = row.key;
@@ -226,6 +226,7 @@ impl ElseApp {
                 column.into_any_element()
             }
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
+            RowKey::Question(id) => self.render_question_card(id, cx),
             RowKey::Pending(request_id) => {
                 let Some(pending) = self
                     .selected
@@ -323,6 +324,17 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
             "Waiting for you to answer the secret request…".into(),
             false,
         ),
+        "waiting"
+            if turn
+                .questions
+                .iter()
+                .any(|q| q.is_pending() && q.is_approval()) =>
+        {
+            ("Waiting for your approval…".into(), false)
+        }
+        "waiting" if turn.questions.iter().any(|q| q.is_pending()) => {
+            ("Waiting for your answer…".into(), false)
+        }
         // The main bot handed part of the request to another bot.
         "waiting" => ("Waiting for another bot…".into(), false),
         "interrupted" => (

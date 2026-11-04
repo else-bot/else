@@ -115,7 +115,7 @@ fn a_pending_delegation_or_secret_request_is_noticed_from_its_tool_result() {
             {"type":"tool_use","id":"d1","name":"mcp__elsebot__delegate","input":{}}]}}),
     );
     let steps = t.on(&json!({"type":"user","message":{"content":[
-            {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\"}"}]}]}}));
+            {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
     assert_eq!(steps, vec![Step::Parked]);
     // A pending secret request parks the attempt the same way; other
     // tools' results never do.
@@ -127,7 +127,7 @@ fn a_pending_delegation_or_secret_request_is_noticed_from_its_tool_result() {
     );
     let steps = t.on(&json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"m1","content":[{"type":"text","text":"pending"}]},
-            {"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"{\"status\":\"pending\"}"}]}]}}));
+            {"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
     assert_eq!(steps, vec![Step::Parked]);
 }
 
@@ -395,6 +395,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         attempt: 1,
         delegation: Default::default(),
         secrets: Vec::new(),
+        questions: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
         routine: None,

@@ -82,6 +82,53 @@ impl SecretRequest {
     }
 }
 
+pub const APPROVE: &str = "approve";
+pub const DENY: &str = "deny";
+pub const APPROVE_FOREVER: &str = "approve_forever";
+
+/// One option of a bot's question, by its stable id and shown label.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct QuestionChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// A bot's question to the owner: a choice between options, or approval of
+/// one destructive or external action. Answered by choosing on its card.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Question {
+    pub id: Uuid,
+    /// `choice`, `destructive`, or `external`.
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    pub choices: Vec<QuestionChoice>,
+    /// `pending`, `answered`, `skipped`, or `cancelled`.
+    pub status: String,
+    /// The chosen option's id once answered.
+    #[serde(default)]
+    pub answer: Option<String>,
+    #[serde(default)]
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl Question {
+    pub fn is_pending(&self) -> bool {
+        self.status == "pending"
+    }
+
+    /// An approval card, as opposed to a plain choice.
+    pub fn is_approval(&self) -> bool {
+        self.kind != "choice"
+    }
+
+    pub fn chosen(&self) -> Option<&QuestionChoice> {
+        let answer = self.answer.as_deref()?;
+        self.choices.iter().find(|c| c.id == answer)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -93,6 +140,9 @@ pub struct Turn {
     pub effect_uncertain: bool,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
+    /// Absent from servers without owner questions.
+    #[serde(default)]
+    pub questions: Vec<Question>,
 }
 
 /// The last due occurrence of a routine: the turn it started, or why it
@@ -339,11 +389,15 @@ impl Conversation {
         }
     }
 
+    pub fn turns_in_order(&self) -> Vec<&Turn> {
+        let mut turns: Vec<_> = self.turns.values().collect();
+        turns.sort_by_key(|turn| turn.turn_no);
+        turns
+    }
+
     /// Every secret request of the loaded turns, by turn number.
     pub fn secret_requests(&self) -> Vec<(&Turn, &SecretRequest)> {
-        let mut turns: Vec<&Turn> = self.turns.values().collect();
-        turns.sort_by_key(|t| t.turn_no);
-        turns
+        self.turns_in_order()
             .into_iter()
             .flat_map(|t| t.secret_requests.iter().map(move |r| (t, r)))
             .collect()
@@ -354,6 +408,25 @@ impl Conversation {
             .values()
             .flat_map(|t| &t.secret_requests)
             .find(|r| r.id == id)
+    }
+
+    pub fn question(&self, id: Uuid) -> Option<&Question> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.questions)
+            .find(|q| q.id == id)
+    }
+
+    pub fn question_anchor(&self, turn: Uuid, settled_at: Option<DateTime<Utc>>) -> Option<Uuid> {
+        self.items
+            .values()
+            .rev()
+            .find(|item| {
+                item.turn_id == turn
+                    && settled_at
+                        .is_none_or(|at| item.created_at.is_none_or(|created| created <= at))
+            })
+            .map(|item| item.id)
     }
 
     pub fn routines(&self) -> &[Routine] {
@@ -704,5 +777,71 @@ mod tests {
             c.apply(&frame(4, "turn.updated", plain)),
             Ok(Applied::Changed)
         );
+    }
+
+    #[test]
+    fn answered_questions_stay_before_their_continuation() {
+        let mut before = item(2, 2, "assistant", "Please choose.");
+        before["turn_id"] = json!(Uuid::from_u128(901));
+        let mut after = item(3, 3, "assistant", "Continuing with your answer.");
+        after["turn_id"] = json!(Uuid::from_u128(901));
+        after["created_at"] = json!("2026-11-02T00:00:02Z");
+        let conversation = Conversation::from_snapshot(snapshot(
+            3,
+            vec![item(1, 1, "user", "Help me choose."), before, after],
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            conversation.question_anchor(
+                Uuid::from_u128(901),
+                Some("2026-11-02T00:00:01Z".parse().unwrap())
+            ),
+            Some(Uuid::from_u128(2))
+        );
+        assert_eq!(
+            conversation.question_anchor(Uuid::from_u128(901), None),
+            Some(Uuid::from_u128(3))
+        );
+    }
+
+    #[test]
+    fn turn_updates_carry_owner_questions_through_their_states() {
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let question = Uuid::from_u128(78);
+        let turn = |status: &str, question_status: &str, answer: Option<&str>| {
+            json!({ "turn": {
+                "id": Uuid::from_u128(9), "request_id": Uuid::from_u128(8), "turn_no": 1,
+                "provider_id": "synthetic", "status": status, "error": null,
+                "effect_uncertain": false,
+                "questions": [{ "id": question, "kind": "destructive",
+                    "title": "Remove the old site", "context": "rm -rf ~/work/old-site",
+                    "choices": [{ "id": "approve", "label": "Approve once" },
+                                { "id": "deny", "label": "Deny" },
+                                { "id": "approve_forever", "label": "Always allow destructive actions" }],
+                    "status": question_status, "answer": answer }],
+            }})
+        };
+        c.apply(&frame(2, "turn.updated", turn("waiting", "pending", None)))
+            .unwrap();
+        let shown = c.question(question).unwrap();
+        assert!(shown.is_pending() && shown.is_approval());
+        assert_eq!(shown.choices.len(), 3);
+        c.apply(&frame(
+            3,
+            "turn.updated",
+            turn("queued", "answered", Some("approve")),
+        ))
+        .unwrap();
+        let shown = c.question(question).unwrap();
+        assert_eq!(shown.chosen().unwrap().label, "Approve once");
+        c.apply(&frame(
+            4,
+            "turn.updated",
+            turn("interrupted", "skipped", None),
+        ))
+        .unwrap();
+        assert_eq!(c.question(question).unwrap().status, "skipped");
+        assert_eq!(c.question(question).unwrap().chosen(), None);
     }
 }

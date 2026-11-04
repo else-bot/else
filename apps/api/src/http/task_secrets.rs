@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiPath, SecretJson};
-use super::turns::bot_deleted;
+use super::turns::active_bot;
 use crate::db::secret_requests::{self, SettleError, Settled};
 use crate::db::task_secrets::{self, SecretError};
 
@@ -41,18 +41,6 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[serde(deny_unknown_fields)]
 struct Body {
     env: BTreeMap<String, String>,
-}
-
-async fn active_bot(state: &AppState, bot_id: Uuid) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
-        None => Err(ApiError::not_found()),
-        Some("active") => Ok(()),
-        Some(_) => Err(bot_deleted()),
-    }
 }
 
 fn error(err: SecretError) -> ApiError {

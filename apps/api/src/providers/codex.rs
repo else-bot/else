@@ -41,7 +41,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v13";
+const PROMPT_VERSION: &str = "else-codex-v14";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
@@ -663,11 +663,10 @@ impl Codex {
                 _ if other_thread || other_turn => {}
                 "item/completed"
                     if params["item"]["type"] == "mcpToolCall"
-                        && params["item"]["tool"]
-                            .as_str()
-                            .is_some_and(|t| crate::app::tools::PARKING_TOOLS.contains(&t))
                         && park_at.is_none()
-                        && params["item"]["result"].to_string().contains("pending") =>
+                        && params["item"]["tool"].as_str().is_some_and(|t| {
+                            crate::app::tools::parks(t, &params["item"]["result"])
+                        }) =>
                 {
                     park_at = Some(tokio::time::Instant::now() + PARK_GRACE);
                 }
@@ -773,6 +772,7 @@ mod tests {
             attempt: 1,
             delegation: Default::default(),
             secrets: Vec::new(),
+            questions: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
             routine: None,

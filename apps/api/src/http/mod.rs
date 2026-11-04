@@ -11,6 +11,8 @@ pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;
+mod owner_tools;
+pub mod questions;
 pub mod routines;
 pub mod settings;
 pub mod task_secrets;
@@ -100,6 +102,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(computers::routes())
         .merge(settings::routes())
         .merge(task_secrets::routes())
+        .merge(questions::routes())
         .merge(routines::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())

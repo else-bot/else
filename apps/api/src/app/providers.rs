@@ -118,6 +118,9 @@ pub struct TurnInput {
     /// The owner's answers to this turn's secret requests that no attempt
     /// has received yet. Names only, never values.
     pub secrets: Vec<SecretOutcome>,
+    /// The owner's answers to this turn's questions and approval requests
+    /// that no attempt has received yet.
+    pub questions: Vec<QuestionOutcome>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -169,6 +172,8 @@ pub struct SecretOutcome {
     pub env: Vec<String>,
     pub stored: bool,
 }
+
+pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome};
 
 /// What a turn's work traces back to, derived by the server from stored
 /// rows: a delegated task inherits the origin of the request that

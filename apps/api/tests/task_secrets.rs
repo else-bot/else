@@ -334,7 +334,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_run",
-        json!({ "command": "true", "secrets": ["theirs"] }),
+        json!({ "command": "true", "secrets": ["theirs"], "effect": "local" }),
     )
     .await;
     assert!(
@@ -349,7 +349,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_run",
-        json!({ "command": "./send.sh", "secrets": ["smtp"] }),
+        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local" }),
     )
     .await;
     assert_eq!(
@@ -378,7 +378,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_job_start",
-        json!({ "command": "./send.sh", "secrets": ["smtp"] }),
+        json!({ "command": "./send.sh", "secrets": ["smtp"], "effect": "local" }),
     )
     .await;
     let id: Uuid = job["job_id"].as_str().unwrap().parse().unwrap();
@@ -425,7 +425,7 @@ async fn stop_work_ends_a_running_foreground_command() {
                 &app,
                 &token,
                 "computer_run",
-                json!({ "command": "HANG for a long time", "timeout_secs": 300 }),
+                json!({ "command": "HANG for a long time", "timeout_secs": 300, "effect": "local" }),
             )
             .await
         })
@@ -529,7 +529,7 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
                 &app,
                 &token,
                 "computer_run",
-                json!({ "command": "HANG", "timeout_secs": 300 }),
+                json!({ "command": "HANG", "timeout_secs": 300, "effect": "local" }),
             )
             .await
         }));
@@ -603,7 +603,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
                 &app,
                 &token,
                 "computer_run",
-                json!({ "command": command, "timeout_secs": 300 }),
+                json!({ "command": command, "timeout_secs": 300, "effect": "local" }),
             )
             .await
         })

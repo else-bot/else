@@ -498,6 +498,20 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Answer a bot's question by one of its choice ids. A stale card gets
+    /// 409 `question_settled` from the server and never changes anything.
+    pub async fn answer_question(
+        self: Arc<Self>,
+        bot: Uuid,
+        question: Uuid,
+        choice: String,
+    ) -> Result<(), ClientError> {
+        let path = format!("/v1/bots/{bot}/questions/{question}/answer");
+        self.call::<serde_json::Value>(Method::POST, path, Some(json!({ "choice": choice })))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn create_bot(
         self: Arc<Self>,
         request: CreateBotRequest,

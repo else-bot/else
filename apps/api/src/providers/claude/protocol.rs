@@ -155,9 +155,9 @@ impl Tracker {
                     let prefix = format!("mcp__{}__", crate::app::tools::SERVER_NAME);
                     let parks = self.tools_by_id.get(id).is_some_and(|name| {
                         name.strip_prefix(&prefix)
-                            .is_some_and(|t| crate::app::tools::PARKING_TOOLS.contains(&t))
+                            .is_some_and(|t| crate::app::tools::parks(t, &block["content"]))
                     });
-                    if parks && block["content"].to_string().contains("pending") {
+                    if parks {
                         steps.push(Step::Parked);
                     }
                 }

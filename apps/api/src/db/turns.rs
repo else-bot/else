@@ -40,6 +40,9 @@ pub struct TurnRecord {
     /// The bot's requests for secrets during this turn (metadata only).
     #[sqlx(skip)]
     pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
+    /// The bot's questions and approval requests to the owner during this turn.
+    #[sqlx(skip)]
+    pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -246,6 +249,16 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         .await?;
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
+    sqlx::query(
+        "UPDATE owner_questions SET status = 'skipped',
+             settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE status = 'pending'
+           AND turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2)",
+    )
+    .bind(conversation_id)
+    .bind(turn_no)
+    .execute(&mut *tx)
+    .await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
@@ -295,21 +308,82 @@ pub async fn load_turn(
     .bind(turn_id)
     .fetch_one(&mut *conn)
     .await?;
-    attach_secret_requests(conn, std::slice::from_mut(&mut turn)).await?;
+    attach_owner_requests(conn, std::slice::from_mut(&mut turn)).await?;
     Ok(turn)
 }
 
-/// Fill in each turn's secret requests.
-pub async fn attach_secret_requests(
+/// Fill in each turn's secret requests and owner questions.
+pub async fn attach_owner_requests(
     conn: &mut SqliteConnection,
     turns: &mut [TurnRecord],
 ) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = turns.iter().map(|t| t.id).collect();
-    let mut by_turn = crate::db::secret_requests::for_turns(conn, &ids).await?;
+    let mut secrets = crate::db::secret_requests::for_turns(conn, &ids).await?;
+    let mut questions = crate::db::owner_questions::for_turns(conn, &ids).await?;
     for turn in turns {
-        turn.secret_requests = by_turn.remove(&turn.id).unwrap_or_default();
+        turn.secret_requests = secrets.remove(&turn.id).unwrap_or_default();
+        turn.questions = questions.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+pub struct AskingCaller {
+    pub bot_id: Uuid,
+    pub attempt: i32,
+    pub owner_conversation: bool,
+    pub main_bot: bool,
+}
+
+pub async fn asking_caller(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<Option<AskingCaller>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.bot_id, t.attempt, c.kind = 'owner' AS owner_conversation,
+             EXISTS (SELECT 1 FROM installation WHERE default_bot_id = t.bot_id) AS main_bot
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         JOIN bots b ON b.id = t.bot_id
+         WHERE t.id = ?1 AND t.status IN ('sending', 'running')
+           AND b.status = 'active' AND NOT b.cancel_pending",
+    )
+    .bind(turn_id)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Whether the current `attempt` of `turn_id` already delegated, asked for
+/// a secret, or asked the owner: it must end, and asks nothing more.
+pub async fn attempt_parked(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    attempt: i32,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = ?1 AND attempt = ?2)",
+    )
+    .bind(turn_id)
+    .bind(attempt)
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// Queue a waiting turn again as a continuation once nothing holds it: no
+/// pending child, secret request, or owner question. True when it was.
+pub async fn continue_waiting(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let requeued = sqlx::query(
+        "UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'waiting'
+           AND NOT EXISTS (SELECT 1 FROM turn_holds WHERE turn_id = ?1 AND pending)",
+    )
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(requeued == 1)
 }
 
 pub async fn load_item(
@@ -544,6 +618,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         attempt: turn.attempt,
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
+        questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         routine: crate::db::routines::run_of(&mut conn, turn_id).await?,

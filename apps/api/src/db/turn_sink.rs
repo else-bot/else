@@ -42,6 +42,8 @@ struct SinkState {
     delivered: Vec<Uuid>,
     /// Secret request answers this attempt's input carried.
     delivered_secrets: Vec<Uuid>,
+    /// Owner question answers this attempt's input carried.
+    delivered_questions: Vec<Uuid>,
 }
 
 pub struct SqliteSink {
@@ -66,6 +68,7 @@ impl SqliteSink {
                 attempt: input.attempt,
                 delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
+                delivered_questions: input.questions.iter().map(|o| o.id).collect(),
             }),
             flush_wanted,
         }
@@ -313,24 +316,10 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-        // A root that delegated or asked the owner for a secret parks
-        // instead of finishing: `waiting` while a child works or the owner
-        // has not answered, or `queued` again (a continuation) when every
-        // one has an outcome this attempt did not see. A Stop (`cancelling`)
-        // ends it normally, and ending withdraws pending secret requests.
         let (current, pending, unseen): (String, i64, i64) = sqlx::query_as(
-            "SELECT t.status,
-                    (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = t.id AND d.status IN ('queued', 'running'))
-                  + (SELECT count(*) FROM secret_requests r
-                     WHERE r.turn_id = t.id AND r.status = 'pending'),
-                    (SELECT count(*) FROM delegations d
-                     WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
-                       AND d.status IN ('completed', 'failed', 'cancelled'))
-                  + (SELECT count(*) FROM secret_requests r
-                     WHERE r.turn_id = t.id AND r.delivered_attempt IS NULL
-                       AND r.status <> 'pending')
-             FROM turns t WHERE t.id = ?1",
+            "SELECT t.status, coalesce(sum(h.pending), 0), coalesce(sum(h.unseen), 0)
+             FROM turns t LEFT JOIN turn_holds h ON h.turn_id = t.id
+             WHERE t.id = ?1 GROUP BY t.id",
         )
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
@@ -438,7 +427,10 @@ impl SinkState {
             Ok(()) => {
                 // Accepted by the provider: the outcomes this attempt carried
                 // were delivered.
-                if !self.delivered.is_empty() || !self.delivered_secrets.is_empty() {
+                if !self.delivered.is_empty()
+                    || !self.delivered_secrets.is_empty()
+                    || !self.delivered_questions.is_empty()
+                {
                     let marked = async {
                         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
                         crate::db::delegations::mark_delivered(
@@ -453,6 +445,13 @@ impl SinkState {
                             self.turn_id,
                             self.attempt,
                             &self.delivered_secrets,
+                        )
+                        .await?;
+                        crate::db::owner_questions::mark_delivered(
+                            &mut tx,
+                            self.turn_id,
+                            self.attempt,
+                            &self.delivered_questions,
                         )
                         .await?;
                         tx.commit().await

@@ -175,24 +175,13 @@ pub async fn create(
     spec: &Spec,
 ) -> Result<RequestInfo, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let caller: Option<(Uuid, String, i32, String, String, bool)> = sqlx::query_as(
-        "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status, b.cancel_pending
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some((bot_id, status, attempt, kind, bot_status, cancel_pending)) = caller else {
-        return Err(RequestError::NotRunning);
-    };
-    if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" || cancel_pending
-    {
-        return Err(RequestError::NotRunning);
-    }
-    if kind != "owner" {
+    let caller = super::turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .ok_or(RequestError::NotRunning)?;
+    if !caller.owner_conversation {
         return Err(RequestError::NotAllowed);
     }
+    let (bot_id, attempt) = (caller.bot_id, caller.attempt);
     let existing: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM secret_requests WHERE turn_id = ?1 AND name = ?2"
     )))
@@ -208,18 +197,13 @@ pub async fn create(
         }
         return Ok(found);
     }
-    let (total, this_attempt, delegated): (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE attempt = ?2),
-                (SELECT count(*) FROM delegations WHERE root_turn_id = ?1 AND parent_attempt = ?2)
-         FROM secret_requests WHERE turn_id = ?1",
-    )
-    .bind(turn_id)
-    .bind(attempt)
-    .fetch_one(&mut *tx)
-    .await?;
-    if this_attempt + delegated > 0 {
+    if super::turns::attempt_parked(&mut tx, turn_id, attempt).await? {
         return Err(RequestError::AttemptParked);
     }
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM secret_requests WHERE turn_id = ?1")
+        .bind(turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
     if total >= MAX_PER_TURN {
         return Err(RequestError::BudgetExhausted);
     }
@@ -343,19 +327,7 @@ async fn settle_in(
     })
     .fetch_one(&mut *conn)
     .await?;
-    let requeued = sqlx::query(
-        "UPDATE turns SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND status = 'waiting'
-           AND NOT EXISTS (SELECT 1 FROM delegations d
-                           WHERE d.root_turn_id = ?1 AND d.status IN ('queued', 'running'))
-           AND NOT EXISTS (SELECT 1 FROM secret_requests r
-                           WHERE r.turn_id = ?1 AND r.status = 'pending')",
-    )
-    .bind(request.turn_id)
-    .execute(&mut *conn)
-    .await?
-    .rows_affected()
-        == 1;
+    let requeued = super::turns::continue_waiting(conn, request.turn_id).await?;
     events::turn_changed(conn, request.bot_id, request.turn_id).await?;
     Ok(Settled {
         request: info(row),

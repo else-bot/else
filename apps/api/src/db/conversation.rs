@@ -62,7 +62,7 @@ pub async fn snapshot(
     .bind(sqlx::types::Json(&turn_ids))
     .fetch_all(&mut *tx)
     .await?;
-    super::turns::attach_secret_requests(&mut tx, &mut turns).await?;
+    super::turns::attach_owner_requests(&mut tx, &mut turns).await?;
     let routines = super::routines::list(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {

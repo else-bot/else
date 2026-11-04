@@ -424,7 +424,7 @@ fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
     let delegation = &input.delegation;
     let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
     if delegation.can_delegate() {
-        tools.extend([Tool::RequestSecret, Tool::Delegate]);
+        tools.extend([Tool::RequestSecret, Tool::AskOwner, Tool::Delegate]);
     }
     if delegation.can_create_bot {
         tools.push(Tool::CreateBot);

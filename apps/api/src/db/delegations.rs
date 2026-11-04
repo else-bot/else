@@ -145,7 +145,9 @@ pub async fn create(
     if total >= MAX_CHILDREN {
         return Err(DelegateError::BudgetExhausted);
     }
-    if this_attempt >= PER_ATTEMPT {
+    if this_attempt >= PER_ATTEMPT
+        || super::turns::attempt_parked(&mut tx, turn_id, attempt).await?
+    {
         return Err(DelegateError::AttemptParked);
     }
     // The target: active, not stopping, rechecked inside an immediate transaction.

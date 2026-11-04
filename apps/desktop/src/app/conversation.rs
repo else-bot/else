@@ -17,12 +17,15 @@ pub(super) enum RowKey {
     Pending(Uuid),
     /// A bot's request for credentials, by request ID.
     SecretRequest(Uuid),
+    /// A bot's question or approval request, by question ID.
+    Question(Uuid),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
+    state: Option<String>,
 }
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
@@ -68,6 +71,8 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
+    /// An answer in flight, or its failure, per pending question.
+    pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
     /// The end of the latest loaded reply was on screen at the last check.
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
@@ -89,6 +94,7 @@ impl ConversationView {
             texts: HashMap::new(),
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
+            question_submits: HashMap::new(),
             latest_seen: false,
             reply_layout: None,
             _load: None,
@@ -98,6 +104,15 @@ impl ConversationView {
 }
 
 impl ElseApp {
+    pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_ref()
+            && let Some(ix) = view.rows.iter().position(|row| row.key == key)
+        {
+            view.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
     pub(super) fn load_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (client, Some(view)) = (self.client.clone(), self.view.as_mut()) else {
             return;
@@ -252,14 +267,29 @@ impl ElseApp {
         }
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        // A turn's secret requests follow its last loaded item.
-        let mut requests: Vec<(Uuid, Uuid)> = conversation
+        let mut requests: Vec<(RowKey, Option<Uuid>)> = conversation
             .into_iter()
-            .flat_map(|c| c.secret_requests())
-            .map(|(turn, request)| (turn.id, request.id))
+            .flat_map(|c| {
+                c.turns_in_order().into_iter().flat_map(move |turn| {
+                    turn.secret_requests
+                        .iter()
+                        .map(move |request| {
+                            (
+                                RowKey::SecretRequest(request.id),
+                                c.question_anchor(turn.id, None),
+                            )
+                        })
+                        .chain(turn.questions.iter().map(move |question| {
+                            (
+                                RowKey::Question(question.id),
+                                c.question_anchor(turn.id, question.settled_at),
+                            )
+                        }))
+                })
+            })
             .collect();
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
-        for (ix, item) in items.iter().enumerate() {
+        for item in &items {
             rows.push(RowKey::Item(item.id));
             let format = if item.kind == "assistant" {
                 RowFormat::Markdown
@@ -273,24 +303,15 @@ impl ElseApp {
                     .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
                 format,
             ));
-            if items
-                .get(ix + 1)
-                .is_none_or(|next| next.turn_id != item.turn_id)
-            {
-                requests.retain(|(turn, request)| {
-                    let here = *turn == item.turn_id;
-                    if here {
-                        rows.push(RowKey::SecretRequest(*request));
-                    }
-                    !here
-                });
-            }
+            requests.retain(|(key, anchor)| {
+                let here = *anchor == Some(item.id);
+                if here {
+                    rows.push(*key);
+                }
+                !here
+            });
         }
-        rows.extend(
-            requests
-                .into_iter()
-                .map(|(_, request)| RowKey::SecretRequest(request)),
-        );
+        rows.extend(requests.into_iter().map(|(key, _)| key));
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
             texts.push((
@@ -314,13 +335,28 @@ impl ElseApp {
                         let author = p.rejected.is_none().then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_) => (None, None),
+                RowKey::SecretRequest(_) | RowKey::Question(_) => (None, None),
             })
             .collect();
         let rows: Vec<TranscriptRow> = rows
             .into_iter()
             .zip(burst_tail_stamps(&senders, &Local))
-            .map(|(key, footer_stamp)| TranscriptRow { key, footer_stamp })
+            .map(|(key, footer_stamp)| {
+                let state = conversation.and_then(|c| match key {
+                    RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
+                    RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
+                    RowKey::Item(id) => c
+                        .item(id)
+                        .and_then(|i| c.turn(i.turn_id))
+                        .map(|t| t.status.clone()),
+                    RowKey::Pending(_) => None,
+                });
+                TranscriptRow {
+                    key,
+                    footer_stamp,
+                    state,
+                }
+            })
             .collect();
         let old = std::mem::take(&mut view.rows);
         let same = |a: &TranscriptRow, b: &TranscriptRow| a.key == b.key;
@@ -341,12 +377,11 @@ impl ElseApp {
             view.list
                 .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
         }
-        let old_stamps: HashMap<RowKey, Option<DateTime<Utc>>> =
-            old.iter().map(|row| (row.key, row.footer_stamp)).collect();
+        let previous: HashMap<_, _> = old.iter().map(|row| (row.key, row)).collect();
         for (ix, row) in rows.iter().enumerate() {
-            if old_stamps
+            if previous
                 .get(&row.key)
-                .is_some_and(|stamp| *stamp != row.footer_stamp)
+                .is_some_and(|old| old.footer_stamp != row.footer_stamp || old.state != row.state)
             {
                 view.list.remeasure_items(ix..ix + 1);
             }
@@ -389,6 +424,7 @@ impl ElseApp {
         }
         view.rows = rows;
         self.sync_secret_forms(window, cx);
+        self.sync_question_submits();
         self.check_reading(window, cx);
         cx.notify();
     }
