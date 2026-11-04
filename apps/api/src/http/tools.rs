@@ -66,6 +66,9 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
     Ok(())
 }
 
+const GRANT_ITEMS: &str =
+    "(i.conversation_id = ?1 OR (t.conversation_id = ?1 AND i.kind = 'assistant'))";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HistoryQuery {
@@ -84,7 +87,7 @@ async fn history(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2) AND i.kind <> 'routine'
+         WHERE {GRANT_ITEMS} AND (?2 IS NULL OR i.seq < ?2) AND i.kind <> 'routine'
          ORDER BY i.seq DESC LIMIT ?3"
     )))
     .bind(grant.conversation_id)
@@ -106,10 +109,10 @@ async fn item(
     // A foreign object is indistinguishable from a missing one.
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.id = ?1 AND i.conversation_id = ?2 AND i.kind <> 'routine'"
+         WHERE i.id = ?2 AND {GRANT_ITEMS} AND i.kind <> 'routine'"
     )))
-    .bind(item_id)
     .bind(grant.conversation_id)
+    .bind(item_id)
     .fetch_optional(&state.db)
     .await?;
     let item = item.ok_or_else(ApiError::not_found)?;

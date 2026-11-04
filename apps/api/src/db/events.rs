@@ -116,16 +116,17 @@ pub async fn turn_changed(
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let turn = turns::load_turn(conn, turn_id).await?;
-    // Delegated work is not part of the owner's conversation; only the
-    // bot's activity changes visibly.
-    if !is_task(conn, turn.conversation_id).await? {
-        let data = json!({
-            "bot_id": bot_id,
-            "conversation_id": turn.conversation_id,
-            "turn": turn_json(&turn),
-        });
-        append(conn, bot_id, "turn.updated", data).await?;
-    }
+    let owner_conversation_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1 AND kind = 'owner'")
+            .bind(bot_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let data = json!({
+        "bot_id": bot_id,
+        "conversation_id": owner_conversation_id,
+        "turn": turn_json(&turn),
+    });
+    append(conn, bot_id, "turn.updated", data).await?;
     bot_updated(conn, bot_id).await
 }
 

@@ -4,7 +4,9 @@
 //! to another registered bot (the main bot included), at most two per
 //! request. The child runs as an ordinary queued
 //! turn of the target bot, in a separate task conversation, through the
-//! same scheduler. The parent attempt then ends; its owner turn waits
+//! same scheduler. The target's owner conversation shows a receipt and the
+//! child's reply; the task conversation keeps its execution (source item,
+//! grants, native session). The parent attempt then ends; its owner turn waits
 //! (`waiting`) with no provider process, and a database trigger requeues it
 //! as a continuation once every child has an outcome. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
@@ -190,14 +192,18 @@ pub async fn create(
     let conversation_id = Uuid::new_v4();
     let child_turn = Uuid::new_v4();
     let item_id = Uuid::new_v4();
+    let receipt_id = Uuid::new_v4();
     // Child turns are numbered from the target's owner counter, so a Stop
     // of the target covers them by the same boundary.
     let turn_no = last_turn_no + 1;
-    sqlx::query("UPDATE conversations SET last_turn_no = ?2 WHERE id = ?1")
-        .bind(owner_conversation)
-        .bind(turn_no)
-        .execute(&mut *tx)
-        .await?;
+    let receipt_seq: i64 = sqlx::query_scalar(
+        "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
+         WHERE id = ?1 RETURNING last_item_seq",
+    )
+    .bind(owner_conversation)
+    .bind(turn_no)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
         "INSERT INTO conversations (id, bot_id, kind, last_item_seq, last_turn_no)
          VALUES (?1, ?2, 'task', 1, ?3)",
@@ -250,9 +256,27 @@ pub async fn create(
     .bind(child_turn)
     .execute(&mut *tx)
     .await?;
+    let sender: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
+        .bind(parent)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+    )
+    .bind(receipt_id)
+    .bind(owner_conversation)
+    .bind(receipt_seq)
+    .bind(child_turn)
+    .bind(format!(
+        "Received a task from {sender}. I'll take care of it for you.\n\n{task}"
+    ))
+    .execute(&mut *tx)
+    .await?;
     // The task enters the target's memory as model-authored text.
     crate::db::memory::log_item(&mut tx, item_id).await?;
-    events::bot_updated(&mut tx, target).await?;
+    events::item_upsert(&mut tx, target, receipt_id).await?;
+    events::turn_changed(&mut tx, target, child_turn).await?;
     tx.commit().await?;
     Ok(Accepted {
         delegation_id,
