@@ -14,6 +14,6 @@ edition = "2024"
 [profile.dev]
 debug = 0
 
-# Markdown wrapping and link previews, pinned until these fixes land upstream.
+# Native link previews, pinned until the hook lands upstream.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "35e493484fcab19a5a7fd8184fb207b6b18beb20" }
+gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "5e412e4847cc0fb838f137c4c6b18fdc50e0f446" }
