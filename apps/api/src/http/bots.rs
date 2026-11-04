@@ -5,7 +5,8 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -14,6 +15,7 @@ use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use crate::app::bots::{Avatar, BotName};
 use crate::db::bots::{self, BotError, BotStatus, Created};
+use crate::db::reads::{self, ReadCommand, ReadError};
 use crate::views::*;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -21,6 +23,33 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bots", get(list).post(create))
         .route("/bots/{bot_id}", get(show).patch(update).delete(delete))
         .route("/bots/{bot_id}/profile", get(show_profile).put(set_profile))
+        .route("/bots/{bot_id}/read", post(mark_read))
+}
+
+impl From<ReadError> for ApiError {
+    fn from(err: ReadError) -> Self {
+        match err {
+            ReadError::NotFound => ApiError::not_found(),
+            ReadError::Deleted => super::turns::bot_deleted(),
+            ReadError::InvalidPosition => ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_position",
+                "The position is not within one of the bot's replies.",
+            ),
+            ReadError::Db(err) => err.into(),
+        }
+    }
+}
+
+/// Move the owner's read position forward, or set or clear the explicit
+/// unread flag. Repeating a command changes nothing further.
+async fn mark_read(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+    ApiJson(command): ApiJson<ReadCommand>,
+) -> Result<Json<Value>, ApiError> {
+    let bot = reads::apply(&state.db, bot_id, command).await?;
+    Ok(Json(json!({ "bot": bot_json(&bot) })))
 }
 
 impl From<BotError> for ApiError {

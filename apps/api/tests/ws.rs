@@ -411,6 +411,79 @@ async fn bots_channel_pushes_list_changes() {
     assert!(removed, "deleting a bot reaches subscribers");
 }
 
+/// A reply to a bot nobody has open reaches the sidebar through the `bots`
+/// channel alone, once per change, and reading it is pushed back.
+#[tokio::test(flavor = "multi_thread")]
+async fn bots_channel_carries_background_replies_and_reads() {
+    let server = Server::start().await;
+    let background = server.app.create_bot("Background").await;
+    let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
+    op(&mut socket, json!({ "op": "subscribe", "channel": "bots" })).await;
+    let state = |update: &Value| {
+        update["data"]["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == json!(background))
+            .unwrap()["read_state"]
+            .clone()
+    };
+    let first = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(state(&first)["unread"], false);
+    let sent = server
+        .app
+        .send(&background, Uuid::new_v4(), "ping ✓", Some("synthetic"))
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    server.app.wait_turn(&turn, &["completed"]).await;
+    let mut latest = Value::Null;
+    let mut previous: Option<Value> = None;
+    while let Some(update) = next(&mut socket, Duration::from_secs(1)).await {
+        assert_ne!(
+            previous.as_ref(),
+            Some(&update["data"]),
+            "only changes are sent"
+        );
+        let read = state(&update);
+        if read["unread"] == true {
+            assert_eq!(read["latest"]["turn_id"], json!(turn));
+            latest = read["latest"].clone();
+        }
+        previous = Some(update["data"].clone());
+    }
+    assert!(
+        latest.is_object(),
+        "the background reply reached the sidebar"
+    );
+    let item = server.snapshot(&background).await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|i| i["kind"] == "assistant")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        latest["position"]["text_bytes"],
+        json!(item["text"].as_str().unwrap().len()),
+        "the last push carries the whole reply"
+    );
+
+    server
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{background}/read"),
+            Some(json!({ "action": "through", "position": latest["position"] })),
+        )
+        .await;
+    let update = next(&mut socket, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        state(&update)["unread"],
+        false,
+        "another client sees the read"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cursor_errors_are_reported_per_channel() {
     let server = Server::start().await;

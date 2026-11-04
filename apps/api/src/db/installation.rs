@@ -122,10 +122,16 @@ pub async fn append_welcome(
     .bind(&text)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("UPDATE conversations SET last_turn_no = 1, last_item_seq = 1 WHERE id = ?1")
-        .bind(conversation_id)
-        .execute(&mut **tx)
-        .await?;
+    // The owner has not missed the greeting of a bot they just made.
+    sqlx::query(
+        "UPDATE conversations SET last_turn_no = 1, last_item_seq = 1,
+             read_item_seq = 1, read_text_bytes = length(CAST(?2 AS BLOB))
+         WHERE id = ?1",
+    )
+    .bind(conversation_id)
+    .bind(&text)
+    .execute(&mut **tx)
+    .await?;
     crate::db::memory::log_item(tx, item_id).await?;
     crate::db::events::item_upsert(tx, bot_id, item_id).await?;
     crate::db::events::turn_changed(tx, bot_id, turn_id).await?;
