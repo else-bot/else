@@ -10,9 +10,9 @@
 # they need. macOS needs Xcode, and a running Docker (OrbStack or Docker Desktop)
 # only when building the optional guest image. SQLite is bundled in the API.
 #
-# It asks once what this machine runs (--both, --server-only, --app-only;
-# Enter or --yes: both on a fresh machine, the installed choice on an
-# update): the server (the API and everything bots need), the app (the
+# On a fresh machine it asks what this machine runs (--both, --server-only,
+# --app-only; Enter or --yes: both); an update keeps what is installed
+# without asking: the server (the API and everything bots need), the app (the
 # desktop, which connects to a server here or elsewhere), or both. Adding a
 # component keeps what is installed: choosing the app on a server installs
 # both. An app-only installation has no server settings, data, or service.
@@ -86,7 +86,6 @@ API_PORT="${ELSE_API_PORT:-7878}"
 SERVICE="${ELSE_SERVICE_NAME:-else-api}"
 WANT_VERSION="${ELSE_VERSION:-}"
 ASSUME_YES=0
-# server, app, or both: asked in stage 2 unless a flag chose (COMPONENTS_FLAG).
 COMPONENTS=""
 COMPONENTS_FLAG=""
 SKIP_GUEST=0
@@ -189,14 +188,13 @@ installed_components() {
 	esac
 }
 
-# Asked once in stage 2; a component already installed is kept.
 choose_components() {
 	local installed choice answer
 	installed="$(installed_components)"
 	choice="$COMPONENTS_FLAG"
 	if [ -z "$choice" ]; then
 		choice="${installed:-both}"
-		if [ "$ASSUME_YES" = 0 ] && { true </dev/tty; } 2>/dev/null; then
+		if [ -z "$installed" ] && [ "$ASSUME_YES" = 0 ] && { true </dev/tty; } 2>/dev/null; then
 			step "What this machine runs"
 			info "1) both    the server and the app"
 			info "2) server  the server only (home hardware or a VPS)"
