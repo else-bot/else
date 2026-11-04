@@ -410,6 +410,7 @@ impl Provider for Claude {
             models: MODELS,
             efforts: EFFORTS,
             tiers: TIERS,
+            ..Default::default()
         }
     }
 

@@ -15,6 +15,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct Catalog {
     pub models: &'static [&'static str],
+    /// Models shown before expanding the picker. Empty shows the full catalog.
+    pub featured_models: &'static [&'static str],
     pub efforts: &'static [&'static str],
     pub tiers: &'static [&'static str],
 }

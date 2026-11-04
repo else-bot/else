@@ -1,5 +1,7 @@
 //! One catalog-backed profile picker for onboarding and bot dialogs.
 
+use std::collections::HashSet;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -19,6 +21,7 @@ pub struct ProfilePicker {
     search: Entity<InputState>,
     change_focus: FocusHandle,
     browsing: bool,
+    expanded_providers: HashSet<String>,
     customizing: bool,
     disabled: bool,
     _search: Subscription,
@@ -54,6 +57,7 @@ impl ProfilePicker {
         });
         Self {
             browsing: choice.is_none(),
+            expanded_providers: HashSet::new(),
             choice,
             providers,
             search,
@@ -111,16 +115,8 @@ impl ProfilePicker {
             .p_1();
         let mut found = false;
         for provider in &self.providers {
-            let models: Vec<_> = provider
-                .catalog
-                .models
-                .iter()
-                .filter(|model| {
-                    format!("{} {} {model}", provider.label, model_label(model))
-                        .to_lowercase()
-                        .contains(&query)
-                })
-                .collect();
+            let expanded = self.expanded_providers.contains(&provider.id);
+            let models = visible_models(provider, self.choice.as_ref(), &query, expanded);
             if models.is_empty() {
                 continue;
             }
@@ -185,6 +181,46 @@ impl ProfilePicker {
                         )
                         .on_click(cx.listener(move |picker, _, window, cx| {
                             picker.choose_model(&provider_id, model_id.clone(), window, cx);
+                        })),
+                );
+            }
+            if query.is_empty()
+                && !provider.catalog.featured_models.is_empty()
+                && provider
+                    .catalog
+                    .models
+                    .iter()
+                    .any(|model| !provider.catalog.featured_models.contains(model))
+            {
+                let provider_id = provider.id.clone();
+                groups = groups.child(
+                    Button::new(SharedString::from(format!("more-models-{provider_id}")))
+                        .cursor_pointer()
+                        .ghost()
+                        .small()
+                        .w_full()
+                        .label(if expanded {
+                            "Fewer models"
+                        } else {
+                            "More models"
+                        })
+                        .icon(if expanded {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .accessibility_label(format!(
+                            "{} {} models",
+                            if expanded { "Show fewer" } else { "Show more" },
+                            provider.label
+                        ))
+                        .toggled(expanded)
+                        .disabled(self.disabled)
+                        .on_click(cx.listener(move |picker, _, _, cx| {
+                            if !picker.expanded_providers.remove(&provider_id) {
+                                picker.expanded_providers.insert(provider_id.clone());
+                            }
+                            cx.notify();
                         })),
                 );
             }
@@ -296,6 +332,32 @@ impl ProfilePicker {
             )
             .into_any_element()
     }
+}
+
+fn visible_models<'a>(
+    provider: &'a ProviderInfo,
+    choice: Option<&ProfileChoice>,
+    query: &str,
+    expanded: bool,
+) -> Vec<&'a String> {
+    provider
+        .catalog
+        .models
+        .iter()
+        .filter(|model| {
+            if !query.is_empty() {
+                return format!("{} {} {model}", provider.label, model_label(model))
+                    .to_lowercase()
+                    .contains(query);
+            }
+            expanded
+                || provider.catalog.featured_models.is_empty()
+                || provider.catalog.featured_models.contains(model)
+                || choice.is_some_and(|choice| {
+                    choice.provider_id == provider.id && choice.model == **model
+                })
+        })
+        .collect()
 }
 
 fn catalog_choice(
@@ -538,7 +600,7 @@ impl Render for ProfilePicker {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAST, catalog_choice, model_label};
+    use super::{FAST, catalog_choice, model_label, visible_models};
     use crate::api::{Catalog, ProviderInfo};
 
     fn provider(id: &str, fast: bool) -> ProviderInfo {
@@ -549,6 +611,7 @@ mod tests {
             cli_unavailable_reason: None,
             catalog: Catalog {
                 models: vec!["first".into(), "second".into()],
+                featured_models: Vec::new(),
                 efforts: vec!["low".into(), "medium".into(), "high".into()],
                 tiers: if fast {
                     vec!["default".into(), FAST.into()]
@@ -568,12 +631,65 @@ mod tests {
 
     #[test]
     fn saved_profile_keeps_its_model_reasoning_and_speed() {
-        let provider = provider("codex", true);
+        let mut provider = provider("codex", true);
+        provider.catalog.featured_models = vec!["first".into()];
         let mut saved = catalog_choice(&provider, None).unwrap();
         saved.model = "second".into();
         saved.reasoning_effort = "high".into();
         saved.service_tier = FAST.into();
         assert_eq!(catalog_choice(&provider, Some(&saved)), Some(saved));
+    }
+
+    #[test]
+    fn more_models_expands_the_catalog_and_search_finds_older_models() {
+        let mut provider = provider("codex", true);
+        provider.catalog.featured_models = vec!["first".into()];
+        assert_eq!(visible_models(&provider, None, "", false), vec!["first"]);
+        assert_eq!(
+            visible_models(&provider, None, "", true),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            visible_models(&provider, None, "second", false),
+            vec!["second"]
+        );
+        assert!(visible_models(&provider, None, "missing", true).is_empty());
+    }
+
+    #[test]
+    fn selected_older_model_stays_visible_when_collapsed() {
+        let mut provider = provider("codex", true);
+        provider.catalog.featured_models = vec!["first".into()];
+        let mut saved = catalog_choice(&provider, None).unwrap();
+        saved.model = "second".into();
+        assert_eq!(
+            visible_models(&provider, Some(&saved), "", false),
+            vec!["first", "second"]
+        );
+        saved.provider_id = "claude".into();
+        assert_eq!(
+            visible_models(&provider, Some(&saved), "", false),
+            vec!["first"]
+        );
+    }
+
+    #[test]
+    fn catalogs_without_featured_metadata_show_every_model() {
+        let mut provider = provider("claude", false);
+        provider.catalog = serde_json::from_value(serde_json::json!({
+            "models": ["claude-opus-5-5", "claude-fable-5-1"],
+            "efforts": ["medium"],
+            "tiers": ["default"]
+        }))
+        .unwrap();
+        assert_eq!(
+            visible_models(&provider, None, "", false),
+            vec!["claude-opus-5-5", "claude-fable-5-1"]
+        );
+        assert_eq!(
+            visible_models(&provider, None, "fable 5.1", false),
+            vec!["claude-fable-5-1"]
+        );
     }
 
     #[test]

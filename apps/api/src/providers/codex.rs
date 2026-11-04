@@ -46,7 +46,16 @@ const PROMPT_VERSION: &str = "else-codex-v14";
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
 const PARK_STOP: Duration = Duration::from_secs(15);
-const MODELS: &[&str] = &["gpt-6.1-sol"];
+const MODELS: &[&str] = &[
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+];
 /// `ultra` delegates to native agents, which are disabled.
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const TIERS: &[&str] = &["default", "priority"];
@@ -269,6 +278,7 @@ impl Provider for Codex {
     fn catalog(&self) -> crate::app::providers::Catalog {
         crate::app::providers::Catalog {
             models: MODELS,
+            featured_models: &MODELS[..4],
             efforts: EFFORTS,
             tiers: TIERS,
         }
@@ -890,6 +900,10 @@ mod tests {
     #[test]
     fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
         let codex = Codex::detect(None, None, None);
+        assert_eq!(
+            codex.catalog().featured_models,
+            &["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-luna"]
+        );
         for model in [
             "gpt-6.1-sol",
             "gpt-6-astra",
