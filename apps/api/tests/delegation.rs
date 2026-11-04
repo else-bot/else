@@ -885,6 +885,66 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
     assert_eq!(delivered, Some(2), "the continuation received the outcome");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_follow_up_ends_a_waiting_root_and_its_task_only() {
+    let app = app_with(2).await;
+    let work = leaf(&app, "Work").await;
+    let (main, root, token) = running_main(&app).await;
+    let reply = delegate(&app, &token, &work, "[synthetic:hang] long research").await;
+    let task_id: Uuid = tool_text(&reply)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_status(&app, root, "waiting").await;
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait_status(&app, child, "running").await;
+
+    // A message in the target's own chat waits for the task, never ends it.
+    let aside = app
+        .send(
+            &work,
+            Uuid::new_v4(),
+            "an aside for Work",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(aside.status, StatusCode::ACCEPTED, "{}", aside.body);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let child_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(child_status, "running");
+
+    let follow = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Do the school part yourself.",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
+    wait_status(&app, root, "interrupted").await;
+    wait_status(&app, child, "interrupted").await;
+    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled", "the task does not outlive its root");
+    app.wait_turn(follow.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    app.wait_turn(aside.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+}
+
 /// Rows for a main bot's running root with one queued child on Target,
 /// written directly so states can be set precisely (no scheduler runs).
 async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {

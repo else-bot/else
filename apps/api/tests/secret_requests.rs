@@ -139,7 +139,88 @@ async fn an_owner_follow_up_withdraws_the_secret_request_and_runs() {
     assert_eq!(request_status(&app, request).await.0, "cancelled");
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    assert!(synthetic.packets().await.last().unwrap().contains(correction));
+    assert!(
+        synthetic
+            .packets()
+            .await
+            .last()
+            .unwrap()
+            .contains(correction)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_while_the_asking_attempt_still_runs_withdraws_the_request() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, owner_tools()).await;
+    let request = request_id(&app, &token).await;
+    assert_eq!(
+        status(&app, turn).await,
+        "running",
+        "the attempt still streams"
+    );
+
+    let correction = "Skip the login, deploy from the CI artifacts instead.";
+    let sent = app
+        .send(&main, Uuid::new_v4(), correction, Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(request_status(&app, request).await.0, "cancelled");
+    let next = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&next, &["completed"]).await;
+    assert_eq!(
+        status(&app, turn).await,
+        "interrupted",
+        "the drained attempt ends instead of parking on the withdrawn request"
+    );
+    assert!(
+        synthetic
+            .packets()
+            .await
+            .last()
+            .unwrap()
+            .contains(correction)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_to_a_request_withdrawn_by_a_follow_up_stores_nothing() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, owner_tools()).await;
+    let request = request_id(&app, &token).await;
+    wait(&app, turn, "waiting").await;
+    let sent = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Never mind the login.",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+
+    let late = fulfill(&app, &main, request, values()).await;
+    assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    assert_eq!(late.body["error"]["code"], "secret_request_settled");
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM task_secrets")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert_eq!(status(&app, turn).await, "interrupted");
+    assert_canary_absent_from_database(&app).await;
+}
+
+async fn status(app: &TestApp, turn: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
 }
 
 async fn wait(app: &TestApp, turn: Uuid, status: &str) {

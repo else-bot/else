@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::messages::{InvalidMessage, MAX_QUEUED_TURNS, Reaction, validate_text};
+use crate::app::messages::{InvalidMessage, Reaction, validate_text};
 use crate::app::providers::Availability;
 use crate::db::turns::{self, AcceptError, SendRequest};
 use crate::views::*;
@@ -50,12 +50,6 @@ impl From<AcceptError> for ApiError {
                 "invalid_reaction",
                 "A reaction must target an assistant message in this conversation.",
             ),
-            AcceptError::QueueFull => ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "queue_full",
-                "Too many messages are waiting for this bot. Try again shortly.",
-            )
-            .retry_after(5),
             AcceptError::CancellationPending => ApiError::new(
                 StatusCode::CONFLICT,
                 "cancellation_pending",
@@ -116,7 +110,6 @@ async fn send(
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
-        max_queued: MAX_QUEUED_TURNS,
     };
     // A matching retry returns its saved result even if the provider has
     // since become unavailable; provider checks apply to new messages only.
