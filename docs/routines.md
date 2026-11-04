@@ -10,7 +10,13 @@ Only work rooted in an owner message may use these tools: a turn answering the o
 
 To move a routine to another bot, for example one the main bot just created, the initiating bot delegates a task stating the complete prompt, schedule, and time zone. The receiving bot saves it as its own and replies with the saved routine. The initiating bot disables or deletes its own copy only after that reply confirms the save. An owner-rooted delegated task may also list, update, or delete the receiving bot's existing routines. Each saved run uses that bot's normal access in its owner conversation. No credentials move with the handoff.
 
-Bot settings lists the conversation's routines under Model, with their schedule, time zone, next run, last run, and an on/off switch. The owner API is `GET /v1/bots/{bot_id}/routines` and `PATCH /v1/bots/{bot_id}/routines/{routine_id}` with `{"enabled": bool}`.
+Bot settings lists the conversation's routines under Model, each with its name, schedule, an on/off switch, and a delete button that asks for confirmation. Hovering a routine shows its full prompt, next run, and last run.
+
+The owner API supports:
+
+- `GET /v1/bots/{bot_id}/routines` to list routines.
+- `PATCH /v1/bots/{bot_id}/routines/{routine_id}` with `{"enabled": bool}` to switch a routine on or off.
+- `DELETE /v1/bots/{bot_id}/routines/{routine_id}` to delete a routine. It returns `{"routine_id": "<uuid>", "deleted": true, "already_deleted": bool}` and succeeds again for a routine already deleted.
 
 ## Schedules
 

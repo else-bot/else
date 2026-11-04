@@ -7,6 +7,7 @@ use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
@@ -14,6 +15,7 @@ use gpui_kit::component::{
     WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub(super) const PANEL_WIDTH: Pixels = px(336.);
@@ -107,7 +109,21 @@ impl ModelDialog {
 #[derive(Debug, Clone, PartialEq)]
 enum RoutineSave {
     Saving { attempt: Uuid, enabled: bool },
+    Deleting { attempt: Uuid },
     Failed(String),
+}
+
+impl RoutineSave {
+    fn busy(&self) -> bool {
+        matches!(self, Self::Saving { .. } | Self::Deleting { .. })
+    }
+
+    fn attempt(&self) -> Option<Uuid> {
+        match self {
+            Self::Saving { attempt, .. } | Self::Deleting { attempt } => Some(*attempt),
+            Self::Failed(_) => None,
+        }
+    }
 }
 
 pub(super) struct BotSettings {
@@ -319,32 +335,18 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
-        let Some(entry) = self.settings.get_mut(&bot) else {
-            return;
-        };
-        if matches!(
-            entry.routines.get(&routine),
-            Some(RoutineSave::Saving { .. })
-        ) {
+        let attempt = Uuid::new_v4();
+        if !self.begin_routine_change(bot, routine, RoutineSave::Saving { attempt, enabled }) {
             return;
         }
-        let attempt = Uuid::new_v4();
-        entry
-            .routines
-            .insert(routine, RoutineSave::Saving { attempt, enabled });
         cx.notify();
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_routine_enabled(bot, routine, enabled).await;
             let _ = this.update(cx, |app, cx| {
-                let Some(entry) = app.settings.get_mut(&bot) else {
+                let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
                     return;
                 };
-                if !matches!(entry.routines.get(&routine),
-                             Some(RoutineSave::Saving { attempt: a, .. }) if *a == attempt)
-                {
-                    return;
-                }
                 match result {
                     Ok(saved) => {
                         entry.routines.remove(&routine);
@@ -358,12 +360,155 @@ impl ElseApp {
                         }
                     }
                     Err(err) => {
-                        entry
-                            .routines
-                            .insert(routine, RoutineSave::Failed(err.to_string()));
+                        entry.routines.insert(
+                            routine,
+                            RoutineSave::Failed(format!("Couldn't save. {err}")),
+                        );
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn changeable_routine(&self, bot: Uuid, routine: Uuid) -> Option<&Routine> {
+        if self.connection != Connection::Connected {
+            return None;
+        }
+        let entry = self.settings.get(&bot)?;
+        if entry.routines.get(&routine).is_some_and(RoutineSave::busy) {
+            return None;
+        }
+        self.view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())?
+            .routines()
+            .iter()
+            .find(|r| r.id == routine)
+    }
+
+    fn begin_routine_change(&mut self, bot: Uuid, routine: Uuid, change: RoutineSave) -> bool {
+        if self.changeable_routine(bot, routine).is_none() {
+            return false;
+        }
+        let Some(entry) = self.settings.get_mut(&bot) else {
+            return false;
+        };
+        entry.routines.insert(routine, change);
+        true
+    }
+
+    fn open_routine_delete_dialog(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .changeable_routine(bot, routine)
+            .map(|r| r.name.clone())
+        else {
+            return;
+        };
+        let app = cx.entity().downgrade();
+        let cancel = cx.focus_handle();
+        let confirm = cx.focus_handle();
+        let focus_once = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus_once.replace(false) {
+                cancel.focus(window, cx);
+            }
+            let theme = cx.theme();
+            let consequence = |text: &'static str| {
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(div().text_color(theme.muted_foreground).child("•"))
+                    .child(text)
+            };
+            let app = app.clone();
+            let app_ok = app.clone();
+            let confirm_ok = confirm.clone();
+            dialog
+                .title(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
+                        .child(div().truncate().child(format!("Delete routine {name}?"))),
+                )
+                .w(px(460.))
+                .on_ok(move |_, window, cx| {
+                    if confirm_ok.is_focused(window) {
+                        let _ = app_ok
+                            .update(cx, |app, cx| app.delete_routine(bot, routine, window, cx));
+                    }
+                    true
+                })
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(consequence("It never runs again and leaves this list."))
+                        .child(consequence("A run already in progress finishes.")),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("routine-delete-cancel")
+                                .label("Cancel")
+                                .outline()
+                                .track_focus(&cancel)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("routine-delete-confirm")
+                                .label("Delete routine")
+                                .danger()
+                                .track_focus(&confirm)
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = app.update(cx, |app, cx| {
+                                        app.delete_routine(bot, routine, window, cx)
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn delete_routine(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let attempt = Uuid::new_v4();
+        if !self.begin_routine_change(bot, routine, RoutineSave::Deleting { attempt }) {
+            return;
+        }
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.delete_routine(bot, routine).await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
+                    return;
+                };
+                if let Err(err) = result {
+                    entry.routines.insert(
+                        routine,
+                        RoutineSave::Failed(format!("Couldn't delete. {err}")),
+                    );
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -956,61 +1101,150 @@ impl ElseApp {
         connected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let saving = match save {
-            Some(RoutineSave::Saving { enabled, .. }) => Some(*enabled),
-            _ => None,
-        };
         let id = routine.id;
+        let busy = save.is_some_and(RoutineSave::busy);
+        let checked = match save {
+            Some(RoutineSave::Saving { enabled, .. }) => *enabled,
+            _ => routine.enabled,
+        };
         let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
-            .checked(saving.unwrap_or(routine.enabled))
+            .checked(checked)
+            .small()
+            .tooltip(if checked {
+                "Pause routine"
+            } else {
+                "Resume routine"
+            })
             .accessibility_label(format!("Run {}", routine.name))
-            .disabled(saving.is_some() || !connected)
+            .disabled(busy || !connected)
             .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
                 app.set_routine(bot, id, *enabled, window, cx)
             }));
-        let next = match (routine.enabled, routine.next_run_at) {
-            (false, _) => "Paused".to_owned(),
-            (true, Some(at)) => format!("Next run {}", local_time(at, &routine.timezone)),
-            (true, None) => "No further runs".to_owned(),
+        let delete = Button::new(ElementId::Name(format!("routine-delete-{id}").into()))
+            .icon(gpui_kit::assets::IconName::Trash)
+            .ghost()
+            .xsmall()
+            .loading(matches!(save, Some(RoutineSave::Deleting { .. })))
+            .tooltip("Delete routine")
+            .accessibility_label(format!("Delete {}", routine.name))
+            .disabled(busy || !connected)
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.open_routine_delete_dialog(bot, id, window, cx)
+            }));
+        let schedule = format!("{} · {}", routine.cron, routine.timezone);
+        let last = routine
+            .last_run
+            .as_ref()
+            .map(|run| last_run(run, &routine.timezone));
+        let problem = match save {
+            Some(RoutineSave::Failed(err)) => Some(err.clone()),
+            _ => last
+                .clone()
+                .filter(|(_, error)| *error)
+                .map(|(text, _)| text),
         };
-        let details = v_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_0p5()
+        let theme = cx.theme();
+        let (hover_bg, hover_border) = (theme.sidebar_accent, theme.border);
+        let pill = h_flex()
+            .id(ElementId::Name(format!("routine-pill-{id}").into()))
+            .w_full()
+            .gap_2()
+            .items_center()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.sidebar_border)
+            .bg(theme.sidebar_accent.opacity(0.4))
+            .hover(move |style| style.bg(hover_bg).border_color(hover_border))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
-                    .child(routine.name.clone()),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(routine.name.clone()),
+                    )
+                    .child(muted(schedule.clone(), cx).truncate())
+                    .children(problem.map(|text| note(text, true, cx))),
             )
             .child(
-                div()
-                    .text_xs()
-                    .truncate()
-                    .child(format!("{} · {}", routine.cron, routine.timezone)),
-            )
-            .child(muted(routine.prompt.clone(), cx).line_clamp(2))
-            .child(muted(next, cx))
-            .children(
-                routine
-                    .last_run
-                    .as_ref()
-                    .map(|run| last_run(run, &routine.timezone, cx)),
-            )
-            .children(match save {
-                Some(RoutineSave::Failed(err)) => {
-                    Some(note(format!("Couldn't save. {err}"), true, cx))
-                }
-                _ => None,
-            });
-        h_flex()
-            .gap_3()
-            .items_start()
-            .child(details)
-            .child(div().flex_none().pt_0p5().child(switch))
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
+                    .child(delete)
+                    .child(switch),
+            );
+        let name = routine.name.clone();
+        let prompt = routine.prompt.clone();
+        let next = match (routine.enabled, routine.next_run_at) {
+            (false, _) => None,
+            (true, Some(at)) => Some(format!("Next run {}", local_time(at, &routine.timezone))),
+            (true, None) => Some("No further runs".to_owned()),
+        };
+        HoverCard::new(ElementId::Name(format!("routine-card-{id}").into()))
+            .trigger_style(StyleRefinement::default().w_full())
+            .anchor(Anchor::RightCenter)
+            .open_delay(Duration::from_millis(300))
+            .w(px(300.))
+            .trigger(pill)
+            .content(move |_, _, cx| {
+                let theme = cx.theme();
+                let line =
+                    |text: String, color: Hsla| div().text_xs().text_color(color).child(text);
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .whitespace_normal()
+                            .child(name.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("routine-card-prompt")
+                            .max_h(px(240.))
+                            .overflow_y_scroll()
+                            .text_sm()
+                            .whitespace_normal()
+                            .text_color(theme.foreground)
+                            .child(prompt.clone()),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(line(schedule.clone(), theme.muted_foreground))
+                            .children(next.clone().map(|text| line(text, theme.muted_foreground)))
+                            .children(last.clone().map(|(text, error)| {
+                                line(
+                                    text,
+                                    if error {
+                                        theme.danger
+                                    } else {
+                                        theme.muted_foreground
+                                    },
+                                )
+                            })),
+                    )
+            })
             .into_any_element()
     }
+}
+
+fn current_change(
+    settings: &mut HashMap<Uuid, BotSettings>,
+    bot: Uuid,
+    routine: Uuid,
+    attempt: Uuid,
+) -> Option<&mut BotSettings> {
+    let entry = settings.get_mut(&bot)?;
+    (entry.routines.get(&routine).and_then(RoutineSave::attempt) == Some(attempt)).then_some(entry)
 }
 
 fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
@@ -1020,7 +1254,7 @@ fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
     }
 }
 
-fn last_run(run: &LastRun, timezone: &str, cx: &App) -> Div {
+fn last_run(run: &LastRun, timezone: &str) -> (String, bool) {
     let when = local_time(run.due_at, timezone);
     let reason = |code: &str| match code {
         "overlap" => "the previous run was still going",
@@ -1035,22 +1269,17 @@ fn last_run(run: &LastRun, timezone: &str, cx: &App) -> Div {
                 .as_ref()
                 .and_then(|e| e.message.clone())
                 .unwrap_or_else(|| run.status.clone());
-            note(
-                format!("Last run {when} {}: {detail}", run.status),
-                true,
-                cx,
-            )
+            (format!("Last run {when} {}: {detail}", run.status), true)
         }
-        "skipped" => note(
+        "skipped" => (
             format!(
                 "Skipped {when}: {}",
                 reason(run.skip_reason.as_deref().unwrap_or_default())
             ),
             true,
-            cx,
         ),
-        "queued" | "running" => muted(format!("Running now (due {when})"), cx),
-        status => muted(format!("Last run {when}: {status}"), cx),
+        "queued" | "running" => (format!("Running now (due {when})"), false),
+        status => (format!("Last run {when}: {status}"), false),
     }
 }
 

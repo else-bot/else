@@ -856,6 +856,88 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     assert_eq!(bad.status, StatusCode::NOT_FOUND);
 }
 
+async fn owner_delete(app: &TestApp, bot: &str, routine: &str) -> common::Reply {
+    app.owner(
+        "DELETE",
+        &format!("/v1/bots/{bot}/routines/{routine}"),
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn the_owner_deletes_a_routine_and_its_admitted_run_finishes() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let other = h.app.create_bot("Work").await;
+    let (setup, token) = h.running(&main, GATE).await;
+    let routine = create(
+        &h.app,
+        &token,
+        digest(&format!("{GATE} a routine report for delete checks.")),
+    )
+    .await;
+    let id = routine["id"].as_str().unwrap().to_owned();
+    let path = format!("/v1/bots/{main}/routines/{id}");
+    let anonymous = h.app.call("DELETE", &path, None, None).await;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    let granted = h.app.call("DELETE", &path, None, Some(&token)).await;
+    assert_eq!(granted.status, StatusCode::FORBIDDEN);
+    let wrong_bot = owner_delete(&h.app, &other, &id).await;
+    assert_eq!(
+        wrong_bot.status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        wrong_bot.body
+    );
+    let missing = owner_delete(&h.app, &main, &Uuid::new_v4().to_string()).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    let unknown_bot = owner_delete(&h.app, &Uuid::new_v4().to_string(), &id).await;
+    assert_eq!(unknown_bot.status, StatusCode::NOT_FOUND);
+    assert_eq!(owner_routines(&h.app, &main).await.len(), 1);
+
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    fire(&h.app, at(&routine["next_run_at"])).await;
+    let run = runs(&h.app, &id).await[0].0.unwrap();
+    h.app.wait_turn(&run.to_string(), &["running"]).await;
+    let before = events(&h.app, &main).await.len();
+    let listed = owner_routines(&h.app, &main).await;
+    assert_eq!(listed[0]["last_run"]["status"], "running");
+    let deleted = owner_delete(&h.app, &main, &id).await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+    assert_eq!(
+        deleted.body,
+        json!({ "routine_id": id, "deleted": true, "already_deleted": false })
+    );
+    let journal = events(&h.app, &main).await;
+    assert_eq!(journal.len(), before + 1);
+    assert_eq!(journal[before].0, "bot.updated");
+    assert_eq!(journal[before].1["routines"], json!([]));
+    assert!(owner_routines(&h.app, &main).await.is_empty());
+
+    let again = owner_delete(&h.app, &main, &id).await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.body["already_deleted"], true);
+    assert_eq!(events(&h.app, &main).await.len(), before + 1);
+    let toggled = set_enabled(&h.app, &main, &id, true).await;
+    assert_eq!(toggled.status, StatusCode::NOT_FOUND);
+
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    let far = Utc::now() + chrono::Duration::days(3650);
+    assert_eq!(fire(&h.app, far).await, 0, "deleted routines never run");
+    assert_eq!(runs(&h.app, &id).await.len(), 1);
+
+    let gone = h
+        .app
+        .owner("DELETE", &format!("/v1/bots/{other}"), None)
+        .await;
+    assert!(gone.status.is_success());
+    let deleted_bot = owner_delete(&h.app, &other, &id).await;
+    assert_eq!(deleted_bot.status, StatusCode::GONE);
+}
+
 #[tokio::test]
 async fn stop_deletion_and_maintenance_hold_runs() {
     let h = harness().await;

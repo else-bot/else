@@ -1,5 +1,5 @@
 //! Routines over MCP (the bot manages its own, for an owner request) and
-//! the owner's routes (list, and switch one on or off).
+//! the owner's routes (list, switch one on or off, and delete one).
 
 use std::sync::Arc;
 
@@ -26,7 +26,10 @@ use crate::views::routine_json;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/bots/{bot_id}/routines", get(owner_list))
-        .route("/bots/{bot_id}/routines/{routine_id}", patch(owner_update))
+        .route(
+            "/bots/{bot_id}/routines/{routine_id}",
+            patch(owner_update).delete(owner_delete),
+        )
 }
 
 impl From<RoutineError> for ApiError {
@@ -100,6 +103,15 @@ async fn owner_update(
     )
     .await?;
     Ok(Json(json!({ "routine": routine_json(&routine) })))
+}
+
+async fn owner_delete(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let now_deleted = routines::delete(&state.db, By::Owner { bot_id }, routine_id).await?;
+    Ok(Json(json!({ "routine_id": routine_id, "deleted": true,
+                    "already_deleted": !now_deleted })))
 }
 
 fn caller(grant: &Grant) -> Caller {
@@ -366,7 +378,7 @@ pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Ok(args) = serde_json::from_value::<DeleteArgs>(args.clone()) else {
         return invalid("pass routine_id.");
     };
-    match routines::delete(&state.db, caller(grant), args.routine_id).await {
+    match routines::delete(&state.db, By::Turn(caller(grant)), args.routine_id).await {
         Ok(now_deleted) => {
             let log = format!(
                 "{} {}",

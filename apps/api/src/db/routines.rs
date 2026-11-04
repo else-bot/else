@@ -5,7 +5,7 @@
 //! conversation, or a task another bot delegated for one), may manage it:
 //! every mutation rechecks the turn inside its own immediate transaction,
 //! so a routine run, a task delegated by one, or a stopped turn is refused
-//! even with a grant. The owner may switch a routine on or off.
+//! even with a grant. The owner may switch a routine on or off, or delete it.
 //!
 //! The scheduler admits due routines (see [`admit_due`]). Each admission is
 //! one transaction that records the occurrence in `routine_runs`, advances
@@ -420,14 +420,14 @@ pub async fn update(
 
 /// Delete a routine: it never runs again and leaves the list; a run already
 /// admitted finishes. Deleting it again returns `false`.
-pub async fn delete(pool: &SqlitePool, caller: Caller, id: Uuid) -> Result<bool, RoutineError> {
+pub async fn delete(pool: &SqlitePool, by: By, id: Uuid) -> Result<bool, RoutineError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorized_owner_conversation(&mut tx, caller).await?;
+    authorize_by(&mut tx, by).await?;
     let deleted: Option<bool> = sqlx::query_scalar(
         "SELECT deleted_at IS NOT NULL FROM routines WHERE id = ?1 AND bot_id = ?2",
     )
     .bind(id)
-    .bind(caller.bot_id)
+    .bind(by.bot_id())
     .fetch_optional(&mut *tx)
     .await?;
     match deleted {
@@ -443,7 +443,7 @@ pub async fn delete(pool: &SqlitePool, caller: Caller, id: Uuid) -> Result<bool,
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            events::bot_updated(&mut tx, caller.bot_id).await?;
+            events::bot_updated(&mut tx, by.bot_id()).await?;
             tx.commit().await?;
             Ok(true)
         }
