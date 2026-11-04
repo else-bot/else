@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use else_api::config::{Config, ProcessEnv};
+use else_api::runtime_lock::RuntimeLock;
 use else_api::scheduler::Scheduler;
 use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
@@ -114,6 +115,13 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .context("starting async runtime")
 }
 
+/// Own the data directory and the database before any command reads
+/// credentials, opens SQLite, or changes either.
+fn lock(config: &Config) -> anyhow::Result<RuntimeLock> {
+    let url = config.require_database().context("invalid configuration")?;
+    Ok(else_api::runtime_lock::acquire(&config.data_dir, url)?)
+}
+
 async fn database(config: &Config) -> anyhow::Result<sqlx::SqlitePool> {
     let url = config.require_database().context("invalid configuration")?;
     let pool = db::connect(url).await?;
@@ -139,16 +147,13 @@ fn backup_parts(
 /// checkpoint; a running API backs up on its own schedule.
 fn run_backup() -> anyhow::Result<()> {
     let config = load_config()?;
+    // A running (possibly older) API's database is never changed by this
+    // command.
+    let _lock = lock(&config)
+        .context("the API is running; it backs up on its schedule (or stop it first)")?;
     let (params, key) = backup_parts(&config)?;
     runtime()?.block_on(async {
-        // Lock before migrating: a running (possibly older) API's database
-        // is never changed by this command.
-        let url = config.require_database().context("invalid configuration")?;
-        let pool = db::connect(url).await?;
-        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool)
-            .await
-            .context("the API is running; it backs up on its schedule (or stop it first)")?;
-        db::migrate(&pool).await?;
+        let pool = database(&config).await?;
         let computers = match else_api::computers::runtime::Msb::detect(
             &config.data_dir,
             config.msb_bin.clone(),
@@ -205,13 +210,10 @@ fn run_upgrade_computer(
 ) -> anyhow::Result<()> {
     let bot_id: uuid::Uuid = bot.parse().context("the bot ID is not a UUID")?;
     let config = load_config()?;
+    let _lock =
+        lock(&config).context("the API is running; stop it before changing a computer's image")?;
     runtime()?.block_on(async {
-        let url = config.require_database().context("invalid configuration")?;
-        let pool = db::connect(url).await?;
-        let _lock = else_api::runtime_lock::acquire(&config.data_dir, &pool)
-            .await
-            .context("the API is running; stop it before changing a computer's image")?;
-        db::migrate(&pool).await?;
+        let pool = database(&config).await?;
         let msb =
             else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone())?;
         let manager = else_api::computers::ComputerManager::new(
@@ -388,6 +390,7 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
 
 fn run_migrate() -> anyhow::Result<()> {
     let config = load_config()?;
+    let _lock = lock(&config)?;
     runtime()?.block_on(async {
         database(&config).await?;
         println!("migrations: up to date");
@@ -400,12 +403,7 @@ fn run_migrate() -> anyhow::Result<()> {
 fn run_setup() -> anyhow::Result<()> {
     use credentials::Provisioned;
     let config = load_config()?;
-    // Validate everything setup will need before writing any file.
-    let url = config.require_database().context("invalid configuration")?;
-    url.expose()
-        .parse::<sqlx::sqlite::SqliteConnectOptions>()
-        .map_err(|_| db::DbError::InvalidUrl)?;
-    credentials::ensure_private_dir(&config.data_dir)?;
+    let _lock = lock(&config)?;
     let describe = |what: &str, result: Provisioned, location: String| {
         let state = match result {
             Provisioned::Created => "created",
@@ -448,18 +446,24 @@ fn run_setup() -> anyhow::Result<()> {
 
 fn run_serve() -> anyhow::Result<()> {
     let config = load_config()?;
+    // A second instance must not migrate, reconcile, or dispatch another's
+    // work, so ownership comes first.
+    let lock = lock(&config)?;
     // Credentials load before the listener opens. Neither is logged.
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
     let secret_key = Arc::new(credentials::load_secret_key(&config.secret_key)?);
     runtime()?.block_on(async {
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
-        // Take the singleton locks and bind before touching runtime state: a
-        // second instance must not reconcile or dispatch another's work.
-        let lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;
+        // Port 0 binds an ephemeral port; providers and the manifest need
+        // the one actually bound.
+        let config = Config {
+            bind: listener.local_addr()?,
+            ..config
+        };
         // Terminate provider processes left by an earlier API process
         // before anything is reconciled or dispatched.
         let swept = else_api::providers::host::Host::new(&config.data_dir, &config.bots_dir)
@@ -554,7 +558,9 @@ fn run_serve() -> anyhow::Result<()> {
             _ => None,
         };
         let state = Arc::new(state);
+        let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state).await;
+        drop(published);
         // Stop provider work after HTTP so no new message is accepted. The
         // singleton lock is held until every worker that changes runtime
         // state has stopped, so a successor never overlaps with them.

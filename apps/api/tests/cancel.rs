@@ -580,22 +580,3 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         "completed"
     );
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn database_file_lock_survives_pool_connection_replacement() {
-    let db = TestDb::migrated().await;
-    let a = tempfile::tempdir().unwrap();
-    let b = tempfile::tempdir().unwrap();
-    let held = else_api::runtime_lock::acquire(a.path(), &db.pool)
-        .await
-        .unwrap();
-    let second = else_api::db::connect(&db.url).await.unwrap();
-    assert!(matches!(
-        else_api::runtime_lock::acquire(b.path(), &second).await,
-        Err(else_api::runtime_lock::LockError::DatabaseInUse)
-    ));
-    drop(held);
-    else_api::runtime_lock::acquire(b.path(), &second)
-        .await
-        .unwrap();
-}
