@@ -578,7 +578,7 @@ async fn record(state: &AppState, grant: &Grant, name: &str, args: &Value, log: 
         supersedes_seq: None,
     };
     let result: Result<(), memory::AppendError> = async {
-        let mut tx = state.db.begin().await?;
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
         match memory::append(&mut tx, grant.bot_id, &entry).await {
             Ok(_) => tx.commit().await.map_err(memory::AppendError::Db),
             Err(err) => Err(err),

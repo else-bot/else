@@ -1,6 +1,6 @@
 //! POC-019: execution recovery and resource admission. A fault point stops
 //! an operation exactly where a crash would; a fresh `ComputerManager` then
-//! plays the restarted API (its state lives only in PostgreSQL and the
+//! plays the restarted API (its state lives only in SQLite and the
 //! runtime). The fake runtime emulates the guest job scripts so effects
 //! (launches, kills) are observable and must never repeat.
 
@@ -188,7 +188,7 @@ fn never() -> tokio_util::sync::CancellationToken {
 }
 
 async fn observed(app: &TestApp, bot: Uuid) -> String {
-    sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = $1")
+    sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)
         .await
@@ -196,7 +196,7 @@ async fn observed(app: &TestApp, bot: Uuid) -> String {
 }
 
 async fn job_status(app: &TestApp, job: Uuid) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, error FROM guest_jobs WHERE id = $1")
+    sqlx::query_as("SELECT status, error FROM guest_jobs WHERE id = ?1")
         .bind(job)
         .fetch_one(&app.db.pool)
         .await
@@ -204,14 +204,14 @@ async fn job_status(app: &TestApp, job: Uuid) -> (String, Option<String>) {
 }
 
 async fn age_jobs(app: &TestApp) {
-    sqlx::query("UPDATE guest_jobs SET started_at = now() - interval '10 minutes'")
+    sqlx::query("UPDATE guest_jobs SET started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-10 minutes')")
         .execute(&app.db.pool)
         .await
         .unwrap();
 }
 
 async fn bot_status(app: &TestApp, bot: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)
         .await
@@ -219,7 +219,7 @@ async fn bot_status(app: &TestApp, bot: Uuid) -> String {
 }
 
 async fn receipt(app: &TestApp, request: Uuid) -> String {
-    sqlx::query_scalar("SELECT state FROM request_receipts WHERE request_id = $1")
+    sqlx::query_scalar("SELECT state FROM request_receipts WHERE request_id = ?1")
         .bind(request)
         .fetch_one(&app.db.pool)
         .await
@@ -349,7 +349,7 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
 
     // Lease renewed, then a crash: the renewal holds after restart.
     sqlx::query(
-        "UPDATE computer_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+        "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
     )
     .bind(lease_id)
     .execute(&app.db.pool)
@@ -569,7 +569,7 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     manager.tick(&never()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelling");
     // Its lease expires: the job is still live work, so it is renewed.
-    sqlx::query("UPDATE computer_leases SET expires_at = now() - interval '1 minute'")
+    sqlx::query("UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 minutes')")
         .execute(&app.db.pool)
         .await
         .unwrap();
@@ -665,7 +665,7 @@ async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
     };
     let request = stop_work(&app, bot).await;
     // A poll that read it as running records its completion meanwhile.
-    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = now() WHERE id = $1")
+    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(job)
         .execute(&app.db.pool)
         .await

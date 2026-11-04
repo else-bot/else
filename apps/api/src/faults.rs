@@ -2,14 +2,15 @@
 //!
 //! An armed point makes the operation that reaches it stop right there, as
 //! if the API process died at that moment: the operation returns without
-//! doing anything further, leaving PostgreSQL and the runtime exactly as a
+//! doing anything further, leaving SQLite and the runtime exactly as a
 //! crash would. Tests then start a fresh manager (a restarted API, whose
-//! state lives only in PostgreSQL and the runtime) and check recovery.
+//! state lives only in SQLite and the runtime) and check recovery.
 //! Points are inert unless a test arms them; production code never does.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-static POINTS: [(&str, AtomicUsize); 7] = [
+static POINTS: [(&str, AtomicUsize); 8] = [
+    ("backup.snapshot", AtomicUsize::new(0)),
     ("backup.before_complete", AtomicUsize::new(0)),
     ("replication.after_part", AtomicUsize::new(0)),
     ("job.after_insert", AtomicUsize::new(0)),

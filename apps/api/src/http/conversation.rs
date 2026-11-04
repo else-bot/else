@@ -87,7 +87,7 @@ pub async fn bot_is_active(
     bot_id: Uuid,
 ) -> Result<Option<(bool, i64)>, sqlx::Error> {
     let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT status, last_event_seq FROM bots WHERE id = $1")
+        sqlx::query_as("SELECT status, last_event_seq FROM bots WHERE id = ?1")
             .bind(bot_id)
             .fetch_optional(&state.db)
             .await?;

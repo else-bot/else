@@ -5,7 +5,7 @@
 //! thread persists in the bot's `CODEX_HOME` and is resumed next time when
 //! its compatibility fingerprint (runtime, prompt version, tool policy,
 //! profile, native-agent policy) still matches. Otherwise a new thread is
-//! started and the conversation is rebuilt from PostgreSQL. The model,
+//! started and the conversation is rebuilt from SQLite. The model,
 //! reasoning effort, and service tier are sent explicitly on thread
 //! creation, resume, and turn start, and the values the server reports back
 //! must match: no silent substitution. Completion comes only from

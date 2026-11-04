@@ -10,7 +10,7 @@
 //! the history its session missed and the owner's message exactly once;
 //! the follow-up itself is never given to the outgoing provider.
 
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::providers::{Availability, CheckpointRequest, HandoffContext, TurnInput};
@@ -18,7 +18,7 @@ use crate::db::handoffs::{self, NewHandoff};
 use crate::providers::{CHECKPOINT_BYTES, Registry};
 
 pub async fn prepare(
-    pool: &PgPool,
+    pool: &SqlitePool,
     registry: &Registry,
     input: &TurnInput,
     target: &str,

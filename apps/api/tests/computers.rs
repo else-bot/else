@@ -1,4 +1,4 @@
-//! POC-017: bot computer lifecycle against PostgreSQL with a recording fake
+//! POC-017: bot computer lifecycle against SQLite with a recording fake
 //! runtime (the live Microsandbox check is in `computers_live.rs`).
 
 mod common;
@@ -218,7 +218,7 @@ async fn ready(manager: &ComputerManager, bot: Uuid, holder: &str) -> (Uuid, Str
 }
 
 async fn observed(app: &TestApp, bot: Uuid) -> String {
-    sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = $1")
+    sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)
         .await
@@ -413,7 +413,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     app.wait_turn(&turn, &["running"]).await;
     let (lease, _) = ready(&manager, bot_id, &format!("turn:{turn}")).await;
     sqlx::query(
-        "UPDATE computer_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+        "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
     )
     .bind(lease)
     .execute(&app.db.pool)
@@ -426,7 +426,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
         "live work keeps its lease"
     );
     let live: bool =
-        sqlx::query_scalar("SELECT released_at IS NULL FROM computer_leases WHERE id = $1")
+        sqlx::query_scalar("SELECT released_at IS NULL FROM computer_leases WHERE id = ?1")
             .bind(lease)
             .fetch_one(&app.db.pool)
             .await
@@ -442,7 +442,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     .await;
     app.wait_turn(&turn, &["interrupted"]).await;
     sqlx::query(
-        "UPDATE computer_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+        "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
     )
     .bind(lease)
     .execute(&app.db.pool)
@@ -494,7 +494,7 @@ async fn startup_inspects_without_waking_recreating_or_removing() {
     fake.computers.lock().unwrap().remove(&lost_name);
     fake.set(&paused_name, RuntimeState::Paused).unwrap();
     fake.set(&kept_name, RuntimeState::Stopped).unwrap();
-    sqlx::query("UPDATE bot_computers SET observed_state = 'stopping' WHERE bot_id = $1")
+    sqlx::query("UPDATE bot_computers SET observed_state = 'stopping' WHERE bot_id = ?1")
         .bind(kept)
         .execute(&app.db.pool)
         .await
@@ -580,7 +580,7 @@ async fn a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped() 
     assert_eq!(acquiring.await.unwrap(), Acquire::BotInactive);
     assert_eq!(observed(&app, bot_id).await, "stopped");
     let leases: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM computer_leases WHERE bot_id = $1 AND released_at IS NULL",
+        "SELECT count(*) FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL",
     )
     .bind(bot_id)
     .fetch_one(&app.db.pool)
@@ -597,7 +597,7 @@ async fn a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer() {
     let bot: Uuid = app.create_bot("Lease", "lease").await.parse().unwrap();
     let (lease, _) = ready(&manager, bot, "test:l").await;
     sqlx::query(
-        "UPDATE computer_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+        "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
     )
     .bind(lease)
     .execute(&app.db.pool)
@@ -642,7 +642,7 @@ async fn nothing_is_used_until_the_runtime_has_been_inspected() {
 
 async fn computer(app: &TestApp, bot: Uuid) -> (String, String, String) {
     sqlx::query_as(
-        "SELECT runtime_name, image, observed_state FROM bot_computers WHERE bot_id = $1",
+        "SELECT runtime_name, image, observed_state FROM bot_computers WHERE bot_id = ?1",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -704,7 +704,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
         RuntimeState::Stopped
     );
     let (state, error): (String, String) =
-        sqlx::query_as("SELECT state, error FROM computer_upgrades WHERE bot_id = $1")
+        sqlx::query_as("SELECT state, error FROM computer_upgrades WHERE bot_id = ?1")
             .bind(bot)
             .fetch_one(&app.db.pool)
             .await
@@ -722,7 +722,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
         .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
     sqlx::query(
         "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
-         VALUES ($1, $2, $3, 'python:3.12-slim', $4, 'img:new', 'started')",
+         VALUES (?1, ?2, ?3, 'python:3.12-slim', ?4, 'img:new', 'started')",
     )
     .bind(Uuid::new_v4())
     .bind(bot)
@@ -755,7 +755,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
         RuntimeState::Stopped
     );
     let counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT state, count(*) FROM computer_upgrades WHERE bot_id = $1 GROUP BY state ORDER BY state",
+        "SELECT state, count(*) FROM computer_upgrades WHERE bot_id = ?1 GROUP BY state ORDER BY state",
     )
     .bind(bot)
     .fetch_all(&app.db.pool)
@@ -834,7 +834,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         (report.to_runtime_name.as_str(), "none")
     );
     let network: Option<String> =
-        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = ?1")
             .bind(bot)
             .fetch_one(&app.db.pool)
             .await
@@ -842,7 +842,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     assert_eq!(network.as_deref(), Some("none"));
 
     // A computer whose profile was never recorded needs an explicit one.
-    sqlx::query("UPDATE bot_computers SET network = NULL WHERE bot_id = $1")
+    sqlx::query("UPDATE bot_computers SET network = NULL WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
@@ -862,7 +862,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     // Rollback restores the previous computer's (unrecorded) profile.
     manager.rollback_upgrade(bot).await.unwrap();
     let network: Option<String> =
-        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = ?1")
             .bind(bot)
             .fetch_one(&app.db.pool)
             .await
@@ -878,7 +878,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
     sqlx::query(
         "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
-         VALUES ($1, $2, 'x', 'y', $3, 'z', 'started')",
+         VALUES (?1, ?2, 'x', 'y', ?3, 'z', 'started')",
     )
     .bind(Uuid::new_v4())
     .bind(bot)
@@ -926,7 +926,7 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     for (job, status) in [(live_job, "running"), (done_job, "completed")] {
         sqlx::query(
             "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
-             VALUES ($1, $2, 'sleep 60', $3, now() + interval '1 hour')",
+             VALUES (?1, ?2, 'sleep 60', ?3, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
         )
         .bind(job)
         .bind(bot_id)
@@ -944,7 +944,7 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
         let pool = app.db.pool.clone();
         async move {
             sqlx::query_scalar::<_, Option<String>>(
-                "SELECT end_reason FROM computer_leases WHERE id = $1",
+                "SELECT end_reason FROM computer_leases WHERE id = ?1",
             )
             .bind(lease)
             .fetch_one(&pool)
@@ -959,7 +959,7 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     for lease in [finished, done_job_lease, live_turn, live_job_lease, desktop] {
         assert_eq!(ended(lease).await, None);
     }
-    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = now() WHERE id = $1")
+    sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(live_job)
         .execute(&app.db.pool)
         .await

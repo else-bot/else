@@ -12,7 +12,7 @@ Provider-native sub-agent spawning is disabled throughout the POC. A bot can del
 
 The [prompt and delegation research](research/prompts-and-delegation.md) tested Codex CLI 0.166.0 with GPT 6.1 Sol, high reasoning, and priority/Fast configuration. Thirteen v1 synthetic inference cases and three v2 asynchronous cases passed. Seventeen scripted guard checks also passed. The model made real MCP calls to a disposable server with scripted results. No real child model, guest command, or external action ran through that server.
 
-Use trusted `developerInstructions` for the else.bot package and ordinary turn input for the owner's message. Include bot roles and a registry snapshot from PostgreSQL. Treat registry roles as descriptions, with permissions enforced separately by the API. Family and work are test roles. Production routing uses the configured registry.
+Use trusted `developerInstructions` for the else.bot package and ordinary turn input for the owner's message. Include bot roles and a registry snapshot from SQLite. Treat registry roles as descriptions, with permissions enforced separately by the API. Family and work are test roles. Production routing uses the configured registry.
 
 Start with one-hop delegation and at most two child tasks per owner request. A delegate call returns a pending ID immediately. Park the parent attempt and release its provider process before running the child. The root task remains working. Queue a continuation with the recorded child result. Do not poll while holding the only provider slot. The API enforces the wait and tool restrictions even when the model ignores them.
 
@@ -20,7 +20,7 @@ The [v1 prompt](experiments/prompts/prompt.txt) and [v2 async prompt](experiment
 
 ## Prompt structure
 
-Build the prompt from versioned configuration in PostgreSQL:
+Build the prompt from versioned configuration in SQLite:
 
 | Part | What it defines |
 | --- | --- |

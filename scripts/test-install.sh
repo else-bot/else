@@ -14,7 +14,7 @@
 # while a bot works (which keeps working, and work is accepted again),
 # updates to v0.0.2 once idle (history kept, new messages answered), and
 # runs the installer once more,
-# which changes nothing. PostgreSQL runs in a sidecar container; containers
+# which changes nothing. SQLite is bundled; containers
 # have no systemd, Docker daemon, or KVM, so the API runs as a managed
 # process and there is no guest image or bot computer.
 #
@@ -95,7 +95,7 @@ EOF
 cat >"$work/scenario.sh" <<'EOF'
 set -euo pipefail
 fail() { echo "CHECK FAILED: $*" >&2; exit 1; }
-export ELSE_REPO=/repo.git ELSE_DATABASE_URL ELSE_INSTALL_NO_SYSTEMD=1
+export ELSE_REPO=/repo.git ELSE_INSTALL_NO_SYSTEMD=1
 H=~/.else
 URL=http://127.0.0.1:7878
 uuid() { cat /proc/sys/kernel/random/uuid; }
@@ -136,12 +136,10 @@ grep -q "running on" /tmp/status || fail "elsebot status"
 
 echo "--- elsebot db reads and cannot write"
 check_db() {
-	[ "$(stat -c %a $H/config/readonly.env)" = 600 ] || fail "readonly.env is not 0600"
-	[ "$(~/.local/bin/elsebot db -Atc 'select current_user')" = else_readonly ] || fail "elsebot db is not the read-only role"
-	[ "$(~/.local/bin/elsebot db -Atc 'select count(*) >= 1 from bots')" = t ] || fail "elsebot db cannot read"
-	if ~/.local/bin/elsebot db -c 'delete from bots' >/tmp/write.log 2>&1; then fail "elsebot db could write"; fi
-	grep -qi "read-only" /tmp/write.log || { cat /tmp/write.log; fail "the write was not refused as read-only"; }
-	if ~/.local/bin/elsebot db -c 'set transaction read write; delete from bots' >/tmp/write2.log 2>&1; then fail "the role could switch to read-write"; fi
+    [ "$(stat -c %a $H/data/else.sqlite3)" = 600 ] || fail "SQLite file is not 0600"
+    [ "$(~/.local/bin/elsebot db 'select count(*) >= 1 from bots')" = 1 ] || fail "elsebot db cannot read"
+    if ~/.local/bin/elsebot db 'delete from bots' >/tmp/write.log 2>&1; then fail "elsebot db could write"; fi
+    grep -qi 'readonly\|read-only' /tmp/write.log || fail "write was not refused as read-only"
 }
 check_db
 
@@ -201,30 +199,23 @@ results=()
 for distro in "${DISTROS[@]}"; do
 	image="$(image_for "$distro")"
 	log="target/install-tests/$distro.log"
-	pg="else-install-pg-$distro-$$"
-	box="else-install-test-$distro-$$"
-	containers+=("$pg" "$box")
-	echo "== $distro ($image) -> $log"
-	started=$(date +%s)
-	password="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
-	docker run -d --name "$pg" --network "$network" -e POSTGRES_USER=else -e POSTGRES_DB=else \
-		-e POSTGRES_PASSWORD="$password" postgres:18.6 >/dev/null
-	for _ in $(seq 1 60); do docker exec "$pg" pg_isready -U else -d else >/dev/null 2>&1 && break; sleep 1; done
+    box="else-install-test-$distro-$$"
+    containers+=("$box")
+    echo "== $distro ($image) -> $log"
+    started=$(date +%s)
 	# In the background and waited for: an interrupt then reaches the trap
 	# at once, which removes the containers.
 	timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
 		-v "$PWD:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
 		-v "else-install-toolchain:/home/tester/.else/toolchain" \
 		-v "else-install-build-$distro:/home/tester/.else/build" \
-		-e ELSE_DATABASE_URL="postgresql://else:$password@$pg:5432/else" \
-		"$image" bash -c "bash /harness/prepare.sh && su - tester -c \"ELSE_DATABASE_URL='\$ELSE_DATABASE_URL' bash /harness/scenario.sh\"" \
+        "$image" bash -c "bash /harness/prepare.sh && su - tester -c 'bash /harness/scenario.sh'" \
 		>"$log" 2>&1 &
 	if wait $!; then
 		results+=("$distro: PASS ($(($(date +%s) - started)) s)")
 	else
 		results+=("$distro: FAIL ($(($(date +%s) - started)) s), see $log")
 	fi
-	docker rm -f "$pg" >/dev/null 2>&1 || true
 	echo "   ${results[${#results[@]}-1]}"
 done
 

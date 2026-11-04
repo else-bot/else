@@ -8,7 +8,7 @@
 //! live in the bot's own `CLAUDE_CONFIG_DIR`, so another bot cannot resume
 //! them; one whose transcript is missing, whose fingerprint changed, or that
 //! may hold an uncertain delivery is replaced and the conversation rebuilt
-//! from PostgreSQL.
+//! from SQLite.
 //!
 //! Tools, enforced by the CLI's flags and verified from its events: a turn
 //! gets the built-in shell and file tools ([`claude_home::HOST_TOOLS`], so
@@ -754,7 +754,7 @@ impl Provider for Claude {
         };
         let fingerprint = self.fingerprint(&profile, &input);
         // Resume only a compatible session whose transcript is still in
-        // this bot's own home; otherwise start over from PostgreSQL.
+        // this bot's own home; otherwise start over from SQLite.
         let resumed = input.session.as_ref().filter(|s| {
             s.fingerprint == fingerprint
                 && self.config.as_ref().is_some_and(|c| {

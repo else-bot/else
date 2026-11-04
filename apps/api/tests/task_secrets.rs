@@ -1,4 +1,4 @@
-//! POC-026: task secrets and script execution against PostgreSQL, the real
+//! POC-026: task secrets and script execution against SQLite, the real
 //! router and MCP endpoint, and a fake runtime that records what reaches
 //! the guest (the live checks are in `scripts_live.rs`).
 
@@ -200,7 +200,7 @@ async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -382,7 +382,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     )
     .await;
     let id: Uuid = job["job_id"].as_str().unwrap().parse().unwrap();
-    let row: Value = sqlx::query_scalar("SELECT to_jsonb(j) FROM guest_jobs j WHERE id = $1")
+    let row: Value = sqlx::query_scalar("SELECT json_object('command', command, 'output_tail', output_tail, 'error', error, 'secrets', json(secrets)) FROM guest_jobs WHERE id = ?1")
         .bind(id)
         .fetch_one(&app.db.pool)
         .await
@@ -397,7 +397,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     assert!(launch.1.iter().all(|a| !a.contains(PASSWORD)));
     assert!(String::from_utf8_lossy(&launch.2).contains(&encoded));
     // Tool activity names the secret, never its value.
-    let logged: Vec<String> = sqlx::query_scalar("SELECT body FROM memory_entry WHERE bot_id = $1")
+    let logged: Vec<String> = sqlx::query_scalar("SELECT body FROM memory_entry WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_all(&app.db.pool)
         .await
@@ -446,7 +446,7 @@ async fn stop_work_ends_a_running_foreground_command() {
     assert!(stop.status.is_success(), "{:?}", stop.body);
     for _ in 0..100 {
         let live: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status = 'running')",
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
         )
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
@@ -487,7 +487,7 @@ async fn stop_work_ends_a_running_foreground_command() {
         "{:?}",
         kill.1
     );
-    let ended: bool = sqlx::query_scalar("SELECT bool_and(ended_at IS NOT NULL) FROM guest_runs")
+    let ended: bool = sqlx::query_scalar("SELECT min(ended_at IS NOT NULL) FROM guest_runs")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
@@ -496,7 +496,7 @@ async fn stop_work_ends_a_running_foreground_command() {
     for _ in 0..100 {
         else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
         let done: bool = sqlx::query_scalar(
-            "SELECT bool_and(state = 'done') FROM request_receipts WHERE operation = 'cancel'",
+            "SELECT min(state = 'done') FROM request_receipts WHERE operation = 'cancel'",
         )
         .fetch_one(&app.db.pool)
         .await
@@ -668,7 +668,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     assert!(stop.status.is_success());
     for _ in 0..100 {
         let live: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status = 'running')",
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status = 'running')",
         )
         .bind(bot_id)
         .fetch_one(&app.db.pool)
@@ -721,7 +721,7 @@ async fn category_changes_leave_guest_jobs_running() {
     let state = || async {
         sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>)>(
             "SELECT j.status, l.released_at FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id
-             WHERE j.id = $1",
+             WHERE j.id = ?1",
         )
         .bind(job)
         .fetch_one(&app.db.pool)

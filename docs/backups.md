@@ -1,18 +1,18 @@
 # Backup design
 
-This is the proposed backup design. The [VM verification](experiments/bot-vm-verification.md) tested disk and full archives, recovery into a separate runtime, and a restored desktop with its browser profile. The [backup research](research/backup-and-recovery.md) passed 17 local encryption and publication checks plus six PostgreSQL dump, encryption, and restore checks. Coordinated whole-assistant recovery and R2 or S3 uploads remain untested.
+The current application uses encrypted SQLite snapshots (backup schema version 2). PostgreSQL-era evidence below is historical and does not validate the SQLite port. The [VM verification](experiments/bot-vm-verification.md) tested disk and full archives, recovery into a separate runtime, and a restored desktop with its browser profile. The [backup research](research/backup-and-recovery.md) passed 17 local encryption and publication checks plus six PostgreSQL dump, encryption, and restore checks. Coordinated whole-assistant recovery and R2 or S3 uploads remain untested.
 
-Backups should automatically capture encrypted PostgreSQL exports, encrypted VM snapshot archives, and the host provider state needed for recovery. PostgreSQL owns the application configuration, including saved provider model profiles and revisions, bot definitions, memory, and chats. VM archives preserve each bot's computer, including its saved files and browser profile.
+Backups capture encrypted SQLite database images, encrypted VM snapshot archives, and the host provider state needed for recovery. SQLite owns the application configuration, including saved provider model profiles and revisions, bot definitions, memory, and chats. VM archives preserve each bot's computer, including its saved files and browser profile.
 
 If a machine fails, data becomes corrupted, or I want to migrate, I should be able to start else.bot on a new machine and restore the latest backup. The goal is to resume where I left off without rebuilding the assistant's knowledge or configuration by hand.
 
-Keep application records in PostgreSQL and VM artifacts in object storage. Store the artifact references and recovery metadata with the application state. Application code should recreate generated files and runtime resources from the restored records and VM archives.
+Keep application records in SQLite and VM artifacts in object storage. Store the artifact references and recovery metadata with the application state. Application code should recreate generated files and runtime resources from the restored records and VM archives.
 
 Use R2 or S3 for the encrypted backup set. Keep the backup schedule and retention configurable. Keep the decryption key and storage access credentials recoverable separately from the server being backed up. Recovery resumes from the latest completed backup set.
 
 ## First-release approach
 
-Use one serialized backup worker in the Rust API. Start with custom-format PostgreSQL dumps, standalone disk archives with their OCI images included, a versioned encrypted JSON manifest, and a completion record published last. Keep provider-state portability explicit. A fresh provider login and session context rebuilt from PostgreSQL are valid fallbacks when supported files cannot be restored.
+Use one serialized backup worker in the Rust API. Start with SQLite snapshots, standalone disk archives with their OCI images included, a versioned encrypted JSON manifest, and a completion record published last. Keep provider-state portability explicit. A fresh provider login and session context rebuilt from SQLite are valid fallbacks when supported files cannot be restored.
 
 Use the Rust `age` crate, pinned initially to the tested `0.12.1`, for authenticated streaming encryption. Derive a per-set age identity from `SECRET_KEY` using HKDF-SHA-256, a fresh public salt, and the accepted `else.bot/backups/v1` purpose. The [backup research](research/backup-and-recovery.md) specifies the library calls, format, key encoding, and recovery metadata.
 
@@ -32,7 +32,7 @@ Each bot's project directory (`<ELSE_BOTS_DIR>/<bot id>`) is also on the host, m
 
 Inventory required host files per provider and pinned CLI version. Export only supported, necessary authentication and bot session state into a separate encrypted backup artifact. Do not archive the owner's whole home directory. Keep `SECRET_KEY` outside this artifact and ordinary backups.
 
-Record provider versions, bot-to-session mappings, and artifact references in the recovery manifest. PostgreSQL remains the source for conversation history, memory, instructions, and configuration. If a native session cannot be restored, create a new session with context rebuilt from PostgreSQL.
+Record provider versions, bot-to-session mappings, and artifact references in the recovery manifest. SQLite remains the source for conversation history, memory, instructions, and configuration. If a native session cannot be restored, create a new session with context rebuilt from SQLite.
 
 Provider credentials may require a fresh login on a new machine. Validate their supported storage, export, and renewal behavior before promising restored subscription access. Until then, mark provider-state recovery as unverified. Keychain-backed credentials may need a different recovery path from ordinary files.
 

@@ -202,19 +202,19 @@ impl Drop for Cleanup {
 }
 
 /// Wait for a turn's final state; returns (status, assistant text).
-async fn finish(db: &sqlx::PgPool, turn: Uuid, timeout: Duration) -> (String, String) {
+async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
         let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = $1")
+            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
         if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
             let text: String = sqlx::query_scalar(
-                "SELECT coalesce(string_agg(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = $1 AND kind = 'assistant'",
+                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
             )
             .bind(turn)
             .fetch_one(db)
@@ -279,8 +279,8 @@ fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool)
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-async fn runtime_name(db: &sqlx::PgPool, bot: &str) -> String {
-    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = $1")
+async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
+    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(db)
         .await
@@ -361,9 +361,9 @@ fn receipts(home: &Path, name: &str, project: &str) -> std::collections::BTreeMa
     last
 }
 
-async fn activity(db: &sqlx::PgPool, bot: &str) -> Vec<String> {
+async fn activity(db: &sqlx::SqlitePool, bot: &str) -> Vec<String> {
     sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(db)
@@ -468,7 +468,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     note(&format!("saved source: {sources}"));
     assert!(sources.contains("data.py main.py report.py"), "{sources}");
     let artifact: (Uuid, String, i64) = sqlx::query_as(
-        "SELECT id, guest_path, size_bytes FROM artifacts WHERE bot_id = $1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, guest_path, size_bytes FROM artifacts WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
@@ -624,8 +624,8 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     let (counts, _) = captured(&home, &name);
     note(&format!("captured after the repeat: {counts:?}"));
     let read: Vec<(String,)> = sqlx::query_as(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'
-           AND source->>'turn_id' = $2 AND body ILIKE '%receipt%'",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
+           AND source->>'turn_id' = ?2 AND body LIKE '%receipt%'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .bind(turn.to_string())
@@ -685,7 +685,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     assert_eq!(status, "completed", "{reply}");
     assert!(reply.replace([',', ' '], "").contains("148933"), "{reply}");
     let jobs: Vec<(String, String)> = sqlx::query_as(
-        "SELECT status, command FROM guest_jobs WHERE bot_id = $1 ORDER BY started_at",
+        "SELECT status, command FROM guest_jobs WHERE bot_id = ?1 ORDER BY started_at",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(&pool)
@@ -717,7 +717,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         "SELECT count(*) FROM (
              SELECT text AS t FROM items UNION ALL SELECT body FROM memory_entry
              UNION ALL SELECT command FROM guest_jobs UNION ALL SELECT coalesce(output_tail, '') FROM guest_jobs
-         ) x WHERE t LIKE '%' || $1 || '%'",
+         ) x WHERE t LIKE '%' || ?1 || '%'",
     )
     .bind(&password)
     .fetch_one(&pool)
@@ -822,7 +822,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     let (status, _) = finish(&pool, turn, long).await;
     assert_ne!(status, "completed");
     let cancelled: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM guest_jobs WHERE bot_id = $1 AND command LIKE 'sleep 290%' AND status = 'cancelled'",
+        "SELECT count(*) FROM guest_jobs WHERE bot_id = ?1 AND command LIKE 'sleep 290%' AND status = 'cancelled'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
@@ -883,7 +883,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let job: (Uuid, Option<Uuid>) = sqlx::query_as(
-        "SELECT id, lease_id FROM guest_jobs WHERE bot_id = $1 AND command LIKE 'sleep 45%'",
+        "SELECT id, lease_id FROM guest_jobs WHERE bot_id = ?1 AND command LIKE 'sleep 45%'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
@@ -895,7 +895,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     let after: Vec<(Uuid, String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         "SELECT j.id, j.status, l.released_at FROM guest_jobs j
          LEFT JOIN computer_leases l ON l.id = j.lease_id
-         WHERE j.bot_id = $1 AND j.command LIKE 'sleep 45%'",
+         WHERE j.bot_id = ?1 AND j.command LIKE 'sleep 45%'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(&pool)
@@ -942,7 +942,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     );
     let started = Instant::now();
     loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
             .bind(job.0)
             .fetch_one(&pool)
             .await
@@ -954,7 +954,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let released: bool =
-        sqlx::query_scalar("SELECT released_at IS NOT NULL FROM computer_leases WHERE id = $1")
+        sqlx::query_scalar("SELECT released_at IS NOT NULL FROM computer_leases WHERE id = ?1")
             .bind(job.1.unwrap())
             .fetch_one(&pool)
             .await

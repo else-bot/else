@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Build the else.bot guest image and load it into the API's private
 # Microsandbox home. Usage: scripts/build-guest-image.sh [DATA_DIR]
-# DATA_DIR defaults to $ELSE_DATA_DIR or ~/.local/share/else-bot.
+# DATA_DIR defaults to $ELSE_DATA_DIR or ~/.else.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${ELSE_GUEST_TAG:-else-guest:2}"
-DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.local/share/else-bot}}"
+DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.else}}"
 MSB="${ELSE_MSB_BIN:-$(command -v msb || echo "$HOME/.microsandbox/bin/msb")}"
 docker build --pull=false --build-arg IMAGE_TAG="$TAG" -t "$TAG" infra/guest
 ARCHIVE="$(mktemp -d)/else-guest.tar"

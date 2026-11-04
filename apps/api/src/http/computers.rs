@@ -32,7 +32,7 @@ fn manager(state: &AppState) -> Result<&Arc<crate::computers::ComputerManager>, 
 }
 
 async fn require_bot(state: &AppState, bot_id: Uuid, active: bool) -> Result<(), ApiError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
         .fetch_optional(&state.db)
         .await?;
@@ -64,7 +64,7 @@ async fn show(
                     last_used_at, last_error,
                     (SELECT count(*) FROM computer_leases l
                      WHERE l.bot_id = c.bot_id AND l.released_at IS NULL)
-             FROM bot_computers c WHERE bot_id = $1",
+             FROM bot_computers c WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_optional(&state.db)

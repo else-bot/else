@@ -1,4 +1,4 @@
-//! POC-028: the screenshot tool's outcomes against PostgreSQL, the real MCP
+//! POC-028: the screenshot tool's outcomes against SQLite, the real MCP
 //! endpoint, and a fake runtime standing in for the guest capture (the live
 //! vision checks are in `vision_live.rs`).
 
@@ -224,8 +224,8 @@ async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
     app.wait_turn(&turn.to_string(), &["running"]).await;
     if let Some(model) = model {
         sqlx::query(
-            "UPDATE turns SET profile = jsonb_build_object('model', $2::text), profile_revision = 1
-             WHERE id = $1",
+            "UPDATE turns SET profile = json_object('model', ?2), profile_revision = 1
+             WHERE id = ?1",
         )
         .bind(turn)
         .bind(model)
@@ -233,7 +233,7 @@ async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
         .await
         .unwrap();
     }
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -302,8 +302,8 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
 
     // A verified model gets the image as an image block, with metadata.
     sqlx::query(
-        "UPDATE turns SET profile = jsonb_build_object('model', 'gpt-6.1-sol')
-         WHERE bot_id = $1 AND status = 'running'",
+        "UPDATE turns SET profile = json_object('model', 'gpt-6.1-sol')
+         WHERE bot_id = ?1 AND status = 'running'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .execute(&app.db.pool)
@@ -327,7 +327,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert!(guest.files.lock().unwrap()[0].starts_with("/var/lib/elsebot-screens/"));
     // Memory records metadata only, never the image.
     let logged: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)
@@ -397,7 +397,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
         .grants()
         .revoke_turn(
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM turns WHERE bot_id = $1 AND status = 'running' LIMIT 1",
+                "SELECT id FROM turns WHERE bot_id = ?1 AND status = 'running' LIMIT 1",
             )
             .bind(other.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
@@ -460,7 +460,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         "the batch reached the guest as sent"
     );
     let logged: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)

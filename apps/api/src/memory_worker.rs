@@ -16,7 +16,7 @@ use crate::actor::Actor;
 
 use async_trait::async_trait;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -67,7 +67,7 @@ pub enum Step {
 
 #[derive(Clone)]
 pub struct Compactor {
-    pool: PgPool,
+    pool: SqlitePool,
     summarizer: Option<Arc<dyn Summarizer>>,
     scheduler: Option<Arc<Scheduler>>,
     cancel: CancellationToken,
@@ -84,7 +84,7 @@ impl Compactor {
     }
 
     /// Copies and joins only.
-    pub fn deterministic(pool: PgPool) -> Self {
+    pub fn deterministic(pool: SqlitePool) -> Self {
         Self {
             pool,
             summarizer: None,
@@ -97,7 +97,7 @@ impl Compactor {
 
     /// With model summaries that take provider slots from `scheduler`.
     pub fn with_summaries(
-        pool: PgPool,
+        pool: SqlitePool,
         summarizer: Arc<dyn Summarizer>,
         scheduler: Arc<Scheduler>,
     ) -> Self {
@@ -200,7 +200,7 @@ impl Compactor {
                             }
                             // Jobs that waited for this summary may go next.
                             let woken = sqlx::query(
-                                "UPDATE memory_job SET available_at = now()
+                                "UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE blocked_reason = 'waiting_for_summary' AND lease_token IS NULL",
                             )
                             .execute(&wake_pool)
@@ -285,7 +285,7 @@ impl Compactor {
 
 /// One job's summary attempts, run beside the compactor loop.
 struct SummaryTask {
-    pool: PgPool,
+    pool: SqlitePool,
     summarizer: Arc<dyn Summarizer>,
     scheduler: Arc<Scheduler>,
     cancel: CancellationToken,
@@ -454,10 +454,10 @@ pub fn backoff(failures: i32) -> Duration {
 }
 
 /// Copies and joins only, until nothing is available (tests).
-pub async fn drain(pool: &PgPool) -> Result<usize, sqlx::Error> {
+pub async fn drain(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     Compactor::deterministic(pool.clone()).drain().await
 }
 
-pub async fn step(pool: &PgPool) -> Result<Step, sqlx::Error> {
+pub async fn step(pool: &SqlitePool) -> Result<Step, sqlx::Error> {
     Compactor::deterministic(pool.clone()).step().await
 }

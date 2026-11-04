@@ -1,6 +1,6 @@
 # Application architecture
 
-These are the current application choices. The first usable POC is implemented: the API (Axum, one in-process scheduler, PostgreSQL, host Codex and Claude adapters) and the GPUI desktop. Implementation follows the [POC backlog](../TODO.md).
+These are the current application choices. The first usable POC is implemented: the API (Axum, one in-process scheduler, SQLite, host Codex and Claude adapters) and the GPUI desktop. Implementation follows the [POC backlog](../TODO.md).
 
 The project should use a monorepo. Start with the Rust API and GPUI desktop client for one owner. Add the mobile app later.
 
@@ -11,15 +11,15 @@ The project should use a monorepo. Start with the Rust API and GPUI desktop clie
 | `Cargo.toml` and `Cargo.lock` | Workspace membership, dependency resolution, and the shared application lockfile. |
 | `apps/api` | Rust API executable and future server application behavior. |
 | `apps/desktop` | Rust desktop executable and future GPUI interface. |
-| `infra/compose.yaml` | Local PostgreSQL and future supporting container services. |
+| `infra/compose.yaml` | Local SQLite and future supporting container services. |
 | `docs` | Product decisions, research, and development instructions. |
 | `docs/experiments` | Independent verification fixtures, outside the application workspace. |
 
 The desktop uses GPUI through the exactly pinned `gpui-kit` with a private Tokio runtime for HTTP. The API uses Tokio and Axum. Its `main.rs` only parses the command and composes the process; configuration and HTTP transport live in separate modules. Frameworks, GPUI, database dependencies, and internal modules are added with the features that need them. The [development guide](development.md) covers the current commands.
 
-The desktop connects to the API through its public contract. It must not depend on the API executable or connect directly to PostgreSQL. Infrastructure configuration starts supporting services; the Rust programs run on the host.
+The desktop connects to the API through its public contract. It must not depend on the API executable or connect directly to SQLite. Infrastructure configuration starts supporting services; the Rust programs run on the host.
 
-Within the future API, application rules own their data types and required interfaces. HTTP handlers call application operations. PostgreSQL, provider CLI, and VM adapters implement those interfaces. Application rules must not depend on transport or storage frameworks. Add shared library crates only when concrete code needs a shared boundary.
+Within the future API, application rules own their data types and required interfaces. HTTP handlers call application operations. SQLite, provider CLI, and VM adapters implement those interfaces. Application rules must not depend on transport or storage frameworks. Add shared library crates only when concrete code needs a shared boundary.
 
 ## API
 
@@ -55,7 +55,7 @@ The desktop client should use Rust and GPUI and connect to the API.
 
 The first desktop client should show a bot list, the selected conversation, and controls to create or delete a bot. Its main view should feel like a messaging app.
 
-Use ordinary authenticated HTTP requests for commands and one owner WebSocket for live updates, with pub/sub channels for the bot list and each open conversation. An SSE stream plus sidebar polling was tried first and replaced; the [contract](research/desktop-and-feature-contracts.md#history-sse-and-polling-were-tried-first) records why. PostgreSQL owns conversation snapshots and replay cursors. The desktop deduplicates messages by stable IDs and keeps an unsent draft per bot. Opening another conversation or closing the window does not cancel server work.
+Use ordinary authenticated HTTP requests for commands and one owner WebSocket for live updates, with pub/sub channels for the bot list and each open conversation. An SSE stream plus sidebar polling was tried first and replaced; the [contract](research/desktop-and-feature-contracts.md#history-sse-and-polling-were-tried-first) records why. SQLite owns conversation snapshots and replay cursors. The desktop deduplicates messages by stable IDs and keeps an unsent draft per bot. Opening another conversation or closing the window does not cancel server work.
 
 The [desktop contracts](research/desktop-and-feature-contracts.md) define the proposed screens, endpoints, stream events, cancellation, and soft deletion. Twelve synthetic contract cases pass. A live GPUI build and real transport remain implementation checks. Rich markdown, attachments, account screens, and remote desktop tabs are outside the first slice.
 
@@ -69,9 +69,9 @@ Push notifications for new bot messages remain a requirement.
 
 ## Service responsibilities
 
-The Rust API owns application state and client access. PostgreSQL stores that state, while bot computers retain their files in isolated environments. The clients connect to the API.
+The Rust API owns application state and client access. SQLite stores that state, while bot computers retain their files in isolated environments. The clients connect to the API.
 
-Start with one API instance and one scheduler. PostgreSQL rows provide durable queues and recovery. Provider adapters, memory compaction, VM lifecycle, and the backup worker run within that service. No Redis, message broker, distributed scheduler, or identity service is needed initially.
+Start with one API instance and one scheduler. SQLite rows provide durable queues and recovery. Provider adapters, memory compaction, VM lifecycle, and the backup worker run within that service. No Redis, message broker, distributed scheduler, or identity service is needed initially.
 
 Mutable runtime registries belong to actors with bounded mailboxes (64 operations per actor). Callers await capacity, and an accepted operation finishes even if its caller is cancelled. Turn persistence has one actor per turn, WebSocket subscriptions one per connection, and foreground command retirement one per command. The provider RPC actor owns its stdin and response registry, caps in-flight requests at 64, and reclaims cancelled requests. Computer operations take a single permit per bot, so unrelated bots proceed independently; unused permit entries are reclaimed. Maintenance admission, authentication budgets, and fault counters use atomics. Provider turns and memory summaries share bounded semaphore capacity.
 

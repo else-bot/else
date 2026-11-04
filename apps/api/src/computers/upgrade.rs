@@ -12,7 +12,7 @@
 //! the host by size and SHA-256, creates a new computer from the new image
 //! with that archive copied in, verifies and unpacks it there as the same
 //! user ID, and stops it. Only then does the bot switch to the new computer,
-//! under its row lock. The old computer is kept, stopped, so
+//! inside an immediate transaction. The old computer is kept, stopped, so
 //! [`ComputerManager::rollback_upgrade`] can switch back; it is never
 //! removed here. A failure before the switch removes only the replacement
 //! this upgrade created and leaves the bot on its old computer.
@@ -126,7 +126,7 @@ impl ComputerManager {
     async fn active_jobs(&self, bot_id: Uuid) -> Result<i64, ComputerError> {
         Ok(sqlx::query_scalar(
             "SELECT count(*) FROM guest_jobs
-             WHERE bot_id = $1 AND status IN ('starting', 'running', 'cancelling')",
+             WHERE bot_id = ?1 AND status IN ('starting', 'running', 'cancelling')",
         )
         .bind(bot_id)
         .fetch_one(&self.pool)
@@ -141,14 +141,14 @@ impl ComputerManager {
     /// lease, and the upgrade is refused.
     pub async fn settle_offline(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         sqlx::query(
-            "UPDATE computer_leases SET released_at = now(), end_reason = 'expired'
-             WHERE bot_id = $1 AND released_at IS NULL AND holder NOT LIKE 'job:%'",
+            "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'expired'
+             WHERE bot_id = ?1 AND released_at IS NULL AND holder NOT LIKE 'job:%'",
         )
         .bind(bot_id)
         .execute(&self.pool)
         .await?;
         let running: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM guest_jobs WHERE bot_id = $1 AND status = 'running'",
+            "SELECT id FROM guest_jobs WHERE bot_id = ?1 AND status = 'running'",
         )
         .bind(bot_id)
         .fetch_all(&self.pool)
@@ -186,7 +186,7 @@ impl ComputerManager {
     async fn clear_interrupted_upgrades(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let started: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT id, to_runtime_name FROM computer_upgrades
-             WHERE bot_id = $1 AND state = 'started'",
+             WHERE bot_id = ?1 AND state = 'started'",
         )
         .bind(bot_id)
         .fetch_all(&self.pool)
@@ -194,9 +194,9 @@ impl ComputerManager {
         for (id, name) in started {
             self.discard_replacement(&name).await?;
             sqlx::query(
-                "UPDATE computer_upgrades SET state = 'failed', finished_at = now(),
+                "UPDATE computer_upgrades SET state = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                      error = coalesce(error, 'interrupted')
-                 WHERE id = $1",
+                 WHERE id = ?1",
             )
             .bind(id)
             .execute(&self.pool)
@@ -218,7 +218,7 @@ impl ComputerManager {
     /// Whether the budget admits booting this computer now (the upgrade's
     /// one VM at a time counts like the computer itself would).
     async fn admit(&self, bot_id: Uuid, row: &super::Row) -> Result<(), ComputerError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let admitted = self.admits(&mut tx, bot_id, row).await?;
         tx.commit().await?;
         if admitted {
@@ -286,7 +286,7 @@ impl ComputerManager {
         // even when the bot was deleted since.
         self.clear_interrupted_upgrades(bot_id).await?;
         let active: Option<bool> =
-            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1")
+            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
                 .bind(bot_id)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -324,7 +324,7 @@ impl ComputerManager {
             "INSERT INTO computer_upgrades
                  (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state,
                   from_network, to_network)
-             VALUES ($1, $2, $3, $4, $5, $6, 'started', $7, $8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'started', ?7, ?8)",
         )
         .bind(id)
         .bind(bot_id)
@@ -355,8 +355,8 @@ impl ComputerManager {
                 let _ = self.stop_confirmed(&row.runtime_name).await;
                 let discarded = self.discard_replacement(&to_runtime_name).await;
                 sqlx::query(
-                    "UPDATE computer_upgrades SET state = $2, finished_at = now(), error = $3
-                     WHERE id = $1",
+                    "UPDATE computer_upgrades SET state = ?2, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), error = ?3
+                     WHERE id = ?1",
                 )
                 .bind(id)
                 .bind(if discarded.is_ok() {
@@ -371,11 +371,11 @@ impl ComputerManager {
             }
         };
 
-        // Switch under the row lock, only if nothing changed meanwhile.
-        let mut tx = self.pool.begin().await?;
+        // Switch inside an immediate transaction, only if nothing changed meanwhile.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = Self::row(&mut tx, bot_id).await?.expect("exists");
         let held: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = $1 AND released_at IS NULL)",
+            "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL)",
         )
         .bind(bot_id)
         .fetch_one(&mut *tx)
@@ -384,9 +384,9 @@ impl ComputerManager {
             drop(tx);
             let _ = self.discard_replacement(&to_runtime_name).await;
             sqlx::query(
-                "UPDATE computer_upgrades SET state = 'failed', finished_at = now(),
+                "UPDATE computer_upgrades SET state = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                      error = 'the computer changed during the upgrade'
-                 WHERE id = $1",
+                 WHERE id = ?1",
             )
             .bind(id)
             .execute(&self.pool)
@@ -396,10 +396,10 @@ impl ComputerManager {
             ));
         }
         sqlx::query(
-            "UPDATE bot_computers SET runtime_name = $2, image = $3, network = $4,
+            "UPDATE bot_computers SET runtime_name = ?2, image = ?3, network = ?4,
                  observed_state = 'stopped', generation = generation + 1,
-                 services_generation = NULL, updated_at = now()
-             WHERE bot_id = $1",
+                 services_generation = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .bind(&to_runtime_name)
@@ -408,9 +408,9 @@ impl ComputerManager {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE computer_upgrades SET state = 'completed', finished_at = now(),
-                 data_bytes = $2, data_sha256 = $3
-             WHERE id = $1",
+            "UPDATE computer_upgrades SET state = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                 data_bytes = ?2, data_sha256 = ?3
+             WHERE id = ?1",
         )
         .bind(id)
         .bind(bytes as i64)
@@ -506,7 +506,7 @@ impl ComputerManager {
         let mut files = vec![(archive.clone(), GUEST_ARCHIVE.to_owned())];
         if self.config.desktop {
             let port: Option<i32> =
-                sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = $1")
+                sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = ?1")
                     .bind(bot_id)
                     .fetch_one(&self.pool)
                     .await?;
@@ -565,8 +565,8 @@ impl ComputerManager {
         let last: Option<UpgradeRow> = sqlx::query_as(
             "SELECT id, from_runtime_name, from_image, data_bytes, data_sha256, from_network
              FROM computer_upgrades
-             WHERE bot_id = $1 AND state = 'completed' AND to_runtime_name = $2
-             ORDER BY created_at DESC LIMIT 1",
+             WHERE bot_id = ?1 AND state = 'completed' AND to_runtime_name = ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
         )
         .bind(bot_id)
         .bind(&row.runtime_name)
@@ -588,7 +588,7 @@ impl ComputerManager {
             )));
         }
         self.stop_for_disk(bot_id, &row).await?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = Self::row(&mut tx, bot_id).await?.expect("exists");
         if current.runtime_name != row.runtime_name || current.observed_state != "stopped" {
             return Err(ComputerError::Busy(
@@ -596,10 +596,10 @@ impl ComputerManager {
             ));
         }
         sqlx::query(
-            "UPDATE bot_computers SET runtime_name = $2, image = $3, network = $4,
+            "UPDATE bot_computers SET runtime_name = ?2, image = ?3, network = ?4,
                  observed_state = 'stopped', generation = generation + 1,
-                 services_generation = NULL, updated_at = now()
-             WHERE bot_id = $1",
+                 services_generation = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .bind(&from_name)
@@ -608,7 +608,7 @@ impl ComputerManager {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE computer_upgrades SET state = 'rolled_back', finished_at = now() WHERE id = $1",
+            "UPDATE computer_upgrades SET state = 'rolled_back', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
         )
         .bind(id)
         .execute(&mut *tx)

@@ -4,7 +4,7 @@
 //! missing provider profiles. Ordinary startup only reads this state: it never
 //! seeds bots, recreates a deleted default, or overwrites saved settings.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use super::DbError;
@@ -50,19 +50,19 @@ impl From<sqlx::Error> for InstallError {
 /// Insert a bot and its canonical conversation in the caller's transaction.
 /// Returns the conversation ID.
 pub async fn insert_bot(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Transaction<'_, Sqlite>,
     bot_id: Uuid,
     name: &BotName,
     role: &BotRole,
 ) -> Result<Uuid, sqlx::Error> {
     let conversation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO bots (id, name, role) VALUES (?1, ?2, ?3)")
         .bind(bot_id)
         .bind(name.as_str())
         .bind(role.as_str())
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
         .bind(conversation_id)
         .bind(bot_id)
         .execute(&mut **tx)
@@ -70,18 +70,15 @@ pub async fn insert_bot(
     Ok(conversation_id)
 }
 
-pub async fn setup(pool: &PgPool) -> Result<SetupReport, InstallError> {
-    let mut tx = pool.begin().await?;
+pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     // Serialize concurrent setups so the main bot is created once.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('else.bot/setup'))")
-        .execute(&mut *tx)
-        .await?;
 
     let mut seeded_profiles = Vec::new();
     for (provider_id, profile) in default_profiles() {
         let inserted = sqlx::query(
             "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
-             VALUES ($1, $2, $3, $4)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (provider_id) DO NOTHING",
         )
         .bind(provider_id)
@@ -114,7 +111,7 @@ pub async fn setup(pool: &PgPool) -> Result<SetupReport, InstallError> {
             let name = BotName::parse(MAIN_BOT_NAME).expect("valid constant");
             let role = BotRole::parse(MAIN_BOT_ROLE).expect("valid constant");
             insert_bot(&mut tx, bot_id, &name, &role).await?;
-            sqlx::query("INSERT INTO installation (default_bot_id) VALUES ($1)")
+            sqlx::query("INSERT INTO installation (default_bot_id) VALUES (?1)")
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;
@@ -130,7 +127,7 @@ pub async fn setup(pool: &PgPool) -> Result<SetupReport, InstallError> {
 
 /// Startup check. Reads only; an empty installation is an error that points
 /// at explicit setup rather than something startup repairs.
-pub async fn check_installed(pool: &PgPool) -> Result<Option<Uuid>, InstallError> {
+pub async fn check_installed(pool: &SqlitePool) -> Result<Option<Uuid>, InstallError> {
     let row: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
         "SELECT i.default_bot_id, b.status
          FROM installation i LEFT JOIN bots b ON b.id = i.default_bot_id",

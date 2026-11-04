@@ -5,8 +5,7 @@
 //! lease expired and was replaced cannot publish. Nodes of the active
 //! generation publish leaves strictly in sequence after `published_seq`;
 //! out-of-order completions wait. The view, watermark, and revision change
-//! together under the store row lock. Lock order everywhere: bot row (FOR
-//! SHARE), memory store, then job rows.
+//! together inside the immediate transaction. SQLite serializes writers; reads and computation stay outside write transactions.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -14,7 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::memory_tree::{self, Build, NodeId, Recipe, View};
@@ -30,21 +29,21 @@ pub struct Job {
     pub attempts: i32,
 }
 
-/// Claim the next available job, oldest range first, skipping locked rows.
-pub async fn claim(pool: &PgPool, lease: Duration) -> Result<Option<Job>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+/// Claim the next available job, oldest range first, atomically in an immediate transaction.
+pub async fn claim(pool: &SqlitePool, lease: Duration) -> Result<Option<Job>, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<(Uuid, i32, i64, i64, Json<Recipe>)> = sqlx::query_as(
         "SELECT j.bot_id, j.generation, j.start_seq, j.span, g.recipe
          FROM memory_job j
          JOIN memory_store s ON s.bot_id = j.bot_id
          JOIN bots b ON b.id = j.bot_id
          JOIN memory_generation g ON g.bot_id = j.bot_id AND g.generation = j.generation
-         WHERE b.status = 'active' AND j.available_at <= now()
-           AND (j.lease_until IS NULL OR j.lease_until < now())
+         WHERE b.status = 'active' AND j.available_at <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+           AND (j.lease_until IS NULL OR j.lease_until < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
            AND (j.generation = s.generation OR j.generation = s.building_generation)
          ORDER BY j.bot_id, j.start_seq, j.span
          LIMIT 1
-         FOR UPDATE OF j SKIP LOCKED",
+        ",
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -53,9 +52,9 @@ pub async fn claim(pool: &PgPool, lease: Duration) -> Result<Option<Job>, sqlx::
     };
     let token = Uuid::new_v4();
     let attempts: i32 = sqlx::query_scalar(
-        "UPDATE memory_job SET lease_token = $5, attempts = attempts + 1,
-             lease_until = now() + make_interval(secs => $6)
-         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4
+        "UPDATE memory_job SET lease_token = ?5, attempts = attempts + 1,
+             lease_until = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?6))
+         WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4
          RETURNING attempts",
     )
     .bind(bot_id)
@@ -87,11 +86,11 @@ pub struct Prepared {
 
 /// The job's input: the labeled original for a leaf, or both children for
 /// a parent. `None` when an input is missing (a parent whose child is gone).
-pub async fn prepare(pool: &PgPool, job: &Job) -> Result<Option<Prepared>, sqlx::Error> {
+pub async fn prepare(pool: &SqlitePool, job: &Job) -> Result<Option<Prepared>, sqlx::Error> {
     let (build, input, sources) = match job.node.children() {
         None => {
             let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
-                "SELECT kind, body, supersedes_seq FROM memory_entry WHERE bot_id = $1 AND seq = $2",
+                "SELECT kind, body, supersedes_seq FROM memory_entry WHERE bot_id = ?1 AND seq = ?2",
             )
             .bind(job.bot_id)
             .bind(job.node.start)
@@ -127,23 +126,22 @@ pub async fn prepare(pool: &PgPool, job: &Job) -> Result<Option<Prepared>, sqlx:
 }
 
 async fn bodies(
-    conn: impl sqlx::PgExecutor<'_>,
+    conn: impl sqlx::SqliteExecutor<'_>,
     bot_id: Uuid,
     generation: i32,
     ids: &[NodeId],
 ) -> Result<HashMap<NodeId, String>, sqlx::Error> {
-    let starts: Vec<i64> = ids.iter().map(|n| n.start).collect();
-    let spans: Vec<i64> = ids.iter().map(|n| n.span).collect();
+    // Drive indexed lookups from the requested nodes, avoiding a quadratic
+    // join of parallel JSON arrays for large publication backlogs.
     let rows: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT n.start_seq, n.span, n.body FROM memory_node n
-         JOIN unnest($3::bigint[], $4::bigint[]) AS w(start_seq, span)
-           ON w.start_seq = n.start_seq AND w.span = n.span
-         WHERE n.bot_id = $1 AND n.generation = $2",
+        "SELECT n.start_seq, n.span, n.body FROM json_each(?3) w CROSS JOIN memory_node n
+         WHERE n.bot_id = ?1 AND n.generation = ?2
+           AND n.start_seq = json_extract(w.value, '$.start')
+           AND n.span = json_extract(w.value, '$.span')",
     )
     .bind(bot_id)
     .bind(generation)
-    .bind(&starts)
-    .bind(&spans)
+    .bind(Json(&ids))
     .fetch_all(conn)
     .await?;
     Ok(rows
@@ -164,7 +162,7 @@ pub enum Completion {
 /// Queues the parent when the sibling exists and publishes or switches
 /// generations as needed, all in one transaction.
 pub async fn complete(
-    pool: &PgPool,
+    pool: &SqlitePool,
     job: &Job,
     method: &str,
     body: &str,
@@ -178,9 +176,9 @@ pub async fn complete(
             job.recipe.node_bytes
         )));
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let active: Option<bool> =
-        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
             .bind(job.bot_id)
             .fetch_optional(&mut *tx)
             .await?;
@@ -188,16 +186,16 @@ pub async fn complete(
         return Ok(Completion::Stale);
     }
     let (generation, building): (i32, Option<i32>) = sqlx::query_as(
-        "SELECT generation, building_generation FROM memory_store WHERE bot_id = $1 FOR NO KEY UPDATE",
+        "SELECT generation, building_generation FROM memory_store WHERE bot_id = ?1",
     )
     .bind(job.bot_id)
     .fetch_one(&mut *tx)
     .await?;
     let ours: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM memory_job
-         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4
-           AND lease_token = $5
-         FOR UPDATE",
+         WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4
+           AND lease_token = ?5
+        ",
     )
     .bind(job.bot_id)
     .bind(job.generation)
@@ -211,7 +209,7 @@ pub async fn complete(
     }
     sqlx::query(
         "INSERT INTO memory_node (bot_id, generation, start_seq, span, body, method, input_hash, audit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT DO NOTHING",
     )
     .bind(job.bot_id)
     .bind(job.generation)
@@ -224,7 +222,7 @@ pub async fn complete(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "DELETE FROM memory_job WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4",
+        "DELETE FROM memory_job WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4",
     )
     .bind(job.bot_id)
     .bind(job.generation)
@@ -240,7 +238,7 @@ pub async fn complete(
     if sibling_built {
         let parent = job.node.parent().0;
         sqlx::query(
-            "INSERT INTO memory_job (bot_id, generation, start_seq, span) VALUES ($1, $2, $3, $4)
+            "INSERT INTO memory_job (bot_id, generation, start_seq, span) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT DO NOTHING",
         )
         .bind(job.bot_id)
@@ -261,7 +259,7 @@ pub async fn complete(
 
 /// Release a job that cannot be built now, with the reason it waits.
 pub async fn defer(
-    pool: &PgPool,
+    pool: &SqlitePool,
     job: &Job,
     reason: &str,
     error: Option<&str>,
@@ -273,7 +271,7 @@ pub async fn defer(
 /// Release a job; `failure` counts a provider failure toward its backoff.
 /// Returns the job's failure count afterwards.
 pub async fn defer_counting(
-    pool: &PgPool,
+    pool: &SqlitePool,
     job: &Job,
     reason: &str,
     error: Option<&str>,
@@ -281,11 +279,11 @@ pub async fn defer_counting(
     failure: bool,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE memory_job SET lease_token = NULL, lease_until = NULL, blocked_reason = $6,
-             last_error = left($7, 1000), available_at = now() + make_interval(secs => $8),
-             failures = failures + $9::int
-         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4
-           AND lease_token = $5",
+        "UPDATE memory_job SET lease_token = NULL, lease_until = NULL, blocked_reason = ?6,
+             last_error = substr(?7, 1, 1000), available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?8)),
+             failures = failures + ?9
+         WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4
+           AND lease_token = ?5",
     )
     .bind(job.bot_id)
     .bind(job.generation)
@@ -302,10 +300,10 @@ pub async fn defer_counting(
 }
 
 /// Provider failures recorded for a job so far.
-pub async fn failures(pool: &PgPool, job: &Job) -> Result<i32, sqlx::Error> {
+pub async fn failures(pool: &SqlitePool, job: &Job) -> Result<i32, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT failures FROM memory_job
-         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4",
+         WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4",
     )
     .bind(job.bot_id)
     .bind(job.generation)
@@ -358,14 +356,14 @@ fn encode_view(nodes: &[NodeId]) -> Value {
 }
 
 /// Publish newly built leaves of the active generation in sequence and
-/// compact if due. Runs under the store row lock held by the caller.
-pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
+/// compact if due. Runs inside the immediate transaction held by the caller.
+pub async fn publish(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let row: (i32, i64, Value, bool, Value, bool, Json<Recipe>) = sqlx::query_as(
         "SELECT s.generation, s.published_seq, s.view_nodes, s.compacting,
                 s.context_nodes, s.context_compacting, g.recipe
          FROM memory_store s
          JOIN memory_generation g ON g.bot_id = s.bot_id AND g.generation = s.generation
-         WHERE s.bot_id = $1",
+         WHERE s.bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -380,8 +378,8 @@ pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx
     };
     let ready: Vec<i64> = sqlx::query_scalar(
         "SELECT start_seq FROM memory_node
-         WHERE bot_id = $1 AND generation = $2 AND span = 1 AND start_seq > $3
-         ORDER BY start_seq LIMIT $4",
+         WHERE bot_id = ?1 AND generation = ?2 AND span = 1 AND start_seq > ?3
+         ORDER BY start_seq LIMIT ?4",
     )
     .bind(bot_id)
     .bind(generation)
@@ -436,9 +434,9 @@ pub async fn publish(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx
         return Ok(false);
     }
     sqlx::query(
-        "UPDATE memory_store SET view_nodes = $2, published_seq = $3, compacting = $4,
-             context_nodes = $5, context_compacting = $6, view_revision = view_revision + 1
-         WHERE bot_id = $1",
+        "UPDATE memory_store SET view_nodes = ?2, published_seq = ?3, compacting = ?4,
+             context_nodes = ?5, context_compacting = ?6, view_revision = view_revision + 1
+         WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .bind(encode_view(&main.nodes))
@@ -457,7 +455,7 @@ const PUBLISH_BATCH: i64 = 10_000;
 /// Publish for one bot whose next leaf is already built but unpublished
 /// (a backlog longer than one batch, or completions that raced). Returns
 /// whether anything was published.
-pub async fn advance(pool: &PgPool) -> Result<bool, sqlx::Error> {
+pub async fn advance(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     // Several candidates, so one bot whose view cannot publish (a damaged
     // record) never starves the others.
     let candidates: Vec<Uuid> = sqlx::query_scalar(
@@ -471,16 +469,16 @@ pub async fn advance(pool: &PgPool) -> Result<bool, sqlx::Error> {
     .fetch_all(pool)
     .await?;
     for bot_id in candidates {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: Option<bool> =
-            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
                 .bind(bot_id)
                 .fetch_optional(&mut *tx)
                 .await?;
         if active != Some(true) {
             continue;
         }
-        sqlx::query("SELECT 1 FROM memory_store WHERE bot_id = $1 FOR NO KEY UPDATE")
+        sqlx::query("SELECT 1 FROM memory_store WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
@@ -495,23 +493,23 @@ pub async fn advance(pool: &PgPool) -> Result<bool, sqlx::Error> {
 /// Start an explicit rebuild into a new generation with the installation's
 /// current recipe. Originals are never rewritten; the old generation stays.
 /// Returns the generation being built.
-pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+pub async fn start_rebuild(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<i32>, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let active: Option<bool> =
-        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
             .bind(bot_id)
             .fetch_optional(&mut *tx)
             .await?;
     if active != Some(true) {
         return Ok(None);
     }
-    sqlx::query("INSERT INTO memory_store (bot_id) VALUES ($1) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO memory_store (bot_id) VALUES (?1) ON CONFLICT DO NOTHING")
         .bind(bot_id)
         .execute(&mut *tx)
         .await?;
     let (generation, building, next): (i32, Option<i32>, i64) = sqlx::query_as(
         "SELECT generation, building_generation, next_seq FROM memory_store
-         WHERE bot_id = $1 FOR NO KEY UPDATE",
+         WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(&mut *tx)
@@ -522,7 +520,7 @@ pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, s
     }
     sqlx::query(
         "INSERT INTO memory_generation (bot_id, generation, recipe)
-         VALUES ($1, 1, coalesce((SELECT memory_recipe FROM installation), $2))
+         VALUES (?1, 1, coalesce((SELECT memory_recipe FROM installation), ?2))
          ON CONFLICT DO NOTHING",
     )
     .bind(bot_id)
@@ -530,14 +528,14 @@ pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, s
     .execute(&mut *tx)
     .await?;
     let new: i32 =
-        sqlx::query_scalar("SELECT max(generation) + 1 FROM memory_generation WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT max(generation) + 1 FROM memory_generation WHERE bot_id = ?1")
             .bind(bot_id)
             .fetch_one(&mut *tx)
             .await?;
     let _ = generation;
     sqlx::query(
         "INSERT INTO memory_generation (bot_id, generation, recipe, watermark)
-         VALUES ($1, $2, coalesce((SELECT memory_recipe FROM installation), $3), $4)",
+         VALUES (?1, ?2, coalesce((SELECT memory_recipe FROM installation), ?3), ?4)",
     )
     .bind(bot_id)
     .bind(new)
@@ -545,14 +543,14 @@ pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, s
     .bind(next)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE memory_store SET building_generation = $2 WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_store SET building_generation = ?2 WHERE bot_id = ?1")
         .bind(bot_id)
         .bind(new)
         .execute(&mut *tx)
         .await?;
     sqlx::query(
         "INSERT INTO memory_job (bot_id, generation, start_seq, span)
-         SELECT $1, $2, s, 1 FROM generate_series(0, $3 - 1) s",
+         SELECT bot_id, ?2, seq, 1 FROM memory_entry WHERE bot_id = ?1 AND seq < ?3",
     )
     .bind(bot_id)
     .bind(new)
@@ -567,9 +565,9 @@ pub async fn start_rebuild(pool: &PgPool, bot_id: Uuid) -> Result<Option<i32>, s
 /// Switch to the generation being rebuilt once its contiguous leaves cover
 /// at least everything the active view covers. Its view is recomputed by
 /// replaying publication; the old generation and its nodes remain.
-async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
+async fn try_switch(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let (generation, building, next): (i32, Option<i32>, i64) = sqlx::query_as(
-        "SELECT generation, building_generation, next_seq FROM memory_store WHERE bot_id = $1",
+        "SELECT generation, building_generation, next_seq FROM memory_store WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -578,7 +576,7 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
         return Ok(false);
     };
     let nodes: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT start_seq, span, body FROM memory_node WHERE bot_id = $1 AND generation = $2",
+        "SELECT start_seq, span, body FROM memory_node WHERE bot_id = ?1 AND generation = ?2",
     )
     .bind(bot_id)
     .bind(building)
@@ -598,7 +596,7 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
         return Ok(false);
     }
     let Json(recipe): Json<Recipe> = sqlx::query_scalar(
-        "SELECT recipe FROM memory_generation WHERE bot_id = $1 AND generation = $2",
+        "SELECT recipe FROM memory_generation WHERE bot_id = ?1 AND generation = ?2",
     )
     .bind(bot_id)
     .bind(building)
@@ -628,10 +626,10 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
         );
     }
     sqlx::query(
-        "UPDATE memory_store SET generation = $2, building_generation = NULL, view_nodes = $3,
-             published_seq = $4, compacting = $5, context_nodes = $6, context_compacting = $7,
+        "UPDATE memory_store SET generation = ?2, building_generation = NULL, view_nodes = ?3,
+             published_seq = ?4, compacting = ?5, context_nodes = ?6, context_compacting = ?7,
              view_revision = view_revision + 1
-         WHERE bot_id = $1",
+         WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .bind(building)
@@ -643,7 +641,7 @@ async fn try_switch(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     .execute(&mut *conn)
     .await?;
     // Jobs of retired generations are never claimed; drop them.
-    sqlx::query("DELETE FROM memory_job WHERE bot_id = $1 AND generation <> $2")
+    sqlx::query("DELETE FROM memory_job WHERE bot_id = ?1 AND generation <> ?2")
         .bind(bot_id)
         .bind(building)
         .execute(&mut *conn)
@@ -680,14 +678,14 @@ pub struct SavedView {
 
 /// Load the exact saved view. Nothing is recomputed; a damaged view is
 /// reported as invalid rather than repaired.
-pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::Error> {
+pub async fn load_view(pool: &SqlitePool, bot_id: Uuid) -> Result<SavedView, sqlx::Error> {
     type Row = (i32, i64, i64, i64, bool, Option<i32>, Value, Value, bool);
     let row: Option<Row> = sqlx::query_as(
         "SELECT s.generation, s.view_revision, s.published_seq, s.next_seq, s.compacting,
                 s.building_generation, s.view_nodes, s.context_nodes,
                 EXISTS (SELECT 1 FROM memory_generation g
                         WHERE g.bot_id = s.bot_id AND g.generation = s.generation)
-         FROM memory_store s WHERE s.bot_id = $1",
+         FROM memory_store s WHERE s.bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_optional(pool)
@@ -720,18 +718,15 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
     let decoded = decode_view(&nodes);
     let context = decode_view(&context_nodes);
     let ids = decoded.clone().unwrap_or_default();
-    let starts: Vec<i64> = ids.iter().map(|n| n.start).collect();
-    let spans: Vec<i64> = ids.iter().map(|n| n.span).collect();
     let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
-        "SELECT n.start_seq, n.span, n.body, n.method FROM memory_node n
-         JOIN unnest($3::bigint[], $4::bigint[]) AS w(start_seq, span)
-           ON w.start_seq = n.start_seq AND w.span = n.span
-         WHERE n.bot_id = $1 AND n.generation = $2",
+        "SELECT n.start_seq, n.span, n.body, n.method FROM json_each(?3) w CROSS JOIN memory_node n
+         WHERE n.bot_id = ?1 AND n.generation = ?2
+           AND n.start_seq = json_extract(w.value, '$.start')
+           AND n.span = json_extract(w.value, '$.span')",
     )
     .bind(bot_id)
     .bind(generation)
-    .bind(&starts)
-    .bind(&spans)
+    .bind(Json(&ids))
     .fetch_all(pool)
     .await?;
     let found: HashMap<NodeId, (String, String)> = rows
@@ -758,7 +753,7 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
         && context_ids.iter().all(|n| context_built.contains_key(n));
     let blocked: Vec<(String, i64)> = sqlx::query_as(
         "SELECT blocked_reason, count(*) FROM memory_job
-         WHERE bot_id = $1 AND blocked_reason IS NOT NULL AND generation = $2
+         WHERE bot_id = ?1 AND blocked_reason IS NOT NULL AND generation = ?2
          GROUP BY blocked_reason ORDER BY blocked_reason",
     )
     .bind(bot_id)
@@ -781,14 +776,14 @@ pub async fn load_view(pool: &PgPool, bot_id: Uuid) -> Result<SavedView, sqlx::E
 
 /// A node's children (or, for a leaf, nothing) in the active generation.
 pub async fn node(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     generation: i32,
     id: NodeId,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT body, method FROM memory_node
-         WHERE bot_id = $1 AND generation = $2 AND start_seq = $3 AND span = $4",
+         WHERE bot_id = ?1 AND generation = ?2 AND start_seq = ?3 AND span = ?4",
     )
     .bind(bot_id)
     .bind(generation)
@@ -802,14 +797,14 @@ pub async fn node(
 /// kept first within `budget` rendered bytes, returned oldest first, with
 /// the view revision they come from. Future entries are never included.
 pub async fn context_before(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     generation: i32,
     before: i64,
     budget: usize,
 ) -> Result<(i64, Vec<(NodeId, String)>), sqlx::Error> {
     let (revision, nodes, active): (i64, Value, i32) = sqlx::query_as(
-        "SELECT view_revision, context_nodes, generation FROM memory_store WHERE bot_id = $1",
+        "SELECT view_revision, context_nodes, generation FROM memory_store WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(pool)
@@ -846,7 +841,7 @@ pub const SESSION_MEMORY_BYTES: usize = 24_000;
 /// view if it fits, else the coarser compaction view, else its newest nodes
 /// with the omitted range stated. Coverage and pending ranges are explicit.
 pub async fn session_context(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
 ) -> Result<Option<crate::app::providers::MemoryContext>, sqlx::Error> {
     let saved = load_view(pool, bot_id).await?;

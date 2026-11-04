@@ -97,7 +97,7 @@ impl ComputerManager {
         }
         if let Some(turn) = turn_id {
             let live: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1
+                "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1
                                 AND status IN ('preparing', 'sending', 'running'))",
             )
             .bind(turn)
@@ -207,7 +207,7 @@ impl ComputerManager {
         capture_id: Uuid,
     ) -> Result<Result<(serde_json::Value, Vec<u8>), ScreenRefusal>, ComputerError> {
         let (program, mut args) = self.as_guest_user(
-            r#"d=$(dirname "$1"); mkdir -p "$d" && find "$d" -mindepth 1 -delete 2>/dev/null; DISPLAY=:99 exec /usr/local/bin/else-screenshot "$1" "$2""#,
+            r#"d=$(dirname "?1"); mkdir -p "$d" && find "$d" -mindepth 1 -delete 2>/dev/null; DISPLAY=:99 exec /usr/local/bin/else-screenshot "?1" "?2""#,
         );
         args.push(user_path.to_owned());
         args.push(MAX_IMAGE_BYTES.to_string());
@@ -240,10 +240,10 @@ impl ComputerManager {
                 "/bin/sh",
                 &[
                     "-c",
-                    r#"set -e; d=$(dirname "$2"); mkdir -p "$d"; chmod 0700 "$d"; find "$d" -mindepth 1 -delete
-[ -f "$1" ] && [ ! -L "$1" ]
-dd if="$1" of="$2" iflag=nofollow,count_bytes count="$3" status=none
-[ "$(stat -c %s "$2")" -lt "$3" ]"#,
+                    r#"set -e; d=$(dirname "?2"); mkdir -p "$d"; chmod 0700 "$d"; find "$d" -mindepth 1 -delete
+[ -f "?1" ] && [ ! -L "?1" ]
+dd if="?1" of="?2" iflag=nofollow,count_bytes count="?3" status=none
+[ "$(stat -c %s "?2")" -lt "?3" ]"#,
                     "sh",
                     user_path,
                     root_path,
@@ -312,7 +312,7 @@ dd if="$1" of="$2" iflag=nofollow,count_bytes count="$3" status=none
         meta.artifact_id = Some(id);
         let inserted = sqlx::query(
             "INSERT INTO artifacts (id, bot_id, turn_id, guest_path, size_bytes, sha256, meta)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(id)
         .bind(bot_id)
@@ -341,7 +341,7 @@ dd if="$1" of="$2" iflag=nofollow,count_bytes count="$3" status=none
     ) -> Result<Result<(Vec<u8>, serde_json::Value), ScreenRefusal>, ComputerError> {
         let row: Option<(Vec<u8>, Option<serde_json::Value>)> = sqlx::query_as(
             "SELECT sha256, meta FROM artifacts
-             WHERE id = $1 AND bot_id = $2 AND guest_path LIKE 'screen:%'",
+             WHERE id = ?1 AND bot_id = ?2 AND guest_path LIKE 'screen:%'",
         )
         .bind(artifact_id)
         .bind(bot_id)

@@ -34,7 +34,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// `Some(true)` active, `Some(false)` deleted, `None` unknown.
 async fn bot_state(state: &AppState, bot_id: Uuid) -> Result<Option<bool>, ApiError> {
     Ok(
-        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1")
+        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
             .bind(bot_id)
             .fetch_optional(&state.db)
             .await?,
@@ -117,7 +117,7 @@ async fn correct(
         source: json!({ "request_id": body.request_id }),
         supersedes_seq: Some(body.supersedes_seq),
     };
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let seqs = match memory::append(&mut tx, bot_id, &entry).await {
         Ok(seqs) => seqs,
         Err(AppendError::Conflict) => {
@@ -156,7 +156,7 @@ async fn access(
     require_active(&state, bot_id).await?;
     let targets: Vec<Uuid> = sqlx::query_scalar(
         "SELECT g.target_bot_id FROM memory_read_grants g JOIN bots b ON b.id = g.target_bot_id
-         WHERE g.reader_bot_id = $1 AND b.status = 'active' ORDER BY g.created_at",
+         WHERE g.reader_bot_id = ?1 AND b.status = 'active' ORDER BY g.created_at",
     )
     .bind(bot_id)
     .fetch_all(&state.db)
@@ -177,7 +177,7 @@ async fn grant(
     require_active(&state, reader).await?;
     require_active(&state, target).await?;
     sqlx::query(
-        "INSERT INTO memory_read_grants (reader_bot_id, target_bot_id) VALUES ($1, $2)
+        "INSERT INTO memory_read_grants (reader_bot_id, target_bot_id) VALUES (?1, ?2)
          ON CONFLICT DO NOTHING",
     )
     .bind(reader)
@@ -194,7 +194,7 @@ async fn revoke(
     if bot_state(&state, reader).await?.is_none() {
         return Err(ApiError::not_found());
     }
-    sqlx::query("DELETE FROM memory_read_grants WHERE reader_bot_id = $1 AND target_bot_id = $2")
+    sqlx::query("DELETE FROM memory_read_grants WHERE reader_bot_id = ?1 AND target_bot_id = ?2")
         .bind(reader)
         .bind(target)
         .execute(&state.db)
@@ -305,7 +305,7 @@ async fn set_recipe(
         context_high,
         context_low,
     };
-    let updated = sqlx::query("UPDATE installation SET memory_recipe = $1")
+    let updated = sqlx::query("UPDATE installation SET memory_recipe = ?1")
         .bind(sqlx::types::Json(recipe))
         .execute(&state.db)
         .await?

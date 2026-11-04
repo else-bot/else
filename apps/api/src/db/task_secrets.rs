@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -182,7 +182,7 @@ fn open(
 
 /// Store (create or replace) a secret. Returns whether it was new.
 pub async fn put(
-    pool: &PgPool,
+    pool: &SqlitePool,
     key: &SecretKey,
     bot_id: Uuid,
     name: &str,
@@ -199,26 +199,38 @@ pub async fn put(
     let plain = Zeroizing::new(serde_json::to_vec(env).expect("a map serializes"));
     let cipher = seal(key, &salt, &plain)?;
     let names: Vec<String> = env.keys().cloned().collect();
-    let inserted: bool = sqlx::query_scalar(
-        "INSERT INTO task_secrets (bot_id, name, env_names, salt, ciphertext)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (bot_id, name) DO UPDATE SET env_names = $3, salt = $4, ciphertext = $5,
-             updated_at = now()
-         RETURNING (xmax = 0)",
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM task_secrets WHERE bot_id = ?1 AND name = ?2)",
     )
     .bind(bot_id)
     .bind(name)
-    .bind(&names)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_secrets (bot_id, name, env_names, salt, ciphertext)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (bot_id, name) DO UPDATE SET env_names = ?3, salt = ?4, ciphertext = ?5,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
+    )
+    .bind(bot_id)
+    .bind(name)
+    .bind(sqlx::types::Json(&names))
     .bind(&salt[..])
     .bind(&cipher)
-    .fetch_one(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(inserted)
+    tx.commit().await?;
+    Ok(!exists)
 }
 
-pub async fn list(pool: &PgPool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sqlx::Error> {
-    let rows: Vec<(String, Vec<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT name, env_names, updated_at FROM task_secrets WHERE bot_id = $1 ORDER BY name",
+pub async fn list(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sqlx::Error> {
+    let rows: Vec<(
+        String,
+        sqlx::types::Json<Vec<String>>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT name, env_names, updated_at FROM task_secrets WHERE bot_id = ?1 ORDER BY name",
     )
     .bind(bot_id)
     .fetch_all(pool)
@@ -227,15 +239,15 @@ pub async fn list(pool: &PgPool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sqlx::
         .into_iter()
         .map(|(name, env, updated_at)| SecretInfo {
             name,
-            env,
+            env: env.0,
             updated_at,
         })
         .collect())
 }
 
-pub async fn delete(pool: &PgPool, bot_id: Uuid, name: &str) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, bot_id: Uuid, name: &str) -> Result<bool, sqlx::Error> {
     Ok(
-        sqlx::query("DELETE FROM task_secrets WHERE bot_id = $1 AND name = $2")
+        sqlx::query("DELETE FROM task_secrets WHERE bot_id = ?1 AND name = ?2")
             .bind(bot_id)
             .bind(name)
             .execute(pool)
@@ -249,7 +261,7 @@ pub async fn delete(pool: &PgPool, bot_id: Uuid, name: &str) -> Result<bool, sql
 /// that is not this bot's is `Unknown`, the same as a missing one. Two
 /// secrets setting the same variable are refused.
 pub async fn resolve(
-    pool: &PgPool,
+    pool: &SqlitePool,
     key: Option<&SecretKey>,
     bot_id: Uuid,
     names: &[String],
@@ -266,7 +278,7 @@ pub async fn resolve(
     let key = key.ok_or(SecretError::NoKey)?;
     for name in names {
         let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-            "SELECT salt, ciphertext FROM task_secrets WHERE bot_id = $1 AND name = $2",
+            "SELECT salt, ciphertext FROM task_secrets WHERE bot_id = ?1 AND name = ?2",
         )
         .bind(bot_id)
         .bind(name)

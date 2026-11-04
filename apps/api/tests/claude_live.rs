@@ -64,7 +64,7 @@ fn private_dir(dir: &Path) -> PathBuf {
 async fn save_claude_profile(db: &TestDb) {
     sqlx::query(
         "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
-         VALUES ('claude', $1, 'low', 'default') ON CONFLICT (provider_id) DO NOTHING",
+         VALUES ('claude', ?1, 'low', 'default') ON CONFLICT (provider_id) DO NOTHING",
     )
     .bind(MODEL)
     .execute(&db.pool)
@@ -90,9 +90,9 @@ async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, Str
         )
         .await;
     let (text, error): (String, Option<String>) = sqlx::query_as(
-        "SELECT coalesce((SELECT string_agg(text, '') FROM items WHERE turn_id = t.id
+        "SELECT coalesce((SELECT group_concat(text, '') FROM items WHERE turn_id = t.id
                           AND kind = 'assistant'), ''), t.error_message
-         FROM turns t WHERE t.id = $1",
+         FROM turns t WHERE t.id = ?1",
     )
     .bind(turn)
     .fetch_one(&app.db.pool)
@@ -108,7 +108,7 @@ async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, Str
 async fn session(app: &TestApp, bot: &str, provider: &str) -> Option<String> {
     sqlx::query_scalar(
         "SELECT native_session_id FROM provider_sessions
-         WHERE bot_id = $1 AND provider_id = $2 AND status = 'active'",
+         WHERE bot_id = ?1 AND provider_id = ?2 AND status = 'active'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .bind(provider)
@@ -183,7 +183,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     assert!(text.contains("ZETA-9"), "{text}");
     assert_eq!(session(&app, &a, "claude").await.unwrap(), first, "resumed");
     let reported: serde_json::Value =
-        sqlx::query_scalar("SELECT reported_profile FROM turns WHERE id = $1")
+        sqlx::query_scalar("SELECT reported_profile FROM turns WHERE id = ?1")
             .bind(turn)
             .fetch_one(&app.db.pool)
             .await
@@ -208,7 +208,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     let mut most = 0;
     for _ in 0..400 {
         most = most.max(provider_processes());
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(probe.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
             .await
@@ -219,9 +219,9 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let (status, code, text): (String, Option<String>, String) = sqlx::query_as(
-        "SELECT t.status, t.error_code, coalesce((SELECT string_agg(text, '') FROM items
+        "SELECT t.status, t.error_code, coalesce((SELECT group_concat(text, '') FROM items
                 WHERE turn_id = t.id AND kind = 'assistant'), '')
-         FROM turns t WHERE t.id = $1",
+         FROM turns t WHERE t.id = ?1",
     )
     .bind(probe.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -247,8 +247,8 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     let (_, status, _) = ask(&app, &b, "claude", "Synthetic test. Reply OK.").await;
     assert_eq!(status, "completed");
     sqlx::query(
-        "UPDATE provider_sessions SET native_session_id = $2
-         WHERE bot_id = $1 AND provider_id = 'claude' AND status = 'active'",
+        "UPDATE provider_sessions SET native_session_id = ?2
+         WHERE bot_id = ?1 AND provider_id = 'claude' AND status = 'active'",
     )
     .bind(b.parse::<Uuid>().unwrap())
     .bind(&first)
@@ -282,7 +282,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     let long = reply.body["turn"]["id"].as_str().unwrap().to_owned();
     for _ in 0..400 {
         let n: i64 = sqlx::query_scalar(
-            "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = $1 AND kind = 'assistant'",
+            "SELECT coalesce(sum(length(text)), 0) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
         )
         .bind(long.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
@@ -453,22 +453,29 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     )
     .await;
     let jobs: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = $1")
+        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = ?1")
             .bind(bot_id)
             .fetch_all(&app.db.pool)
             .await
             .unwrap();
-    let handoffs: Vec<(i64, String, String, String, String, Vec<i64>)> = sqlx::query_as(
+    let handoffs: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        String,
+        sqlx::types::Json<Vec<i64>>,
+    )> = sqlx::query_as(
         "SELECT t.turn_no, h.source_provider_id, h.target_provider_id, h.kind, h.state,
                 h.selected_turns
-         FROM handoffs h JOIN turns t ON t.id = h.turn_id WHERE h.bot_id = $1 ORDER BY t.turn_no",
+         FROM handoffs h JOIN turns t ON t.id = h.turn_id WHERE h.bot_id = ?1 ORDER BY t.turn_no",
     )
     .bind(bot_id)
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
     let activity: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
     .bind(bot_id)
     .fetch_all(&app.db.pool)
@@ -477,8 +484,8 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     eprintln!("jobs {jobs:?}\nhandoffs {handoffs:#?}\nactivity {activity:#?}");
     let claude_checks: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry
-         WHERE bot_id = $1 AND kind = 'tool_activity'
-           AND source->>'tool' = 'computer_job' AND source->>'turn_id' = $2",
+         WHERE bot_id = ?1 AND kind = 'tool_activity'
+           AND source->>'tool' = 'computer_job' AND source->>'turn_id' = ?2",
     )
     .bind(bot_id)
     .bind(t2_id.to_string())
@@ -514,12 +521,16 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
         (src.as_str(), dst.as_str(), state.as_str()),
         ("codex", "claude", "accepted")
     );
-    assert_eq!(selected, &vec![1]);
+    assert_eq!(&selected.0, &vec![1]);
     let (_, src, dst, _, state, selected) = &handoffs[1];
     assert_eq!(
         (src.as_str(), dst.as_str(), state.as_str()),
         ("claude", "codex", "accepted")
     );
-    assert_eq!(selected, &vec![2], "returning Codex got only Claude's turn");
+    assert_eq!(
+        &selected.0,
+        &vec![2],
+        "returning Codex got only Claude's turn"
+    );
     let _ = (t3, t3_id);
 }

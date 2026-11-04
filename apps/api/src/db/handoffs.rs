@@ -1,7 +1,7 @@
 //! Provider handoff records (POC-020). See migration `0017_handoffs`.
 
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::providers::{HandoffContext, JobReceipt, Selection};
@@ -11,12 +11,12 @@ pub const PROMPT_VERSION: &str = "else-handoff-v1";
 
 /// The provider of the owner turn just before `turn_no`, if any.
 pub async fn previous_provider(
-    pool: &PgPool,
+    pool: &SqlitePool,
     conversation_id: Uuid,
     turn_no: i64,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT provider_id FROM turns WHERE conversation_id = $1 AND turn_no < $2
+        "SELECT provider_id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
          ORDER BY turn_no DESC LIMIT 1",
     )
     .bind(conversation_id)
@@ -28,13 +28,13 @@ pub async fn previous_provider(
 /// The handoff already prepared for this attempt (a restarted dispatch
 /// reuses the frozen checkpoint rather than asking again).
 pub async fn existing(
-    pool: &PgPool,
+    pool: &SqlitePool,
     turn_id: Uuid,
     attempt: i32,
 ) -> Result<Option<HandoffContext>, sqlx::Error> {
     let row: Option<(Uuid, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT id, source_provider_id, checkpoint, reason FROM handoffs
-         WHERE turn_id = $1 AND attempt = $2",
+         WHERE turn_id = ?1 AND attempt = ?2",
     )
     .bind(turn_id)
     .bind(attempt)
@@ -52,9 +52,9 @@ pub async fn existing(
 
 /// Whether any attempt of this turn already handed off and was accepted
 /// (a continuation does not hand off again).
-pub async fn accepted_for_turn(pool: &PgPool, turn_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn accepted_for_turn(pool: &SqlitePool, turn_id: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM handoffs WHERE turn_id = $1 AND state = 'accepted')",
+        "SELECT EXISTS (SELECT 1 FROM handoffs WHERE turn_id = ?1 AND state = 'accepted')",
     )
     .bind(turn_id)
     .fetch_one(pool)
@@ -76,7 +76,7 @@ pub struct NewHandoff<'a> {
 /// Persist a prepared handoff while its turn is still active. Returns it,
 /// or `None` if the turn ended meanwhile.
 pub async fn insert(
-    pool: &PgPool,
+    pool: &SqlitePool,
     new: NewHandoff<'_>,
 ) -> Result<Option<HandoffContext>, sqlx::Error> {
     let id = Uuid::new_v4();
@@ -89,11 +89,11 @@ pub async fn insert(
         "INSERT INTO handoffs (id, bot_id, conversation_id, turn_id, attempt, source_provider_id,
              target_provider_id, source_session_id, boundary_turn_no, kind, reason, checkpoint,
              prompt_version)
-         SELECT $1, $2, $3, $4, $5, $6, $7,
-             (SELECT id FROM provider_sessions WHERE conversation_id = $3
-                AND provider_id = $6 AND status = 'active'),
-             $8, $9, $10, $11, $12
-         WHERE EXISTS (SELECT 1 FROM turns WHERE id = $4 AND status IN {})
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+             (SELECT id FROM provider_sessions WHERE conversation_id = ?3
+                AND provider_id = ?6 AND status = 'active'),
+             ?8, ?9, ?10, ?11, ?12
+         WHERE EXISTS (SELECT 1 FROM turns WHERE id = ?4 AND status IN {})
          ON CONFLICT (turn_id, attempt) DO NOTHING",
         crate::db::turns::ACTIVE_STATUSES
     )))
@@ -129,21 +129,21 @@ pub async fn insert(
 
 /// Record what the packet carried, before it is sent.
 pub async fn record_packet(
-    pool: &PgPool,
+    pool: &SqlitePool,
     turn_id: Uuid,
     attempt: i32,
     selection: &Selection,
     payload: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE handoffs SET selected_turns = $3, omitted_turns = $4, payload_sha256 = $5,
-             updated_at = now()
-         WHERE turn_id = $1 AND attempt = $2 AND state = 'prepared'",
+        "UPDATE handoffs SET selected_turns = ?3, omitted_turns = ?4, payload_sha256 = ?5,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE turn_id = ?1 AND attempt = ?2 AND state = 'prepared'",
     )
     .bind(turn_id)
     .bind(attempt)
-    .bind(&selection.selected)
-    .bind(&selection.omitted)
+    .bind(sqlx::types::Json(&selection.selected))
+    .bind(sqlx::types::Json(&selection.omitted))
     .bind(Sha256::digest(payload.as_bytes()).to_vec())
     .execute(pool)
     .await?;
@@ -153,17 +153,17 @@ pub async fn record_packet(
 /// Move this attempt's handoff between delivery states, inside the
 /// caller's transaction (the turn's own transition).
 pub async fn transition(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     turn_id: Uuid,
     attempt: i32,
     from: &str,
     to: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE handoffs SET state = $4, updated_at = now(),
+        "UPDATE handoffs SET state = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              target_session_id = coalesce(target_session_id,
-                 (SELECT provider_session_id FROM turns WHERE id = $1))
-         WHERE turn_id = $1 AND attempt = $2 AND state = $3",
+                 (SELECT provider_session_id FROM turns WHERE id = ?1))
+         WHERE turn_id = ?1 AND attempt = ?2 AND state = ?3",
     )
     .bind(turn_id)
     .bind(attempt)
@@ -177,15 +177,15 @@ pub async fn transition(
 /// A handoff still `sending` whose turn has ended without acknowledgment
 /// (restart or orphan recovery) has an unknown delivery.
 pub async fn settle_ended(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     turn_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE handoffs h SET state = 'uncertain', updated_at = now()
+        "UPDATE handoffs AS h SET state = 'uncertain', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          FROM turns t
          WHERE h.turn_id = t.id AND h.state = 'sending'
            AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
-           AND ($1::uuid IS NULL OR h.turn_id = $1)",
+           AND (?1 IS NULL OR h.turn_id = ?1)",
     )
     .bind(turn_id)
     .execute(&mut *conn)
@@ -196,15 +196,14 @@ pub async fn settle_ended(
 /// The bot's jobs that may still be running or whose outcome is unknown
 /// (`lost` within a week), newest first, at most 20.
 pub async fn job_receipts(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
 ) -> Result<Vec<JobReceipt>, sqlx::Error> {
     let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
-        "SELECT id, status, left(command, 300), to_char(started_at AT TIME ZONE 'UTC',
-                'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+        "SELECT id, status, substr(command, 1, 300), started_at
          FROM guest_jobs
-         WHERE bot_id = $1 AND (status IN ('starting', 'running', 'cancelling')
-               OR (status = 'lost' AND started_at > now() - interval '7 days'))
+         WHERE bot_id = ?1 AND (status IN ('starting', 'running', 'cancelling')
+               OR (status = 'lost' AND started_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-7 days')))
          ORDER BY started_at DESC LIMIT 20",
     )
     .bind(bot_id)

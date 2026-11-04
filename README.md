@@ -4,7 +4,7 @@ else.bot is a personal AI agent that learns to reflect its owner. One main assis
 
 You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
 
-POC-001 through POC-032 are marked complete: the GPUI messaging app, Rust API, PostgreSQL storage, memory, delegation, bot computers, provider switching, backup/recovery, guest programming tools and script workflows with task secrets, visual desktop control (screenshots and input), CDP scripting against the visible browser, and sidebar categories are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits.
+POC-001 through POC-032 are marked complete: the GPUI messaging app, Rust API, SQLite storage, memory, delegation, bot computers, provider switching, backup/recovery, guest programming tools and script workflows with task secrets, visual desktop control (screenshots and input), CDP scripting against the visible browser, and sidebar categories are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits.
 
 The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
 
@@ -43,7 +43,7 @@ Each bot has a project directory on the host (`~/.else/bots/<bot id>`), mounted 
 
 else.bot should work with AI providers through CLIs installed on the host and your existing subscriptions. The CLIs run on the host as your user, starting in the bot's project directory, with their own shell and file tools; bots operate their isolated computers through scoped tools. Keeping host work to what you ask for is up to the bot's instructions, not a sandbox: a bot can read and change what your user can. The [decision record](docs/decisions/0001-providers-run-on-the-host.md) explains this trade-off. You can switch providers during a task while keeping one conversation and handing over the context needed to continue.
 
-The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings are saved in PostgreSQL and can be updated by the owner. Provider-native sub-agents are disabled for the POC. See the [execution policy](docs/providers.md#saved-execution-profile).
+The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings are saved in SQLite and can be updated by the owner. Provider-native sub-agents are disabled for the POC. See the [execution policy](docs/providers.md#saved-execution-profile).
 
 The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
 
@@ -56,18 +56,17 @@ curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bas
 ```
 
 It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
-- build tools, Docker with Compose, the PostgreSQL 18 client tools (from apt.postgresql.org on Debian and Ubuntu), and the desktop's libraries;
+- build tools, the SQLite CLI for optional SQL inspection, and the desktop's libraries;
 - in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
-- PostgreSQL 18 as the Docker Compose project `else-bot` with a generated password;
-- the guest VM image (about 15 minutes the first time);
+- SQLite bundled into the API, with its database at `~/.else/data/else.sqlite3`;
+- Docker for building the guest VM image (about 15 minutes the first time; skip with `--skip-guest-image`);
 - `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`. The installer asks once whether the API should start at boot; if yes, it turns on lingering for your user with `loginctl enable-linger`, using sudo if needed. `--autostart` and `--no-autostart` choose without asking, and the choice is kept for updates.
 
 Bot computers need `/dev/kvm`; the installer offers to add you to the `docker` and `kvm` groups (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
-On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, PostgreSQL in Docker, Microsandbox, and the guest image. Before running it, install:
+On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, SQLite, Microsandbox, and the guest image. Before running it, install:
 - Xcode with the Metal toolchain (the desktop compiles Metal shaders);
-- OrbStack or Docker Desktop, running;
-- the PostgreSQL 18 client tools. If they are missing, the installer offers to run `brew install postgresql@18`.
+- OrbStack or Docker Desktop, running, only to build the optional guest image.
 
 Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`, and you should also set OrbStack or Docker Desktop to start at login. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
 
@@ -121,15 +120,16 @@ There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`
 
 ## Try the POC
 
-You need Rust, Docker, and a logged-in `codex` CLI (`codex login`). From the repository root:
+You need Rust and a logged-in `codex` CLI (`codex login`). From the repository root:
 
 ```sh
 test -e .env || cp .env.example .env
-docker compose up -d --wait
 cargo run -p else-api -- setup     # once: credentials, migrations, main bot
 cargo run -p else-api -- serve     # leave running
 cargo run -p else-desktop          # in another terminal
 ```
+
+The API creates `~/.else/else.sqlite3` by default. Installed releases set `ELSE_DATA_DIR=~/.else/data` and store it there instead. Override `ELSE_DATA_DIR` for an isolated checkout, or `DATABASE_URL=sqlite:///absolute/path/else.sqlite3` for another file. SQLite is bundled; no database service or Compose is needed. This alpha change starts with a fresh database; PostgreSQL data and old PostgreSQL backup sets are not imported.
 
 The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs on the host in the bot's project directory, with its own shell and file tools, scoped else.bot tools, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
 
@@ -141,17 +141,17 @@ The Cargo workspace separates the API and desktop client. Development services l
 Cargo.toml
 Cargo.lock
 apps/
-	api/          Axum API, scheduler, PostgreSQL store, provider adapters, migrations
+	api/          Axum API, scheduler, SQLite store, provider adapters, migrations
 	desktop/      GPUI desktop client
 infra/
-	compose.yaml  PostgreSQL
+	compose.yaml  optional S3 test emulator
 scripts/
 	demo.sh       disposable demo installation
 docs/
 .env.example
 ```
 
-Check and test the workspace (the tests need the Compose PostgreSQL; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
+Check and test the workspace (database tests use temporary SQLite files; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
 
 ```sh
 cargo fmt --all -- --check
@@ -174,7 +174,7 @@ The detailed notes separate requirements, decisions, proposals, and research res
 | Topic | Details |
 | --- | --- |
 | [Implementation backlog](TODO.md) | Ordered POC tasks, completion gates, and autonomous-agent handoff. |
-| [Local development](docs/development.md) | Workspace commands, PostgreSQL setup, configuration, and database lifecycle. |
+| [Local development](docs/development.md) | Workspace commands, SQLite setup, configuration, and database lifecycle. |
 | [Research review](docs/research/README.md) | Seven research tracks, local evidence, the starting design, and remaining integration checks. |
 | [Product requirements](docs/product.md) | Context recognition, delegation, built-in tools, and bot computers. |
 | [Architecture](docs/architecture.md) | Rust API, desktop client, and the preference for native iOS. |
@@ -182,7 +182,7 @@ The detailed notes separate requirements, decisions, proposals, and research res
 | [System prompts](docs/prompts.md) | Prompt structure, bot roles, summary and continuation drafts, and validation. |
 | [Security and secrets](docs/security.md) | Prompt injection controls, isolation, the master key, and open recovery design. |
 | [Routines and webhooks](docs/routines.md) | Scheduled work, event inputs, and independent webhook bearer tokens. |
-| [Memory and storage](docs/memory.md) | UniiChat-based memory, saved views, and PostgreSQL verification. |
+| [Memory and storage](docs/memory.md) | UniiChat-based memory, saved views, and SQLite storage. |
 | [Bot computers](docs/sandboxes.md) | Runtime research, Rust deployment, VM locks, and resource limits. |
 | [Backup design](docs/backups.md) | Database exports, VM snapshots, encryption, retention, and size estimates. |
 | [Restore procedure](docs/restore.md) | Planned recovery on a new server and startup that preserves saved state. |

@@ -300,7 +300,7 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
 /// Whether this turn's model is verified to receive images.
 async fn vision(state: &AppState, grant: &Grant) -> Result<(), String> {
     let model: Option<String> =
-        sqlx::query_scalar("SELECT profile->>'model' FROM turns WHERE id = $1")
+        sqlx::query_scalar("SELECT profile->>'model' FROM turns WHERE id = ?1")
             .bind(grant.turn_id)
             .fetch_optional(&state.db)
             .await

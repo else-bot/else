@@ -9,19 +9,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{BackupConfig, Coordinator, SetSummary, create_set};
-use super::{BackupError, PgParams};
+use super::{BackupError, DatabaseParams};
 use crate::credentials::SecretKey;
 
 const FIRST_RETRY: Duration = Duration::from_secs(60);
 const MAX_RETRY: Duration = Duration::from_secs(3600);
 
 pub struct BackupWorker {
-    pool: PgPool,
-    params: PgParams,
+    pool: SqlitePool,
+    params: DatabaseParams,
     key: Arc<SecretKey>,
     pub config: BackupConfig,
     coordinator: Coordinator,
@@ -29,7 +29,12 @@ pub struct BackupWorker {
 }
 
 impl BackupWorker {
-    pub fn new(pool: PgPool, params: PgParams, key: Arc<SecretKey>, config: BackupConfig) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        params: DatabaseParams,
+        key: Arc<SecretKey>,
+        config: BackupConfig,
+    ) -> Self {
         Self {
             pool,
             params,
@@ -121,7 +126,7 @@ impl BackupWorker {
     async fn locked_run(&self, cancel: &CancellationToken) -> Result<SetSummary, BackupError> {
         let run = uuid::Uuid::new_v4();
         let set_id = super::new_set_id();
-        sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES (?1, ?2)")
             .bind(run)
             .bind(&set_id)
             .execute(&self.pool)
@@ -145,8 +150,8 @@ impl BackupWorker {
                     .map(|a| a.ciphertext_bytes)
                     .sum();
                 sqlx::query(
-                    "UPDATE backup_runs SET local_status = 'completed', finished_at = now(),
-                         ciphertext_bytes = $2, coverage = $3 WHERE id = $1",
+                    "UPDATE backup_runs SET local_status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                         ciphertext_bytes = ?2, coverage = ?3 WHERE id = ?1",
                 )
                 .bind(run)
                 .bind(bytes as i64)
@@ -159,8 +164,8 @@ impl BackupWorker {
                 let message: String = err.to_string().chars().take(500).collect();
                 tracing::warn!(set = %set_id, error = %message, "backup failed");
                 sqlx::query(
-                    "UPDATE backup_runs SET local_status = 'failed', finished_at = now(), error = $2
-                     WHERE id = $1",
+                    "UPDATE backup_runs SET local_status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), error = ?2
+                     WHERE id = ?1",
                 )
                 .bind(run)
                 .bind(message)
@@ -198,7 +203,7 @@ impl BackupWorker {
 
     async fn recover_locked(&self) -> Result<usize, BackupError> {
         sqlx::query(
-            "UPDATE backup_runs SET local_status = 'failed', finished_at = now(),
+            "UPDATE backup_runs SET local_status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  error = 'interrupted before it finished'
              WHERE local_status = 'running'",
         )

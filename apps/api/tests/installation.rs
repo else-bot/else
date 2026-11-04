@@ -1,4 +1,4 @@
-//! POC-003: migrations and explicit installation setup against PostgreSQL.
+//! POC-003: migrations and explicit installation setup against SQLite.
 
 mod common;
 
@@ -7,7 +7,7 @@ use else_api::db::{self, installation};
 use installation::{InstallError, MainBot};
 use uuid::Uuid;
 
-async fn counts(pool: &sqlx::PgPool) -> (i64, i64, i64, i64) {
+async fn counts(pool: &sqlx::SqlitePool) -> (i64, i64, i64, i64) {
     sqlx::query_as(
         "SELECT (SELECT count(*) FROM bots), (SELECT count(*) FROM conversations),
                 (SELECT count(*) FROM installation), (SELECT count(*) FROM provider_profiles)",
@@ -62,7 +62,7 @@ async fn repeated_migrate_setup_and_startup_are_stable() {
     let MainBot::Created(main_id) = first.main_bot else {
         panic!()
     };
-    let snapshot = |pool: sqlx::PgPool| async move {
+    let snapshot = |pool: sqlx::SqlitePool| async move {
         let ids: Vec<(Uuid, Uuid)> =
             sqlx::query_as("SELECT b.id, c.id FROM bots b JOIN conversations c ON c.bot_id = b.id")
                 .fetch_all(&pool)
@@ -130,7 +130,7 @@ async fn cleared_default_is_preserved_by_setup_and_startup() {
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
     // Simulates deleting the main bot (POC-004): tombstone and clear default.
-    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now()")
+    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
         .execute(&db.pool)
         .await
         .unwrap();
@@ -168,7 +168,7 @@ async fn partial_or_inconsistent_installations_are_refused() {
     // A default pointing at a tombstoned bot.
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
-    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now()")
+    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
         .execute(&db.pool)
         .await
         .unwrap();
@@ -211,7 +211,7 @@ async fn futures_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn constraints_and_rollback_hold_in_postgres() {
+async fn constraints_and_rollback_hold_in_sqlite() {
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
 
@@ -234,7 +234,7 @@ async fn constraints_and_rollback_hold_in_postgres() {
     ] {
         let result = sqlx::query(
             "INSERT INTO bots (id, name, role, status, deleted_at)
-             VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN now() END)",
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END)",
         )
         .bind(Uuid::new_v4())
         .bind(name)
@@ -255,14 +255,14 @@ async fn constraints_and_rollback_hold_in_postgres() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let mut tx = db.pool.begin().await.unwrap();
+    let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let name = else_api::app::bots::BotName::parse("Work").unwrap();
     let role = else_api::app::bots::BotRole::parse("Help with work").unwrap();
     installation::insert_bot(&mut tx, Uuid::new_v4(), &name, &role)
         .await
         .unwrap();
     // A second conversation for an existing bot violates the unique bot_id.
-    let err = sqlx::query("INSERT INTO conversations (id, bot_id) VALUES ($1, $2)")
+    let err = sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
         .bind(Uuid::new_v4())
         .bind(existing_bot)
         .execute(&mut *tx)
@@ -278,7 +278,7 @@ async fn unreachable_database_is_a_clear_error() {
         "postgresql://else:secret-canary@127.0.0.1:1/else".to_owned(),
     );
     let err = db::connect(&url).await.unwrap_err().to_string();
-    assert!(err.starts_with("cannot reach PostgreSQL"), "{err}");
+    assert!(err.contains("SQLite"), "{err}");
     assert!(!err.contains("secret-canary"));
     let err = db::connect(&else_api::config::DatabaseUrl::new("not a url".into()))
         .await

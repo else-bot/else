@@ -2,7 +2,7 @@
 //!
 //! Adapters translate one turn into provider-specific process communication.
 //! They report progress only through a [`TurnSink`], which persists before
-//! returning; PostgreSQL stays authoritative for visible history. Provider
+//! returning; SQLite stays authoritative for visible history. Provider
 //! event formats never cross this boundary.
 
 use async_trait::async_trait;

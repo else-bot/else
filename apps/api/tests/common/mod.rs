@@ -1,115 +1,30 @@
-//! Shared helpers for tests that need real PostgreSQL.
-//!
-//! Each test gets its own freshly created database on the development server
-//! (`TEST_DATABASE_URL`, else the `.env` settings), dropped afterwards. The
-//! owner's application database is never touched.
+//! Each integration test owns a private temporary SQLite database.
 #![allow(dead_code)]
-
-use else_api::config::{Config, DatabaseUrl, ProcessEnv};
-use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
+use else_api::config::{Config, DatabaseUrl};
+use sqlx::SqlitePool;
 pub struct TestDb {
-    pub pool: PgPool,
+    pub pool: SqlitePool,
     pub url: DatabaseUrl,
-    name: String,
-    admin: PgConnectOptions,
+    _dir: tempfile::TempDir,
 }
-
-fn admin_options() -> PgConnectOptions {
-    let _ = dotenvy::dotenv();
-    let url = match std::env::var("TEST_DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => Config::load(&ProcessEnv)
-            .expect("configuration")
-            .require_database()
-            .expect("PostgreSQL tests need TEST_DATABASE_URL or the .env POSTGRES_* settings")
-            .expose()
-            .to_owned(),
-    };
-    url.parse().expect("valid PostgreSQL URL")
-}
-
 impl TestDb {
-    /// A new, empty database. Migrations are not applied.
     pub async fn empty() -> Self {
-        let admin = admin_options();
-        let name = format!("else_test_{}", uuid::Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(admin.clone())
-            .await
-            .expect("PostgreSQL for tests is not reachable; run `docker compose up -d --wait`");
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin_pool)
-            .await
-            .unwrap();
-        admin_pool.close().await;
-        let options = admin.clone().database(&name);
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(options.clone())
-            .await
-            .unwrap();
-        let url = DatabaseUrl::new(options_url(&admin, &name));
+        let dir = tempfile::tempdir().unwrap();
+        let url = DatabaseUrl::new(format!(
+            "sqlite://{}",
+            dir.path().join("test.sqlite3").display()
+        ));
+        let pool = else_api::db::connect(&url).await.unwrap();
         Self {
             pool,
             url,
-            name,
-            admin,
+            _dir: dir,
         }
     }
-
-    /// A new database with all migrations applied.
     pub async fn migrated() -> Self {
         let db = Self::empty().await;
         else_api::db::migrate(&db.pool).await.unwrap();
         db
-    }
-}
-
-fn options_url(admin: &PgConnectOptions, name: &str) -> String {
-    let base = std::env::var("TEST_DATABASE_URL").ok().unwrap_or_else(|| {
-        Config::load(&ProcessEnv)
-            .unwrap()
-            .require_database()
-            .unwrap()
-            .expose()
-            .to_owned()
-    });
-    let _ = admin;
-    // Replace the path component with the test database name.
-    let (prefix, _) = base.rsplit_once('/').expect("URL with a database path");
-    format!("{prefix}/{name}")
-}
-
-impl Drop for TestDb {
-    fn drop(&mut self) {
-        // Tests use the multi-threaded runtime so cleanup can block in place.
-        let admin = self.admin.clone();
-        let name = self.name.clone();
-        let pool = self.pool.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                // Mark the pool closed before terminating its connections, so
-                // background listeners cannot reconnect to the test database.
-                // Do not wait for those listeners before FORCE disconnects them.
-                let closed = pool.close();
-                if let Ok(admin_pool) = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect_with(admin)
-                    .await
-                {
-                    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-                    )))
-                    .execute(&admin_pool)
-                    .await;
-                    admin_pool.close().await;
-                }
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), closed).await;
-            })
-        });
     }
 }
 
@@ -296,7 +211,7 @@ impl TestApp {
     ) -> String {
         let id: uuid::Uuid = turn_id.parse().unwrap();
         for _ in 0..(timeout.as_millis() / 25) {
-            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
                 .bind(id)
                 .fetch_one(&self.db.pool)
                 .await
@@ -510,5 +425,48 @@ impl Drop for ApiProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Canonical values for comparing arbitrary result rows across recovery.
+pub async fn rows(conn: &mut sqlx::SqliteConnection, sql: &str) -> Vec<String> {
+    use sqlx::{Row, TypeInfo, ValueRef};
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+        .fetch_all(conn)
+        .await
+        .unwrap();
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let values: Vec<serde_json::Value> = (0..row.len())
+                .map(|i| {
+                    let value = row.try_get_raw(i).unwrap();
+                    if value.is_null() {
+                        return serde_json::Value::Null;
+                    }
+                    match value.type_info().name() {
+                        "INTEGER" => serde_json::json!(row.get::<i64, _>(i)),
+                        "REAL" => serde_json::json!(row.get::<f64, _>(i)),
+                        "BLOB" => serde_json::json!(hex::encode(row.get::<Vec<u8>, _>(i))),
+                        _ => serde_json::json!(row.get::<String, _>(i)),
+                    }
+                })
+                .collect();
+            serde_json::to_string(&values).unwrap()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Remove only a test restore's SQLite files, never an application database.
+pub fn remove_database(options: &sqlx::sqlite::SqliteConnectOptions, name: &str) {
+    let params = else_api::backup::DatabaseParams {
+        options: options.clone(),
+    }
+    .with_database(name);
+    let path = params.options.get_filename();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }

@@ -1,12 +1,10 @@
 //! POC-013: the original memory log and scoped retrieval, against real
-//! PostgreSQL and the real router.
+//! SQLite and the real router.
 
 mod common;
 
-use std::borrow::Cow;
-
 use axum::http::StatusCode;
-use common::{TestApp, TestDb};
+use common::TestApp;
 use else_api::db::memory::{self, AppendError, Kind, NewEntry};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
@@ -23,7 +21,7 @@ fn entry<'a>(key: &'a str, body: &'a str) -> NewEntry<'a> {
 }
 
 async fn append(app: &TestApp, bot: Uuid, entry: &NewEntry<'_>) -> Result<Vec<i64>, AppendError> {
-    let mut tx = app.db.pool.begin().await.unwrap();
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let result = memory::append(&mut tx, bot, entry).await;
     if result.is_ok() {
         tx.commit().await.unwrap();
@@ -32,7 +30,7 @@ async fn append(app: &TestApp, bot: Uuid, entry: &NewEntry<'_>) -> Result<Vec<i6
 }
 
 async fn seqs(app: &TestApp, bot: Uuid) -> Vec<i64> {
-    sqlx::query_scalar("SELECT seq FROM memory_entry WHERE bot_id = $1 ORDER BY seq")
+    sqlx::query_scalar("SELECT seq FROM memory_entry WHERE bot_id = ?1 ORDER BY seq")
         .bind(bot)
         .fetch_all(&app.db.pool)
         .await
@@ -53,7 +51,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
         tasks.spawn(async move {
             let key = format!("k{i}");
             let body = format!("fact {i}");
-            let mut tx = pool.begin().await.unwrap();
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
             let seqs = memory::append(&mut tx, bot, &entry(&key, &body))
                 .await
                 .unwrap();
@@ -64,7 +62,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     for _ in 0..10 {
         let pool = app.db.pool.clone();
         tasks.spawn(async move {
-            let mut tx = pool.begin().await.unwrap();
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
             let seqs = memory::append(&mut tx, a, &entry("retry", "same content"))
                 .await
                 .unwrap();
@@ -89,7 +87,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     assert_eq!(seqs(&app, a).await, (0..21).collect::<Vec<i64>>());
     assert_eq!(seqs(&app, b).await, (0..10).collect::<Vec<i64>>());
     let retries: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM memory_entry WHERE bot_id = $1 AND request_key = 'retry'",
+        "SELECT count(*) FROM memory_entry WHERE bot_id = ?1 AND request_key = 'retry'",
     )
     .bind(a)
     .fetch_one(&app.db.pool)
@@ -104,7 +102,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     ));
 
     // A rolled-back append consumes no sequence.
-    let mut tx = app.db.pool.begin().await.unwrap();
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     memory::append(&mut tx, a, &entry("rolled", "rolled back"))
         .await
         .unwrap();
@@ -125,7 +123,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     let parts = append(&app, a, &entry("long", &long)).await.unwrap();
     assert_eq!(parts, vec![22, 23, 24]);
     let bodies: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND request_key = 'long' ORDER BY part_index",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND request_key = 'long' ORDER BY part_index",
     )
     .bind(a)
     .fetch_all(&app.db.pool)
@@ -247,7 +245,7 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
     let forged = sqlx::query(
         "INSERT INTO memory_entry (bot_id, seq, request_key, request_fingerprint, kind, authority,
              body, body_sha256, source, original_sha256, supersedes_seq)
-         VALUES ($1, 3, 'forged', $2, 'owner_correction', 'assistant', 'x', $2, '{}', $2, 0)",
+         VALUES (?1, 3, 'forged', ?2, 'owner_correction', 'assistant', 'x', ?2, '{}', ?2, 0)",
     )
     .bind(bot_id)
     .bind(vec![0u8; 32])
@@ -339,7 +337,7 @@ async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -490,15 +488,15 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
     let app = TestApp::installed().await;
     let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
     // A deletion in progress holds the bot row.
-    let mut deletion = app.db.pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+    let mut deletion = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
         .bind(bot)
         .execute(&mut *deletion)
         .await
         .unwrap();
     let pool = app.db.pool.clone();
     let append = tokio::spawn(async move {
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         let result = memory::append(&mut tx, bot, &entry("racer", "late")).await;
         if result.is_ok() {
             tx.commit().await.unwrap();
@@ -507,7 +505,7 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(!append.is_finished(), "the append waits for the deletion");
-    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = now() WHERE id = $1")
+    sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(bot)
         .execute(&mut *deletion)
         .await
@@ -594,7 +592,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -708,7 +706,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
 
     // Each call was logged to the caller's memory as tool activity only.
     let logged: Vec<(String, String)> = sqlx::query_as(
-        "SELECT kind, authority FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'",
+        "SELECT kind, authority FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
     .bind(me.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)
@@ -784,108 +782,4 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     )
     .await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn migration_backfills_existing_history_in_order() {
-    let db = TestDb::empty().await;
-    let before = sqlx::migrate::Migrator {
-        migrations: Cow::Owned(
-            else_api::db::MIGRATOR
-                .migrations
-                .iter()
-                .filter(|m| m.version < 6)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: false,
-        locking: true,
-        no_tx: false,
-        table_name: else_api::db::MIGRATOR.table_name.clone(),
-        create_schemas: else_api::db::MIGRATOR.create_schemas.clone(),
-    };
-    before.run(&db.pool).await.unwrap();
-    let bot = Uuid::new_v4();
-    let conversation = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, 'Old', 'old')")
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES ($1, $2)")
-        .bind(conversation)
-        .bind(bot)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    let long = "ü".repeat(20_000); // 20,000 characters, 40,000 bytes
-    let texts = [
-        ("user", "first question".to_owned()),
-        ("assistant", long.clone()),
-        ("user", "second".to_owned()),
-    ];
-    for (n, (kind, text)) in texts.iter().enumerate() {
-        let turn = Uuid::new_v4();
-        let owner_item = Uuid::new_v4();
-        let no = n as i64 + 1;
-        sqlx::query(
-            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-                 owner_item_id, provider_id, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'synthetic', 'completed')",
-        )
-        .bind(turn)
-        .bind(bot)
-        .bind(conversation)
-        .bind(Uuid::new_v4())
-        .bind(vec![0u8; 32])
-        .bind(no)
-        .bind(owner_item)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO items (id, conversation_id, seq, turn_id, kind, text) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(Uuid::new_v4())
-            .bind(conversation)
-            .bind(no)
-            .bind(turn)
-            .bind(kind)
-            .bind(text)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-    }
-    else_api::db::migrate(&db.pool).await.unwrap();
-    let rows: Vec<(i64, String, String, i32, i32)> = sqlx::query_as(
-        "SELECT seq, kind, body, part_index, part_count FROM memory_entry WHERE bot_id = $1 ORDER BY seq",
-    )
-    .bind(bot)
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    let kinds: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
-    assert_eq!(
-        kinds,
-        [
-            "owner_message",
-            "assistant_message",
-            "assistant_message",
-            "owner_message"
-        ]
-    );
-    assert_eq!(
-        rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-        vec![0, 1, 2, 3]
-    );
-    assert_eq!(
-        format!("{}{}", rows[1].2, rows[2].2),
-        long,
-        "split, not truncated"
-    );
-    assert_eq!((rows[2].3, rows[2].4), (1, 2));
-    let next: i64 = sqlx::query_scalar("SELECT next_seq FROM memory_store WHERE bot_id = $1")
-        .bind(bot)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    assert_eq!(next, 4);
 }

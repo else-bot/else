@@ -26,7 +26,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router, middleware};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -39,7 +39,7 @@ use error::ApiError;
 /// Shared request state. Credentials are held only as digests.
 pub struct AppState {
     pub owner_token: OwnerToken,
-    pub db: PgPool,
+    pub db: SqlitePool,
     pub scheduler: Arc<Scheduler>,
     pub events: crate::events::EventHub,
     /// Nonsecret identity of this API process, used to bind event cursors.
@@ -56,7 +56,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         owner_token: OwnerToken,
-        db: PgPool,
+        db: SqlitePool,
         scheduler: Arc<Scheduler>,
         events: crate::events::EventHub,
     ) -> Self {
@@ -339,12 +339,10 @@ pub mod tests {
             32
         );
         let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        // Auth tests deliberately have no database. Authorized capability
-        // requests query defaults; fail those queries promptly rather than
-        // spending the production pool's 30-second timeout on each one.
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        // Capability queries use an empty SQLite database in these auth tests.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("postgresql://unused@127.0.0.1:1/unused")
+            .connect_lazy("sqlite::memory:")
             .unwrap();
         let scheduler = Scheduler::new(pool.clone(), crate::providers::Registry::new(vec![]), 1);
         router(

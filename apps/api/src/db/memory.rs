@@ -2,16 +2,13 @@
 //!
 //! Appends run inside the caller's transaction, so a memory entry commits
 //! with the conversation change it records. The per-bot `memory_store` row
-//! is locked `FOR NO KEY UPDATE`: appends for one bot are serialized and
-//! numbered in commit order, other bots are unaffected, and a rollback
-//! consumes no sequence. A request key makes appends idempotent: a retry
-//! with the same content returns the original sequence numbers, a retry
-//! with different content is a conflict. Entries are never updated.
+//! is protected by immediate transactions: appends are serialized and
+//! a rolled-back append consumes no sequence. Originals are immutable.
 
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 /// Longest single entry body. Longer originals are split into parts.
@@ -107,7 +104,7 @@ fn fingerprint(entry: &NewEntry<'_>) -> Vec<u8> {
 /// Append one original (possibly as several parts) and return its sequence
 /// numbers. Runs in the caller's transaction.
 pub async fn append(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     entry: &NewEntry<'_>,
 ) -> Result<Vec<i64>, AppendError> {
@@ -117,24 +114,22 @@ pub async fn append(
     if (entry.kind == Kind::OwnerCorrection) != entry.supersedes_seq.is_some() {
         return Err(AppendError::InvalidCorrection);
     }
-    // Lock order: the bot row, then the memory store. `FOR SHARE` holds
-    // off a concurrent deletion (which updates the row) until commit, so
-    // nothing is appended to a bot whose deletion committed first.
+    // The caller's immediate transaction fences concurrent deletion and appends.
     let active: Option<bool> =
-        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+        sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
             .bind(bot_id)
             .fetch_optional(&mut *conn)
             .await?;
     if active != Some(true) {
         return Err(AppendError::BotInactive);
     }
-    sqlx::query("INSERT INTO memory_store (bot_id) VALUES ($1) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO memory_store (bot_id) VALUES (?1) ON CONFLICT DO NOTHING")
         .bind(bot_id)
         .execute(&mut *conn)
         .await?;
     let (next, generation, building): (i64, i32, Option<i32>) = sqlx::query_as(
         "SELECT next_seq, generation, building_generation FROM memory_store
-         WHERE bot_id = $1 FOR NO KEY UPDATE",
+         WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -142,7 +137,7 @@ pub async fn append(
     // The first generation takes the installation's current recipe.
     sqlx::query(
         "INSERT INTO memory_generation (bot_id, generation, recipe)
-         VALUES ($1, 1, coalesce((SELECT memory_recipe FROM installation), $2))
+         VALUES (?1, 1, coalesce((SELECT memory_recipe FROM installation), ?2))
          ON CONFLICT DO NOTHING",
     )
     .bind(bot_id)
@@ -152,7 +147,7 @@ pub async fn append(
     let print = fingerprint(entry);
     let existing: Vec<(i64, Vec<u8>)> = sqlx::query_as(
         "SELECT seq, request_fingerprint FROM memory_entry
-         WHERE bot_id = $1 AND request_key = $2 ORDER BY part_index",
+         WHERE bot_id = ?1 AND request_key = ?2 ORDER BY part_index",
     )
     .bind(bot_id)
     .bind(entry.request_key)
@@ -166,7 +161,7 @@ pub async fn append(
     }
     if let Some(target) = entry.supersedes_seq {
         let authority: Option<String> =
-            sqlx::query_scalar("SELECT authority FROM memory_entry WHERE bot_id = $1 AND seq = $2")
+            sqlx::query_scalar("SELECT authority FROM memory_entry WHERE bot_id = ?1 AND seq = ?2")
                 .bind(bot_id)
                 .bind(target)
                 .fetch_optional(&mut *conn)
@@ -185,7 +180,7 @@ pub async fn append(
             "INSERT INTO memory_entry (bot_id, seq, request_key, request_fingerprint, kind,
                  authority, body, body_sha256, source, part_index, part_count, original_sha256,
                  supersedes_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(bot_id)
         .bind(seq)
@@ -204,7 +199,7 @@ pub async fn append(
         .await?;
         seqs.push(seq);
     }
-    sqlx::query("UPDATE memory_store SET next_seq = $2 WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_store SET next_seq = ?2 WHERE bot_id = ?1")
         .bind(bot_id)
         .bind(next + seqs.len() as i64)
         .execute(&mut *conn)
@@ -214,12 +209,12 @@ pub async fn append(
     let generations: Vec<i32> = std::iter::once(generation).chain(building).collect();
     sqlx::query(
         "INSERT INTO memory_job (bot_id, generation, start_seq, span)
-         SELECT $1, g, s, 1 FROM unnest($2::int[]) g, unnest($3::bigint[]) s
+         SELECT ?1, g.value, s.value, 1 FROM json_each(?2) g, json_each(?3) s WHERE true
          ON CONFLICT DO NOTHING",
     )
     .bind(bot_id)
-    .bind(&generations)
-    .bind(&seqs)
+    .bind(sqlx::types::Json(&generations))
+    .bind(sqlx::types::Json(&seqs))
     .execute(&mut *conn)
     .await?;
     Ok(seqs)
@@ -227,10 +222,10 @@ pub async fn append(
 
 /// Log a conversation item's final text, once. Missing or empty items and
 /// inactive bots are skipped: memory follows visible history.
-pub async fn log_item(conn: &mut PgConnection, item_id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), sqlx::Error> {
     let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>, String)> = sqlx::query_as(
         "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind
-         FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = $1",
+         FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = ?1",
     )
     .bind(item_id)
     .fetch_optional(&mut *conn)
@@ -270,9 +265,9 @@ pub async fn log_item(conn: &mut PgConnection, item_id: Uuid) -> Result<(), sqlx
 }
 
 /// Log the assistant text of a turn that has just ended.
-pub async fn log_turn_end(conn: &mut PgConnection, turn_id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn log_turn_end(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<(), sqlx::Error> {
     let items: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM items WHERE turn_id = $1 AND kind = 'assistant' ORDER BY seq",
+        "SELECT id FROM items WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq",
     )
     .bind(turn_id)
     .fetch_all(&mut *conn)
@@ -285,13 +280,13 @@ pub async fn log_turn_end(conn: &mut PgConnection, turn_id: Uuid) -> Result<(), 
 
 /// Whether `reader` may read `target`'s memory: the target is active, and
 /// it is the reader itself or the owner granted the read.
-pub async fn readable(pool: &PgPool, reader: Uuid, target: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn readable(pool: &SqlitePool, reader: Uuid, target: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS (
-             SELECT 1 FROM bots b WHERE b.id = $2 AND b.status = 'active'
-               AND ($1 = $2 OR EXISTS (
+             SELECT 1 FROM bots b WHERE b.id = ?2 AND b.status = 'active'
+               AND (?1 = ?2 OR EXISTS (
                    SELECT 1 FROM memory_read_grants g
-                   WHERE g.reader_bot_id = $1 AND g.target_bot_id = $2)))",
+                   WHERE g.reader_bot_id = ?1 AND g.target_bot_id = ?2)))",
     )
     .bind(reader)
     .bind(target)
@@ -301,14 +296,14 @@ pub async fn readable(pool: &PgPool, reader: Uuid, target: Uuid) -> Result<bool,
 
 /// Active bots `reader` may read, itself first.
 pub async fn readable_bots(
-    pool: &PgPool,
+    pool: &SqlitePool,
     reader: Uuid,
 ) -> Result<Vec<(Uuid, String, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT b.id, b.name, b.role FROM bots b
-         WHERE b.status = 'active' AND (b.id = $1 OR EXISTS (
-             SELECT 1 FROM memory_read_grants g WHERE g.reader_bot_id = $1 AND g.target_bot_id = b.id))
-         ORDER BY b.id <> $1, b.created_at, b.id",
+         WHERE b.status = 'active' AND (b.id = ?1 OR EXISTS (
+             SELECT 1 FROM memory_read_grants g WHERE g.reader_bot_id = ?1 AND g.target_bot_id = b.id))
+         ORDER BY b.id <> ?1, b.created_at, b.id",
     )
     .bind(reader)
     .fetch_all(pool)
@@ -325,6 +320,7 @@ pub struct EntryRow {
     pub part_index: i32,
     pub part_count: i32,
     pub supersedes_seq: Option<i64>,
+    #[sqlx(json)]
     pub superseded_by: Vec<i64>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -335,8 +331,8 @@ fn entry_columns(bound: &str) -> String {
     format!(
         "e.seq, e.kind, e.authority, e.body, e.source, e.part_index,
          e.part_count, e.supersedes_seq,
-         coalesce((SELECT array_agg(c.seq ORDER BY c.seq) FROM memory_entry c
-                   WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq {bound}), '{{}}')
+         coalesce((SELECT json_group_array(c.seq ORDER BY c.seq) FROM memory_entry c
+                   WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq {bound}), '[]')
              AS superseded_by,
          e.created_at"
     )
@@ -344,14 +340,14 @@ fn entry_columns(bound: &str) -> String {
 
 /// Entries from `start_seq` on, in order.
 pub async fn read(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     start_seq: i64,
     count: i64,
 ) -> Result<Vec<EntryRow>, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM memory_entry e
-         WHERE e.bot_id = $1 AND e.seq >= $2 ORDER BY e.seq LIMIT $3",
+        "SELECT {} FROM memory_entry e JOIN memory_search ON memory_search.rowid = e.rowid
+         WHERE e.bot_id = ?1 AND e.seq >= ?2 ORDER BY e.seq LIMIT ?3",
         entry_columns("")
     )))
     .bind(bot_id)
@@ -362,9 +358,9 @@ pub async fn read(
 }
 
 /// The number of entries, which is also the next sequence number.
-pub async fn length(pool: &PgPool, bot_id: Uuid) -> Result<i64, sqlx::Error> {
+pub async fn length(pool: &SqlitePool, bot_id: Uuid) -> Result<i64, sqlx::Error> {
     let next: Option<i64> =
-        sqlx::query_scalar("SELECT next_seq FROM memory_store WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT next_seq FROM memory_store WHERE bot_id = ?1")
             .bind(bot_id)
             .fetch_optional(pool)
             .await?;
@@ -383,7 +379,7 @@ pub struct SearchPage {
 /// ordered by rank, then newest first. Entries replaced by an explicit owner
 /// correction are left out unless `include_superseded`.
 pub async fn search(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     query: &str,
     include_superseded: bool,
@@ -395,19 +391,19 @@ pub async fn search(
         None => length(pool, bot_id).await?,
     };
     let mut hits: Vec<EntryRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM memory_entry e
-         WHERE e.bot_id = $1 AND e.seq < $2
-           AND e.search @@ websearch_to_tsquery('simple', $3)
-           AND ($4 OR NOT EXISTS (SELECT 1 FROM memory_entry c
+        "SELECT {} FROM memory_entry e JOIN memory_search ON memory_search.rowid = e.rowid
+         WHERE e.bot_id = ?1 AND e.seq < ?2
+           AND memory_search MATCH ?3
+           AND (?4 OR NOT EXISTS (SELECT 1 FROM memory_entry c
                                   WHERE c.bot_id = e.bot_id AND c.supersedes_seq = e.seq
-                                    AND c.seq < $2))
-         ORDER BY ts_rank(e.search, websearch_to_tsquery('simple', $3)) DESC, e.seq DESC
-         OFFSET $5 LIMIT $6",
-        entry_columns("AND c.seq < $2")
+                                    AND c.seq < ?2))
+         ORDER BY memory_search.rank, e.seq DESC
+         LIMIT ?6 OFFSET ?5",
+        entry_columns("AND c.seq < ?2")
     )))
     .bind(bot_id)
     .bind(watermark)
-    .bind(query)
+    .bind(search_query(query))
     .bind(include_superseded)
     .bind(offset)
     .bind(SEARCH_PAGE + 1)
@@ -443,5 +439,61 @@ mod tests {
             assert_ne!(kind.authority(), "owner");
         }
         assert_eq!(Kind::OwnerCorrection.authority(), "owner");
+    }
+}
+
+/// Quote user input rather than exposing FTS operators. Preserve web-search
+/// phrases, OR alternatives, and exclusions; malformed quotes remain safe.
+fn search_query(query: &str) -> String {
+    let mut tokens = Vec::new();
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        let mut token = String::new();
+        token.push(c);
+        if c == '"' || (c == '-' && chars.peek() == Some(&'"')) {
+            if c == '-' {
+                token.push(chars.next().unwrap());
+            }
+            for c in chars.by_ref() {
+                token.push(c);
+                if c == '"' {
+                    break;
+                }
+            }
+        } else {
+            while chars.peek().is_some_and(|c| !c.is_whitespace()) {
+                token.push(chars.next().unwrap());
+            }
+        }
+        tokens.push(token);
+    }
+    let quote = |s: &str| format!("\"{}\"", s.trim_matches('"').replace('"', "\"\""));
+    let mut alternatives = Vec::new();
+    let mut positive = Vec::new();
+    let mut negative = Vec::new();
+    for token in tokens.into_iter().chain(std::iter::once("OR".into())) {
+        if token == "OR" {
+            if !positive.is_empty() {
+                let mut group = positive.join(" AND ");
+                for term in negative.drain(..) {
+                    group = format!("({group}) NOT {term}");
+                }
+                alternatives.push(format!("({group})"));
+            }
+            positive.clear();
+            negative.clear();
+        } else if let Some(term) = token.strip_prefix('-').filter(|s| !s.is_empty()) {
+            negative.push(quote(term));
+        } else if token.chars().any(char::is_alphanumeric) {
+            positive.push(quote(&token));
+        }
+    }
+    if alternatives.is_empty() {
+        "\"\"".into()
+    } else {
+        alternatives.join(" OR ")
     }
 }

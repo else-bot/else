@@ -316,7 +316,7 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
     assert!(started.elapsed() < Duration::from_secs(10));
     gone("sleep 6[12].731").await;
     let ended: (Option<String>, bool) =
-        sqlx::query_as("SELECT end_reason, ended_at IS NOT NULL FROM guest_runs WHERE bot_id = $1")
+        sqlx::query_as("SELECT end_reason, ended_at IS NOT NULL FROM guest_runs WHERE bot_id = ?1")
             .bind(bot)
             .fetch_one(&app.db.pool)
             .await

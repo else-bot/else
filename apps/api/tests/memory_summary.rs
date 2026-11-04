@@ -71,7 +71,7 @@ async fn recipe(app: &TestApp, node: usize) {
 }
 
 async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) {
-    let mut tx = app.db.pool.begin().await.unwrap();
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     memory::append(
         &mut tx,
         bot,
@@ -122,7 +122,7 @@ async fn summaries_fill_long_ranges_with_a_complete_audit() {
     assert!(saved.valid);
     assert_eq!(saved.published_seq, 2, "publication passed the long entry");
     let (method, audit, body): (String, Value, String) = sqlx::query_as(
-        "SELECT method, audit, body FROM memory_node WHERE bot_id = $1 AND start_seq = 1 AND span = 1",
+        "SELECT method, audit, body FROM memory_node WHERE bot_id = ?1 AND start_seq = 1 AND span = 1",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -165,14 +165,14 @@ async fn oversized_or_failed_summaries_are_never_installed() {
     }
     let worker = compactor(&app, fake.clone());
     worker.drain().await.unwrap();
-    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_node WHERE bot_id = $1")
+    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_node WHERE bot_id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(nodes, 0, "no truncated or oversized summary was saved");
     let (reason, error, later): (String, String, bool) = sqlx::query_as(
-        "SELECT blocked_reason, last_error, available_at > now() FROM memory_job WHERE bot_id = $1",
+        "SELECT blocked_reason, last_error, available_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') FROM memory_job WHERE bot_id = ?1",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -189,7 +189,7 @@ async fn oversized_or_failed_summaries_are_never_installed() {
     );
 
     // A provider failure is recorded the same way.
-    sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
@@ -228,7 +228,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     let worker = compactor(&app, fake.clone());
     worker.drain().await.unwrap();
     let reason: String = sqlx::query_scalar(
-        "SELECT blocked_reason FROM memory_job WHERE bot_id = $1 AND span = 1 AND start_seq = 0",
+        "SELECT blocked_reason FROM memory_job WHERE bot_id = ?1 AND span = 1 AND start_seq = 0",
     )
     .bind(bot_id)
     .fetch_one(&app.db.pool)
@@ -250,8 +250,8 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
         .await;
     let next = next.body["turn"]["id"].as_str().unwrap().to_owned();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1::uuid")
-        .bind(&next)
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(next.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
@@ -353,7 +353,7 @@ async fn shutdown_cancels_an_active_summary_promptly() {
     // Wait until the summary holds the job.
     for _ in 0..100 {
         let leased: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM memory_job WHERE bot_id = $1 AND lease_token IS NOT NULL)",
+            "SELECT EXISTS (SELECT 1 FROM memory_job WHERE bot_id = ?1 AND lease_token IS NOT NULL)",
         )
         .bind(bot)
         .fetch_one(&app.db.pool)
@@ -376,7 +376,7 @@ async fn shutdown_cancels_an_active_summary_promptly() {
         "no full summary batch after shutdown"
     );
     let (leased, failures): (bool, i32) = sqlx::query_as(
-        "SELECT lease_token IS NOT NULL, failures FROM memory_job WHERE bot_id = $1",
+        "SELECT lease_token IS NOT NULL, failures FROM memory_job WHERE bot_id = ?1",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -402,7 +402,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
         held.push(summary_slot(&app, 4).await);
     }
     for _ in 0..10 {
-        sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
+        sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot)
             .execute(&app.db.pool)
             .await
@@ -410,7 +410,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
         worker.drain().await.unwrap();
     }
     drop(held);
-    sqlx::query("UPDATE memory_job SET available_at = now() WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
@@ -421,7 +421,7 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
         .push_back(Err("provider error".into()));
     worker.drain().await.unwrap();
     let (failures, wait): (i32, f64) = sqlx::query_as(
-        "SELECT failures, extract(epoch FROM available_at - now())::float8 FROM memory_job WHERE bot_id = $1",
+        "SELECT failures, (julianday(available_at) - julianday('now')) * 86400.0 FROM memory_job WHERE bot_id = ?1",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)

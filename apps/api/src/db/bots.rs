@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
@@ -83,27 +83,24 @@ fn create_hash(name: &BotName, role: &BotRole) -> Vec<u8> {
 
 /// Serialize all operations that use one request ID within a transaction.
 pub(crate) async fn lock_request(
-    tx: &mut sqlx::PgConnection,
-    request_id: Uuid,
+    _tx: &mut sqlx::SqliteConnection,
+    _request_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 7))")
-        .bind(request_id)
-        .execute(tx)
-        .await?;
+    // The caller's immediate transaction already serializes receipt checks/inserts.
     Ok(())
 }
 
 pub async fn create(
-    pool: &PgPool,
+    pool: &SqlitePool,
     request_id: Uuid,
     name: &BotName,
     role: &BotRole,
 ) -> Result<Created, BotError> {
     let hash = create_hash(name, role);
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     lock_request(&mut tx, request_id).await?;
     let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
-        "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = $1",
+        "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = ?1",
     )
     .bind(request_id)
     .fetch_optional(&mut *tx)
@@ -125,7 +122,7 @@ pub async fn create(
     insert_bot(&mut tx, bot_id, name, role).await?;
     sqlx::query(
         "INSERT INTO request_receipts (request_id, operation, bot_id, payload_hash)
-         VALUES ($1, 'create_bot', $2, $3)",
+         VALUES (?1, 'create_bot', ?2, ?3)",
     )
     .bind(request_id)
     .bind(bot_id)
@@ -140,17 +137,17 @@ pub async fn create(
     ))
 }
 
-pub async fn find(pool: &PgPool, bot_id: Uuid) -> Result<Option<BotRecord>, sqlx::Error> {
+pub async fn find(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<BotRecord>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     find_in(&mut conn, bot_id).await
 }
 
 /// Look up a bot inside an existing transaction or connection.
 pub async fn find_in(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut sqlx::SqliteConnection,
     bot_id: Uuid,
 ) -> Result<Option<BotRecord>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT_BOT} WHERE b.id = $1")))
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT_BOT} WHERE b.id = ?1")))
         .bind(bot_id)
         .fetch_optional(conn)
         .await
@@ -165,15 +162,12 @@ pub struct Listing {
 
 /// Active bots, plus tombstones whose shutdown is still pending when
 /// requested. Completed tombstones never appear. Ordered oldest first.
-pub async fn list(pool: &PgPool, include_deleting: bool) -> Result<Listing, sqlx::Error> {
+pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, sqlx::Error> {
     // One snapshot for both reads, so a concurrent deletion cannot pair a
     // cleared default with the bot it just deleted.
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
     let bots = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{SELECT_BOT} WHERE b.status = 'active' OR ($1 AND b.status = 'deleting')
+        "{SELECT_BOT} WHERE b.status = 'active' OR (?1 AND b.status = 'deleting')
          ORDER BY b.created_at, b.id"
     )))
     .bind(include_deleting)
@@ -206,27 +200,25 @@ pub struct Deleted {
 /// entry point and is never deleted. With work still running the bot stays `deleting`
 /// until its provider stops; otherwise it is `deleted` at once. Repeating it
 /// returns the existing tombstone unchanged. History is retained.
-pub async fn delete(pool: &PgPool, bot_id: Uuid) -> Result<Deleted, BotError> {
-    let mut tx = pool.begin().await?;
+pub async fn delete(pool: &SqlitePool, bot_id: Uuid) -> Result<Deleted, BotError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     // Read under a share lock so the main bot cannot change meanwhile.
-    let main: Option<Uuid> =
-        sqlx::query_scalar("SELECT default_bot_id FROM installation FOR SHARE")
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
+    let main: Option<Uuid> = sqlx::query_scalar("SELECT default_bot_id FROM installation")
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
     if main == Some(bot_id) {
         return Err(BotError::MainBot);
     }
-    let status: Option<BotStatus> =
-        sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
-            .bind(bot_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let status: Option<BotStatus> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     let mut interrupt = None;
     match status {
         None => return Err(BotError::NotFound),
         Some(BotStatus::Active) => {
-            sqlx::query("UPDATE bots SET status = 'deleting', deleted_at = now() WHERE id = $1")
+            sqlx::query("UPDATE bots SET status = 'deleting', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
                 .bind(bot_id)
                 .execute(&mut *tx)
                 .await?;

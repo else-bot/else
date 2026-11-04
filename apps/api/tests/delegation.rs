@@ -1,5 +1,5 @@
 //! POC-016: one-hop asynchronous delegation through the real router,
-//! scheduler, and PostgreSQL, with the synthetic provider.
+//! scheduler, and SQLite, with the synthetic provider.
 
 mod common;
 
@@ -42,7 +42,7 @@ async fn running_main(app: &TestApp) -> (String, Uuid, String) {
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["running"]).await;
     let turn_id: Uuid = turn.parse().unwrap();
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn_id)
         .fetch_one(&app.db.pool)
         .await
@@ -118,7 +118,7 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
         .await;
     let (status, result, delivered, child): (String, Option<String>, Option<i32>, Uuid) =
         sqlx::query_as(
-            "SELECT status, result, delivered_attempt, child_turn_id FROM delegations WHERE id = $1",
+            "SELECT status, result, delivered_attempt, child_turn_id FROM delegations WHERE id = ?1",
         )
         .bind(task_id)
         .fetch_one(&app.db.pool)
@@ -127,14 +127,14 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     assert_eq!(status, "completed");
     assert!(result.unwrap().contains("planetarium form"));
     assert_eq!(delivered, Some(2), "the second attempt received it");
-    let attempts: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = $1")
+    let attempts: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
         .bind(root)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(attempts, 2);
     let children: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM delegations WHERE root_turn_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
             .fetch_one(&app.db.pool)
             .await
@@ -157,7 +157,7 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
         "{texts:?}"
     );
     let child_conversation: String = sqlx::query_scalar(
-        "SELECT c.kind FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = $1",
+        "SELECT c.kind FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?1",
     )
     .bind(child)
     .fetch_one(&app.db.pool)
@@ -167,18 +167,18 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     // Memory: the task is model-authored in the target; the result is tool
     // activity in the parent.
     let task_entry: (String, String) = sqlx::query_as(
-        "SELECT kind, authority FROM memory_entry WHERE bot_id = $1::uuid AND body LIKE '%planetarium form details%'
+        "SELECT kind, authority FROM memory_entry WHERE bot_id = ?1 AND body LIKE '%planetarium form details%'
          ORDER BY seq LIMIT 1",
     )
-    .bind(&school)
+    .bind(school.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
     assert_eq!(task_entry, ("delegated_task".into(), "assistant".into()));
     let parent_entry: String = sqlx::query_scalar(
-        "SELECT authority FROM memory_entry WHERE bot_id = $1::uuid AND request_key = $2",
+        "SELECT authority FROM memory_entry WHERE bot_id = ?1 AND request_key = ?2",
     )
-    .bind(&main)
+    .bind(main.parse::<Uuid>().unwrap())
     .bind(format!("delegation:{task_id}"))
     .fetch_one(&app.db.pool)
     .await
@@ -211,7 +211,7 @@ async fn delegation_limits_fail_in_code() {
             .starts_with("BOT_UNAVAILABLE")
     );
     // A grant without the delegate tool (any leaf or other bot) is refused.
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(root)
         .fetch_one(&app.db.pool)
         .await
@@ -259,13 +259,13 @@ async fn delegation_limits_fail_in_code() {
     );
     // A leaf (a child turn) cannot delegate even with a forged grant.
     let child: Uuid =
-        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = $1")
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
     for _ in 0..200 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(child)
             .fetch_one(&app.db.pool)
             .await
@@ -292,7 +292,7 @@ async fn delegation_limits_fail_in_code() {
     );
     wait_status(&app, root, "completed").await;
     let children: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM delegations WHERE root_turn_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
             .fetch_one(&app.db.pool)
             .await
@@ -303,7 +303,7 @@ async fn delegation_limits_fail_in_code() {
     // the attempt: simulate a third attempt that is running.
     let (_, root, _) = running_main(&app).await;
     for (n, target) in [&work, &family].iter().enumerate() {
-        sqlx::query("UPDATE turns SET attempt = $2 WHERE id = $1")
+        sqlx::query("UPDATE turns SET attempt = ?2 WHERE id = ?1")
             .bind(root)
             .bind(n as i32 + 1)
             .execute(&app.db.pool)
@@ -318,7 +318,7 @@ async fn delegation_limits_fail_in_code() {
         .await
         .unwrap();
     }
-    sqlx::query("UPDATE turns SET attempt = 3 WHERE id = $1")
+    sqlx::query("UPDATE turns SET attempt = 3 WHERE id = ?1")
         .bind(root)
         .execute(&app.db.pool)
         .await
@@ -362,7 +362,7 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         .await;
     assert!(stop.status.is_success(), "{}", stop.body);
     wait_status(&app, root, "interrupted").await;
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = $1")
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
         .bind(task_id)
         .fetch_one(&app.db.pool)
         .await
@@ -373,7 +373,7 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         Duration::from_secs(20),
     )
     .await;
-    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
         .bind(task_id)
         .fetch_one(&app.db.pool)
         .await
@@ -393,7 +393,7 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
     app.owner("DELETE", &format!("/v1/bots/{work}"), None).await;
     wait_status(&app, root, "completed").await;
     let (status, error, delivered): (String, Option<String>, Option<i32>) =
-        sqlx::query_as("SELECT status, error, delivered_attempt FROM delegations WHERE id = $1")
+        sqlx::query_as("SELECT status, error, delivered_attempt FROM delegations WHERE id = ?1")
             .bind(task_id)
             .fetch_one(&app.db.pool)
             .await
@@ -412,18 +412,18 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
         .await
         .unwrap();
     let target = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, 'Target', 'target role')")
+    sqlx::query("INSERT INTO bots (id, name, role) VALUES (?1, 'Target', 'target role')")
         .bind(target)
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
         .bind(Uuid::new_v4())
         .bind(target)
         .execute(&db.pool)
         .await
         .unwrap();
-    let conversation: Uuid = sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1")
         .bind(main)
         .fetch_one(&db.pool)
         .await
@@ -432,7 +432,7 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
              owner_item_id, provider_id, status, attempt)
-         VALUES ($1, $2, $3, $4, $5, 1, $6, 'synthetic', 'running', 1)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'synthetic', 'running', 1)",
     )
     .bind(root)
     .bind(main)
@@ -446,7 +446,7 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
     let accepted = else_api::db::delegations::create(&db.pool, root, target, "seeded task")
         .await
         .unwrap();
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = $1")
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
         .bind(accepted.delegation_id)
         .fetch_one(&db.pool)
         .await
@@ -459,8 +459,8 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     let db = TestDb::migrated().await;
     let (_, root, child, delegation) = seed(&db).await;
     // The parent's finish holds the root lock and decides to park.
-    let mut parent = db.pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM turns WHERE id = $1 FOR UPDATE")
+    let mut parent = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("SELECT 1 FROM turns WHERE id = ?1")
         .bind(root)
         .execute(&mut *parent)
         .await
@@ -468,7 +468,7 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     // Meanwhile the child ends; its trigger waits for the root lock.
     let pool = db.pool.clone();
     let child_end = tokio::spawn(async move {
-        sqlx::query("UPDATE turns SET status = 'completed', finished_at = now() WHERE id = $1")
+        sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
             .bind(child)
             .execute(&pool)
             .await
@@ -479,7 +479,7 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
         !child_end.is_finished(),
         "settlement waits for the parent's decision"
     );
-    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'waiting' WHERE id = ?1")
         .bind(root)
         .execute(&mut *parent)
         .await
@@ -488,7 +488,7 @@ async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     child_end.await.unwrap();
     let (root_status, delegation_status): (String, String) = sqlx::query_as(
         "SELECT t.status, d.status FROM turns t JOIN delegations d ON d.root_turn_id = t.id
-         WHERE d.id = $1",
+         WHERE d.id = ?1",
     )
     .bind(delegation)
     .fetch_one(&db.pool)
@@ -510,7 +510,7 @@ async fn restart_reconciliation_ends_the_children_of_an_ended_root() {
     let (root_status, child_status, delegation_status): (String, String, String) = sqlx::query_as(
         "SELECT r.status, c.status, d.status FROM delegations d
          JOIN turns r ON r.id = d.root_turn_id JOIN turns c ON c.id = d.child_turn_id
-         WHERE d.id = $1",
+         WHERE d.id = ?1",
     )
     .bind(delegation)
     .fetch_one(&db.pool)
@@ -527,19 +527,19 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
     let db = TestDb::migrated().await;
     let (main, root, _, first) = seed(&db).await;
     let other = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, 'Other', 'other role')")
+    sqlx::query("INSERT INTO bots (id, name, role) VALUES (?1, 'Other', 'other role')")
         .bind(other)
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
         .bind(Uuid::new_v4())
         .bind(other)
         .execute(&db.pool)
         .await
         .unwrap();
     let _ = main;
-    sqlx::query("UPDATE turns SET attempt = 2 WHERE id = $1")
+    sqlx::query("UPDATE turns SET attempt = 2 WHERE id = ?1")
         .bind(root)
         .execute(&db.pool)
         .await
@@ -550,17 +550,17 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
     assert!(second.created);
     assert_ne!(second.delegation_id, first);
     // A retry of a settled child reports its outcome, not `pending`.
-    let target: Uuid = sqlx::query_scalar("SELECT target_bot_id FROM delegations WHERE id = $1")
+    let target: Uuid = sqlx::query_scalar("SELECT target_bot_id FROM delegations WHERE id = ?1")
         .bind(first)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = $1")
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
         .bind(first)
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE turns SET status = 'completed', finished_at = now() WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(child)
         .execute(&db.pool)
         .await
@@ -608,7 +608,7 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
     // A scoped grant is refused outside its scope even though Work itself
     // may read Private.
     let warm: Uuid = sqlx::query_scalar(
-        "SELECT id FROM turns WHERE bot_id = $1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM turns WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(work_id)
     .fetch_one(&app.db.pool)
@@ -619,7 +619,7 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
