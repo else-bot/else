@@ -292,7 +292,16 @@ impl ElseApp {
         if incoming.is_empty() {
             return false;
         }
-        let count = self.composer.read(cx).tokens().len();
+        let editor = self.composer.read(cx);
+        let selection = editor.selected_range();
+        let count = editor
+            .tokens()
+            .iter()
+            .filter(|span| {
+                let range = span.range();
+                range.end <= selection.start || range.start >= selection.end
+            })
+            .count();
         if count + incoming.len() > MAX_FILES {
             self.notice = Some(format!("Attach at most {MAX_FILES} files per message."));
             cx.notify();
