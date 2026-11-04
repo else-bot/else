@@ -50,6 +50,8 @@ Codex documents `agents.enabled` as the switch for multi-agent tools. Claude doc
 
 Local configuration inspection confirmed the Codex multi-agent flags resolve to false with explicit overrides. It did not run inference or prove that every native spawn route is blocked. Implementation acceptance requires adversarial requests and actual tool, native agent/thread lifecycle, and process observations for each provider, including resumed sessions. Native sub-agents may share a process, so an unchanged process count alone proves nothing.
 
+Codex skills are scoped to the bot's project. A separate `CODEX_HOME` does not stop Codex from discovering the owner's `~/.agents/skills`, ancestor-repository skills, or bundled system skills. Before starting or resuming a thread, the adapter disables every discovered skill except repository-scoped skills within that bot's project. The same filter applies to memory summaries and handoffs. Skills installed for the bot in its own `.agents/skills` remain available. This policy is part of native-session compatibility, so sessions created before the filter rebuild from recorded conversation history.
+
 This policy concerns agents spawned inside a bot's CLI. Planned delegation between registered else.bot bots still goes through the Rust API, scoped tasks, and scheduler. It does not use native CLI sub-agents. Development agents working on the repository remain governed by their assigned development instructions.
 
 ## First-version continuity

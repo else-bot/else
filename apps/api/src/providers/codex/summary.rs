@@ -91,6 +91,8 @@ impl Codex {
             .await
             .map_err(|e| e.to_string())?;
         self.check_servers(&status["data"], false)?;
+        let mut config = super::skills::config(server).await?;
+        config["model_reasoning_effort"] = json!(profile.reasoning_effort);
         let started = server
             .request(
                 "thread/start",
@@ -102,7 +104,7 @@ impl Codex {
                     "sandbox": "read-only",
                     "ephemeral": true,
                     "developerInstructions": system,
-                    "config": { "model_reasoning_effort": profile.reasoning_effort },
+                    "config": config,
                 }),
                 RPC_TIMEOUT,
             )
