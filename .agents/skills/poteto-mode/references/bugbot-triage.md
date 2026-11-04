@@ -87,14 +87,6 @@ Historical data showed humans sometimes dismiss security/data-flow comments. Tre
 
 Append new candidate learnings here during or after babysitting when they look team-useful but not yet mature. Prefer promoting recurring candidates into the section above once several PRs confirm the pattern.
 
-### Manual reimplementations of native browser behavior
-
-- Confidence: candidate
-- Skip when: Practically never. When a diff replaces native browser behavior with a manual equivalent (native sticky → JS-positioned clones, native scroll targeting → forwarded wheel/touch events, paint-order occlusion → masks/clip-path), Bugbot's logic-bug findings against that code have been consistently legitimate.
-- Do not skip when: The finding concerns event-forwarding gaps (wheel deltaMode, touch pans, scroll-chaining at edges, tap slop), mask/clip hit-testing divergence, or observer-vs-React state timing races in such code. Default to fix.
-- Example signal: "masks do not affect hit-testing", "overlay blocks wheel scroll", "ignores deltaMode", "runs in the IntersectionObserver callback before React applies state".
-- Source: one sticky-occlusion PR: six Bugbot passes, roughly eighteen findings, every one fixed rather than dismissed.
-
 ### Contract-test drift claims are cheaply verifiable — run the test first
 
 - Confidence: candidate

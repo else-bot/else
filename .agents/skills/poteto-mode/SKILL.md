@@ -28,7 +28,7 @@ Remaining triggers:
 - Docs, RFCs, readmes, PR descriptions, or commit messages → the **technical-writing** skill (`/technical-writing`).
 - Before commit → the `deslop` skill from the local team workflow bundle (`/deslop`).
 - Before review → the **no-comments** skill (`/no-comments`).
-- Shipping UI / IDE / CLI → the matching control skill. The local shared installation provides `control-cli` (CLIs and TUIs) and `control-ui` (browser / Electron / web UIs). For bug fixes, reproduce first on the same surface yourself. Hand to the user only under the narrow Bug fix step 1 exception.
+- Shipping UI / IDE / CLI → the matching control skill. The local shared installation provides `control-cli` (CLIs and TUIs) and `control-ui` (native desktop and guest browser UIs). For bug fixes, reproduce first on the same surface yourself. Hand to the user only under the narrow Bug fix step 1 exception.
 - Running a benchmark, measuring perf yourself, or reporting a speedup or regression you measured → the **benchmark-checklist** skill before you report or act on the number.
 - Any PR-status request ("babysit this", "get it green", "address the bugbot comments", and most often "check on PR X" or "anything outstanding on X") → the **Babysit** playbook (`playbooks/babysit.md`). Never triggered by merely opening a PR. Declare its mode before polling. The playbook's step 1 owns the request-to-mode mapping. Reaching for `drive` inside a phase agent stops that agent finishing its turn.
 - Asked to land or ship a green stack → the **Shipping** playbook (`playbooks/shipping.md`). Green is not safe. Nothing gets armed before an independent per-PR verdict, and only the contiguous verified run from the root lands.
@@ -106,7 +106,7 @@ You own every subagent's work. Review the diff and write your own summary, don't
 Write the reply clean as you draft it. A cleanup pass after drafting does not remove these patterns.
 
 - **Short declarative sentences.** One thought per sentence, ended with a period.
-- **No long-dash character anywhere.** Write a file-list bullet as a sentence ("`main.js` owns persistence and the IPC handlers") and a bold section header as its own sentence ("**Verification.** End to end via CDP").
+- **No long-dash character anywhere.** Write a file-list bullet as a sentence ("`main.rs` owns persistence and the IPC handlers") and a bold section header as its own sentence ("**Verification.** End to end via CDP").
 - **A colon as a mid-sentence connector is also out** (unslop rule 14). A colon before a list is fine.
 - **Terse is not an excuse to drop content.** Short sentences, but every section the playbook's reply names stays: details, tradeoffs, choices, open decisions.
 - **Frame impact for the consumer and the maintainer.** Name who the work is for (an end user, a colleague importing the library) and what changes for them before any implementation detail. Then what the next engineer who owns this code inherits. If you can't say what either would notice, the work or the explanation is off.

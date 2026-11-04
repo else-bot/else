@@ -13,7 +13,7 @@ Check the diff against main and remove AI-generated slop introduced in the branc
 
 - Extra comments that are unnecessary or inconsistent with local style
 - Defensive checks or try/catch blocks that are abnormal for trusted code paths
-- Casts to `any` used only to bypass type issues
+- Unnecessary casts or `unsafe` blocks used only to bypass type issues
 - Deeply nested code that should be simplified with early returns
 - Other patterns inconsistent with the file and surrounding codebase
 

@@ -1,44 +1,29 @@
 ---
 name: run-smoke-tests
-description: Run Playwright smoke tests, debug failures, and verify fixes
+description: Run Rust smoke checks and existing integration tests, diagnose failures, and verify focused fixes.
 ---
 
 Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model presets](../../rules/pstack-models.md) before following this workflow.
 
 # Run smoke tests
 
-## Trigger
+1. Read the workspace manifests and the
+   [development guide](../../../docs/development.md). Identify the smallest
+   existing check that exercises the changed behavior.
+2. Check the affected Rust targets and run the relevant headless tests:
 
-Need end-to-end smoke verification before or after changes.
+   ```sh
+   cargo check --workspace --all-targets
+   cargo test -p <crate> <test-filter>
+   ```
 
-## Workflow
+3. Use the checked-in integration or end-to-end runner when the change covers
+   services or desktop flows. Follow the session's containment rules before
+   tests that touch the desktop, notifications, portals, or keyrings.
+4. On failure, inspect the logs and reproduce the cause before editing code.
+   Apply a focused fix and rerun the affected check.
+5. Report the commands, results, and any untested behavior. Do not claim that
+   compilation alone proves a user flow works.
 
-1. Build prerequisites for the target app.
-2. Run the relevant smoke suite or a focused test file.
-3. If failing, inspect traces/logs and isolate the root cause.
-4. Apply a minimal fix and rerun until stable.
-
-## Example Commands
-
-```bash
-# Run full smoke suite
-npm run smoketest
-
-# Run a specific smoke test file
-npm run smoketest -- path/to/test.spec.ts
-
-# Faster iteration when build artifacts are ready
-npm run smoketest-no-compile -- path/to/test.spec.ts
-```
-
-## Guardrails
-
-- Prefer deterministic waits and assertions over brittle timeouts.
-- Re-run passing fixes to reduce flaky false positives.
-- Quarantine tests only when explicitly requested and documented.
-
-## Output
-
-- Test results summary
-- Root cause and fix
-- Remaining flake risk (if any)
+Prefer deterministic waits and observable outcomes. Quarantine a test only
+when the user explicitly requests it.

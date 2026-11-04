@@ -59,7 +59,7 @@ Apply the baseline prompt above, plus these explicit review rules:
    - Flag thin abstractions, identity wrappers, or pass-through helpers that add indirection without buying clarity.
 
 5. **Push hard on type and boundary cleanliness when they affect maintainability.**
-   - Question unnecessary optionality, `unknown`, `any`, or cast-heavy code when a clearer type boundary could exist.
+   - Question unnecessary `Option` fields, lossy casts, or `unsafe` blocks when a clearer type boundary could exist.
    - Prefer explicit typed models or shared contracts over loosely-shaped ad-hoc objects.
    - If a branch relies on silent fallback to paper over an unclear invariant, ask whether the boundary should be made explicit instead.
 
@@ -103,7 +103,7 @@ Escalate findings when you see:
 - Feature-specific logic leaking into general-purpose modules.
 - Generic "magic" handling that hides simple structure and makes the code harder to reason about.
 - Thin wrappers or identity abstractions that add indirection without simplifying anything.
-- Unnecessary casts, `any`, `unknown`, or optional params that muddy the real contract.
+- Unnecessary casts, `unsafe` blocks, or optional parameters that muddy the real contract.
 - Copy-pasted logic instead of extracted helpers.
 - Narrow edge-case handling implemented in the middle of an already busy function.
 - Refactors that technically pass tests but make the code less modular or less readable.

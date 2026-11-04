@@ -20,7 +20,7 @@ Use a repeatable local harness to exercise an interactive CLI instead of poking 
 ## Harness Loop
 
 1. Identify the command under test and the smallest reproducible workspace.
-2. Discover existing local harnesses: package scripts, e2e tests, demo recorders, expect scripts, or PTY helpers.
+2. Discover existing local harnesses: Cargo commands, e2e tests, demo recorders, expect scripts, or PTY helpers.
 3. If no harness exists, launch the CLI in an isolated terminal session with deterministic env vars.
 4. Capture the current screen before interacting.
 5. Send one action at a time: text, Enter, arrows, Escape, Ctrl-C, resize.
@@ -32,8 +32,8 @@ Use a repeatable local harness to exercise an interactive CLI instead of poking 
 
 - Repo-native harness: prefer checked-in scripts because they know the app's startup, env, and prompts.
 - `tmux`: managed sessions, `capture-pane`, `send-keys`, attach/detach.
-- PTY probe: use a short Python, Node, or Expect script when tmux is unavailable.
-- Runtime inspector: use Node or Bun inspector for CPU profiles, heap snapshots, and live evaluation.
+- PTY probe: use a short Python or Expect script when tmux is unavailable.
+- Native profiler: use available CPU, allocation, and thread-stack tools for the Rust binary.
 - Terminal recorder: use repo-local demo tools or asciinema-compatible tools when the user asks for a demo.
 
 ## Minimal tmux Harness
@@ -46,14 +46,6 @@ tmux send-keys -t "$SESSION" "help" Enter
 tmux capture-pane -pt "$SESSION"
 tmux kill-session -t "$SESSION"
 ```
-
-For Node CLIs:
-
-```bash
-NODE_OPTIONS="--inspect=127.0.0.1:0" tmux new-session -d -s "$SESSION" -- <node-cli-command>
-```
-
-Read the terminal output to find the inspector URL, then use Chrome DevTools-compatible tooling if profiling is needed.
 
 ## Minimal PTY Harness
 
@@ -99,8 +91,8 @@ If the CLI needs richer terminal control, use `pty.fork()` or an existing PTY li
 
 - Startup regression: capture baseline and treatment startup timings under the same machine, env, and command.
 - Slow operation: start a CPU profile, perform the operation, stop the profile, and compare top self-time functions.
-- Memory leak: force GC if available, take a heap snapshot, perform the operation repeatedly, force GC again, and take another snapshot.
-- Hang: capture the screen, active handles/resources, and a stack/CPU sample before interrupting.
+- Memory growth: record process memory and allocation evidence, repeat the operation under the same workload, then check whether memory is retained after the operation completes.
+- Hang: capture the screen, open resources, thread stacks, and a CPU sample before interrupting.
 
 ## Guardrails
 

@@ -62,7 +62,7 @@ The signal is a *pattern*, not single instances. Tells:
 
 - The same shape of workaround appearing repeatedly across unrelated code.
 - Multiple unrelated edge cases that all need special-case branches.
-- Types that need escape hatches (`any`, casts, optional fields always set in practice) to compile.
+- Types that need unnecessary `unsafe` blocks, lossy casts, or `Option` fields always set in practice to compile.
 - The "we need a lock" reflex when the sketch said the state wasn't shared.
 - Callers having to know the abstraction's internal rules to use it.
 - Two or more independent Phase D deviations of the same shape across the implementation.
