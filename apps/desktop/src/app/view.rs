@@ -15,6 +15,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -528,7 +529,8 @@ impl ElseApp {
             );
         }
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
-        let can_send = self.connection == Connection::Connected;
+        let can_send = self.connection == Connection::Connected
+            && !self.composer.read(cx).value().trim().is_empty();
         let mut frame = v_flex()
             .key_context(COMPOSER_CONTEXT)
             .w_full()
@@ -556,7 +558,7 @@ impl ElseApp {
             .child(
                 h_flex().gap_2().items_center().child(div().flex_1()).child(
                     Button::new("send")
-                        .cursor_pointer()
+                        .when(can_send, |button| button.cursor_pointer())
                         .icon(IconName::ArrowUp)
                         .primary()
                         .small()
