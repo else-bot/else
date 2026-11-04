@@ -245,13 +245,15 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     // configured; the picker shows why it is not.
     // Unknown when the database does not answer quickly: then only the
     // adapters' own availability is reported.
-    let configured: Option<Vec<String>> = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        sqlx::query_scalar("SELECT provider_id FROM provider_profiles").fetch_all(&state.db),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok);
+    let (configured, defaults, onboarding_required) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query_scalar("SELECT provider_id FROM provider_profiles").fetch_all(&state.db),
+        ),
+        settings::defaults(&state),
+        onboarding::required(&state),
+    );
+    let configured: Option<Vec<String>> = configured.ok().and_then(Result::ok);
     let mut default_id = None;
     let providers: Vec<_> = registry
         .all()
@@ -299,8 +301,8 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             })
         })
         .collect();
-    let defaults = settings::defaults(&state).await.ok().flatten();
-    let onboarding_required = onboarding::required(&state).await.unwrap_or(false);
+    let defaults = defaults.ok().flatten();
+    let onboarding_required = onboarding_required.unwrap_or(false);
     Json(json!({
         "api_version": "v1",
         "server_instance_id": state.server_instance_id,

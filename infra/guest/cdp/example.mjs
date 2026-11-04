@@ -17,7 +17,11 @@ try {
     throw e;
   }
   await page.waitFor("document.querySelector('#results')", { timeoutMs: 10000 });
-  console.log(JSON.stringify({ title: await page.read("document.title"), results: await page.read("document.querySelector('#results').innerText") }));
+  const [title, results] = await Promise.all([
+    page.read("document.title"),
+    page.read("document.querySelector('#results').innerText"),
+  ]);
+  console.log(JSON.stringify({ title, results }));
 } finally {
   await browser.close();
 }

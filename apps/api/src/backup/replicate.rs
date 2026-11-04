@@ -370,8 +370,9 @@ impl Replicator {
     /// Incomplete remote sets are removed only when no local set awaits
     /// them.
     async fn apply_remote_retention(&self, dir: &Path) -> Result<Vec<String>, BackupError> {
-        let sets = self.remote_sets().await?;
-        let verified = self.verified().await?;
+        let (sets, verified) = tokio::join!(self.remote_sets(), self.verified());
+        let sets = sets?;
+        let verified = verified?;
         let present: Vec<&(String, bool)> = verified
             .iter()
             .filter(|(id, _)| sets.iter().any(|(s, complete, _)| s == id && *complete))
