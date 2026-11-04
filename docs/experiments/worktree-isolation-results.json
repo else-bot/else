@@ -68,5 +68,22 @@
     ]
   },
   "build_retry": "An initial cold build received SIGKILL. Compilation and verification passed with the four-job default.",
-  "evidence_directory": "target/worktree-isolation"
+  "evidence_directory": "target/worktree-isolation",
+  "rebase_validation": {
+    "base": "a31b3ea2b56f1830a80f94b07961dc9273b2b612",
+    "full_offline_lanes": 30,
+    "rust_tests_passed": 295,
+    "python_tests_passed": {
+      "launcher": 12,
+      "verification_runner": 5,
+      "infrastructure": 24,
+      "installer_config": 18
+    },
+    "native_desktop_connected_to_owned_api": true,
+    "integration_fixes": [
+      "Private saved desktop profile refreshed after API verification and excluded from exported evidence",
+      "Bot settings use the current nonoptional validated client"
+    ],
+    "evidence_directory": "target/rebase-pr18"
+  }
 }
