@@ -20,7 +20,7 @@ impl ElseApp {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
-        let Some(row) = view.rows.get(ix).copied() else {
+        let Some(row) = view.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
         let key = row.key;

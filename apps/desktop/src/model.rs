@@ -406,14 +406,6 @@ impl Conversation {
             .find(|r| r.id == id)
     }
 
-    /// Every question of the loaded turns, by turn number.
-    pub fn questions(&self) -> Vec<(&Turn, &Question)> {
-        self.turns_in_order()
-            .into_iter()
-            .flat_map(|t| t.questions.iter().map(move |q| (t, q)))
-            .collect()
-    }
-
     pub fn question(&self, id: Uuid) -> Option<&Question> {
         self.turns
             .values()
@@ -831,7 +823,6 @@ mod tests {
         let shown = c.question(question).unwrap();
         assert!(shown.is_pending() && shown.is_approval());
         assert_eq!(shown.choices.len(), 3);
-        assert_eq!(c.questions().len(), 1);
         c.apply(&frame(
             3,
             "turn.updated",

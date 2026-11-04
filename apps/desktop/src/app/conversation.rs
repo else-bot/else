@@ -21,10 +21,11 @@ pub(super) enum RowKey {
     Question(Uuid),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
+    state: Option<String>,
 }
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
@@ -181,9 +182,6 @@ impl ElseApp {
                 match conversation.apply(&frame) {
                     Ok(Applied::Duplicate) => {}
                     Ok(Applied::Changed) => {
-                        if frame.event == "turn.updated" {
-                            view.list.remeasure();
-                        }
                         // The channel's activity is fresher than the list.
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
@@ -328,7 +326,22 @@ impl ElseApp {
         let rows: Vec<TranscriptRow> = rows
             .into_iter()
             .zip(burst_tail_stamps(&senders, &Local))
-            .map(|(key, footer_stamp)| TranscriptRow { key, footer_stamp })
+            .map(|(key, footer_stamp)| {
+                let state = conversation.and_then(|c| match key {
+                    RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
+                    RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
+                    RowKey::Item(id) => c
+                        .item(id)
+                        .and_then(|i| c.turn(i.turn_id))
+                        .map(|t| t.status.clone()),
+                    RowKey::Pending(_) => None,
+                });
+                TranscriptRow {
+                    key,
+                    footer_stamp,
+                    state,
+                }
+            })
             .collect();
         let old = std::mem::take(&mut view.rows);
         let same = |a: &TranscriptRow, b: &TranscriptRow| a.key == b.key;
@@ -349,12 +362,11 @@ impl ElseApp {
             view.list
                 .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
         }
-        let old_stamps: HashMap<RowKey, Option<DateTime<Utc>>> =
-            old.iter().map(|row| (row.key, row.footer_stamp)).collect();
+        let previous: HashMap<_, _> = old.iter().map(|row| (row.key, row)).collect();
         for (ix, row) in rows.iter().enumerate() {
-            if old_stamps
+            if previous
                 .get(&row.key)
-                .is_some_and(|stamp| *stamp != row.footer_stamp)
+                .is_some_and(|old| old.footer_stamp != row.footer_stamp || old.state != row.state)
             {
                 view.list.remeasure_items(ix..ix + 1);
             }
