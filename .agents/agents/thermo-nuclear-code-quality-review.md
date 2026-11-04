@@ -1,0 +1,1 @@
+../plugins/cursor-team-kit/agents/thermo-nuclear-code-quality-review.md
