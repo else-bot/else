@@ -69,6 +69,20 @@ pub struct ProfileChoice {
     pub service_tier: String,
 }
 
+/// The profile a bot's next messages use: its own (`own`), else the
+/// defaults it follows.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BotProfile {
+    #[serde(flatten)]
+    pub choice: ProfileChoice,
+    pub own: bool,
+}
+
+#[derive(Deserialize)]
+struct BotProfileEnvelope<P> {
+    profile: P,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Limits {
     pub max_text_bytes: usize,
@@ -435,6 +449,49 @@ impl Client {
         )
         .await
         .map(|(_, v)| v.bot)
+    }
+
+    /// Replace a bot's name and role (its instructions). Repeating the same
+    /// values is a no-op, so a retry after an unknown outcome is safe.
+    pub async fn update_bot(
+        self: Arc<Self>,
+        bot: Uuid,
+        name: String,
+        role: String,
+    ) -> Result<Bot, ClientError> {
+        let body = json!({ "name": name, "role": role });
+        self.call::<BotEnvelope>(Method::PATCH, format!("/v1/bots/{bot}"), Some(body))
+            .await
+            .map(|(_, v)| v.bot)
+    }
+
+    /// The bot's effective profile; `None` before any defaults exist.
+    pub async fn bot_profile(
+        self: Arc<Self>,
+        bot: Uuid,
+    ) -> Result<Option<BotProfile>, ClientError> {
+        self.call::<BotProfileEnvelope<Option<BotProfile>>>(
+            Method::GET,
+            format!("/v1/bots/{bot}/profile"),
+            None,
+        )
+        .await
+        .map(|(_, v)| v.profile)
+    }
+
+    /// Give the bot its own profile, used from its next message.
+    pub async fn set_bot_profile(
+        self: Arc<Self>,
+        bot: Uuid,
+        choice: ProfileChoice,
+    ) -> Result<BotProfile, ClientError> {
+        self.call::<BotProfileEnvelope<BotProfile>>(
+            Method::PUT,
+            format!("/v1/bots/{bot}/profile"),
+            Some(json!(choice)),
+        )
+        .await
+        .map(|(_, v)| v.profile)
     }
 
     /// Complete the welcome screen: name the main bot and set its provider

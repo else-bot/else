@@ -7,11 +7,13 @@
 mod categories;
 mod conversation;
 mod dialogs;
+mod settings;
 mod view;
 
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use dialogs::{CreateFormHolder, Welcome};
+use settings::BotSettings;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,7 +39,8 @@ actions!(
         DeleteBot,
         LoadOlder,
         NewCategory,
-        MoveBot
+        MoveBot,
+        ToggleSettings
     ]
 );
 
@@ -59,6 +62,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-up", LoadOlder, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", NewCategory, Some(APP_CONTEXT)),
         KeyBinding::new("ctrl-shift-m", MoveBot, Some(APP_CONTEXT)),
+        KeyBinding::new("ctrl-shift-b", ToggleSettings, Some(APP_CONTEXT)),
     ]);
 }
 
@@ -113,6 +117,8 @@ pub struct ElseApp {
     moving: HashSet<Uuid>,
     /// The last category operation's failure, shown in the sidebar.
     category_notice: Option<String>,
+    settings_open: bool,
+    settings: HashMap<Uuid, BotSettings>,
     sidebar_focus: FocusHandle,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
@@ -168,6 +174,8 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
+            settings_open: true,
+            settings: HashMap::new(),
             sidebar_focus,
             live: None,
             _live: None,
@@ -258,6 +266,7 @@ impl ElseApp {
                     self.open_welcome(&caps, window, cx);
                 }
                 self.caps = Some(caps);
+                self.build_pickers(window, cx);
             }
             Err(ClientError::Unauthorized) => {
                 self.connection =
@@ -292,6 +301,7 @@ impl ElseApp {
                 .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle"))
         });
         self.reconcile_selection(window, cx);
+        self.sync_settings(window, cx);
         cx.notify();
     }
 
@@ -333,6 +343,7 @@ impl ElseApp {
             self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
         }
         self.view = id.map(ConversationView::new);
+        self.ensure_settings(window, cx);
         if id.is_some() {
             // Pending sends show at once, even before history loads.
             self.sync_rows(window, cx);
