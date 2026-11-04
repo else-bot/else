@@ -271,7 +271,7 @@ pacman_packages() {
 
 # Docker is only used to build the optional guest image.
 docker_packages() {
-    [ "$SKIP_GUEST" = 1 ] && return 0
+    docker_needed || return 0
     have docker && return 0
     case "$DISTRO" in
         debian | ubuntu) echo "docker.io" ;;
@@ -318,11 +318,11 @@ docker_run() {
 }
 
 linux_access() {
-	step "Docker, KVM, and the provider sandbox"
-	if [ "$SKIP_GUEST" != 1 ] && have docker; then
+	if docker_needed && have docker; then
+		step "Docker, to build the guest image"
 		if has_systemd && ! systemctl is-active --quiet docker 2>/dev/null; then
 			sudo_ready
-			if $SUDO systemctl enable --now docker >/dev/null 2>&1; then ok "Docker service started"; else warn "could not start the Docker service"; fi
+			if $SUDO systemctl start docker >/dev/null 2>&1; then ok "Docker service started"; else warn "could not start the Docker service"; fi
 		fi
 		if ! in_group docker && getent group docker >/dev/null 2>&1; then
 			if confirm "Add $USER to the docker group (Docker without sudo)?"; then
@@ -335,6 +335,7 @@ linux_access() {
 		if in_group docker && ! active_in_session docker; then DOCKER_VIA_SG=1; fi
 		if docker_run info >/dev/null 2>&1; then ok "Docker works"; else warn "Docker is not reachable from this session (no daemon running, or no permission)"; fi
 	fi
+	step "KVM"
 	if [ ! -e /dev/kvm ]; then
 		warn "/dev/kvm is missing: bot computers need hardware virtualization (VT-x/AMD-V, or nested virtualization in a VM)"
 	elif [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
@@ -631,15 +632,40 @@ refresh_provider_paths() {
 	if [ -n "$claude" ]; then config_set ELSE_CLAUDE_BIN "$claude"; fi
 }
 
+GUEST_IMAGE_STATE=missing
+decide_guest_image() {
+	if [ "$DISTRO" = macos ] && [ "$ARCH" != aarch64 ]; then
+		warn "bot computers need Apple silicon (Microsandbox has no Intel macOS build); they will report unavailable"
+		SKIP_GUEST=1
+		NO_MSB=1
+	fi
+	if [ "$SKIP_GUEST" = 1 ]; then
+		GUEST_IMAGE_STATE=skip
+		return 0
+	fi
+	GUEST_IMAGE_STATE=missing
+	local home="$DATA/microsandbox" images
+	[ -d "$home" ] || return 0
+	[ -x "$MSB" ] || ensure_msb
+	if ! images="$(MSB_HOME="$home" "$MSB" image list --format json)"; then
+		ensure_msb
+		images="$(MSB_HOME="$home" "$MSB" image list --format json)" ||
+			die "could not list the guest images in $home with $MSB"
+	fi
+	case "$images" in *"\"$GUEST_TAG\""*) GUEST_IMAGE_STATE=cached ;; esac
+}
+docker_needed() { [ "$GUEST_IMAGE_STATE" = missing ]; }
+
 build_guest_image() {
-	[ "$SKIP_GUEST" = 1 ] && return 0
 	step "Guest VM image $GUEST_TAG"
-	local home="$DATA/microsandbox" images=""
-	[ -d "$home" ] && images="$(MSB_HOME="$home" "$MSB" image list --format json 2>/dev/null || true)"
-	case "$images" in
-	*"\"$GUEST_TAG\""*) ok "already loaded" ;;
-	*)
-		info "Building it and loading it into $home (about 15 minutes the first time)"
+	case "$GUEST_IMAGE_STATE" in
+	skip)
+		ok "not needed (no guest image)"
+		return 0
+		;;
+	cached) ok "already loaded" ;;
+	missing)
+		info "Building it and loading it into $DATA/microsandbox (about 15 minutes the first time)"
 		local log="$LOGS/guest-image.log"
 		if [ "$DOCKER_VIA_SG" = 0 ]; then
 			ELSE_GUEST_TAG="$GUEST_TAG" ELSE_MSB_BIN="$MSB" "$SRC/scripts/build-guest-image.sh" "$DATA" >"$log" 2>&1
@@ -685,7 +711,6 @@ setup_service() {
 	launchd)
 		if [ "$AUTOSTART" = 1 ]; then
 			ok "launchd agent, starts when you log in"
-			info "${DIM}It needs Docker at login too: in OrbStack or Docker Desktop, turn on starting at login${RESET}"
 		else
 			ok "launchd agent, starts with: elsebot start (--autostart to start it at login)"
 		fi
@@ -785,8 +810,6 @@ check_providers() {
 
 # --- Stage 2: install or update from the release's own source ---------------
 
-# macOS: Xcode and Docker for the optional guest image. Docker
-# Desktop and OrbStack are apps the owner installs; nothing here uses sudo.
 macos_prerequisites() {
 	step "Xcode"
 	if ! xcode-select -p >/dev/null 2>&1; then
@@ -801,23 +824,14 @@ macos_prerequisites() {
 	else
 		ok "command line tools"
 	fi
-
-
-	step "Docker"
-	if [ "$SKIP_GUEST" = 1 ]; then
-		ok "not needed (no guest image)"
-	elif ! have docker; then
+	docker_needed || return 0
+	step "Docker, to build the guest image"
+	if ! have docker; then
 		die "Docker is missing: install OrbStack (https://orbstack.dev) or Docker Desktop, start it, then run the installer again"
 	elif ! docker info >/dev/null 2>&1; then
 		die "Docker is not running: start OrbStack or Docker Desktop, then run the installer again"
 	else
 		ok "Docker works ($(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo running))"
-	fi
-
-	if [ "$ARCH" != aarch64 ]; then
-		warn "bot computers need Apple silicon (Microsandbox has no Intel macOS build); they will report unavailable"
-		SKIP_GUEST=1
-		NO_MSB=1
 	fi
 }
 
@@ -844,6 +858,7 @@ stage2() {
 	current) info "else.bot $target is installed; checking the installation" ;;
 	esac
 
+	decide_guest_image
 	if [ "$DISTRO" = macos ]; then
 		macos_prerequisites
 	else
