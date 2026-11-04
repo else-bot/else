@@ -416,13 +416,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         _ => return tool_error("Unknown tool."),
     };
     if let Some(log) = log {
-        // Typed text never enters memory (it may be a password).
-        let logged = if name == "computer_input" {
-            json!({ "frame": args["frame"], "actions": super::guest_tools::summarize_input(
-                args["actions"].as_array().map(Vec::as_slice).unwrap_or_default()) })
-        } else {
-            args.clone()
-        };
+        let logged = crate::app::tools::loggable_args(name, args);
         record(state, grant, name, &logged, &log).await;
     }
     result

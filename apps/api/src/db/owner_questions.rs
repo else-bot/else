@@ -275,7 +275,9 @@ impl Spec {
             title,
             context: Some(context),
             choices: approval_choices(kind),
-            action: Some(json!({ "tool": tool, "args": args })),
+            action: Some(
+                json!({ "tool": tool, "args": crate::app::tools::loggable_args(tool, args) }),
+            ),
             action_hash: Some(hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()])),
         }
     }

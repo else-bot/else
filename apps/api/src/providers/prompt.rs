@@ -383,8 +383,9 @@ fn questions_block(input: &TurnInput) -> String {
                 };
                 let next = match answer {
                     "approve" | "approve_forever" if action.get("tool").is_some() => format!(
-                        "Approved: call {} again with exactly these arguments, once. A different \
-                         call needs a new card.",
+                        "Approved: call {} again with the original tool call arguments, once. \
+                         Typed text is redacted here; never substitute the summary into the call. \
+                         A different call needs a new card.",
                         action["tool"].as_str().unwrap_or_default()
                     ),
                     "approve" | "approve_forever" => {

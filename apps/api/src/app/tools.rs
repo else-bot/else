@@ -64,6 +64,43 @@ pub fn parks(tool: &str, result: &serde_json::Value) -> bool {
     }
 }
 
+pub fn summarize_input(actions: &[serde_json::Value]) -> String {
+    actions
+        .iter()
+        .map(|a| {
+            if let Some(t) = a["type"].as_str() {
+                format!("type({} chars)", t.chars().count())
+            } else if let Some(k) = a["key"].as_str() {
+                format!("key({})", &k[..k.floor_char_boundary(k.len().min(40))])
+            } else if let Some((kind, v)) = a.as_object().and_then(|o| o.iter().next()) {
+                format!("{kind}({v})")
+            } else {
+                "?".into()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    match name {
+        "computer_input" => json!({
+            "frame": args["frame"],
+            "actions": summarize_input(args["actions"].as_array().map(Vec::as_slice).unwrap_or_default()),
+        }),
+        "computer_browser" if args["action"] == "type" => {
+            let mut safe = args.clone();
+            if let Some(text) = args["text"].as_str() {
+                safe["text"] = Value::String(format!("type({} chars)", text.chars().count()));
+            }
+            safe
+        }
+        _ => args.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::mcp::{Outcome, slice, tool_error, tool_image, tool_result, wire_size};
+use crate::app::tools::summarize_input;
 use crate::computers::jobs::CommandOutput;
 use crate::computers::jobs::Started;
 use crate::computers::{Acquire, ComputerError};
@@ -567,24 +568,6 @@ async fn input(
 
 /// An input batch for the activity log: action kinds and points, never the
 /// typed text (it may be a password).
-pub(crate) fn summarize_input(actions: &[Value]) -> String {
-    actions
-        .iter()
-        .map(|a| {
-            if let Some(t) = a["type"].as_str() {
-                format!("type({} chars)", t.chars().count())
-            } else if let Some(k) = a["key"].as_str() {
-                format!("key({})", slice(k, 0, 40).1)
-            } else if let Some((kind, v)) = a.as_object().and_then(|o| o.iter().next()) {
-                format!("{kind}({v})")
-            } else {
-                "?".into()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The task secrets a call names, decrypted, or the tool error.
 async fn secrets_for(
     state: &AppState,

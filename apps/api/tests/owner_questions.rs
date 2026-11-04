@@ -468,7 +468,9 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         "{packet}"
     );
     assert!(
-        packet.contains("Approved: call computer_run again with exactly these arguments, once"),
+        packet.contains(
+            "Approved: call computer_run again with the original tool call arguments, once"
+        ),
         "{packet}"
     );
 
@@ -610,6 +612,50 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
     let asks = tool_text(&tool(&app, &token, "computer_run", other_delete).await);
     assert_eq!(asks["status"], "pending", "revoked: asks again");
     wait(&app, turn, "waiting").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_records_never_store_typed_text() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let canary = "PRIVATE-TYPED-TEXT-934f";
+    for (name, args) in [
+        (
+            "computer_input",
+            json!({ "frame": [100, 100], "actions": [{ "type": canary }], "effect": "external" }),
+        ),
+        (
+            "computer_browser",
+            json!({ "action": "type", "selector": "#message", "text": canary, "effect": "external" }),
+        ),
+    ] {
+        let (turn, token) = running(&app, &main).await;
+        let pending = tool_text(&tool(&app, &token, name, args).await);
+        let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+        let snapshot = shown_turn(&app, &main, turn).await;
+        assert!(!snapshot.to_string().contains(canary));
+        assert!(
+            !journaled(&app, &main, question)
+                .await
+                .to_string()
+                .contains(canary)
+        );
+        let stored: String = sqlx::query_scalar("SELECT action FROM owner_questions WHERE id = ?1")
+            .bind(question)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+        assert!(!stored.contains(canary), "{stored}");
+        wait(&app, turn, "waiting").await;
+        assert_eq!(
+            answer(&app, &main, question, "approve").await.status,
+            StatusCode::OK
+        );
+        wait(&app, turn, "completed").await;
+        let packet = synthetic.packets().await.last().unwrap().clone();
+        assert!(packet.contains("[else.bot owner answers]"));
+        assert!(!packet.contains(canary), "{packet}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
