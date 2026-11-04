@@ -1,10 +1,11 @@
 //! Routines and their runs.
 //!
 //! A routine belongs to its bot's owner conversation. Only that bot, from a
-//! running turn answering an owner message there, may manage it: every
-//! mutation rechecks the turn inside its own immediate transaction, so a
-//! delegated task, a routine run, or a stopped turn is refused even with a
-//! grant. The owner may switch a routine on or off.
+//! running turn whose work is rooted in an owner message (in its owner
+//! conversation, or a task another bot delegated for one), may manage it:
+//! every mutation rechecks the turn inside its own immediate transaction,
+//! so a routine run, a task delegated by one, or a stopped turn is refused
+//! even with a grant. The owner may switch a routine on or off.
 //!
 //! The scheduler admits due routines (see [`admit_due`]). Each admission is
 //! one transaction that records the occurrence in `routine_runs`, advances
@@ -19,7 +20,7 @@ use uuid::Uuid;
 
 use super::events;
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Availability, Profile, RoutineRun};
+use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
 use crate::app::routines::{InvalidRoutine, MAX_PER_BOT, RoutineName, RoutinePrompt, Schedule};
 use crate::providers::Registry;
 
@@ -29,8 +30,8 @@ pub const ADMIT_BATCH: i64 = 8;
 #[derive(Debug, thiserror::Error)]
 pub enum RoutineError {
     #[error(
-        "only a bot's own conversation with the owner can manage its routines; delegated tasks \
-         and routine runs cannot"
+        "a bot manages its own routines only for an owner request; routine runs and tasks they \
+         delegated cannot"
     )]
     NotAllowed,
     #[error("the request is no longer running")]
@@ -196,34 +197,37 @@ async fn load(conn: &mut SqliteConnection, id: Uuid) -> Result<Routine, sqlx::Er
     Ok(row.into())
 }
 
-async fn authorize(conn: &mut SqliteConnection, caller: Caller) -> Result<(), RoutineError> {
-    let row: Option<(Uuid, Uuid, String, String, String, String)> = sqlx::query_as(
-        "SELECT t.bot_id, t.conversation_id, t.status, c.kind, b.status, i.kind
-         FROM turns t JOIN conversations c ON c.id = t.conversation_id
-         JOIN bots b ON b.id = t.bot_id JOIN items i ON i.id = t.owner_item_id
+async fn authorized_owner_conversation(
+    conn: &mut SqliteConnection,
+    caller: Caller,
+) -> Result<Uuid, RoutineError> {
+    let row: Option<(Uuid, Uuid, String, String, Uuid)> = sqlx::query_as(
+        "SELECT t.bot_id, t.conversation_id, t.status, b.status, o.id
+         FROM turns t JOIN bots b ON b.id = t.bot_id
+         JOIN conversations o ON o.bot_id = t.bot_id AND o.kind = 'owner'
          WHERE t.id = ?1",
     )
     .bind(caller.turn_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((bot, conversation, status, kind, bot_status, source)) = row else {
+    let Some((bot, conversation, status, bot_status, owner_conversation)) = row else {
         return Err(RoutineError::NotRunning);
     };
     if bot != caller.bot_id || conversation != caller.conversation_id {
         return Err(RoutineError::NotAllowed);
     }
-    if kind != "owner" || source != "user" {
+    if super::delegations::origin(conn, caller.turn_id).await? != Origin::OwnerRequest {
         return Err(RoutineError::NotAllowed);
     }
     if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
         return Err(RoutineError::NotRunning);
     }
-    Ok(())
+    Ok(owner_conversation)
 }
 
 async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {
     match by {
-        By::Turn(caller) => authorize(conn, caller).await,
+        By::Turn(caller) => authorized_owner_conversation(conn, caller).await.map(drop),
         By::Owner { bot_id } => {
             let status: Option<String> =
                 sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
@@ -271,7 +275,7 @@ pub async fn create(
 ) -> Result<(Routine, bool), RoutineError> {
     let hash = create_hash(&routine);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorize(&mut tx, caller).await?;
+    let conversation_id = authorized_owner_conversation(&mut tx, caller).await?;
     let existing: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
         "SELECT id, request_hash FROM routines WHERE created_turn_id = ?1 AND created_name = ?2",
     )
@@ -309,7 +313,7 @@ pub async fn create(
     )
     .bind(id)
     .bind(caller.bot_id)
-    .bind(caller.conversation_id)
+    .bind(conversation_id)
     .bind(routine.name.as_str())
     .bind(routine.prompt.as_str())
     .bind(routine.schedule.cron())
@@ -418,7 +422,7 @@ pub async fn update(
 /// admitted finishes. Deleting it again returns `false`.
 pub async fn delete(pool: &SqlitePool, caller: Caller, id: Uuid) -> Result<bool, RoutineError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    authorize(&mut tx, caller).await?;
+    authorized_owner_conversation(&mut tx, caller).await?;
     let deleted: Option<bool> = sqlx::query_scalar(
         "SELECT deleted_at IS NOT NULL FROM routines WHERE id = ?1 AND bot_id = ?2",
     )

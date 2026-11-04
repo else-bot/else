@@ -1,4 +1,4 @@
-//! Routines over MCP (the bot manages its own, from an owner message) and
+//! Routines over MCP (the bot manages its own, for an owner request) and
 //! the owner's routes (list, and switch one on or off).
 
 use std::sync::Arc;
@@ -157,11 +157,11 @@ fn fields() -> Value {
 pub fn create_schema() -> Value {
     json!({
         "name": "routine_create",
-        "description": "Save a recurring task that runs on a schedule in this conversation. \
-            Each run gives you the prompt as a scheduled routine task; you do it and report the \
-            results to the owner. Returns the routine with its next run time. Repeating the same \
-            call in this owner request returns the same routine; other settings for the same \
-            name conflict.",
+        "description": "Save one of your own recurring tasks; it runs on a schedule in your \
+            conversation with the owner. Each run gives you the prompt as a scheduled routine \
+            task; you do it and report the results to the owner. Returns the routine with its \
+            next run time. Repeating the same call in this request returns the same routine; \
+            other settings for the same name conflict.",
         "inputSchema": {
             "type": "object",
             "properties": fields(),

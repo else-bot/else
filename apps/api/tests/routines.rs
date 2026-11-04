@@ -1,165 +1,25 @@
 mod common;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
 use common::{TestApp, TestDb};
-use else_api::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, TurnInput, TurnOutcome, TurnSink,
-};
 use else_api::grants::{DEFAULT_TTL, Tool};
-use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const SLOW: &str = "[synthetic:slow] set up my morning digest routine, please.";
 const YEARLY: &str = "0 9 1 1 *";
 
-enum GrantMessage {
-    Record(Uuid, String),
-    Read(Uuid, oneshot::Sender<Option<String>>),
-}
-
-struct Recorder {
-    inner: Synthetic,
-    grants: mpsc::Sender<GrantMessage>,
-}
-
-#[async_trait::async_trait]
-impl Provider for Recorder {
-    fn id(&self) -> &'static str {
-        self.inner.id()
-    }
-    fn label(&self) -> &'static str {
-        self.inner.label()
-    }
-    fn availability(&self) -> Availability {
-        Availability::Available
-    }
-    fn uses_profile(&self) -> bool {
-        false
-    }
-    fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        self.inner.validate_profile(profile)
-    }
-    async fn checkpoint(
-        &self,
-        request: CheckpointRequest,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<String, String> {
-        self.inner.checkpoint(request, cancel).await
-    }
-    async fn run(
-        &self,
-        input: TurnInput,
-        sink: &dyn TurnSink,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> TurnOutcome {
-        if let Some(token) = input.tool_grant.clone() {
-            self.grants
-                .send(GrantMessage::Record(input.turn_id, token))
-                .await
-                .unwrap();
-        }
-        self.inner.run(input, sink, cancel).await
-    }
-}
-
-struct Harness {
-    app: TestApp,
-    recorder: Arc<Recorder>,
-}
-
 async fn harness() -> Harness {
-    let db = Arc::new(TestDb::migrated().await);
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let (grants, mut mailbox) = mpsc::channel(64);
-    tokio::spawn(async move {
-        let mut latest = HashMap::new();
-        while let Some(message) = mailbox.recv().await {
-            match message {
-                GrantMessage::Record(turn, token) => {
-                    latest.insert(turn, token);
-                }
-                GrantMessage::Read(turn, reply) => {
-                    let _ = reply.send(latest.get(&turn).cloned());
-                }
-            }
-        }
-    });
-    let recorder = Arc::new(Recorder {
-        inner: Synthetic::new(Duration::from_millis(5)),
-        grants,
-    });
-    let registry = else_api::providers::Registry::new(vec![recorder.clone()]);
-    Harness {
-        app: TestApp::with_registry(db, 4, registry),
-        recorder,
-    }
+    recorder::harness(4).await
 }
 
 impl Harness {
-    async fn grant(&self, turn: Uuid) -> String {
-        for _ in 0..400 {
-            let (reply, response) = oneshot::channel();
-            self.recorder
-                .grants
-                .send(GrantMessage::Read(turn, reply))
-                .await
-                .unwrap();
-            let found = response.await.unwrap();
-            if let Some(token) = found {
-                return token;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("turn {turn} never started");
-    }
-
     async fn owner_turn(&self, bot: &str) -> (Uuid, String) {
-        let sent = self.app.send(bot, Uuid::new_v4(), SLOW, None).await;
-        assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
-        let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
-        self.app.wait_turn(&turn.to_string(), &["running"]).await;
-        (turn, self.grant(turn).await)
-    }
-
-    async fn packets(&self) -> Vec<String> {
-        self.recorder.inner.packets().await
-    }
-}
-
-struct Called {
-    status: StatusCode,
-    result: Value,
-    error: bool,
-    body: Value,
-}
-
-async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Called {
-    let reply = app
-        .call(
-            "POST",
-            "/tools/v1/mcp",
-            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                         "params": { "name": name, "arguments": args } })),
-            Some(token),
-        )
-        .await;
-    let text = reply.body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    Called {
-        status: reply.status,
-        result: serde_json::from_str(&text).unwrap_or(json!(text)),
-        error: reply.body["result"]["isError"] == true,
-        body: reply.body,
+        self.running(bot, SLOW).await
     }
 }
 
@@ -397,114 +257,273 @@ async fn routines_per_bot_are_capped() {
     assert!(over.result.as_str().unwrap().starts_with("LIMIT_REACHED"));
 }
 
-#[tokio::test]
-async fn delegated_tasks_and_routine_runs_cannot_manage_routines() {
+async fn child_of(app: &TestApp, root: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1 ORDER BY created_at DESC",
+    )
+    .bind(root)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+async fn owner_conversation(app: &TestApp, bot: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1 AND kind = 'owner'")
+        .bind(bot.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn forged(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.scheduler
+        .grants()
+        .issue(bot, conversation, turn, tools, DEFAULT_TTL)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     let h = harness().await;
     let main = h.app.main_bot().await;
-    let leaf = h.app.create_bot("School").await;
-    let warm = h
-        .app
-        .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
-        .await;
-    h.app
-        .wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
-        .await;
-    let (root, token) = h.owner_turn(&main).await;
+    let args = json!({ "name": "Morning digest", "prompt": "Summarize the owner's unread mail.",
+                       "cron": "30 7 * * 1-5", "timezone": "Europe/Paris" });
+    let (setup, token) = h.running(&main, GATE).await;
+    let old = create(&h.app, &token, args.clone()).await;
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
 
-    let delegated = tool(
+    let (root, token) = h
+        .running(
+            &main,
+            &format!("{GATE_EVERY_ATTEMPT} make a Mail bot and move my morning digest to it"),
+        )
+        .await;
+    let created = tool(&h.app, &token, "create_bot", json!({ "name": "Mail" })).await;
+    assert!(!created.error, "{}", created.body);
+    let mail = created.result["bot_id"].as_str().unwrap().to_owned();
+    let handoff = "[gate] Save this as your own routine named Morning digest: summarize the \
+                   owner's unread mail, at 07:30 on weekdays, Europe/Paris time.";
+    let pending = tool(
         &h.app,
         &token,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] fill in the school form, carefully." }),
+        json!({ "target_bot_id": mail, "task": handoff }),
     )
     .await;
-    assert_eq!(delegated.result["status"], "pending", "{}", delegated.body);
-    let child: Uuid =
-        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
-            .bind(root)
-            .fetch_one(&h.app.db.pool)
-            .await
-            .unwrap();
-    h.app.wait_turn(&child.to_string(), &["running"]).await;
-    let child_token = h.grant(child).await;
-    let refused = tool(&h.app, &child_token, "routine_list", json!({})).await;
-    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
-    let (child_bot, child_conversation): (Uuid, Uuid) =
-        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
-            .bind(child)
-            .fetch_one(&h.app.db.pool)
-            .await
-            .unwrap();
-    let forged = h
-        .app
-        .scheduler
-        .grants()
-        .issue(
-            child_bot,
-            child_conversation,
-            child,
-            vec![Tool::Routines],
-            DEFAULT_TTL,
-        )
-        .await;
-    let called = tool(&h.app, &forged, "routine_create", digest("x")).await;
-    assert!(
-        called.result.as_str().unwrap().starts_with("NOT_ALLOWED"),
-        "{}",
-        called.body
-    );
-    h.app.wait_turn(&root.to_string(), &["completed"]).await;
+    assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+    let child = child_of(&h.app, root).await;
+    h.release(root).await;
+    h.app.wait_turn(&root.to_string(), &["waiting"]).await;
 
-    let (setup, token) = h.owner_turn(&main).await;
+    let (_, child_token) = h.started(child).await;
+    let saved = create(&h.app, &child_token, args.clone()).await;
+    let again = tool(&h.app, &child_token, "routine_create", args).await;
+    assert_eq!(again.result["created"], false, "{}", again.body);
+    assert_eq!(again.result["routine"]["id"], saved["id"]);
+    let (owner, conversation, creator): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT bot_id, conversation_id, created_turn_id FROM routines WHERE id = ?1",
+    )
+    .bind(saved["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(owner.to_string(), mail, "the routine is the new bot's own");
+    assert_eq!(conversation, owner_conversation(&h.app, &mail).await);
+    assert_eq!(creator, child);
+    let foreign = tool(
+        &h.app,
+        &child_token,
+        "routine_update",
+        json!({ "routine_id": old["id"], "enabled": false }),
+    )
+    .await;
+    assert_eq!(foreign.code(), "NOT_FOUND", "{}", foreign.body);
+    for (name, args) in [
+        (
+            "delegate",
+            json!({ "target_bot_id": main, "task": "loop back" }),
+        ),
+        ("create_bot", json!({ "name": "Another" })),
+        (
+            "request_secret",
+            json!({ "name": "x", "reason": "y", "env": ["X"] }),
+        ),
+    ] {
+        let refused = tool(&h.app, &child_token, name, args).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::FORBIDDEN,
+            "{name}: {}",
+            refused.body
+        );
+    }
+    assert_eq!(
+        else_api::db::delegations::create(&h.app.db.pool, child, main.parse().unwrap(), "x").await,
+        Err(else_api::db::delegations::DelegateError::NotAllowed),
+        "one hop, even with a forged grant"
+    );
+    h.release(child).await;
+    let (_, continuation_token) = h.started(root).await;
+
+    let attempts = h.inputs(root).await;
+    assert_eq!(attempts.len(), 2);
+    let results = else_api::providers::prompt::outcomes_block(&attempts[1]);
+    assert!(results.contains("bot=\"Mail\""), "{results}");
+    assert!(
+        results.contains("Europe/Paris"),
+        "the new bot's reply: {results}"
+    );
+    let task = &h.inputs(child).await[0];
+    let rules = else_api::providers::prompt::instructions(task, "/p");
+    let main_name = &attempts[0].bot_name;
+    assert!(
+        rules.contains(&format!(
+            "delegated to you by the bot {main_name} (bot_id {main})"
+        )),
+        "{rules}"
+    );
+    assert!(rules.contains("you may set up, change, or remove your OWN routines"));
+    assert!(rules.contains("scheduled routine task in your conversation with the owner"));
+    assert_eq!(
+        owner_routines(&h.app, &main).await[0]["enabled"],
+        true,
+        "the old routine is the main bot's to retire"
+    );
+    let retired = tool(
+        &h.app,
+        &continuation_token,
+        "routine_update",
+        json!({ "routine_id": old["id"], "enabled": false }),
+    )
+    .await;
+    assert!(!retired.error, "{}", retired.body);
+    assert_eq!(retired.result["routine"]["enabled"], false);
+    h.release(root).await;
+    h.app.wait_turn(&root.to_string(), &["completed"]).await;
+    assert_eq!(owner_routines(&h.app, &main).await[0]["enabled"], false);
+    let (status, delivered, result): (String, Option<i32>, Option<String>) = sqlx::query_as(
+        "SELECT status, delivered_attempt, result FROM delegations WHERE child_turn_id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), delivered), ("completed", Some(2)));
+    assert!(result.unwrap().contains("Morning digest"));
+
+    let listed = owner_routines(&h.app, &mail).await;
+    assert_eq!(listed.len(), 1);
+    let due = at(&listed[0]["next_run_at"]);
+    assert_eq!(fire(&h.app, due).await, 1);
+    let run = runs(&h.app, saved["id"].as_str().unwrap()).await[0]
+        .0
+        .unwrap();
+    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    let (run_bot, run_conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(run)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(run_bot.to_string(), mail);
+    assert_eq!(run_conversation, owner_conversation(&h.app, &mail).await);
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{mail}/conversation"), None)
+        .await
+        .body;
+    assert!(
+        snapshot["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["turn_id"] == run.to_string().as_str() && i["kind"] == "assistant"),
+        "the run reports in the new bot's chat with the owner"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let leaf = h.app.create_bot("School").await;
+    let (setup, token) = h.running(&main, GATE).await;
     let routine = create(
         &h.app,
         &token,
-        digest("[synthetic:slow] gather the morning news digest now."),
+        digest("[gate] gather the morning news digest now."),
     )
     .await;
-    let due = at(&routine["next_run_at"]);
+    h.release(setup).await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
-    assert_eq!(fire(&h.app, due).await, 1);
+    assert_eq!(fire(&h.app, at(&routine["next_run_at"])).await, 1);
     let run = runs(&h.app, routine["id"].as_str().unwrap()).await[0]
         .0
         .unwrap();
-    h.app.wait_turn(&run.to_string(), &["running"]).await;
-    let run_token = h.grant(run).await;
+    let (_, run_token) = h.started(run).await;
+
+    let (owner_inputs, run_inputs) = tokio::join!(h.inputs(setup), h.inputs(run));
+    let owner_registry = else_api::providers::prompt::registry_text(&owner_inputs[0]);
+    let run_registry = else_api::providers::prompt::registry_text(&run_inputs[0]);
+    assert_ne!(
+        owner_registry, run_registry,
+        "routine permissions affect session compatibility"
+    );
+    let run_rules = else_api::providers::prompt::instructions(&run_inputs[0], "/p");
+    assert!(!run_rules.contains("save it as a routine with routine_create"));
+    assert!(!run_rules.contains("To hand a routine to another bot"));
+
     let refused = tool(&h.app, &run_token, "routine_create", digest("again")).await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
-    let main_id: Uuid = main.parse().unwrap();
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
-        .bind(run)
-        .fetch_one(&h.app.db.pool)
-        .await
-        .unwrap();
-    let forged = h
-        .app
-        .scheduler
-        .grants()
-        .issue(
-            main_id,
-            conversation,
-            run,
-            vec![Tool::Routines],
-            DEFAULT_TTL,
-        )
-        .await;
     let called = tool(
         &h.app,
-        &forged,
+        &forged(&h.app, run, vec![Tool::Routines]).await,
         "routine_delete",
         json!({ "routine_id": routine["id"] }),
     )
     .await;
-    assert!(
-        called.result.as_str().unwrap().starts_with("NOT_ALLOWED"),
-        "{}",
-        called.body
-    );
+    assert_eq!(called.code(), "NOT_ALLOWED", "{}", called.body);
     let memory = tool(&h.app, &run_token, "memory_bots", json!({})).await;
     assert_eq!(memory.status, StatusCode::OK);
     assert!(!memory.error);
+
+    let pending = tool(
+        &h.app,
+        &run_token,
+        "delegate",
+        json!({ "target_bot_id": leaf, "task": "[gate] fill in the school form, carefully." }),
+    )
+    .await;
+    assert_eq!(pending.result["status"], "pending", "{}", pending.body);
+    let child = child_of(&h.app, run).await;
+    h.release(run).await;
+    let (_, child_token) = h.started(child).await;
+    let refused = tool(&h.app, &child_token, "routine_list", json!({})).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let rules = else_api::providers::prompt::instructions(&h.inputs(child).await[0], "/p");
+    assert!(
+        rules.contains("the routine tools are refused for you"),
+        "{rules}"
+    );
+    assert!(!rules.contains("save it as a routine with routine_create"));
+    let called = tool(
+        &h.app,
+        &forged(&h.app, child, vec![Tool::Routines]).await,
+        "routine_create",
+        digest("x"),
+    )
+    .await;
+    assert_eq!(called.code(), "NOT_ALLOWED", "{}", called.body);
+    h.release(child).await;
+    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+    assert!(owner_routines(&h.app, &leaf).await.is_empty());
 }
 
 #[tokio::test]
