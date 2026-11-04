@@ -39,6 +39,7 @@ impl RowText {
                 TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
                     .default_value(source.clone())
+                    .context_menu(!matches!(key, RowKey::Item(_)))
             })),
             RowFormat::Markdown => {
                 let state = cx.new(|cx| TextViewState::markdown(&source, cx));
@@ -70,6 +71,18 @@ impl RowText {
         match self.widget {
             Widget::Plain(_) => RowFormat::Plain,
             Widget::Markdown { .. } => RowFormat::Markdown,
+        }
+    }
+
+    pub(super) fn copy_text(&self, cx: &App) -> String {
+        let selected = match &self.widget {
+            Widget::Plain(state) => state.read(cx).selected_value().to_string(),
+            Widget::Markdown { state, .. } => state.read(cx).selected_text(),
+        };
+        if selected.is_empty() {
+            self.source.clone()
+        } else {
+            selected
         }
     }
 

@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::messages::{InvalidMessage, MAX_QUEUED_TURNS, validate_text};
+use crate::app::messages::{InvalidMessage, MAX_QUEUED_TURNS, Reaction, validate_text};
 use crate::app::providers::Availability;
 use crate::db::turns::{self, AcceptError, SendRequest};
 use crate::views::*;
@@ -46,6 +46,10 @@ impl From<AcceptError> for ApiError {
                 "request_conflict",
                 "This request ID was already used with different input.",
             ),
+            AcceptError::InvalidReaction => ApiError::bad_request(
+                "invalid_reaction",
+                "A reaction must target an assistant message in this conversation.",
+            ),
             AcceptError::QueueFull => ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "queue_full",
@@ -74,6 +78,8 @@ struct SendBody {
     text: String,
     #[serde(default)]
     provider_id: Option<String>,
+    #[serde(default)]
+    reaction: Option<Reaction>,
 }
 
 async fn send(
@@ -106,6 +112,7 @@ async fn send(
         bot_id,
         request_id,
         text: &body.text,
+        reaction: body.reaction,
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,

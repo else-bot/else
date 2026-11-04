@@ -84,6 +84,7 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "text": item.text,
         "provider_id": item.provider_id,
         "created_at": item.created_at,
+        "reaction": item.reaction.as_ref().map(|reaction| reaction.0),
     })
 }
 

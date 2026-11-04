@@ -9,6 +9,8 @@ mod categories;
 mod conversation;
 mod dialogs;
 mod link_target;
+mod message_menu;
+mod reply;
 mod row_text;
 mod secret_card;
 mod settings;
@@ -17,6 +19,7 @@ mod view;
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use dialogs::{CreateFormHolder, Welcome};
+use reply::Draft;
 use settings::{BotSettings, ModelDialog};
 
 use std::collections::{HashMap, HashSet};
@@ -30,6 +33,7 @@ use uuid::Uuid;
 use crate::api::{
     Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
 };
+use crate::model::Reaction;
 
 actions!(
     else_desktop,
@@ -87,6 +91,7 @@ struct PendingSend {
     request_id: Uuid,
     text: String,
     provider_id: Option<String>,
+    reaction: Option<Reaction>,
     /// `None` while sending; otherwise why the outcome is unknown.
     unknown: Option<String>,
     /// Set when the server definitely refused it. The text stays here until
@@ -104,7 +109,7 @@ pub struct ElseApp {
     selected: Option<Uuid>,
     view: Option<ConversationView>,
     composer: Entity<TextareaState>,
-    drafts: HashMap<Uuid, String>,
+    drafts: HashMap<Uuid, Draft>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     unread: HashSet<Uuid>,
@@ -338,12 +343,13 @@ impl ElseApp {
         }
         // Keep the draft of the bot being left.
         if let Some(previous) = self.selected {
-            let draft = self.composer.read(cx).value().to_string();
-            self.drafts.insert(previous, draft);
+            self.drafts.entry(previous).or_default().text =
+                self.composer.read(cx).value().to_string();
         }
         self.selected = id;
         let draft = id
-            .and_then(|id| self.drafts.get(&id).cloned())
+            .and_then(|id| self.drafts.get(&id))
+            .map(|draft| draft.text.clone())
             .unwrap_or_default();
         self.composer
             .update(cx, |state, cx| state.set_value(draft, window, cx));
@@ -385,41 +391,57 @@ impl ElseApp {
 
     // ----- Conversation and stream -----------------------------------------
 
-    /// Load a snapshot, then subscribe to the bot's channel from its cursor.
-    /// Any reset repeats this; reconnects resume from the last applied cursor.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected else { return };
-        let text = self.composer.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        let draft = Draft {
+            text: self.composer.read(cx).value().to_string(),
+            reply_to: self.drafts.get(&bot).and_then(|d| d.reply_to.clone()),
+        };
+        let Some(message) = draft.message() else {
             return;
+        };
+        if !self.enqueue(bot, message, None, window, cx) {
+            return;
+        }
+        self.composer
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.drafts.remove(&bot);
+    }
+
+    fn enqueue(
+        &mut self,
+        bot: Uuid,
+        text: String,
+        reaction: Option<Reaction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.connection != Connection::Connected {
+            return false;
         }
         let limit = self
             .caps
             .as_ref()
             .map_or(32 * 1024, |c| c.limits.max_text_bytes);
-        if text.len() > limit {
-            self.notice = Some(format!(
-                "The message is too long ({} KiB maximum).",
-                limit / 1024
-            ));
+        if let Some(notice) = reply::too_long(&text, limit) {
+            self.notice = Some(notice);
             cx.notify();
-            return;
+            return false;
         }
         let pending = PendingSend {
             request_id: Uuid::new_v4(),
             text,
             // The bot's own provider and model, chosen by the API.
             provider_id: None,
+            reaction,
             unknown: None,
             rejected: None,
         };
-        self.composer
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.drafts.remove(&bot);
         self.notice = None;
         self.pending.entry(bot).or_default().push(pending.clone());
         self.sync_rows(window, cx);
         self.submit(bot, pending, window, cx);
+        true
     }
 
     /// POST a pending send. Retrying reuses its request ID and text, so the
@@ -439,6 +461,7 @@ impl ElseApp {
                     pending.request_id,
                     pending.text.clone(),
                     pending.provider_id.clone(),
+                    pending.reaction,
                 )
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
