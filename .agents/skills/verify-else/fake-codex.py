@@ -49,7 +49,9 @@ for line in sys.stdin:
     method = request['method']
     params = request.get('params', {})
     result = {}
-    if method == 'mcpServerStatus/list':
+    if method == 'skills/list':
+        result = {'data': []}
+    elif method == 'mcpServerStatus/list':
         config = tomllib.loads((Path(os.environ['CODEX_HOME'])/'config.toml').read_text())
         result = {'data':[{'name': name,'tools': [{'name':tool} for tool in value['enabled_tools']]} for name,value in config.get('mcp_servers',{}).items()]}
     elif method == 'account/read':

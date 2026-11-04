@@ -20,6 +20,14 @@ spec.loader.exec_module(verify)
 
 
 class RunnerChecks(unittest.TestCase):
+    def test_fixture_supports_the_skill_catalog_handshake(self):
+        request = {"id": 1, "method": "skills/list", "params": {"cwds": ["/tmp/project"], "forceReload": True}}
+        result = subprocess.run(
+            [sys.executable, str(verify.SCRIPT.with_name("fake-codex.py")), "app-server"],
+            input=json.dumps(request) + "\n", capture_output=True, text=True, check=True, timeout=5,
+        )
+        self.assertEqual(json.loads(result.stdout), {"jsonrpc": "2.0", "id": 1, "result": {"data": []}})
+
     def test_fixture_can_resume_after_a_historical_hang_marker(self):
         child = subprocess.Popen([sys.executable, str(verify.SCRIPT.with_name("fake-codex.py")), "app-server"],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
