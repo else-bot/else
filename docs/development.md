@@ -4,7 +4,7 @@ The repository contains the Rust API, the GPUI desktop client, and bundled SQLit
 
 ## Prerequisites
 
-For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else`. Use the [native ARM64 E2E lanes](#native-arm64-e2e) for automated macOS and Ubuntu coverage; `scripts/test-install.sh` retains the existing Debian, Ubuntu, and Arch container matrix. A development checkout uses the root `.env` and `~/.else` as below.
+For an installation rather than a development checkout, use the installer (see [Install](../README.md#install)); it keeps everything in `~/.else`. Use the [native ARM64 E2E lanes](#native-arm64-e2e) for automated macOS and Ubuntu coverage; `scripts/test-install.sh` retains the existing Debian, Ubuntu, and Arch container matrix. Use [isolated development sessions](#run-isolated-development-sessions) when working in multiple checkouts. Each session owns its state and API address.
 
 Install Rust with Cargo and rustfmt. SQLite is bundled into the API; no database server or Docker Compose is needed. Docker is optional for building guest images and for the S3 replication test emulator. The desktop also needs the Linux libraries listed under [Run the desktop](#run-the-desktop). Run commands from the repository root.
 
@@ -24,9 +24,9 @@ The desktop needs Xcode with the Metal compiler available to `xcrun`; the API al
 
 Codex needs `codex login`, and Claude Code needs a login, as in a terminal: bots use the host's Claude configuration, so the Keychain login works. Leftover provider processes from a crashed API are swept at startup on macOS too (through libproc; see [security](security.md#host-provider-processes)).
 
-## Configure the development services
+## Configure the API directly
 
-Create the local environment file if it does not exist:
+The session launcher below supplies its own configuration. For advanced direct binary use, configure every checkout separately. Create the local environment file if it does not exist:
 
 ```sh
 test -e .env || cp .env.example .env
@@ -44,7 +44,7 @@ Run the offline installer configuration checks without building binaries or star
 python3 scripts/test-install-config.py
 ```
 
-Optional S3 tests use the `seaweedfs` service in `infra/compose.yaml`. Copy `.env.example`, then run `docker compose up -d --wait seaweedfs` only when running those tests. No application data is stored in Compose.
+Run optional S3 tests with `scripts/test-replication.py`. It creates its own Compose project, stable kernel-assigned endpoint, synthetic credentials, and volume, then removes that exact project. Outage tests cannot stop another run's emulator.
 
 To inspect an installation, use `elsebot db 'select count(*) from bots'`; it opens the SQLite CLI in read-only mode. A checkout can use `sqlite3 -readonly ~/.else/else.sqlite3`.
 
@@ -167,11 +167,10 @@ and Cargo artifacts outside the disposable installation, while linking commands
 inside it. A non-release `ELSE_INSTALL_TEST_PROFILE` requires that cache.
 
 The macOS cache defaults to `target/e2e-cache/macos-arm64` (`--cache-dir` changes
-its parent). Ubuntu uses a named `else-e2e-ubuntu-arm64-<sdk-id>` volume recorded
+its parent). Ubuntu uses a named `else-e2e-<cache-id>-ubuntu-arm64-<sdk-id>` volume recorded
 in the results. Keep these caches for fast reruns; remove the specific cache or
 volume when a clean build is needed. Fresh databases and installation state are
-never reused. Run one invocation per cache to avoid competing version builds; the two
-platforms in a matrix use separate caches.
+never reused. A second invocation on the same cache is refused. Its ownership lock lives under `$XDG_STATE_HOME/else-test-locks` or `~/.local/state/else-test-locks`, outside Cargo output. Different checkouts have different default caches; the two platforms in a matrix use separate caches.
 
 Logs and machine-readable phase/per-target timings are written beneath
 `target/e2e/<timestamp>-<pid>` or `--output <new-directory>`. Image preparation
@@ -182,7 +181,7 @@ measured application and full-lane times and cache conditions.
 
 The commands below use the root `.env` and `~/.else` defaults. To run beside another checkout without sharing a port, database, or credentials, use [isolated development sessions](#run-isolated-development-sessions) instead.
 
-Provision the installation once, then start the API from the repository root:
+For normal development, use [isolated sessions](#run-isolated-development-sessions). The following direct commands are for an explicitly configured installation. Set unique data and project directories and a unique API bind for every checkout before running them:
 
 ```sh
 cargo run -p else-api -- setup
@@ -214,7 +213,7 @@ printf 'Authorization: Bearer %s\n' "$(cat ~/.else/owner-token)" |
 | `ELSE_S3_REGION`, `ELSE_S3_PREFIX`, `ELSE_S3_PATH_STYLE` | `auto`, `else-backups/`, `1` | Bucket region, key prefix, and path-style addressing. |
 | `ELSE_SYNTHETIC_PROVIDER` | `0` | `1` exposes the deterministic `synthetic` provider, labeled "Synthetic (test)", for demos and manual checks. It runs no model. |
 | `ELSE_MAX_ACTIVE_TURNS` | `2` | Provider turns running at once across all bots, from 1 to 32. Each bot runs at most one turn at a time regardless. |
-| `ELSE_BOTS_DIR` | `~/.else-dev/bots` (without `HOME`, `$ELSE_DATA_DIR/projects`) | Root of the bots' project directories, `<ELSE_BOTS_DIR>/<bot id>` (mode 0700, created on first use). Each provider run starts in its bot's directory, and the bot's computer mounts it at `~/work`. The installer sets `~/.else/bots`, so a checkout and an installation on one machine keep separate bots. Provider CLIs run on the host as the API user with their own shell and file tools; see [host provider processes](security.md#host-provider-processes). |
+| `ELSE_BOTS_DIR` | `$ELSE_DATA_DIR/projects` | Root of the bots' project directories, `<ELSE_BOTS_DIR>/<bot id>` (mode 0700, created on first use). Each provider run starts in its bot's directory, and the bot's computer mounts it at `~/work`. The installer sets `~/.else/bots`; the session launcher supplies its own projects directory. Provider CLIs run on the host as the API user with their own shell and file tools; see [host provider processes](security.md#host-provider-processes). |
 | `ELSE_MAX_BODY_BYTES` | `65536` | Maximum request body, from 1024 to 1048576 bytes. A larger declared `Content-Length` receives `413 too_large` on every route; body extractors also stop chunked bodies at the limit. |
 | `ELSE_SHUTDOWN_GRACE_SECS` | `10` | Seconds to drain connections after a shutdown signal, from 1 to 120. |
 | `RUST_LOG` | `info` | Log filter written to stderr. Request logs record method and path only, never query strings, headers, or bodies. |
@@ -261,7 +260,7 @@ One scheduler runs inside the API. SQLite rows are the queue: it claims the olde
 
 History `seq` is arrival order. A message queued behind a running turn can therefore precede that turn's reply; each item carries its `turn_id`.
 
-On startup the API takes two singleton locks before reading or changing runtime state: an exclusive lock on `$ELSE_DATA_DIR/api.lock` and a database-path file lock. A second API on the same data directory exits with `another else.bot API is already running`, and one on the same database with `another else.bot API is already using this database`, before reconciling or dispatching anything. It then binds the listener and reconciles: a turn claimed but never sent returns to the queue; a turn that may have reached its provider, including one being stopped, becomes `uncertain` with `effect_uncertain = true` and is never resent; pending stops and deletions waiting on those turns complete.
+On startup the API takes two singleton locks before reading or changing runtime state: an exclusive lock on `$ELSE_DATA_DIR/api.lock` and a database-path file lock. A second API on the same data directory exits with `another else.bot API is already running`, and one on the same database with `another else.bot API is already using this database`, before creating credentials, connecting to SQLite, migrating, reconciling, or dispatching anything. `setup` and `migrate` take the same ownership locks. It then binds the listener and reconciles: a turn claimed but never sent returns to the queue; a turn that may have reached its provider, including one being stopped, becomes `uncertain` with `effect_uncertain = true` and is never resent; pending stops and deletions waiting on those turns complete.
 
 An interrupted provider has 10 seconds to stop. If it does not, its turn is recorded as `uncertain` rather than claiming the action was undone.
 
@@ -338,7 +337,7 @@ New computers use Microsandbox's `public` network profile (`ELSE_VM_NETWORK`): t
 
 #### Desktop image and guest tools
 
-`infra/guest` defines the desktop image (POC-018): Debian trixie (base pinned by digest, packages from a fixed `snapshot.debian.org` date, `SNAPSHOT` build argument) with Chromium, Xvfb, Openbox, xterm, x11vnc, noVNC/websockify, and supervisord. `scripts/build-guest-image.sh [DATA_DIR]` builds it with Docker (tag `else-guest:2`, or `ELSE_GUEST_TAG`) and loads it into the API's runtime home; then set `ELSE_VM_IMAGE=else-guest:2` and `ELSE_VM_DESKTOP=1`. For a desktop computer the API picks a free host loopback port for noVNC and writes a random VNC password to a private host file (`$ELSE_DATA_DIR/computers/<bot>/vnc.pass`, 0600) that is copied into the guest at creation. On the first use of each boot it runs `else-init` (recorded per generation as `services_generation` and retried on a later use if it failed; the owner's desktop is offered only once it succeeded), which starts supervisord as a daemon (the runtime's agent stays PID 1, so its graceful stop works) and is a no-op while the services run. Before stopping a running desktop it runs `else-checkpoint`, which closes Chromium cleanly so its profile is flushed and unlocked. VNC listens on guest loopback only and requires the password; Chromium's DevTools listens on guest loopback only and is never published; noVNC is published on host loopback only.
+`infra/guest` defines the desktop image (POC-018): Debian trixie (base pinned by digest, packages from a fixed `snapshot.debian.org` date, `SNAPSHOT` build argument) with Chromium, Xvfb, Openbox, xterm, x11vnc, noVNC/websockify, and supervisord. `scripts/build-guest-image.sh [DATA_DIR]` builds it with Docker, exports the immutable image ID, and loads it into the API's runtime home under the alias `else-guest:2` or `ELSE_GUEST_TAG`; then set `ELSE_VM_IMAGE=else-guest:2` and `ELSE_VM_DESKTOP=1`. For a desktop computer the API picks a free host loopback port for noVNC and writes a random VNC password to a private host file (`$ELSE_DATA_DIR/computers/<bot>/vnc.pass`, 0600) that is copied into the guest at creation. On the first use of each boot it runs `else-init` (recorded per generation as `services_generation` and retried on a later use if it failed; the owner's desktop is offered only once it succeeded), which starts supervisord as a daemon (the runtime's agent stays PID 1, so its graceful stop works) and is a no-op while the services run. Before stopping a running desktop it runs `else-checkpoint`, which closes Chromium cleanly so its profile is flushed and unlocked. VNC listens on guest loopback only and requires the password; Chromium's DevTools listens on guest loopback only and is never published; noVNC is published on host loopback only.
 
 #### Guest programming toolchain
 
@@ -460,13 +459,13 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, an
 
 ### Database tests
 
-Database tests use a private temporary SQLite file per test. No server or `TEST_DATABASE_URL` is needed, and owner data is never used. Run `cargo test --workspace --locked`. Live provider and VM tests remain opt-in through their `ELSE_LIVE_*` flags. S3 replication tests run with `cargo test -p else-api --test replication -- --ignored` and require the Compose S3 emulator; some restart that container. The optional `scripts/test-replication.py` runner runs them against an emulator scoped to this worktree. See [acceptance.md](implementation/acceptance.md) for historical live scenarios.
+Database tests use a private temporary SQLite file per test. No server or `TEST_DATABASE_URL` is needed, and owner data is never used. Run `cargo test --workspace --locked`. Live provider and VM tests remain opt-in through their `ELSE_LIVE_*` flags. Run S3 replication tests with `scripts/test-replication.py`. It supplies an emulator owned by that invocation; tests refuse to restart a service without this explicit ownership configuration. See [acceptance.md](implementation/acceptance.md) for historical live scenarios.
 
 ## Run the desktop
 
 The desktop is a native GPUI window built with [GPUI Kit](https://gpui-kit.com) `gpui-kit = "=0.8.1"`, which pins GPUI as `gpui-pre 0.3.10`. The pin is exact because GPUI is pre-1.0. It was built and run on Arch Linux (Omarchy) with Hyprland 0.56.2 on Wayland and Rust 1.98.0. Linux needs `libxkbcommon`, `libxcb`, `fontconfig`, and `freetype2`, plus a Vulkan-capable graphics driver; Wayland and X11 sessions are both supported by GPUI. The first build compiles GPUI and takes a few minutes.
 
-Start the API, then the desktop:
+Start the API and desktop with [the session launcher](#run-isolated-development-sessions). For direct binary use, the desktop reads the root `.env`. Set `ELSE_API_URL` to this API's address and `ELSE_OWNER_TOKEN_FILE` to its token file explicitly:
 
 ```sh
 cargo run -p else-desktop
@@ -519,7 +518,7 @@ scripts/dev.py api
 scripts/dev.py desktop
 ```
 
-`api` builds `else-api`, creates the session on first use, runs `setup`, and serves in the foreground until Ctrl-C. Host provider logins work as usual. The API binds `127.0.0.1:0` and writes its PID and actual URL to `data/api.json`. `dev.py` uses that URL only after it checks that the PID is the process it started, that the process holds the session's data lock, that the session's owner token is accepted, and that the API serves the session's database. `desktop` takes both the URL and the owner token file from the same session. It refuses to start under the omabox guard; run it from your own terminal, or use [a private box](#test-the-desktop-in-a-private-box).
+`api` builds `else-api` in the checkout-private `.else-dev/.build` cache, creates the session on first use, runs `setup`, and serves in the foreground until Ctrl-C. Host provider logins work as usual. Launcher builds ignore a shared `CARGO_TARGET_DIR` so another checkout cannot replace the executable between compilation and launch. They use four Cargo jobs by default; set `CARGO_BUILD_JOBS` explicitly to change that budget. The API binds `127.0.0.1:0` and writes its PID and actual URL to `data/api.json`. `dev.py` uses that URL only after it checks that the PID is the process it started, that the process holds the session's data lock, that the session's owner token is accepted, and that the API serves the session's database. `desktop` takes both the URL and the owner token file from the same session. It refuses to start under the omabox guard; run it from your own terminal, or use [a private box](#test-the-desktop-in-a-private-box).
 
 | Command | Effect |
 | --- | --- |
@@ -548,7 +547,7 @@ Agents testing the GUI use one foreground command instead of the host commands. 
 scripts/dev.py run
 ```
 
-`run` builds both binaries, creates a new box with `omabox up --new --net isolated`, and starts the API and the desktop inside it with fresh state in the box's home. Only the Synthetic provider answers there: Codex, Claude, and Microsandbox are unavailable. `run` prints a JSON manifest with the box name, the desktop window's address, the in-box state path, the evidence directory, and `omabox` commands that name both the box and the window. It refuses to pick a window when the desktop's PID owns more than one or another `else-bot` window exists in the box. `--api-only` skips the desktop.
+`run` builds both binaries, creates a new box with `omabox up --new --net isolated`, and starts the API and the desktop inside it with fresh state in the box's home. The launcher completes onboarding before opening the desktop so native dialogs can be tested without a provider login. Only the Synthetic provider answers there: Codex, Claude, and Microsandbox are unavailable. `run` prints a JSON manifest with the box name, the desktop window's address, the in-box state path, the evidence directory, and `omabox` commands that name both the box and the window. It refuses to pick a window when the desktop's PID owns more than one or another `else-bot` window exists in the box. `--api-only` skips the desktop.
 
 Drive the window only with the printed `-b BOX --window ADDRESS`. The box's network is isolated, so probe the API with the printed `status_command` or `curl_command`, which run inside the box. Ctrl-C or `SIGTERM` stops the session, copies its logs, `doctor.json`, and manifests to `.else-dev/runs/RUN`, and removes the box with `omabox down -b BOX`. The live database stays in the box.
 

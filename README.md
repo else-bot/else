@@ -160,16 +160,14 @@ There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`
 
 ## Try the POC
 
-You need Rust and a logged-in `codex` CLI (`codex login`). From the repository root:
+You need Rust and a logged-in `codex` CLI (`codex login`). From the repository root, start a development session:
 
 ```sh
-test -e .env || cp .env.example .env
-cargo run -p else-api -- setup     # once: credentials, migrations, main bot
-cargo run -p else-api -- serve     # leave running
-cargo run -p else-desktop          # in another terminal
+scripts/dev.py api
+scripts/dev.py desktop
 ```
 
-The API creates `~/.else/else.sqlite3` by default. Installed releases set `ELSE_DATA_DIR=~/.else/data` and store it there instead. Override `ELSE_DATA_DIR` for an isolated checkout, or `DATABASE_URL=sqlite:///absolute/path/else.sqlite3` for another file. SQLite is bundled; no database service or Compose is needed.
+Leave the API running and start the desktop in another terminal. Each checkout and named session owns its database, credentials, projects, and kernel-assigned API port. Use the same `--session NAME` on both commands for an additional session. SQLite is bundled; no database service is needed. Agent UI checks use `scripts/dev.py run`, which creates and cleans up its own isolated omabox. Optional S3 tests use `scripts/test-replication.py`, which owns its emulator and port.
 
 The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs on the host in the bot's project directory, with its own shell and file tools, scoped else.bot tools, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
 
@@ -186,7 +184,8 @@ apps/
 infra/
 	compose.yaml  optional S3 test emulator
 scripts/
-	demo.sh       disposable demo installation
+	dev.py        isolated development and boxed UI sessions
+	demo.sh       compatibility commands for development sessions
 docs/
 .env.example
 ```

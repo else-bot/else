@@ -26,7 +26,7 @@ SQLite is bundled; no database server, Docker, account, or VM is needed.
 .agents/skills/verify-else/verify.py
 ```
 
-This builds `else-api` with the existing Cargo dev cache, creates a new
+This builds `else-api` with this checkout's `.else-dev/.build` Cargo cache, creates a new
 network-isolated omabox, and runs three public HTTP journeys concurrently.
 Each journey owns its own API, database, project directory, generated
 credentials, and logs. The API binds `127.0.0.1:0` and publishes its PID and
@@ -50,7 +50,8 @@ VMs, installer/update containers, doctests, and native desktop interaction
 remain separate checks. Some existing tests internally skip when a provider
 or executable is unavailable; read their logs before claiming those paths.
 
-Builds run sequentially in one Cargo cache. After compilation, the runner
+Builds run sequentially in the checkout's private Cargo cache. A shared
+`CARGO_TARGET_DIR` cannot replace another checkout's executables. After compilation, the runner
 uses Cargo's emitted executable paths and runs the test binaries directly in
 the box. No Cargo process competes for the build lock during driving. Up to
 four independent lanes run at once with two test threads per binary and two
