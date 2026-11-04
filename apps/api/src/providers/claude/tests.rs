@@ -205,6 +205,55 @@ fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
     );
 }
 
+fn detect_with(dir: &std::path::Path, version: &str, status: &str) -> Availability {
+    use std::os::unix::fs::PermissionsExt;
+    let program = dir.join("claude");
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\ncase \"$1\" in\n--version) {version} ;;\nauth) {status} ;;\nesac\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = claude_home::HostConfig {
+        dir: dir.to_owned(),
+        explicit: true,
+    };
+    Claude::detect(
+        Some(Host::new(dir, dir)),
+        Some(program),
+        Some(config),
+        String::new(),
+    )
+    .availability()
+}
+
+#[test]
+fn any_running_logged_in_version_is_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let version = "echo '2.1.999 (Claude Code)'";
+    let logged_in = r#"echo '{"loggedIn":true}'"#;
+    let availability = detect_with(dir.path(), version, logged_in);
+    assert!(
+        matches!(availability, Availability::Available),
+        "{availability:?}"
+    );
+    for (version, status) in [
+        ("exit 1", logged_in),
+        ("true", logged_in),
+        (version, r#"echo '{"loggedIn":false}'"#),
+        (version, "echo 'not json'"),
+        (version, "exit 1"),
+    ] {
+        assert!(
+            matches!(
+                detect_with(dir.path(), version, status),
+                Availability::Unavailable(_)
+            ),
+            "{version} {status}"
+        );
+    }
+}
+
 fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
     ResultInfo {
         success,
