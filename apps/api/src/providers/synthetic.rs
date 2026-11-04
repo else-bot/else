@@ -13,6 +13,7 @@
 //! - `[synthetic:stall-send]` marks delivery as started, then waits until
 //!   cancelled without acknowledging (a crash here leaves delivery unknown).
 //! - `[synthetic:refuse]` fails before delivery (nothing was sent).
+//! - `[synthetic:messages]` follows the reply with a second message.
 //!
 //! Like a host adapter it keeps a native session per conversation (resumed
 //! while its fingerprint matches, unless the test forgot it), sends the
@@ -35,6 +36,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "synthetic";
 const FINGERPRINT: &str = "synthetic-v1";
+pub const SECOND_MESSAGE: &str = "Second message.";
 
 pub struct Synthetic {
     id: &'static str,
@@ -239,6 +241,11 @@ impl Provider for Synthetic {
             if sink.text(&chunk).await.is_err() {
                 return TurnOutcome::Interrupted;
             }
+        }
+        if input.text.contains("[synthetic:messages]")
+            && (sink.text("\n\n").await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())
+        {
+            return TurnOutcome::Interrupted;
         }
         TurnOutcome::Completed
     }
