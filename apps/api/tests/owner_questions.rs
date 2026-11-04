@@ -168,7 +168,7 @@ async fn journaled(app: &TestApp, bot: &str, question: Uuid) -> Value {
                 .find(|q| q["id"] == question.to_string())
                 .cloned()
         })
-        .last()
+        .next_back()
         .expect("the question was journaled")
 }
 
