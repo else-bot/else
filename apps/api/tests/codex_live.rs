@@ -900,6 +900,85 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn main_bot_creates_a_github_specialist_on_request() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (codex, auth) = codex_and_auth();
+    let provider = Arc::new(
+        Codex::detect(
+            Some(Host::new(&data, &data.join("bots"))),
+            Some(codex),
+            Some(auth),
+        )
+        .with_tools(format!("http://127.0.0.1:{port}/tools/v1/mcp")),
+    );
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let app = TestApp::with_registry(db, 1, Registry::new(vec![provider]));
+    let router = app.router.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let main = app.main_bot().await;
+    let updated = app.owner(
+        "PATCH", &format!("/v1/bots/{main}"),
+        Some(json!({"name": "Sharky", "role": "You are sharky my main assistant for running example.test business"})),
+    ).await;
+    assert_eq!(updated.status, axum::http::StatusCode::OK);
+    let (turn, status, text) = ask(
+        &app,
+        &main,
+        "Ok first of all can you create a Github bot that will have access to the \
+         elsebot-test-org organization repositories. Idea is being able to do some \
+         cleaning on branches automatically for instance with a routine.",
+    )
+    .await;
+    server.abort();
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    eprintln!("Specialist creation response ({status}): {text}");
+    assert_eq!(status, "completed", "{error:?}: {text}");
+    let specialists: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, name, role FROM bots WHERE id <> ?1 AND status = 'active'")
+            .bind(main.parse::<Uuid>().unwrap())
+            .fetch_all(&app.db.pool)
+            .await
+            .unwrap();
+    eprintln!("Created specialists: {specialists:?}");
+    assert_eq!(
+        specialists.len(),
+        1,
+        "a registered else.bot must exist: {text}"
+    );
+    let definition = format!("{} {}", specialists[0].1, specialists[0].2).to_lowercase();
+    assert!(definition.contains("github"), "{specialists:?}");
+    let creations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memory_entry WHERE kind = 'tool_activity' \
+         AND source->>'turn_id' = ?1 AND source->>'tool' = 'create_bot'",
+    )
+    .bind(&turn)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(creations >= 1, "creation went through the task-scoped tool");
+    let violations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turns WHERE error_code = 'policy_violation'")
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(violations, 0);
+}
+
 /// POC-016: with one provider slot, the real main bot routes a subtask to a
 /// newly created bot by role, parks, the child runs through its own
 /// API-managed attempt, and the parent continues with the recorded result.
