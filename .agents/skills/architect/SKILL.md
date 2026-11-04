@@ -12,6 +12,8 @@ Sketch types, function signatures, class shapes, and module boundaries with `not
 
 ## Start
 
+For automatic invocations, apply the [delegation policy](../../rules/pstack-models.md#delegation-policy). If no substantive design choice remains, return the existing shape to the caller without spawning a panel. An explicit request for architect or multiple designs still runs this workflow.
+
 Open a todolist with one entry per phase before starting.
 
 1. Ground

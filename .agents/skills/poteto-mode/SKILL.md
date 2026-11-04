@@ -20,7 +20,7 @@ Remaining triggers:
 - Nontrivial change, architecture decision, or "are we sure?" → the **how** skill.
 - About to the current runtime's question tool on a "which approach", "how should I", or "what should this do" fork → classify it before you ask. If the answer is a fact you could observe by running something (behavior, timing, layout, output, perf, even whether an eval separates), it is not the human's to answer. Sketch it via the Prototype playbook (`playbooks/prototype.md`) and let the result decide. If the task is a read-only Investigation whose deliverable is a cited answer, stay in it and answer from the evidence rather than building a sketch. Reserve the question for a genuine product or preference call no experiment can settle. Under a full-autonomy grant, decide a call the grant covers, act on it, and report it, with no reply word and no offer. Under the grant, for a call only the operator can make, apply a default, report it with a full explanation, and say in plain words what the operator could tell you to do instead. The operator answers in their own words. Never give a shorthand token to type back. Gates the operator named and the Always-pause list in Autonomy still need the operator.
 - Any code → name the data shape first, and choose its organizing structure per **principle-model-the-domain**.
-- Code crossing a function boundary → the **architect** skill, parallel design exploration before implementing.
+- A substantive unresolved choice about state, ownership, interfaces, or behavior → the **architect** skill. Apply the [delegation policy](../../rules/pstack-models.md#delegation-policy) before automatic fan-out. A function boundary alone does not trigger a panel.
 - Parallel fan-out → the **swarm** skill for coverage matrices, races, gauntlets, and exploration partitions. Use **arena** for design or code bakeoffs with base selection and grafting.
 - Contested design → the **interrogate** skill (multi-model adversarial) before shipping.
 - Nontrivial multi-step → write the throughput checkpoint (Feature step 3).
@@ -93,7 +93,7 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 **Playbook delegates.** Use the runtime's supported general-purpose agents. Each brief requires reading this `SKILL.md` in full, including its Principles index, then each applicable principle's leaf skill. The parent runs the playbook and owns delegation. Delegates must not start child agents unless their brief explicitly authorizes it. Routed workflows (`how`, `why`, `interrogate`, `reflect`, `swarm`) supply their own reviewer prompts; follow those workflows when they apply.
 
-**Model roles.** Read `.agents/rules/pstack-models.md`. Resolve each role's preset into its provider, model, and options. Opus medium handles coding, judgment, and synthesis. Opus high handles the hardest tasks. Sol and Fable provide independent review and design perspectives.
+**Model roles.** Read [the model roles and routing policy](../../rules/pstack-models.md). Resolve each role's preset into its provider, model, and options. Apply its risk classification, bounded decision and coding assignments, and independent review rules. Keep model defaults in that file.
 
 **Keep the selected preset.** Preserve its model, effort, and speed. Do not construct model slugs, raise or lower effort, or substitute a model. Report an unavailable preset and continue only with independent work. Follow the current runtime's delegation and completion instructions.
 

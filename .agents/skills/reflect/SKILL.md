@@ -22,17 +22,17 @@ Spawn three reviewers using the current runtime's delegation tools. Allow the MC
 
 Read `.agents/rules/pstack-models.md` and resolve the role named below through its preset table. Preserve the configured provider, effort, and speed. Do not pass preset names as model IDs or silently fall back to another model. Keep read-only investigators able to use the required tools and MCPs; their briefs must prohibit edits.
 
-| Lens | Role line | Example preset | Prompt template |
-|---|---|---|---|
-| Judgment | `reflect judgment, divergent, synthesizer` | `opus-medium` | `references/judgment-reviewer.md` |
-| Tooling | `reflect tooling` | `sol-xhigh-fast` | `references/tooling-reviewer.md` |
-| Divergent | `reflect judgment, divergent, synthesizer` | `opus-medium` | `references/divergent-reviewer.md` |
+| Lens | Role line | Prompt template |
+|---|---|---|
+| Judgment | `reflect judgment` | `references/judgment-reviewer.md` |
+| Tooling | `reflect tooling` | `references/tooling-reviewer.md` |
+| Divergent | `reflect divergent` | `references/divergent-reviewer.md` |
 
 Pass each template verbatim, substituting the transcript path or digest where marked. Reviewers return findings in the delegation result.
 
 ## 3. Synthesize
 
-Spawn one synthesizer using `reflect judgment, divergent, synthesizer`. It spot-verifies citations through the available MCPs. Pass `references/synthesizer.md` with all reviewer outputs. It returns an Accepted / Rejected / Backlog list.
+Spawn one synthesizer using `reflect synthesizer`. It spot-verifies citations through the available MCPs. Pass `references/synthesizer.md` with all reviewer outputs. It returns an Accepted / Rejected / Backlog list.
 
 ## 4. Structural enforcement check
 
