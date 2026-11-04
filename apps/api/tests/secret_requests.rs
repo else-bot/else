@@ -123,6 +123,25 @@ async fn request_status(app: &TestApp, request: Uuid) -> (String, Option<i32>) {
         .unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_follow_up_withdraws_the_secret_request_and_runs() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, owner_tools()).await;
+    let request = request_id(&app, &token).await;
+    wait(&app, turn, "waiting").await;
+
+    let correction = "Use the logged-in gh host CLI instead of a GH_TOKEN.";
+    let sent = app
+        .send(&main, Uuid::new_v4(), correction, Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(request_status(&app, request).await.0, "cancelled");
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    assert!(synthetic.packets().await.last().unwrap().contains(correction));
+}
+
 async fn wait(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
