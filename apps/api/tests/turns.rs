@@ -164,23 +164,27 @@ async fn bots_keep_separate_histories_and_order() {
     let app = TestApp::installed().await;
     let a = app.main_bot().await;
     let b = app.create_bot("Work").await;
-    let mut turns = Vec::new();
-    for (bot, text) in [(&a, "a1"), (&b, "b1"), (&a, "a2"), (&b, "b2"), (&a, "a3")] {
-        let reply = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
-        assert_eq!(reply.status, StatusCode::ACCEPTED);
-        turns.push(reply.body["turn"]["id"].as_str().unwrap().to_owned());
+    for round in [[(&a, "a1"), (&b, "b1")], [(&a, "a2"), (&b, "b2")]] {
+        let mut turns = Vec::new();
+        for (bot, text) in round {
+            let reply = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
+            assert_eq!(reply.status, StatusCode::ACCEPTED);
+            turns.push(reply.body["turn"]["id"].as_str().unwrap().to_owned());
+        }
+        for turn in &turns {
+            app.wait_turn(turn, &["completed"]).await;
+        }
     }
-    for turn in &turns {
-        app.wait_turn(turn, &["completed"]).await;
-    }
+    let last = app.send(&a, Uuid::new_v4(), "a3", Some("synthetic")).await;
+    app.wait_turn(last.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
     let texts = |history: Vec<(i64, String, String)>| -> Vec<String> {
         history
             .into_iter()
             .map(|(_, kind, text)| format!("{kind}:{text}"))
             .collect()
     };
-    // History `seq` is arrival order: queued owner messages can precede
-    // earlier replies. Each reply belongs to its own turn.
+    // Each reply belongs to its own turn and its own bot.
     let a_history = texts(items(&app, &a).await);
     assert_eq!(a_history.len(), 6);
     let a_users: Vec<_> = a_history
@@ -203,7 +207,7 @@ async fn bots_keep_separate_histories_and_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn one_active_turn_per_bot_and_queue_order() {
+async fn one_active_turn_per_bot_while_newer_messages_steer() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
     let mut turns = Vec::new();
@@ -216,6 +220,7 @@ async fn one_active_turn_per_bot_and_queue_order() {
                 Some("synthetic"),
             )
             .await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED);
         turns.push(reply.body["turn"]["id"].as_str().unwrap().to_owned());
     }
     let pool = app.db.pool.clone();
@@ -233,19 +238,149 @@ async fn one_active_turn_per_bot_and_queue_order() {
         }
         max_active
     });
-    for turn in &turns {
-        app.wait_turn(turn, &["completed"]).await;
+    assert_eq!(app.wait_turn(&turns[2], &["completed"]).await, "completed");
+    for turn in &turns[..2] {
+        assert_eq!(app.wait_turn(turn, &["interrupted"]).await, "interrupted");
     }
     assert_eq!(
         monitor.await.unwrap(),
         1,
         "never more than one active turn for the bot"
     );
-    let finished: Vec<i64> = sqlx::query_scalar("SELECT turn_no FROM turns ORDER BY finished_at")
-        .fetch_all(&app.db.pool)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rapid_corrections_are_all_accepted_and_reach_the_newest_reply() {
+    let db = Arc::new(TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let synthetic = Arc::new(else_api::providers::synthetic::Synthetic::new(
+        Duration::from_millis(5),
+    ));
+    let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
+    let app = TestApp::with_registry(db, 4, registry);
+    let bot = app.main_bot().await;
+    let other = app.create_bot("Other").await;
+    let elsewhere = app
+        .send(
+            &other,
+            Uuid::new_v4(),
+            "[synthetic:hang] elsewhere",
+            Some("synthetic"),
+        )
+        .await;
+    let elsewhere = elsewhere.body["turn"]["id"].as_str().unwrap().to_owned();
+    let hang = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:hang] publish",
+            Some("synthetic"),
+        )
+        .await;
+    let hang = hang.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&hang, &["running"]).await;
+    app.wait_turn(&elsewhere, &["running"]).await;
+
+    let corrections: Vec<String> = (0..6).map(|i| format!("correction {i}")).collect();
+    let mut requests = Vec::new();
+    for text in &corrections {
+        let request = Uuid::new_v4();
+        let reply = app.send(&bot, request, text, Some("synthetic")).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.body);
+        requests.push((
+            request,
+            reply.body["turn"]["id"].as_str().unwrap().to_owned(),
+        ));
+    }
+    let listing = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert!(
+        listing.body["bot"]["activity"]["queued_count"]
+            .as_i64()
+            .unwrap()
+            <= 1,
+        "{}",
+        listing.body
+    );
+
+    let (_, newest) = requests.last().unwrap();
+    assert_eq!(app.wait_turn(newest, &["completed"]).await, "completed");
+    assert_eq!(app.wait_turn(&hang, &["interrupted"]).await, "interrupted");
+    for (request, turn) in &requests[..requests.len() - 1] {
+        assert_eq!(app.wait_turn(turn, &["interrupted"]).await, "interrupted");
+        let lookup = app
+            .owner(
+                "GET",
+                &format!("/v1/bots/{bot}/turns/by-request/{request}"),
+                None,
+            )
+            .await;
+        assert_eq!(lookup.body["turn"]["error"]["code"], "superseded");
+    }
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    for text in &corrections {
+        assert!(
+            packet.contains(text.as_str()),
+            "{text} missing from {packet}"
+        );
+    }
+    let owner_messages = items(&app, &bot)
+        .await
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "user")
+        .count();
+    assert_eq!(owner_messages, 7, "every message is kept in history");
+    let other_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(elsewhere.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    assert_eq!(finished, vec![1, 2, 3], "queue order holds");
+    assert_eq!(other_status, "running", "another bot's work is untouched");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_of_an_older_message_does_not_preempt_the_newer_one() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let first_request = Uuid::new_v4();
+    let first = app
+        .send(
+            &bot,
+            first_request,
+            "[synthetic:hang] first",
+            Some("synthetic"),
+        )
+        .await;
+    let first = first.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&first, &["running"]).await;
+    let second = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:hang] second",
+            Some("synthetic"),
+        )
+        .await;
+    let second = second.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&second, &["running"]).await;
+    assert_eq!(app.wait_turn(&first, &["interrupted"]).await, "interrupted");
+
+    let retry = app
+        .send(
+            &bot,
+            first_request,
+            "[synthetic:hang] first",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body["turn"]["id"], first.as_str());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(second.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "running");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -293,6 +428,8 @@ async fn failures_are_terminal_outcomes_with_partial_text() {
     let failed = app
         .send(&bot, Uuid::new_v4(), "[synthetic:fail]", Some("synthetic"))
         .await;
+    let failed_id = failed.body["turn"]["id"].as_str().unwrap();
+    assert_eq!(app.wait_turn(failed_id, &["failed"]).await, "failed");
     let refused = app
         .send(
             &bot,
@@ -301,9 +438,7 @@ async fn failures_are_terminal_outcomes_with_partial_text() {
             Some("synthetic"),
         )
         .await;
-    let failed_id = failed.body["turn"]["id"].as_str().unwrap();
     let refused_id = refused.body["turn"]["id"].as_str().unwrap();
-    assert_eq!(app.wait_turn(failed_id, &["failed"]).await, "failed");
     assert_eq!(app.wait_turn(refused_id, &["failed"]).await, "failed");
     let lookup = app
         .owner(
@@ -331,40 +466,6 @@ async fn failures_are_terminal_outcomes_with_partial_text() {
         ],
         "partial text is kept; the refused turn produced no output"
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn queue_overflow_is_bounded_and_retryable() {
-    let app = TestApp::installed().await;
-    let bot = app.main_bot().await;
-    let first = app
-        .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
-        .await;
-    app.wait_turn(first.body["turn"]["id"].as_str().unwrap(), &["running"])
-        .await;
-    for i in 0..4 {
-        let reply = app
-            .send(
-                &bot,
-                Uuid::new_v4(),
-                &format!("wait {i}"),
-                Some("synthetic"),
-            )
-            .await;
-        assert_eq!(reply.status, StatusCode::ACCEPTED);
-    }
-    let before = turn_count(&app).await;
-    let overflow = app
-        .send(&bot, Uuid::new_v4(), "one too many", Some("synthetic"))
-        .await;
-    assert_eq!(overflow.status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(overflow.body["error"]["code"], "queue_full");
-    assert_eq!(overflow.body["error"]["retryable"], true);
-    assert!(overflow.headers.contains_key("retry-after"));
-    assert_eq!(turn_count(&app).await, before);
-    let listing = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
-    assert_eq!(listing.body["bot"]["activity"]["phase"], "working");
-    assert_eq!(listing.body["bot"]["activity"]["queued_count"], 4);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -553,7 +654,6 @@ async fn capabilities_list_providers_and_limits() {
         .collect();
     assert_eq!(ids, vec!["synthetic", "codex"]);
     assert_eq!(caps.body["providers"][0]["label"], "Synthetic (test)");
-    assert_eq!(caps.body["limits"]["max_queued_turns"], 4);
     assert_eq!(caps.body["limits"]["max_text_bytes"], 32768);
     // The owner picks each bot's model: the defaults and each provider's
     // exact values are offered.

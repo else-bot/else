@@ -730,7 +730,7 @@ async fn a_failure_before_any_text_shows_in_the_last_run() {
 }
 
 #[tokio::test]
-async fn overlapping_and_queued_occurrences_are_skipped_and_missed_ones_coalesce() {
+async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     let h = harness().await;
     let main = h.app.main_bot().await;
     let (setup, token) = h.owner_turn(&main).await;
@@ -762,13 +762,15 @@ async fn overlapping_and_queued_occurrences_are_skipped_and_missed_ones_coalesce
     assert_eq!(listed[0]["last_run"]["skip_reason"], "overlap");
     h.app.wait_turn(&first.to_string(), &["completed"]).await;
 
+    // Rapid owner messages coalesce to one queued turn, so they never fill
+    // the queue a routine run needs.
     let (_, _) = h.owner_turn(&main).await;
     for _ in 0..else_api::app::messages::MAX_QUEUED_TURNS {
         let sent = h.app.send(&main, Uuid::new_v4(), "queued", None).await;
         assert_eq!(sent.status, StatusCode::ACCEPTED);
     }
-    assert_eq!(fire(&h.app, due + chrono::Duration::hours(2)).await, 0);
-    assert_eq!(runs(&h.app, &id).await[2].1.as_deref(), Some("queue_full"));
+    assert_eq!(fire(&h.app, due + chrono::Duration::hours(2)).await, 1);
+    assert_eq!(runs(&h.app, &id).await[2].1, None);
     let stop = h
         .app
         .owner(
@@ -1173,13 +1175,15 @@ async fn the_routines_migration_preserves_existing_data() {
     .await
     .unwrap();
     let mut conn = db.pool.acquire().await.unwrap();
-    let before = common::rows(&mut conn, "SELECT * FROM items").await;
+    let saved_items =
+        "SELECT id, conversation_id, seq, turn_id, kind, text, provider_id, created_at FROM items";
+    let before = common::rows(&mut conn, saved_items).await;
     drop(conn);
 
     else_api::db::migrate(&db.pool).await.unwrap();
 
     let mut conn = db.pool.acquire().await.unwrap();
-    assert_eq!(common::rows(&mut conn, "SELECT * FROM items").await, before);
+    assert_eq!(common::rows(&mut conn, saved_items).await, before);
     drop(conn);
     let avatars: Vec<(Uuid, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT id, avatar_shape, avatar_color FROM bots ORDER BY id = ?1 DESC")

@@ -354,14 +354,24 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         )
         .await;
     let second = created["bot"]["id"].as_str().unwrap().to_owned();
+    let (_, created) = api
+        .call(
+            Method::POST,
+            "/v1/bots",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Third" })),
+        )
+        .await;
+    let third = created["bot"]["id"].as_str().unwrap().to_owned();
 
-    // Bot A: one turn stuck while sending, one queued behind it.
+    // Bot A: one turn stuck while sending. Bot B: one turn running. They
+    // hold both provider slots, so bot C's message stays queued.
     let sending = send(&api, &main, "[synthetic:stall-send]").await;
     wait_status(&api, &db.pool, &sending, "sending").await;
-    let queued = send(&api, &main, "queued during crash").await;
-    // Bot B: one turn running.
     let running = send(&api, &second, "[synthetic:hang]").await;
     wait_status(&api, &db.pool, &running, "running").await;
+    let queued = send(&api, &third, "queued during crash").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(status_of(&db.pool, &queued).await.0, "queued");
     let owner_items = || async {
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM items WHERE kind = 'user'")
             .fetch_one(&db.pool)
@@ -388,7 +398,7 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         assert_eq!((status.as_str(), uncertain), ("uncertain", true));
         let (_, bots) = api.call(Method::GET, "/v1/bots", None).await;
         assert_eq!(bots["default_bot_id"], main.as_str());
-        assert_eq!(bots["bots"].as_array().unwrap().len(), 2);
+        assert_eq!(bots["bots"].as_array().unwrap().len(), 3);
         drop(api);
     }
     assert_eq!(

@@ -3,6 +3,7 @@
 ## Sub-features
 
 - Send once and stream the assistant's UTF-8 reply.
+- Steer an owner conversation with a follow-up, withdrawing pending secret forms.
 - Retry an unconfirmed send using its original request UUID.
 - Stop a running turn and wait for the cancellation receipt to finish.
 - Reconnect or restart without duplicated history.
@@ -22,7 +23,7 @@ running, and retries one cancellation UUID until its receipt is `done` and
 the turn is `interrupted`. It restarts the real API against the same data and
 compares saved items/turns, including a changed process-bound event cursor.
 
-Run `verify.py --tests turns cancel ws` for queue, replay and socket behavior.
+Run `verify.py --tests turns cancel ws` for steering, replay and socket behavior.
 The `ws` target starts real loopback WebSockets, but does not render GPUI.
 
 For native proof, use the private session and ensure the bot has an available

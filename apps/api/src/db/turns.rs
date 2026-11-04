@@ -76,8 +76,6 @@ pub enum AcceptError {
     RequestConflict,
     #[error("reaction target is not an assistant message of this conversation")]
     InvalidReaction,
-    #[error("too many queued messages")]
-    QueueFull,
     #[error("work is still stopping")]
     CancellationPending,
     #[error("no saved profile for provider {0}")]
@@ -91,8 +89,8 @@ pub struct Accepted {
     pub created: bool,
     pub turn: TurnRecord,
     pub item: ItemRecord,
-    /// An active turn on another provider this message switched away from;
-    /// it was moved to `cancelling` and must be interrupted.
+    /// The conversation's active turn this message preempted; it is
+    /// `cancelling` and must be interrupted.
     pub preempted: Option<Uuid>,
 }
 
@@ -106,7 +104,6 @@ pub struct SendRequest<'a> {
     /// The provider the turn is bound to.
     pub provider_id: &'a str,
     pub uses_profile: bool,
-    pub max_queued: i64,
 }
 
 /// Text holds no NUL, so it is always the tail after the last separator.
@@ -180,14 +177,6 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     if cancel_pending {
         return Err(AcceptError::CancellationPending);
     }
-    let queued: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
-            .bind(req.bot_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if queued >= req.max_queued {
-        return Err(AcceptError::QueueFull);
-    }
     // The bot's own profile for this provider, else the provider's saved one.
     let profile: Option<(i64, Json<Profile>)> = if req.uses_profile {
         Some(
@@ -244,21 +233,29 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         .execute(&mut *tx)
         .await?;
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
-    // Switching provider stops the active turn on the other provider (its
-    // output is recorded as it drains; guest jobs keep running), so the
-    // switch is not stuck behind it. Children's bots are locked before the
-    // turn, in the usual order.
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
-    let preempted: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE bot_id = ?1 AND conversation_id = ?2 AND turn_no < ?3 AND provider_id <> ?4
-           AND status IN ('preparing', 'sending', 'running')
+    let superseded: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
+             error_message = 'A newer owner message continued this conversation before this one finished.',
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE conversation_id = ?1 AND turn_no < ?2 AND status IN ('queued', 'waiting')
          RETURNING id",
     )
-    .bind(req.bot_id)
     .bind(conversation_id)
     .bind(turn_no)
-    .bind(req.provider_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for superseded in superseded {
+        crate::db::events::turn_changed(&mut tx, req.bot_id, superseded).await?;
+        crate::db::delegations::cancel_for_root(&mut tx, superseded).await?;
+    }
+    let preempted: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE conversation_id = ?1 AND turn_no < ?2 AND status IN ('preparing', 'sending', 'running')
+         RETURNING id",
+    )
+    .bind(conversation_id)
+    .bind(turn_no)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(active) = preempted {
@@ -665,7 +662,6 @@ mod tests {
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
-            max_queued: 1,
         }
     }
 

@@ -75,9 +75,9 @@ Persist owner messages, ordered history, and turn attempts before dispatch. Add 
 Acceptance:
 
 - A send and its retry produce one owner bubble and one accepted request. Conflicting reuse fails without another message.
-- Two bots retain separate histories. Queue order and the configured one-active-turn-per-bot limit hold.
+- Two bots retain separate histories. Owner messages keep their arrival order, and the configured one-active-turn-per-bot limit holds.
 - The synthetic adapter produces persisted assistant output and a terminal outcome through the normal application path.
-- A failed acceptance transaction publishes no partial message. Queue overflow returns a bounded, retryable error.
+- A failed acceptance transaction publishes no partial message. A newer owner message replaces unstarted replies and interrupts the running one, so the owner conversation holds at most one queued turn.
 - Sending to a deleted bot fails before accepting a message or starting work.
 - Provider-specific events stay behind the adapter. PostgreSQL remains authoritative for visible history.
 - Profile updates validate against adapter capabilities and survive restart. Queued/running requests keep their original snapshots; newly accepted requests get the new revision. Task grants cannot update settings.

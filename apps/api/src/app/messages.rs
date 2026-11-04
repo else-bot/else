@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const MAX_TEXT_BYTES: usize = 32 * 1024;
-/// Waiting (not yet started) messages allowed per bot.
+/// Queued turns a bot may hold before a due routine run is skipped.
 pub const MAX_QUEUED_TURNS: i64 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
