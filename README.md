@@ -56,19 +56,21 @@ curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bas
 ```
 
 It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
+
 - build tools, the SQLite CLI for optional SQL inspection, and the desktop's libraries;
 - in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
 - SQLite bundled into the API, with its database at `~/.else/data/else.sqlite3`;
-- Docker for building the guest VM image (about 15 minutes the first time; skip with `--skip-guest-image`);
+- Docker, only when the guest VM image must be built (about 15 minutes the first time; skip with `--skip-guest-image`). The installer starts the Docker service for the build but does not set it to start at boot. Once the image is loaded, later runs skip Docker;
 - `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`. The installer asks once whether the API should start at boot; if yes, it turns on lingering for your user with `loginctl enable-linger`, using sudo if needed. `--autostart` and `--no-autostart` choose without asking, and the choice is kept for updates.
 
-Bot computers need `/dev/kvm`; the installer offers to add you to the `docker` and `kvm` groups (log in again afterwards). Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
+Bot computers need `/dev/kvm`, and the installer offers to add you to the `kvm` group. When it builds the guest image, it also offers to add you to the `docker` group. Log in again after a group change. Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
 
 On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, SQLite, Microsandbox, and the guest image. Before running it, install:
-- Xcode with the Metal toolchain (the desktop compiles Metal shaders);
-- OrbStack or Docker Desktop, running, only to build the optional guest image.
 
-Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`, and you should also set OrbStack or Docker Desktop to start at login. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
+- Xcode with the Metal toolchain (the desktop compiles Metal shaders);
+- OrbStack or Docker Desktop, running, when the guest image needs to be built.
+
+Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`. The API does not need Docker to run. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
 
 ### Update
 
@@ -99,7 +101,7 @@ Alpha installations with a non-SQLite database URL stop the API and set up SQLit
 
 `elsebot db` opens this installation's SQLite database in read-only mode, for example `elsebot db 'select count(*) from bots'`.
 
-Outside `~/.else`: the system packages, the guest image in Docker, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
+Outside `~/.else`: the system packages, the guest image in Docker when the installer built it, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
 
 ### elsebot
 
@@ -111,7 +113,7 @@ Outside `~/.else`: the system packages, the guest image in Docker, the systemd u
 | `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
 | `elsebot logs` | Follow the API log |
 | `elsebot api backup` | Any `else-api` command with this installation's settings |
-| `elsebot db` | Read-only SQL on the installation's database (`psql`), e.g. `elsebot db -c 'select count(*) from bots'` |
+| `elsebot db` | Read-only SQL on the installation's database (`sqlite3 -readonly`), for example `elsebot db 'select count(*) from bots'` |
 | `elsebot paths` | Where everything is |
 
 ### Versions and releases

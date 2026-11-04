@@ -149,7 +149,7 @@ host with `scripts/test-install.sh`; these ARM64 lanes do not emulate amd64.
 python3 scripts/test-e2e.py ubuntu-arm64 --suite application
 python3 scripts/test-e2e.py macos-arm64 --suite installer
 python3 scripts/test-e2e.py macos-arm64 --compile-live
-python3 scripts/e2e/test_runner.py
+python3 -m unittest discover -s scripts/e2e -p 'test_*.py'
 ```
 
 Application runs include unit tests, integration targets, and doctests. The
