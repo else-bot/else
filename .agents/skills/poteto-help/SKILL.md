@@ -43,7 +43,7 @@ Report unsupported capabilities without changing the requested models.
 | Review and ship a branch | [review-and-ship](../review-and-ship/SKILL.md) |
 
 For other goals, read the neighboring skill descriptions and select the closest
-match. [The guide](../../docs/guide/README.md) explains the workflows in more detail.
+match.
 Start a new task with `/poteto-mode` and a concrete completion check. Persistent
 modes, scheduling, transcript access, and browser tools depend on the current
 runtime; use [its local rules](../../rules/plugin-compatibility.md).

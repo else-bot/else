@@ -4,7 +4,7 @@ The canonical directory is `.agents`. `.claude` is a relative symlink to it.
 Skills live in `.agents/skills/<name>/SKILL.md`, and agent definitions live
 in `.agents/agents/<name>.md`. Edit these installed files directly.
 Supporting scripts and assets live inside their skill folders.
-Upstream licenses are retained in `.agents/licenses/`.
+Upstream copyright and license notices are retained in `.agents/NOTICE`.
 
 Invoke skills by their local name, such as `/poteto-mode`, and agents by
 their local name, such as `poteto-agent`. Read another skill's local
