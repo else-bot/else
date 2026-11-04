@@ -29,14 +29,7 @@ impl ElseApp {
     }
 
     fn latest_loaded(&self) -> Option<ReplyPosition> {
-        let item = self
-            .view
-            .as_ref()?
-            .conversation
-            .as_ref()?
-            .items()
-            .rev()
-            .find(|item| item.kind == "assistant")?;
+        let item = self.view.as_ref()?.conversation.as_ref()?.latest_reply()?;
         Some(ReplyPosition {
             item_seq: item.seq,
             text_bytes: item.text.len() as i64,

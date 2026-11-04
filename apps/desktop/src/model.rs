@@ -306,6 +306,13 @@ impl Conversation {
         self.items.values()
     }
 
+    pub fn latest_reply(&self) -> Option<&Item> {
+        self.items
+            .values()
+            .rev()
+            .find(|item| item.kind == "assistant")
+    }
+
     pub fn item(&self, id: Uuid) -> Option<&Item> {
         self.seq_of.get(&id).and_then(|seq| self.items.get(seq))
     }
