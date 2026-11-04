@@ -14,6 +14,7 @@ use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
@@ -380,9 +381,11 @@ impl ElseApp {
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
-        let Some(key) = view.rows.get(ix).copied() else {
+        let Some(row) = view.rows.get(ix).copied() else {
             return div().into_any_element();
         };
+        let key = row.key;
+        let footer = row.footer_stamp.map(stamp);
         let theme = cx.theme().clone();
         let card = |text: &RowText, user: bool| {
             div()
@@ -463,15 +466,17 @@ impl ElseApp {
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
                 let mut column = v_flex().w_full().gap_1().px_4().py_1();
-                let card = card(text, user);
+                let card = with_exact_time(
+                    card(text, user).id(SharedString::from(format!("message-{id}"))),
+                    item.created_at,
+                );
                 let card = match Author::of(&item.kind) {
                     Some(author) => {
                         let (owner, bot) = (cx.entity().downgrade(), view.bot_id);
-                        card.id(SharedString::from(format!("message-{id}")))
-                            .context_menu(move |menu, window, cx| {
-                                Self::message_menu(owner.clone(), bot, id, author, menu, window, cx)
-                            })
-                            .into_any_element()
+                        card.context_menu(move |menu, window, cx| {
+                            Self::message_menu(owner.clone(), bot, id, author, menu, window, cx)
+                        })
+                        .into_any_element()
                     }
                     None => card.into_any_element(),
                 };
@@ -479,10 +484,9 @@ impl ElseApp {
                     Some(kind) => reacted(card, kind),
                     None => card,
                 };
-                column = column.child(side(user, card)).children(
-                    item.created_at
-                        .map(|at| beside(user, note(stamp(at), false))),
-                );
+                column = column
+                    .child(side(user, card))
+                    .children(footer.map(|at| beside(user, note(at, false))));
                 if let Some(turn) = turn {
                     let show_on_user = user && !turn.is_finished()
                         || user
@@ -517,8 +521,16 @@ impl ElseApp {
                     .gap_1()
                     .px_4()
                     .py_1()
-                    .child(side(true, card(text, true).into_any_element()))
-                    .child(beside(true, note(stamp(pending.sent_at), false)));
+                    .child(side(
+                        true,
+                        with_exact_time(
+                            card(text, true)
+                                .id(SharedString::from(format!("pending-{request_id}"))),
+                            Some(pending.sent_at),
+                        )
+                        .into_any_element(),
+                    ))
+                    .children(footer.map(|at| beside(true, note(at, false))));
                 if let Some(reason) = &pending.rejected {
                     return column
                         .child(
@@ -853,6 +865,25 @@ fn beside(user: bool, note: Div) -> Div {
     if user { row.justify_end() } else { row }
 }
 
+fn with_exact_time(card: Stateful<Div>, at: Option<DateTime<Utc>>) -> Stateful<Div> {
+    match at {
+        Some(at) => {
+            let exact = SharedString::from(exact_stamp_in(at, &Local));
+            card.tooltip(move |window, cx| Tooltip::new(exact.clone()).build(window, cx))
+        }
+        None => card,
+    }
+}
+
+fn exact_stamp_in<Tz: TimeZone>(at: DateTime<Utc>, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    at.with_timezone(zone)
+        .format("%A, %-d %B %Y, %H:%M:%S UTC%:z")
+        .to_string()
+}
+
 fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
@@ -936,7 +967,7 @@ impl Render for ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::stamp_in;
+    use super::{exact_stamp_in, stamp_in};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -952,6 +983,16 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
+        );
+    }
+
+    #[test]
+    fn exact_stamps_name_the_year_seconds_and_offset_in_the_viewer_zone() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let at = "2026-11-04T22:30:07Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(
+            exact_stamp_in(at, &zone),
+            "Thursday, 5 November 2026, 00:30:07 UTC+02:00"
         );
     }
 }

@@ -133,7 +133,7 @@ impl ElseApp {
             if let Some(ix) = view
                 .rows
                 .iter()
-                .position(|r| *r == RowKey::SecretRequest(request))
+                .position(|r| r.key == RowKey::SecretRequest(request))
             {
                 view.list.remeasure_items(ix..ix + 1);
             }
