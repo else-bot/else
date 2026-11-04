@@ -759,3 +759,19 @@ async fn category_changes_leave_guest_jobs_running() {
         "the job and its lease are untouched"
     );
 }
+
+/// Retiring old input counters must never renew a live turn's allowance.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_allowances_survive_counter_cleanup() {
+    let Setup { app, manager, .. } = setup().await;
+    let bot = app.create_bot("Input", "bounded input").await;
+    let (turn, _) = grant(&app, &bot).await;
+    for expected in 1..=41 {
+        assert_eq!(manager.count_input(turn).await.unwrap(), expected);
+    }
+    // These IDs stand for settled turns whose counters have accumulated.
+    for _ in 0..10_001 {
+        manager.count_input(Uuid::new_v4()).await.unwrap();
+    }
+    assert_eq!(manager.count_input(turn).await.unwrap(), 42);
+}

@@ -270,15 +270,27 @@ impl ComputerManager {
     }
 
     /// Count one input batch for a turn; returns the count including it.
-    pub async fn count_input(&self, turn_id: Uuid) -> u32 {
+    pub async fn count_input(&self, turn_id: Uuid) -> Result<u32, ComputerError> {
+        let pool = self.pool.clone();
         self.input_batches
-            .call(move |batches| {
-                if batches.len() > 10_000 {
-                    batches.clear();
-                }
-                let n = batches.entry(turn_id).or_insert(0);
-                *n += 1;
-                *n
+            .call_async(move |batches| {
+                Box::pin(async move {
+                    if batches.len() >= 10_000 {
+                        // Retire only settled turns. Clearing the entire cache
+                        // would give every running turn a fresh input allowance.
+                        let live: Vec<Uuid> = sqlx::query_scalar(
+                            "SELECT id FROM turns WHERE status IN
+                         ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')",
+                        )
+                        .fetch_all(&pool)
+                        .await?;
+                        let live: std::collections::HashSet<_> = live.into_iter().collect();
+                        batches.retain(|turn, _| live.contains(turn));
+                    }
+                    let n = batches.entry(turn_id).or_insert(0);
+                    *n = n.saturating_add(1);
+                    Ok(*n)
+                })
             })
             .await
     }
