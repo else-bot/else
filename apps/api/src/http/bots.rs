@@ -115,6 +115,8 @@ struct CreateBot {
     profile: Option<super::settings::ProfileChoice>,
     #[serde(default)]
     category_id: Option<Uuid>,
+    #[serde(default)]
+    avatar: Option<Avatar>,
 }
 
 async fn create(
@@ -140,6 +142,7 @@ async fn create(
                 .as_ref()
                 .map(|(provider, profile)| (*provider, profile)),
             category_id: body.category_id,
+            avatar: body.avatar,
         },
     )
     .await

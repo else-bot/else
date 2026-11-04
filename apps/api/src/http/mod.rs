@@ -307,6 +307,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
     let onboarding_required = onboarding_required.unwrap_or(false);
     Json(json!({
         "api_version": "v1",
+        "bot_avatar_on_create": true,
         "server_instance_id": state.server_instance_id,
         "default_provider_id": default_id,
         "defaults": defaults,
@@ -457,6 +458,7 @@ pub mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["api_version"], "v1");
+        assert_eq!(body["bot_avatar_on_create"], true);
     }
 
     #[tokio::test]
