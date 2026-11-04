@@ -25,7 +25,7 @@ impl ComputerManager {
             return Err(ComputerError::LeaseEnded);
         }
         let (program, mut args) =
-            self.as_guest_user(r#"[ -f "?1" ] && [ ! -L "?1" ] && stat -c %s -- "?1""#);
+            self.as_guest_user(r#"[ -f "$1" ] && [ ! -L "$1" ] && stat -c %s -- "$1""#);
         args.push(guest_path.to_owned());
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let size = self
@@ -155,7 +155,7 @@ impl ComputerManager {
         let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
         self.guest(
             lease,
-            r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; mkdir -p -- "$(dirname -- "?1")" && printf %s "?2" | base64 -d > "?1""#,
+            r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; mkdir -p -- "$(dirname -- "$1")" && printf %s "$2" | base64 -d > "$1""#,
             &[path, &encoded],
             Duration::from_secs(30),
         )
@@ -177,8 +177,8 @@ impl ComputerManager {
         let out = self
             .guest(
                 lease,
-                r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; [ -f "?1" ] || { echo "not a regular file" >&2; exit 1; }
-stat -c %s -- "?1" && tail -c +"$((?2 + 1))" -- "?1" | head -c "?3" | base64 -w0"#,
+                r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"; [ -f "$1" ] || { echo "not a regular file" >&2; exit 1; }
+stat -c %s -- "$1" && tail -c +"$(($2 + 1))" -- "$1" | head -c "$3" | base64 -w0"#,
                 &[path, &offset_arg, &length_arg],
                 Duration::from_secs(30),
             )

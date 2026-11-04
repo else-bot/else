@@ -180,7 +180,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
 
 /// POC-018: the desktop image, guest tools, jobs, artifacts, the browser,
 /// desktop access, isolation, and persistence across stop and start. Needs
-/// the image built: `docker build -t else-guest:1 infra/guest`.
+/// the image built: `docker build -t else-guest:2 infra/guest`.
 #[tokio::test(flavor = "multi_thread")]
 async fn guest_tools_desktop_and_isolation() {
     if !live() {
@@ -194,7 +194,7 @@ async fn guest_tools_desktop_and_isolation() {
     let tar = dir.path().join("guest.tar");
     assert!(
         std::process::Command::new("docker")
-            .args(["save", "else-guest:1", "-o"])
+            .args(["save", "else-guest:2", "-o"])
             .arg(&tar)
             .status()
             .unwrap()
@@ -203,7 +203,7 @@ async fn guest_tools_desktop_and_isolation() {
     assert!(
         std::process::Command::new(&msb_bin)
             .env("MSB_HOME", &home)
-            .args(["load", "-q", "-t", "else-guest:1", "-i"])
+            .args(["load", "-q", "-t", "else-guest:2", "-i"])
             .arg(&tar)
             .status()
             .unwrap()
@@ -216,7 +216,7 @@ async fn guest_tools_desktop_and_isolation() {
         names: std::sync::Mutex::default(),
     };
     let config = ComputerConfig {
-        image: "else-guest:1".into(),
+        image: "else-guest:2".into(),
         desktop: true,
         idle_after: Duration::ZERO,
         state_dir: dir.path().to_owned(),
@@ -281,11 +281,13 @@ async fn guest_tools_desktop_and_isolation() {
     let canary = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
     canary.set_nonblocking(true).unwrap();
     let port = canary.local_addr().unwrap().port();
-    let host_ip = std::process::Command::new("sh")
-        .args(["-c", "ip -4 route get 1.1.1.1 | grep -oP 'src \\K[0-9.]+'"])
-        .output()
-        .unwrap();
-    let host_ip = String::from_utf8_lossy(&host_ip.stdout).trim().to_owned();
+    let route = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    route.connect("1.1.1.1:80").unwrap();
+    let host_ip = route.local_addr().unwrap().ip();
+    assert!(
+        !host_ip.is_unspecified(),
+        "the host canary needs a routed address"
+    );
     let probe = format!("curl -s -m 4 http://{host_ip}:{port}/ || echo unreachable");
     let out = manager
         .run_command(bot, "test:turn", &probe, Duration::from_secs(30))
@@ -802,7 +804,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let tar = dir.path().join("guest.tar");
     assert!(
         std::process::Command::new("docker")
-            .args(["save", "else-guest:1", "-o"])
+            .args(["save", "else-guest:2", "-o"])
             .arg(&tar)
             .status()
             .unwrap()
@@ -811,7 +813,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     assert!(
         std::process::Command::new(&msb_bin)
             .env("MSB_HOME", &home)
-            .args(["load", "-q", "-t", "else-guest:1", "-i"])
+            .args(["load", "-q", "-t", "else-guest:2", "-i"])
             .arg(&tar)
             .status()
             .unwrap()
@@ -832,7 +834,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let db = Arc::new(common::TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let config = |state: &std::path::Path| ComputerConfig {
-        image: "else-guest:1".into(),
+        image: "else-guest:2".into(),
         desktop: true,
         idle_after: Duration::from_secs(3600),
         state_dir: state.to_owned(),
@@ -1220,7 +1222,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .env("ELSE_SYNTHETIC_PROVIDER", "1")
             .env("ELSE_BACKUP_INTERVAL_SECS", "0")
             .env("ELSE_MSB_BIN", &msb_bin)
-            .env("ELSE_VM_IMAGE", "else-guest:1")
+            .env("ELSE_VM_IMAGE", "else-guest:2")
             .env("ELSE_VM_DESKTOP", "1")
             .env("RUST_LOG", "warn")
             .stdout(std::process::Stdio::null())

@@ -69,6 +69,12 @@ pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+const CAPTURE_SCRIPT: &str = r#"d=$(dirname "$1"); mkdir -p "$d" && find "$d" -mindepth 1 -delete 2>/dev/null; DISPLAY=:99 exec /usr/local/bin/else-screenshot "$1" "$2""#;
+const COPY_SCRIPT: &str = r#"set -e; d=$(dirname "$2"); mkdir -p "$d"; chmod 0700 "$d"; find "$d" -mindepth 1 -delete
+[ -f "$1" ] && [ ! -L "$1" ]
+dd if="$1" of="$2" iflag=nofollow,count_bytes count="$3" status=none
+[ "$(stat -c %s "$2")" -lt "$3" ]"#;
+
 impl ComputerManager {
     /// Capture the bot's desktop under `lease` (its own computer: a lease of
     /// another bot is `LeaseEnded`) for `turn_id`, which must still run once
@@ -206,9 +212,7 @@ impl ComputerManager {
         staging: &std::path::Path,
         capture_id: Uuid,
     ) -> Result<Result<(serde_json::Value, Vec<u8>), ScreenRefusal>, ComputerError> {
-        let (program, mut args) = self.as_guest_user(
-            r#"d=$(dirname "?1"); mkdir -p "$d" && find "$d" -mindepth 1 -delete 2>/dev/null; DISPLAY=:99 exec /usr/local/bin/else-screenshot "?1" "?2""#,
-        );
+        let (program, mut args) = self.as_guest_user(CAPTURE_SCRIPT);
         args.push(user_path.to_owned());
         args.push(MAX_IMAGE_BYTES.to_string());
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -240,10 +244,7 @@ impl ComputerManager {
                 "/bin/sh",
                 &[
                     "-c",
-                    r#"set -e; d=$(dirname "?2"); mkdir -p "$d"; chmod 0700 "$d"; find "$d" -mindepth 1 -delete
-[ -f "?1" ] && [ ! -L "?1" ]
-dd if="?1" of="?2" iflag=nofollow,count_bytes count="?3" status=none
-[ "$(stat -c %s "?2")" -lt "?3" ]"#,
+                    COPY_SCRIPT,
                     "sh",
                     user_path,
                     root_path,
@@ -373,6 +374,55 @@ dd if="?1" of="?2" iflag=nofollow,count_bytes count="?3" status=none
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_scripts_use_their_paths_and_preserve_unrelated_working_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        let canary = cwd.join("unrelated");
+        std::fs::write(&canary, "keep").unwrap();
+        let helper = dir.path().join("capture");
+        std::fs::write(&helper, "#!/bin/sh\nprintf png > \"$1\"\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = dir.path().join("user/capture with spaces.png");
+        let copied = dir.path().join("root/checked.png");
+        let capture = super::CAPTURE_SCRIPT
+            .replace("/usr/local/bin/else-screenshot", helper.to_str().unwrap());
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &capture, "sh", image.to_str().unwrap(), "4"])
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read(&image).unwrap(), b"png");
+        assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep");
+        let out = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                super::COPY_SCRIPT,
+                "sh",
+                image.to_str().unwrap(),
+                copied.to_str().unwrap(),
+                "4",
+            ])
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read(&copied).unwrap(), b"png");
+        assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep");
+    }
+
     #[test]
     fn png_headers_are_read_and_others_refused() {
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
