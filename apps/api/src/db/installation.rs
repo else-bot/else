@@ -4,11 +4,12 @@
 //! missing provider profiles. Ordinary startup only reads this state: it never
 //! seeds bots, recreates a deleted default, or overwrites saved settings.
 
+use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use super::DbError;
-use crate::app::bots::{BotName, BotRole, MAIN_BOT_NAME, MAIN_BOT_ROLE};
+use crate::app::bots::{BotName, BotRole, MAIN_BOT_NAME, MAIN_BOT_ROLE, welcome_message};
 use crate::app::providers::default_profiles;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,6 +69,66 @@ pub async fn insert_bot(
         .execute(&mut **tx)
         .await?;
     Ok(conversation_id)
+}
+
+/// Open the main bot's conversation with its greeting, as a completed turn
+/// that never reached a provider, in the caller's transaction. Only an
+/// empty conversation is greeted. Returns whether the greeting was added.
+pub async fn append_welcome(
+    tx: &mut Transaction<'_, Sqlite>,
+    bot_id: Uuid,
+    name: &BotName,
+    provider_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let conversation_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM conversations
+         WHERE bot_id = ?1 AND kind = 'owner' AND last_turn_no = 0 AND last_item_seq = 0",
+    )
+    .bind(bot_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(conversation_id) = conversation_id else {
+        return Ok(false);
+    };
+    let text = welcome_message(name);
+    let mut hasher = Sha256::new();
+    hasher.update(b"welcome\0");
+    hasher.update(text.as_bytes());
+    let turn_id = Uuid::new_v4();
+    let item_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id, status, attempt, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 'completed', 0,
+             strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
+    )
+    .bind(turn_id)
+    .bind(bot_id)
+    .bind(conversation_id)
+    .bind(Uuid::new_v4())
+    .bind(hasher.finalize().to_vec())
+    .bind(item_id)
+    .bind(provider_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, 1, ?3, 'assistant', ?4)",
+    )
+    .bind(item_id)
+    .bind(conversation_id)
+    .bind(turn_id)
+    .bind(&text)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE conversations SET last_turn_no = 1, last_item_seq = 1 WHERE id = ?1")
+        .bind(conversation_id)
+        .execute(&mut **tx)
+        .await?;
+    crate::db::memory::log_item(tx, item_id).await?;
+    crate::db::events::item_upsert(tx, bot_id, item_id).await?;
+    crate::db::events::turn_changed(tx, bot_id, turn_id).await?;
+    Ok(true)
 }
 
 pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {

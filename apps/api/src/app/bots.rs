@@ -8,6 +8,26 @@ pub const MAIN_BOT_NAME: &str = "Assistant";
 pub const MAIN_BOT_ROLE: &str = "Main assistant. Understand the owner's personal, family, and work \
 context, remember what matters, and coordinate with the other bots when they are better suited.";
 
+const WELCOME: &str = "Hi, I'm {bot_name}. Welcome to else.bot.
+
+I'm your main assistant. Tell me what you need in your own words, whether it's a question, \
+something you're working on, or a task you want me to handle.
+
+I remember our conversations, so we can build on what you've already told me about your work, \
+your life, and how you like things done. You can correct me whenever I get something wrong.
+
+I have my own computer for browsing, writing code, and working with files. You can open its \
+desktop to see what I'm doing. You can also create other bots for specific roles, and I can hand \
+tasks to them when it helps.
+
+To get acquainted, what should I call you? Tell me a little about yourself and what you'd like \
+my help with first. We can figure out the rest as we go.";
+
+/// The main bot's first message on a fresh installation.
+pub fn welcome_message(name: &BotName) -> String {
+    WELCOME.replace("{bot_name}", name.as_str())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidBot {
     #[error("Name must be 1 to 80 characters after trimming.")]

@@ -130,7 +130,7 @@ pub async fn turn_accepted(
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let turn = turns::load_turn(conn, turn_id).await?;
-    item_upsert(conn, bot_id, turn.owner_item_id).await?;
+    item_upsert(conn, bot_id, turn.source_item_id).await?;
     turn_changed(conn, bot_id, turn_id).await
 }
 

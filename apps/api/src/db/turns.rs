@@ -23,7 +23,9 @@ pub struct TurnRecord {
     pub conversation_id: Uuid,
     pub request_id: Uuid,
     pub turn_no: i64,
-    pub owner_item_id: Uuid,
+    /// The item the turn answers: the owner's message, or the assistant's
+    /// own greeting for a turn that started the conversation.
+    pub source_item_id: Uuid,
     pub provider_id: String,
     pub profile_revision: Option<i64>,
     pub profile: Option<Json<Profile>>,
@@ -37,8 +39,8 @@ pub struct TurnRecord {
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
-    t.owner_item_id, t.provider_id, t.profile_revision, t.profile, t.status, t.error_code,
-    t.error_message, t.effect_uncertain, t.created_at, t.finished_at, t.attempt";
+    t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
+    t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.finished_at, t.attempt";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ItemRecord {
@@ -271,7 +273,7 @@ async fn load_turn_and_item(
     turn_id: Uuid,
 ) -> Result<(TurnRecord, ItemRecord), sqlx::Error> {
     let turn = load_turn(conn, turn_id).await?;
-    let item = load_item(conn, turn.owner_item_id).await?;
+    let item = load_item(conn, turn.source_item_id).await?;
     Ok((turn, item))
 }
 
@@ -424,8 +426,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             .bind(turn.bot_id)
             .fetch_one(&mut *conn)
             .await?;
-    let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
-        .bind(turn.owner_item_id)
+    let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1 AND kind = 'user'")
+        .bind(turn.source_item_id)
         .fetch_one(&mut *conn)
         .await?;
     let history = sqlx::query_as::<_, (i64, String, String, String)>(

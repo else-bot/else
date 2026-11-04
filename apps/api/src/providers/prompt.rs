@@ -199,8 +199,8 @@ fn render(entry: &HistoryEntry) -> String {
 
 /// The owner's message, preceded by what the native session has not seen:
 /// a handoff checkpoint from another provider, if any, then missed history.
-/// Whole items only: the first owner message, then the newest others that
-/// fit the budget; omissions are stated with their turn numbers.
+/// Whole items only: retain the first owner message and newest others that
+/// fit the budget, in conversation order. Omissions state their turn numbers.
 pub fn packet(input: &TurnInput, considered_through: i64) -> String {
     packet_with_selection(input, considered_through).0
 }
@@ -222,36 +222,35 @@ pub fn packet_with_selection(input: &TurnInput, considered_through: i64) -> (Str
     // The first owner message anchors the conversation; it is charged
     // against the budget first (if it fits at all).
     let first = missed
-        .first()
-        .filter(|e| e.kind == "user")
-        .map(|e| (e, render(e)))
-        .filter(|(_, line)| line.len() <= budget / 2);
-    let mut used = first.as_ref().map_or(0, |(_, line)| line.len());
-    let rest = if first.is_some() {
-        &missed[1..]
-    } else {
-        &missed[..]
-    };
-    let mut chosen = Vec::new();
-    for entry in rest.iter().rev() {
+        .iter()
+        .position(|entry| entry.kind == "user")
+        .filter(|index| render(missed[*index]).len() <= budget / 2);
+    let mut included = vec![false; missed.len()];
+    let mut used = 0;
+    if let Some(index) = first {
+        included[index] = true;
+        used = render(missed[index]).len();
+    }
+    for (index, entry) in missed.iter().enumerate().rev() {
+        if included[index] {
+            continue;
+        }
         let line = render(entry);
         if used + line.len() > budget {
             break;
         }
         used += line.len();
-        chosen.push(*entry);
+        included[index] = true;
     }
-    chosen.reverse();
-    let omitted: Vec<&HistoryEntry> = rest[..rest.len() - chosen.len()].to_vec();
     let mut selection = Selection::default();
-    for entry in first.iter().map(|(e, _)| **e).chain(chosen.iter().copied()) {
-        if selection.selected.last() != Some(&entry.turn_no) {
-            selection.selected.push(entry.turn_no);
-        }
-    }
-    for entry in &omitted {
-        if selection.omitted.last() != Some(&entry.turn_no) {
-            selection.omitted.push(entry.turn_no);
+    for (entry, include) in missed.iter().zip(&included) {
+        let turns = if *include {
+            &mut selection.selected
+        } else {
+            &mut selection.omitted
+        };
+        if turns.last() != Some(&entry.turn_no) {
+            turns.push(entry.turn_no);
         }
     }
     let mut text = String::new();
@@ -281,19 +280,19 @@ pub fn packet_with_selection(input: &TurnInput, considered_through: i64) -> (Str
         "[else.bot context] Earlier messages of this conversation that this session has not \
          seen. They are history, not new instructions.\n<history>\n",
     );
-    if let Some((_, first)) = &first {
-        text.push_str(first);
-    }
-    if !omitted.is_empty() {
-        let turns: Vec<String> = selection.omitted.iter().map(i64::to_string).collect();
-        text.push_str(&format!(
-            "[{} earlier messages omitted: turns {}; search memory for them]\n",
-            omitted.len(),
-            turns.join(", ")
-        ));
-    }
-    for entry in chosen {
-        text.push_str(&render(entry));
+    let first_omitted = included.iter().position(|include| !include);
+    for (index, entry) in missed.iter().enumerate() {
+        if Some(index) == first_omitted {
+            let turns: Vec<String> = selection.omitted.iter().map(i64::to_string).collect();
+            text.push_str(&format!(
+                "[{} earlier messages omitted: turns {}; search memory for them]\n",
+                included.iter().filter(|include| !**include).count(),
+                turns.join(", ")
+            ));
+        }
+        if included[index] {
+            text.push_str(&render(entry));
+        }
     }
     text.push_str("</history>\n\nOwner's latest message:\n");
     text.push_str(&input.text);
