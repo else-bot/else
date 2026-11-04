@@ -78,7 +78,12 @@ FAKE_API = textwrap.dedent('''\
         def log_message(self, *_):
             pass
     host, port = os.environ["ELSE_API_BIND"].rsplit(":", 1)
-    server = http.server.ThreadingHTTPServer((host, int(port)), Handler)
+    class Server(http.server.ThreadingHTTPServer):
+        def server_bind(self):
+            http.server.socketserver.TCPServer.server_bind(self)
+            self.server_name = "localhost"
+            self.server_port = self.server_address[1]
+    server = Server((host, int(port)), Handler)
     (data / "api.tmp").write_text(json.dumps({"pid": os.getpid(), "url": f"http://127.0.0.1:{server.server_port}"}))
     os.replace(data / "api.tmp", data / "api.json")
     server.serve_forever()
@@ -134,7 +139,7 @@ def dead(pid):
 
 class DevSessions(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="else-test-dev-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="else-test-dev-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.api = executable(self.tmp / "fake-api", FAKE_API)
         self.desktop = executable(self.tmp / "fake-desktop", FAKE_DESKTOP)
@@ -147,6 +152,15 @@ class DevSessions(unittest.TestCase):
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
             process.communicate(timeout=30)
+
+    def test_lock_owner_must_be_the_named_process(self):
+        lock = self.tmp / "ownership.lock"
+        with lock.open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            self.processes.append(child)
+            self.assertTrue(dev.holds(os.getpid(), lock))
+            self.assertFalse(dev.holds(child.pid, lock))
 
     def checkout(self, name):
         root = self.tmp / name

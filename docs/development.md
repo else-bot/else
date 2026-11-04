@@ -58,7 +58,7 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
 
-For fast behavior checks on Linux amd64, use the
+For fast behavior checks on macOS arm64 and Linux arm64 or amd64, use the
 [verify-else skill](../.agents/skills/verify-else/SKILL.md):
 
 ```sh
@@ -67,10 +67,12 @@ For fast behavior checks on Linux amd64, use the
 .agents/skills/verify-else/verify.py --full
 ```
 
-The default runs independent HTTP journeys for bots, messaging/stop/restart,
-and categories. `--full` adds the existing offline workspace tests. Compilation
+The default runs independent HTTP journeys for bots and settings, messaging/stop/restart,
+categories, and onboarding with a persisted greeting. `--full` adds the existing offline workspace tests. Compilation
 uses the dev cache once, then test binaries run in bounded parallel lanes
-inside a private, network-isolated omabox. Logs and results survive teardown
+inside a private, network-isolated omabox on Linux. macOS uses private process
+groups, HOME, and XDG directories on the host network. Use `--backend process`
+inside an owned Linux container or VM. Logs and results survive teardown
 under `target/verification/`. The skill also documents native desktop input
 checks and explicit live-provider, VM, S3, installer, and platform exclusions.
 
@@ -119,12 +121,13 @@ python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --repeat 2
 ```
 
 The Ubuntu lane runs Ubuntu 26.04 aarch64 in Docker; macOS runs native arm64
-binaries and a temporary launchd service. Both build the API and desktop, run
-the application tests with temporary SQLite files and an isolated S3 emulator,
+binaries and a temporary launchd service. Both build the API and desktop, run the verify-else public API journeys and
+Python tooling checks, then run the application tests with temporary SQLite files and an isolated S3 emulator,
 and exercise the real installer with local v0.0.1/v0.0.2 Git tags: installation, busy-update
 refusal, backup-before-migration, preserved conversations, read-only database
 access, native binaries, and an idempotent reinstall. Ubuntu uses a managed
-API process, as the container has no systemd. Desktop rendering is not driven.
+API process, as the container has no systemd. Desktop input remains a separate check documented in the
+[native desktop guide](../.agents/skills/verify-else/native-desktop.md).
 
 The default development profile keeps assertions and overflow checks enabled.
 It avoids release optimization during functional testing; use `--profile
@@ -146,6 +149,7 @@ lane alone. Run the amd64 Debian/Ubuntu/Arch matrix separately on an amd64
 host with `scripts/test-install.sh`; these ARM64 lanes do not emulate amd64.
 
 ```sh
+python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --suite verification
 python3 scripts/test-e2e.py ubuntu-arm64 --suite application
 python3 scripts/test-e2e.py macos-arm64 --suite installer
 python3 scripts/test-e2e.py macos-arm64 --compile-live

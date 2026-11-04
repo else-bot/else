@@ -269,7 +269,14 @@ def holds(pid, lock):
         fd = try_lock(lock, create=False)
         if fd:
             os.close(fd)
-        return fd is None
+        if fd is not None:
+            return False
+        try:
+            owned = subprocess.run(["lsof", "-a", "-p", str(pid), "-Ff", "--", str(lock)],
+                                   capture_output=True, text=True, timeout=5)
+            return owned.returncode == 0 and any(line.startswith("f") for line in owned.stdout.splitlines())
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     for entry in fds.iterdir():
         try:
             found = os.stat(entry)
