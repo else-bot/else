@@ -211,7 +211,12 @@ pub struct ElseApp {
 }
 
 impl ElseApp {
-    pub fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: Arc<Client>,
+        preferences: crate::preferences::Preferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sidebar_focus = cx.focus_handle();
         sidebar_focus.focus(window, cx);
         let composer = cx.new(|cx| {
@@ -263,7 +268,7 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
-            preferences: crate::preferences::Preferences::load(),
+            preferences,
             _save_preferences: None,
             settings_open: false,
             settings: HashMap::new(),

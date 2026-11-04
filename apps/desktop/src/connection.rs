@@ -240,7 +240,13 @@ impl Shell {
                 .app
                 .update(cx, |app, cx| app.dismiss_notifications(cx));
         }
-        let app = cx.new(|cx| ElseApp::new(client, window, cx));
+        let preferences = self
+            .launch
+            .store
+            .as_ref()
+            .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
+            .unwrap_or_default();
+        let app = cx.new(|cx| ElseApp::new(client, preferences, window, cx));
         let observer = cx.observe(&app, |_, _, cx| cx.notify());
         self.active = Some(Active {
             profile,
