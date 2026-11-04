@@ -139,8 +139,6 @@ impl From<sqlx::Error> for RequestError {
     }
 }
 
-/// The newest question of `turn_id` with this title (a choice) or action
-/// hash (an approval).
 async fn find_same(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
@@ -172,8 +170,6 @@ async fn find_same(
     Ok(row.map(info))
 }
 
-/// Insert a new pending question for the caller's attempt, after the
-/// parking and budget checks.
 async fn insert(
     conn: &mut SqliteConnection,
     turn_id: Uuid,

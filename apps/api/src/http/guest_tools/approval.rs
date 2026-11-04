@@ -34,7 +34,6 @@ impl Effect {
         }
     }
 
-    /// The approval a call with this effect needs, if any.
     fn approval(self) -> Option<Kind> {
         match self {
             Self::Local => None,
@@ -44,8 +43,6 @@ impl Effect {
     }
 }
 
-/// Whether a call of `name` with `args` must declare its effect: the tools
-/// that act. Reading a page, a file, or a job does not.
 fn needs_effect(name: &str, args: &Value) -> bool {
     match name {
         "computer_run" | "computer_job_start" | "computer_input" | "computer_write_file" => true,
@@ -54,8 +51,6 @@ fn needs_effect(name: &str, args: &Value) -> bool {
     }
 }
 
-/// The declared effect of a call, or the refusal to send back. `Ok(None)`
-/// means the call has nothing to declare.
 fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
     let needs = needs_effect(name, args);
     let effect = match args.get("effect") {
@@ -86,9 +81,6 @@ fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
     Ok(Some(effect))
 }
 
-/// What the approval card shows for a gated call: a title (the declared
-/// purpose, or what the tool does) and the action itself. Typed text is
-/// shown by its size only (it may be a password).
 fn approval_card(name: &str, args: &Value) -> (String, String) {
     let text = |key: &str| args[key].as_str().unwrap_or_default();
     let purpose = text("purpose").trim();
@@ -149,10 +141,6 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
     (title, context)
 }
 
-/// Let a destructive or external call through only with the owner's
-/// approval for exactly this call (or the standing destructive grant);
-/// otherwise the answer to send back: a pending card, a refusal, or the
-/// owner's denial. `Ok(Some(note))` describes why it may run.
 async fn approve(
     state: &AppState,
     grant: &Grant,

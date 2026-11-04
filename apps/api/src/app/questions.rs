@@ -149,7 +149,6 @@ fn text_arg<'a>(args: &'a Value, key: &str, max: usize) -> Result<Option<&'a str
     }
 }
 
-/// Keys of `args` outside `allowed` are refused (no value rides along).
 fn only_keys(args: &Value, allowed: &[&str]) -> Result<(), ()> {
     let object = args.as_object().ok_or(())?;
     if object.keys().all(|k| allowed.contains(&k.as_str())) {

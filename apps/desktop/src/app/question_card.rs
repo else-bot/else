@@ -34,13 +34,11 @@ pub(super) enum SubmitState {
 }
 
 impl QuestionSubmit {
-    /// No other choice may be sent while this one is in flight or recorded.
     fn locks(&self) -> bool {
         !matches!(self.state, SubmitState::Failed(_))
     }
 }
 
-/// What the card says above the question, by kind.
 fn heading(question: &Question, bot_name: &str) -> String {
     match question.kind.as_str() {
         "destructive" => format!("{bot_name} wants to do something that is hard to undo"),
@@ -49,7 +47,6 @@ fn heading(question: &Question, bot_name: &str) -> String {
     }
 }
 
-/// The settled card's one-line outcome.
 fn outcome(question: &Question, bot_name: &str) -> String {
     match question.status.as_str() {
         "answered" => match (question.is_approval(), question.answer.as_deref()) {
@@ -72,7 +69,6 @@ fn outcome(question: &Question, bot_name: &str) -> String {
     }
 }
 
-/// The letter shown before a plain choice, from its id.
 fn letter(choice_id: &str) -> String {
     choice_id.to_uppercase()
 }
@@ -182,9 +178,7 @@ impl ElseApp {
         };
         let submit = view.question_submits.get(&id);
         let pending = question.is_pending();
-        // Once the server settled the card, or an answer is on its way, no
-        // other choice can be made; offline, none can be sent.
-        let busy = !pending
+        let locked = !pending
             || submit.is_some_and(QuestionSubmit::locks)
             || self.connection != Connection::Connected;
         let approval = question.is_approval();
@@ -239,7 +233,7 @@ impl ElseApp {
             let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                 .label(label)
                 .small()
-                .disabled(busy)
+                .disabled(locked)
                 .on_click(cx.listener(move |app, _, window, cx| {
                     app.answer_question(id, choice_id.clone(), window, cx)
                 }));

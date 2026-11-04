@@ -51,7 +51,6 @@ fn owner_tools() -> Vec<Tool> {
     vec![Tool::ReadMemory, Tool::AskOwner, Tool::Computer]
 }
 
-/// Start a slow turn on `bot` and return it with a grant for its attempt.
 async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {
     let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
@@ -136,7 +135,6 @@ async fn permissions(app: &TestApp, bot: &str) -> i64 {
         .unwrap()
 }
 
-/// The turn as the owner's snapshot shows it.
 async fn shown_turn(app: &TestApp, bot: &str, turn: Uuid) -> Value {
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
@@ -150,7 +148,6 @@ async fn shown_turn(app: &TestApp, bot: &str, turn: Uuid) -> Value {
         .clone()
 }
 
-/// The question's latest state in the bot's event journal.
 async fn journaled(app: &TestApp, bot: &str, question: Uuid) -> Value {
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT kind, data FROM bot_events WHERE bot_id = ?1 ORDER BY seq")
@@ -183,7 +180,6 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(result["parked"], true);
     let question: Uuid = result["question_id"].as_str().unwrap().parse().unwrap();
     assert_eq!(result["choices"][1]["id"], "b");
-    // The asking attempt is parked: nothing else may run in it.
     let more = tool(&app, &token, "memory_bots", json!({})).await;
     assert_eq!(more.status, StatusCode::CONFLICT, "{}", more.body);
     assert_eq!(more.body["error"]["code"], "attempt_parked");
@@ -220,7 +216,6 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert!(packet.contains("The owner chose: HTML digest"), "{packet}");
     assert!(packet.contains("kind=\"choice\""), "{packet}");
 
-    // A retry of the same answer is a no-op; any other answer is stale.
     let again = answer(&app, &main, question, "b").await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.body["requeued"], false);
@@ -251,9 +246,6 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
     }
     let first = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
     assert_eq!(first["status"], "pending", "{first}");
-    // The asking attempt is parked; a later attempt of the same turn that
-    // asks the same question gets the same card, never a second one, and
-    // is parked again in turn.
     let parked = tool(&app, &token, "ask_owner", choice_args()).await;
     assert_eq!(parked.status, StatusCode::CONFLICT, "{}", parked.body);
     let token = grant(&app, turn, owner_tools()).await;
@@ -474,9 +466,6 @@ async fn an_external_action_needs_approval_for_exactly_that_call_once() {
         "{packet}"
     );
 
-    // The continuation calls the same tool with the same arguments: the
-    // approval is consumed and the call runs (here: as far as the missing
-    // computer). A changed command, or the same one again, asks anew.
     let token = grant(&app, turn, owner_tools()).await;
     sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
         .bind(turn)
@@ -564,7 +553,6 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
     assert_eq!(listed.body["permissions"][0]["scope"], "destructive");
     wait(&app, turn, "completed").await;
 
-    // A later request: destructive runs without a card, external still asks.
     let (turn, token) = running(&app, &main).await;
     let other_delete = json!({ "command": "rm -rf ~/work/cache", "effect": "destructive" });
     let ran = tool(&app, &token, "computer_run", other_delete.clone()).await;

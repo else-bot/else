@@ -100,8 +100,6 @@ pub(super) fn permission_schema() -> Value {
 
 pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     use crate::db::secret_requests::{self, RequestError, Spec, Status};
-    // Arguments that are not exact metadata are never logged: they might
-    // carry a value.
     let spec = match Spec::parse(args) {
         Ok(spec) => spec,
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
@@ -124,7 +122,6 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
             (tool_result(result), Some(log))
         }
         Ok(request) => {
-            // This attempt must now end; the API refuses its further calls.
             state.scheduler.grants().park(grant.turn_id).await;
             let log = format!("pending {} for {}", request.id, request.name);
             let result = json!({
@@ -192,7 +189,6 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
             (tool_result(result), Some(log))
         }
         Ok(question) => {
-            // This attempt must now end; the API refuses its further calls.
             state.scheduler.grants().park(grant.turn_id).await;
             let log = format!("pending {} {:?}", question.id, question.title);
             let result = json!({

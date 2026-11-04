@@ -49,8 +49,6 @@ CREATE VIEW turn_holds AS
     SELECT turn_id, attempt, status = 'pending', delivered_attempt IS NULL AND status <> 'pending'
     FROM owner_questions;
 
--- A question outlives no turn: whatever ends the turn withdraws what is
--- still pending. A newer owner message marks it skipped first (turns.rs).
 CREATE TRIGGER turns_end_owner_questions AFTER UPDATE OF status ON turns
 WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'interrupted', 'failed', 'uncertain') BEGIN
     UPDATE owner_questions SET status = 'cancelled',
@@ -58,7 +56,6 @@ WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'int
     WHERE turn_id = NEW.id AND status = 'pending';
 END;
 
--- A root waiting on the owner's answer too stays waiting when a child ends.
 DROP TRIGGER turns_delegation_child;
 CREATE TRIGGER turns_delegation_child AFTER UPDATE OF status ON turns
 WHEN OLD.status <> NEW.status AND NEW.status IN ('completed', 'interrupted', 'failed', 'uncertain') BEGIN

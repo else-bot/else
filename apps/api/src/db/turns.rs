@@ -237,9 +237,6 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         .await?;
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
-    // A question the owner has not answered is skipped by this newer
-    // message, before the turn ends: skipped, not approved, and never
-    // confused with a withdrawal for another reason.
     sqlx::query(
         "UPDATE owner_questions SET status = 'skipped',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
