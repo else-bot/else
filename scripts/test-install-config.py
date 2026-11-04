@@ -26,10 +26,11 @@ class InstallerConfigTests(unittest.TestCase):
         (self.home / "current").symlink_to("versions/0.0.3")
         self.config = self.home / "config/.env"
 
-    def update(self, url, **overrides):
+    def update(self, url, seed_token=True, **overrides):
         if url is not None:
             self.config.write_text(f"DATABASE_URL={url}\nELSE_API_BIND=127.0.0.1:7878\nCUSTOM_SETTING=kept\n")
-        (self.home / "data/owner-token").write_text("existing-token")
+        if seed_token:
+            (self.home / "data/owner-token").write_text("existing-token")
         env = {
             "PATH": os.environ["PATH"], "HOME": str(self.home), "USER": "tester",
             "ELSE_HOME": str(self.home), "ELSE_VERSION": "0.0.6", **overrides,
@@ -52,7 +53,7 @@ elsebot() {
     printf '%s %s %s\n' "$1" "$(readlink "$CURRENT")" "$(env_value DATABASE_URL)" >>"$ELSE_HOME/events"
     [ "${FAIL_STOP:-0}" != 1 ]
 }
-api_running() { return 1; }
+api_running() { [ "${API_RUNNING:-0}" = 1 ]; }
 backup_if_migrating() { echo backup >>"$ELSE_HOME/events"; }
 install_commands() { :; }
 setup_service() { :; }
@@ -127,6 +128,18 @@ stage2
         self.assertEqual(self.config.read_text(), config)
         self.assertNotIn("backup", (self.home / "events").read_text().splitlines())
 
+    def test_reinstall_keeps_the_running_api_and_does_not_acquire_its_data_lock(self):
+        self.assertEqual(self.update("legacy://localhost/else").returncode, 0)
+        (self.home / "events").unlink()
+        result = self.update(None, API_RUNNING="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.home / "events").exists(), "reinstall must not run setup, stop or start")
+
+    def test_fresh_install_still_runs_setup_when_another_listener_answers(self):
+        result = self.update(None, seed_token=False, API_RUNNING="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("setup versions/0.0.6 sqlite:", (self.home / "events").read_text())
+
 
 # The installer's real flag parsing, stage 2, build selection, and commands,
 # with a fake cargo and recorders for the steps that need the system.
@@ -145,6 +158,7 @@ for step in linux_access ensure_msb decide_guest_image write_config ensure_bots_
     check_providers api_running prepare_running_api backup_if_migrating; do
     eval "$step() { echo $step >>\"\$ELSE_HOME/events\"; }"
 done
+api_running() { echo api_running >>"$ELSE_HOME/events"; return 1; }
 main "$@"
 '''
 
