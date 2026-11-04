@@ -8,6 +8,7 @@ mod bot_menu;
 mod categories;
 mod conversation;
 mod dialogs;
+mod link_target;
 mod row_text;
 mod secret_card;
 mod settings;

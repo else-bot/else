@@ -1,9 +1,11 @@
+use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
+use gpui_kit::base::text::TextView;
 use gpui_kit::component::input::{Textarea, TextareaState};
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
 use std::sync::Arc;
-use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RowFormat {
@@ -96,13 +98,23 @@ impl RowText {
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
                 .w_full()
+                .text_sm()
+                .line_height(rems(1.25))
                 .scrollable(false)
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
                 .on_link_click(|url, event, _, cx| {
-                    if activates_link(event) && is_web_link(url) {
-                        cx.open_url(url);
+                    if activates_link(event)
+                        && let Some(target) = LinkTarget::parse(url)
+                    {
+                        target.open(cx);
                     }
+                })
+                .link_tooltip(|url, window, cx| {
+                    let destination = LinkTarget::parse(url)
+                        .map_or_else(|| url.to_string(), |target| target.destination());
+                    Tooltip::element(move |_, _| div().max_w(rems(32.)).child(destination.clone()))
+                        .build(window, cx)
                 })
                 .into_any_element(),
         }
@@ -118,8 +130,4 @@ fn activates_link(event: &ClickEvent) -> bool {
         ClickEvent::Keyboard(_) => true,
         ClickEvent::Touch(click) => !click.long_press,
     }
-}
-
-fn is_web_link(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }

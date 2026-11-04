@@ -463,7 +463,7 @@ Database tests use a private temporary SQLite file per test. No server or `TEST_
 
 ## Run the desktop
 
-The desktop is a native GPUI window built with [GPUI Kit](https://gpui-kit.com) `gpui-kit = "=0.8.1"`, which pins GPUI as `gpui-pre 0.3.10`. The pin is exact because GPUI is pre-1.0. It was built and run on Arch Linux (Omarchy) with Hyprland 0.56.2 on Wayland and Rust 1.98.0. Linux needs `libxkbcommon`, `libxcb`, `fontconfig`, and `freetype2`, plus a Vulkan-capable graphics driver; Wayland and X11 sessions are both supported by GPUI. The first build compiles GPUI and takes a few minutes.
+The desktop is a native GPUI window built with [GPUI Kit](https://gpui-kit.com) `gpui-kit = "=0.9.0"`, which pins GPUI as `gpui-pre 0.3.11`. The pin is exact because GPUI is pre-1.0. It was built and run on Arch Linux (Omarchy) with Hyprland 0.56.2 on Wayland and Rust 1.98.0. Linux needs `libxkbcommon`, `libxcb`, `fontconfig`, and `freetype2`, plus a Vulkan-capable graphics driver; Wayland and X11 sessions are both supported by GPUI. The first build compiles GPUI and takes a few minutes.
 
 Start the API and desktop with [the session launcher](#run-isolated-development-sessions). For direct binary use, the desktop reads the root `.env`. Set `ELSE_API_URL` to this API's address and `ELSE_OWNER_TOKEN_FILE` to its token file explicitly:
 
@@ -504,6 +504,14 @@ The token is sent only as an `Authorization` header to the configured origin, ov
 To run the desktop against a session that no other checkout can touch, use `scripts/dev.py` as described in the next section.
 
 The workspace shares its root `Cargo.lock` and `target` directory. The backup research crate remains excluded so its documented standalone commands still work. See [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html).
+
+The workspace patches `gpui-base` to a fixed commit in the
+[else-bot/gpui-kit fork](https://github.com/else-bot/gpui-kit/tree/else/0.9.0-markdown-links).
+It carries the native link-preview hook and regression tests. Punctuation
+wrapping comes from the published GPUI 0.3.11 backend.
+The other toolkit crates retain their published versions. The fork's
+[patch notes](https://github.com/else-bot/gpui-kit/blob/5e412e4847cc0fb838f137c4c6b18fdc50e0f446/docs/else-bot-patches.md)
+describe the changes and when the patch can be removed.
 
 ## Run isolated development sessions
 
