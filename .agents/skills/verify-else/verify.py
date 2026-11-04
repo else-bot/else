@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import plistlib
 import re
 import shutil
 import signal
@@ -384,23 +383,20 @@ def native_session(name, args):
             f"ELSE_DESKTOP_CONFIG_FILE={evidence / 'desktop' / 'desktop.json'}\n")
         print(f"Ready: {api.url}; session {name}", flush=True)
         desktop = None
+        bundle_id = None
         try:
             if args.desktop_binary:
                 binary = args.desktop_binary.resolve()
                 if platform.system() == "Darwin":
-                    contents = evidence / "Else Verification.app/Contents"
-                    (contents / "MacOS").mkdir(parents=True)
-                    shutil.copy2(binary, contents / "MacOS/else-desktop")
-                    (contents / "Info.plist").write_bytes(plistlib.dumps({
-                        "CFBundleIdentifier": "bot.else.verification." + uuid.uuid4().hex,
-                        "CFBundleName": "Else Verification", "CFBundleExecutable": "else-desktop", "CFBundlePackageType": "APPL"}))
-                    binary = contents / "MacOS/else-desktop"
+                    bundle_id = "bot.else.verification." + uuid.uuid4().hex
+                    binary = dev.publish_app(binary, evidence / "apps", bundle_id, "Else Verification")
                 env = {**api.env, "ELSE_API_URL": api.url, "ELSE_OWNER_TOKEN_FILE": str(api.data / "owner-token"),
                        "ELSE_DESKTOP_CONFIG_FILE": str(evidence / "desktop/desktop.json")}
                 with (evidence / "desktop.log").open("w") as log:
                     desktop = subprocess.Popen([str(binary)], cwd=api.work, env=env, stdout=log,
                                                stderr=subprocess.STDOUT, start_new_session=True)
-                (evidence / "desktop-process.json").write_text(json.dumps({"pid": desktop.pid, "binary": str(binary)}) + "\n")
+                (evidence / "desktop-process.json").write_text(json.dumps({
+                    "pid": desktop.pid, "binary": str(binary), "bundle_id": bundle_id}) + "\n")
                 deadline = time.monotonic() + 3600
                 while desktop.poll() is None:
                     require(api.child.poll() is None, "native verification API exited; see api.log")
@@ -418,6 +414,9 @@ def native_session(name, args):
             raise RuntimeError("native verification session expired after one hour")
         finally:
             dev.stop(desktop, grace=5)
+            if bundle_id:
+                subprocess.run(["defaults", "delete", bundle_id], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
 
 
 def native_probe(name, args):

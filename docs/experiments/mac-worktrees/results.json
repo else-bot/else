@@ -1,0 +1,100 @@
+{
+  "system": "Darwin",
+  "architecture": "arm64",
+  "status": "passed",
+  "cross_auth": {
+    "a_token_on_b": 401,
+    "b_token_on_a": 401,
+    "tokens_distinct": true
+  },
+  "restart": {
+    "closed_a_desktop": true,
+    "a_before": {
+      "session": "default",
+      "checkout": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a",
+      "state": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a/.else-dev/default",
+      "pid": 212,
+      "url": "http://127.0.0.1:52601",
+      "main_bot_id": "3e3b42a3-7336-4a49-b370-16ad73f00886"
+    },
+    "a_after": {
+      "session": "default",
+      "checkout": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a",
+      "state": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a/.else-dev/default",
+      "pid": 10823,
+      "url": "http://127.0.0.1:53625",
+      "main_bot_id": "3e3b42a3-7336-4a49-b370-16ad73f00886"
+    },
+    "a_categories_persisted": true,
+    "b_api_unchanged": true,
+    "b_desktop_pid": 6976,
+    "b_turn_still_working": "3af9f105-a8f5-45b6-bc52-6bc183488cc7"
+  },
+  "rebuild": {
+    "status": "passed",
+    "a": {
+      "pid": 10972,
+      "bundle_id": "bot.else.dev.0389795bac479557",
+      "previous_executable": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a/.else-dev/default/apps/549a04d9c5db00c5/else.bot \u00b7 workspace-a \u00b7 default \u00b7 479557.app/Contents/MacOS/else-desktop",
+      "new_executable": "/private/tmp/else-worktrees-o3tjh5vl/workspace-a/.else-dev/default/apps/2c50321548949a06/else.bot \u00b7 workspace-a \u00b7 default \u00b7 479557.app/Contents/MacOS/else-desktop",
+      "previous_executable_inode_unchanged": true,
+      "new_api_url": "http://127.0.0.1:53625",
+      "profile_follows_new_port": true,
+      "categories": [
+        "Only in workspace A"
+      ]
+    },
+    "b": {
+      "desktop_pid": 6976,
+      "api_pid": 93067,
+      "api_url": "http://127.0.0.1:51989",
+      "desktop_executable_inode_unchanged": true,
+      "profile_unchanged": true,
+      "turn_still_working": "3af9f105-a8f5-45b6-bc52-6bc183488cc7",
+      "categories": [
+        "Only in workspace B"
+      ]
+    },
+    "shared_target_ignored": true
+  },
+  "independent_close": {
+    "closed_b_desktop": true,
+    "a_desktop_remains": true,
+    "both_apis_remain": true
+  },
+  "verification_publisher": {
+    "native_app_opened": true,
+    "native_close_stopped_api": true,
+    "preferences_removed": true,
+    "bundle_id": "bot.else.verification.282b54d956294c659172b9adfad48ad6",
+    "interrupt_cleanup": {
+      "seeded_preference_exists_before_interrupt": true,
+      "preference_domain_removed_after_interrupt": true,
+      "desktop_and_api_exited": true,
+      "private_data_removed": true
+    }
+  },
+  "cleanup": {
+    "status": "passed",
+    "owned_desktops_exited": 2,
+    "owned_api_launchers_stopped": 2,
+    "owned_git_worktrees_removed": 2,
+    "private_homes_and_build_cache_removed": true,
+    "owned_preferences_removed": true,
+    "temporary_root_absent": true
+  },
+  "checks": {
+    "macos": {
+      "development_passed": 18,
+      "verification_passed": 8,
+      "desktop_build": "passed",
+      "rustfmt": "passed"
+    },
+    "linux_arm64": {
+      "development_passed": 17,
+      "development_skipped_macos_only": 1,
+      "verification_passed": 8,
+      "desktop_cargo_check": "passed"
+    }
+  }
+}

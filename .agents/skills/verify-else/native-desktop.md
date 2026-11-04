@@ -16,9 +16,14 @@ python3 .agents/skills/verify-else/verify.py --session mac-ui \
 ```
 
 The helper creates a private API HOME, database, desktop profile, and a local
-`Else Verification.app` bundle. The bundle gives native automation an exact
-app path to select. It copies the built binary so another build cannot
-replace the running desktop. It never installs the app or a service.
+`Else Verification.app` bundle under `apps/HASH/` in the output directory.
+`desktop-process.json` records its exact executable path for native
+automation. The bundle comes from the same publisher as `scripts/dev.py
+desktop`. It holds a copy of the built binary, so another build cannot
+replace the running desktop. Each run gets a random bundle identifier. After
+the desktop stops, the helper removes that identifier's macOS preferences,
+which macOS can write outside the private HOME. It never installs the app or
+a service.
 
 Use the session's native computer controls to select that exact app bundle.
 Check connection, then Continue. With `--welcome`, complete onboarding through

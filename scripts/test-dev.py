@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Behavior checks for scripts/dev.py against fake API, desktop, and omabox executables.
 
-Run inside an owned omabox: omabox run -b BOX -- python3 scripts/test-dev.py
+Run inside an owned omabox on Linux, or directly on a macOS host: python3 scripts/test-dev.py
 """
 
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import signal
 import subprocess
@@ -445,6 +448,93 @@ print(json.dumps({"reason":"compiler-artifact","target":{"name":name},"executabl
             self.assertTrue(session.database.exists())
         finally:
             os.close(fd)
+
+    def test_app_identity_is_stable_per_session_and_distinct_otherwise(self):
+        one, two = self.tmp / "left/else", self.tmp / "right/else"
+        sessions = [dev.Session(one, "work", one / ".else-dev/work"), dev.Session(two, "work", two / ".else-dev/work"),
+                    dev.Session(one, "other", one / ".else-dev/other"), dev.Session(one, "work", self.tmp / "elsewhere")]
+        ids = [s.bundle_id for s in sessions]
+        self.assertEqual(len(set(ids)), len(ids), ids)
+        self.assertEqual(len({s.label for s in sessions}), len(sessions))
+        self.assertEqual(ids[0], dev.Session(one, "work", one / ".else-dev/work").bundle_id)
+        for bundle_id in ids:
+            self.assertRegex(bundle_id, r"^bot\.else\.dev\.[0-9a-f]+$")
+        self.assertIn("else", sessions[0].label)
+        self.assertIn("work", sessions[0].label)
+        self.assertIn("other", sessions[2].label)
+
+    def publish(self, source, root):
+        return dev.publish_app(source, root, "bot.else.test", "else.bot · test · work")
+
+    def test_published_apps_are_immutable_copies(self):
+        source, root = self.tmp / "else-desktop", self.tmp / "apps"
+        executable(source, "#!/bin/sh\necho first\n")
+        first = self.publish(source, root)
+        self.assertTrue(first.is_relative_to(root))
+        self.assertEqual(first.read_text(), source.read_text())
+        self.assertTrue(os.access(first, os.X_OK))
+        info = plistlib.loads((first.parents[1] / "Info.plist").read_bytes())
+        self.assertEqual((info["CFBundleIdentifier"], info["CFBundleDisplayName"], info["CFBundleExecutable"]),
+                         ("bot.else.test", "else.bot · test · work", "else-desktop"))
+        inode = first.stat().st_ino
+        self.assertEqual(self.publish(source, root), first)
+        self.assertEqual(first.stat().st_ino, inode, "republishing must not replace a running copy")
+
+        executable(self.tmp / "rebuilt", "#!/bin/sh\necho second\n").replace(source)
+        second = self.publish(source, root)
+        self.assertNotEqual(second, first)
+        self.assertEqual(second.read_text(), "#!/bin/sh\necho second\n")
+        self.assertEqual((first.read_text(), first.stat().st_ino), ("#!/bin/sh\necho first\n", inode))
+        self.assertEqual(sorted(p.name.startswith(".") for p in root.iterdir()), [False, False])
+
+    def test_concurrent_publication_shares_one_complete_app(self):
+        source, root = executable(self.tmp / "else-desktop", "#!/bin/sh\n" + "# padding\n" * 50000), self.tmp / "apps"
+        with ThreadPoolExecutor(8) as pool:
+            paths = set(pool.map(lambda _: self.publish(source, root), range(16)))
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths.pop().read_bytes(), source.read_bytes())
+        self.assertEqual(len(list(root.iterdir())), 1, "staging copies must not remain")
+
+    def test_run_without_omabox_points_macos_at_native_commands(self):
+        args = argparse.Namespace(api_binary=str(self.api), desktop_binary=str(self.desktop), api_only=False)
+        for darwin, expected in ((True, "verify.py --session"), (False, "omabox is required")):
+            with patch.object(dev, "DARWIN", darwin), patch.object(dev.shutil, "which", return_value=None):
+                with self.assertRaises(dev.Refused) as refused:
+                    dev.run_box(args)
+            self.assertIn(expected, str(refused.exception))
+        self.assertIn("scripts/dev.py desktop", dev.MAC_RUN)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS app bundles")
+    def test_macos_desktop_runs_a_private_app_copy_per_worktree(self):
+        printer = executable(self.tmp / "app-desktop", textwrap.dedent('''\
+            #!/usr/bin/env python3
+            import json, os, plistlib, sys
+            from pathlib import Path
+            info = plistlib.loads((Path(sys.argv[0]).parents[1] / "Info.plist").read_bytes())
+            print(json.dumps({"executable": sys.argv[0], "bundle": info["CFBundleIdentifier"],
+                              "profile": os.environ["ELSE_DESKTOP_CONFIG_FILE"], "title": os.environ["ELSE_DESKTOP_TITLE"]}))
+        '''))
+        a, b = self.tmp / "one/else", self.tmp / "two/else"
+        for root in (a, b):
+            (root / "scripts").mkdir(parents=True)
+            shutil.copy(DEV, root / "scripts/dev.py")
+            self.start(root)
+        launched = []
+        for root in (a, b):
+            info = self.status(root)
+            result = self.dev(root, "desktop", "--desktop-binary", printer)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            app = json.loads(result.stdout)
+            state = Path(info["state"])
+            self.assertTrue(Path(app["executable"]).is_relative_to(state / "apps"), app)
+            self.assertEqual(Path(app["profile"]), state / "desktop/desktop.json")
+            self.assertEqual(json.loads(Path(app["profile"]).read_text())["origin"], info["url"])
+            self.assertIn("else · default", app["title"])
+            launched.append(app)
+        self.assertNotEqual(launched[0]["bundle"], launched[1]["bundle"])
+        self.assertNotEqual(launched[0]["title"], launched[1]["title"])
+        again = json.loads(self.dev(a, "desktop", "--desktop-binary", printer).stdout)
+        self.assertEqual((again["executable"], again["bundle"]), (launched[0]["executable"], launched[0]["bundle"]))
 
 
 if __name__ == "__main__":
