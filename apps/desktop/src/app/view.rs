@@ -9,6 +9,7 @@ use super::{
 use crate::api::Bot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
@@ -223,19 +224,22 @@ impl ElseApp {
             )
     }
 
-    fn render_bot_row(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_bot_row(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let id = bot.id;
         let selected = self.selected == Some(id);
+        let unread = self.unread.contains(&id);
         let pending = !bot.is_active();
         let activity = if pending {
             "Deleting…".to_owned()
         } else {
             activity_label(bot)
         };
-        let mut name_row = h_flex()
-            .gap_2()
-            .child(div().text_sm().truncate().child(bot.name.clone()));
+        let mut name = div().text_sm().truncate().child(bot.name.clone());
+        if unread {
+            name = name.font_weight(FontWeight::SEMIBOLD);
+        }
+        let mut name_row = h_flex().gap_2().items_center().child(name);
         if self.default_bot_id == Some(id) {
             name_row = name_row.child(
                 div()
@@ -245,6 +249,16 @@ impl ElseApp {
                     .bg(theme.secondary)
                     .text_color(theme.secondary_foreground)
                     .child("Main"),
+            );
+        }
+        if unread {
+            name_row = name_row.child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .size_2()
+                    .rounded_full()
+                    .bg(theme.primary),
             );
         }
         let mut row = v_flex()
@@ -265,7 +279,7 @@ impl ElseApp {
             row = row
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
-                .on_click(cx.listener(move |app, _, window, cx| app.select(Some(id), window, cx)));
+                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)));
         }
         if !self.categories.is_empty() && self.movable_bot(id).is_some() {
             row = row.on_drag(
@@ -279,7 +293,14 @@ impl ElseApp {
         if selected {
             row = row.bg(theme.list_active);
         }
-        row
+        if pending {
+            return row.into_any_element();
+        }
+        let owner = cx.entity().downgrade();
+        row.context_menu(move |menu, window, cx| {
+            Self::bot_menu(owner.clone(), id, menu, window, cx)
+        })
+        .into_any_element()
     }
 
     fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -319,7 +340,12 @@ impl ElseApp {
                     .label("Delete")
                     .small()
                     .ghost()
-                    .on_click(cx.listener(|app, _, window, cx| app.open_delete_dialog(window, cx))),
+                    .disabled(self.connection != Connection::Connected)
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        if let Some(id) = app.selected {
+                            app.open_delete_dialog(id, window, cx)
+                        }
+                    })),
             );
         }
         h_flex()
@@ -753,7 +779,9 @@ impl Render for ElseApp {
                 }
             }))
             .on_action(cx.listener(|app, _: &DeleteBot, window, cx| {
-                app.open_delete_dialog(window, cx);
+                if let Some(id) = app.selected {
+                    app.open_delete_dialog(id, window, cx);
+                }
             }))
             .on_action(cx.listener(|app, _: &LoadOlder, window, cx| app.load_older(window, cx)))
             .on_action(cx.listener(|app, _: &NewCategory, window, cx| {

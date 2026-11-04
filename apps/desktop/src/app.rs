@@ -4,6 +4,7 @@
 //! results and apply them to this view. The conversation model accepts only
 //! contiguous committed events, and any inconsistency reloads a snapshot.
 
+mod bot_menu;
 mod categories;
 mod conversation;
 mod dialogs;
@@ -105,6 +106,8 @@ pub struct ElseApp {
     drafts: HashMap<Uuid, String>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
+    unread: HashSet<Uuid>,
+    deleting: HashSet<Uuid>,
     notice: Option<String>,
     create: Option<Entity<CreateFormHolder>>,
     _create_enter: Option<Subscription>,
@@ -158,6 +161,8 @@ impl ElseApp {
             drafts: HashMap::new(),
             pending: HashMap::new(),
             stopping: HashSet::new(),
+            unread: HashSet::new(),
+            deleting: HashSet::new(),
             notice: None,
             create: None,
             _create_enter: None,
@@ -296,6 +301,8 @@ impl ElseApp {
                 .iter()
                 .any(|b| b.id == *id && b.activity.as_ref().is_some_and(|a| a.phase != "idle"))
         });
+        self.unread
+            .retain(|id| self.bots.iter().any(|b| b.id == *id && b.is_active()));
         self.reconcile_selection(window, cx);
         self.sync_settings(window, cx);
         cx.notify();
@@ -315,6 +322,13 @@ impl ElseApp {
         if next != self.selected || (next.is_some() && self.view.is_none()) {
             self.select(next, window, cx);
         }
+    }
+
+    fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.unread.remove(&id) {
+            cx.notify();
+        }
+        self.select(Some(id), window, cx);
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
@@ -360,7 +374,7 @@ impl ElseApp {
             .and_then(|id| ids.iter().position(|b| *b == id))
             .unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, ids.len() as isize - 1) as usize;
-        self.select(Some(ids[next]), window, cx);
+        self.open_bot(ids[next], window, cx);
     }
 
     fn selected_bot(&self) -> Option<&Bot> {
