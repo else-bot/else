@@ -2,3 +2,4 @@
 - When adding a rule, apply it to the current codebase and commit the resulting changes using `chore(scope): scope`.
 - Keep coordination lock-free where possible; shard any necessary locks by the resource they protect.
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
+- Run independent async calls concurrently with `Promise.all` in JavaScript/TypeScript or `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.

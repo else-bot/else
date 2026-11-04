@@ -94,27 +94,26 @@ struct Work {
 }
 
 async fn work(state: &AppState) -> Result<Work, ApiError> {
-    let (turns, queued): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FILTER (WHERE status IN {}), count(*) FILTER (WHERE status = 'queued')
-         FROM turns",
-        crate::db::turns::ACTIVE_STATUSES
-    )))
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| unavailable())?;
-    let commands: i64 =
+    let (turns, commands, jobs, running) = tokio::join!(
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FILTER (WHERE status IN {}), count(*) FILTER (WHERE status = 'queued')
+             FROM turns",
+            crate::db::turns::ACTIVE_STATUSES
+        )))
+        .fetch_one(&state.db),
         sqlx::query_scalar("SELECT count(*) FROM guest_runs WHERE ended_at IS NULL")
-            .fetch_one(&state.db)
-            .await
-            .map_err(|_| unavailable())?;
-    let jobs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM guest_jobs WHERE status IN ('starting', 'running', 'cancelling')",
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| unavailable())?;
+            .fetch_one(&state.db),
+        sqlx::query_scalar(
+            "SELECT count(*) FROM guest_jobs WHERE status IN ('starting', 'running', 'cancelling')",
+        )
+        .fetch_one(&state.db),
+        state.scheduler.running_count(),
+    );
+    let (turns, queued): (i64, i64) = turns.map_err(|_| unavailable())?;
+    let commands = commands.map_err(|_| unavailable())?;
+    let jobs = jobs.map_err(|_| unavailable())?;
     // A turn this process still runs counts even before its row says so.
-    let turns = turns.max(state.scheduler.running_count().await as i64);
+    let turns = turns.max(running as i64);
     Ok(Work {
         turns,
         commands,

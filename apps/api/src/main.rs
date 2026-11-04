@@ -559,14 +559,20 @@ fn run_serve() -> anyhow::Result<()> {
         // singleton lock is held until every worker that changes runtime
         // state has stopped, so a successor never overlaps with them.
         stop_scheduler.cancel();
-        let _ = scheduler_task.await;
-        let _ = compactor.await;
-        if let Some(task) = computer_task {
-            let _ = task.await;
-        }
-        if let Some(task) = backup_task {
-            let _ = task.await;
-        }
+        let _ = tokio::join!(
+            scheduler_task,
+            compactor,
+            async {
+                if let Some(task) = computer_task {
+                    let _ = task.await;
+                }
+            },
+            async {
+                if let Some(task) = backup_task {
+                    let _ = task.await;
+                }
+            },
+        );
         drop(lock);
         tracing::info!("API stopped");
         result
