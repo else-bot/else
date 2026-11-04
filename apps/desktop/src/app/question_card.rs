@@ -93,14 +93,13 @@ impl ElseApp {
     }
 
     fn remeasure_question(&mut self, question: Uuid, cx: &mut Context<Self>) {
-        if let Some(view) = self.view.as_mut() {
-            if let Some(ix) = view
+        if let Some(view) = self.view.as_mut()
+            && let Some(ix) = view
                 .rows
                 .iter()
                 .position(|r| r.key == RowKey::Question(question))
-            {
-                view.list.remeasure_items(ix..ix + 1);
-            }
+        {
+            view.list.remeasure_items(ix..ix + 1);
         }
         cx.notify();
     }

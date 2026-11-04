@@ -111,7 +111,7 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
         "computer_run" | "computer_job_start" => {
             let mut preview = slice(text("command"), 0, MAX_PREVIEW).1.to_owned();
             if preview.len() < text("command").len() {
-                preview.push_str("…");
+                preview.push('…');
             }
             if let Some(secrets) = args["secrets"].as_array().filter(|s| !s.is_empty()) {
                 let names: Vec<&str> = secrets.iter().filter_map(Value::as_str).collect();
