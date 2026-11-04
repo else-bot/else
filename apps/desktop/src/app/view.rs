@@ -441,6 +441,7 @@ impl ElseApp {
                 }
                 column.into_any_element()
             }
+            RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
             RowKey::Pending(request_id) => {
                 let Some(pending) = self
                     .selected
@@ -692,6 +693,10 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "queued" => ("Queued".into(), false),
         "preparing" | "sending" | "running" => ("Working…".into(), false),
         "cancelling" => ("Stopping…".into(), false),
+        "waiting" if turn.secret_requests.iter().any(|r| r.is_pending()) => (
+            "Waiting for you to answer the secret request…".into(),
+            false,
+        ),
         // The main bot handed part of the request to another bot.
         "waiting" => ("Waiting for another bot…".into(), false),
         "interrupted" => (

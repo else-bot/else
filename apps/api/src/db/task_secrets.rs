@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -109,7 +109,7 @@ pub fn valid_name(name: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
-fn valid_var(name: &str) -> bool {
+pub fn valid_var(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('A'..='Z' | '_'))
         && name.len() <= 64
@@ -180,14 +180,19 @@ fn open(
     Ok(out)
 }
 
-/// Store (create or replace) a secret. Returns whether it was new.
-pub async fn put(
-    pool: &SqlitePool,
+/// A validated secret, encrypted and ready to write; holds no plaintext.
+pub struct Sealed {
+    names: Vec<String>,
+    salt: [u8; 32],
+    cipher: Vec<u8>,
+}
+
+/// Validate and encrypt a secret's variables outside any transaction.
+pub fn seal_env(
     key: &SecretKey,
-    bot_id: Uuid,
     name: &str,
     env: &BTreeMap<String, String>,
-) -> Result<bool, SecretError> {
+) -> Result<Sealed, SecretError> {
     if !valid_name(name) {
         return Err(SecretError::Invalid(
             "a secret name is 1 to 40 of a-z, 0-9, _ and -, starting with a letter".into(),
@@ -198,14 +203,27 @@ pub async fn put(
     getrandom::fill(&mut salt).map_err(|e| SecretError::Crypto(e.to_string()))?;
     let plain = Zeroizing::new(serde_json::to_vec(env).expect("a map serializes"));
     let cipher = seal(key, &salt, &plain)?;
-    let names: Vec<String> = env.keys().cloned().collect();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    Ok(Sealed {
+        names: env.keys().cloned().collect(),
+        salt,
+        cipher,
+    })
+}
+
+/// Write a sealed secret (create or replace) in the caller's transaction.
+/// Returns whether it was new.
+pub async fn write_in(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    name: &str,
+    sealed: &Sealed,
+) -> Result<bool, sqlx::Error> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM task_secrets WHERE bot_id = ?1 AND name = ?2)",
     )
     .bind(bot_id)
     .bind(name)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT INTO task_secrets (bot_id, name, env_names, salt, ciphertext)
@@ -215,13 +233,27 @@ pub async fn put(
     )
     .bind(bot_id)
     .bind(name)
-    .bind(sqlx::types::Json(&names))
-    .bind(&salt[..])
-    .bind(&cipher)
-    .execute(&mut *tx)
+    .bind(sqlx::types::Json(&sealed.names))
+    .bind(&sealed.salt[..])
+    .bind(&sealed.cipher)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await?;
     Ok(!exists)
+}
+
+/// Store (create or replace) a secret. Returns whether it was new.
+pub async fn put(
+    pool: &SqlitePool,
+    key: &SecretKey,
+    bot_id: Uuid,
+    name: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<bool, SecretError> {
+    let sealed = seal_env(key, name, env)?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let created = write_in(&mut tx, bot_id, name, &sealed).await?;
+    tx.commit().await?;
+    Ok(created)
 }
 
 pub async fn list(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sqlx::Error> {

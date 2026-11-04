@@ -8,6 +8,7 @@ mod categories;
 mod conversation;
 mod dialogs;
 mod row_text;
+mod secret_card;
 mod settings;
 mod view;
 
@@ -232,10 +233,15 @@ impl ElseApp {
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = Some(format!("Reconnecting… {reason}"));
                 }
+                // Values typed into a secret form do not outlive the connection.
+                self.clear_secret_forms(window, cx);
+                self.sync_secret_forms(window, cx);
             }
             LiveEvent::Unauthorized => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+                self.clear_secret_forms(window, cx);
+                self.sync_secret_forms(window, cx);
             }
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
             LiveEvent::Bot { bot, message } => self.apply_stream(bot, message, window, cx),
@@ -261,6 +267,8 @@ impl ElseApp {
             Err(ClientError::Unauthorized) => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+                self.clear_secret_forms(window, cx);
+                self.sync_secret_forms(window, cx);
             }
             Err(_) => {}
         }
@@ -330,6 +338,7 @@ impl ElseApp {
         if let Some(old) = self.view.as_ref() {
             self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
         }
+        self.clear_secret_forms(window, cx);
         self.view = id.map(ConversationView::new);
         self.ensure_settings(window, cx);
         if id.is_some() {

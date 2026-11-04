@@ -657,7 +657,7 @@ impl Provider for Claude {
                         });
                         send(&mut stdin, &format!("{reply}\n")).await;
                     }
-                    Step::DelegationPending => {
+                    Step::Parked => {
                         if park_at.is_none() && !parked {
                             park_at = Some(tokio::time::Instant::now() + PARK_GRACE);
                         }

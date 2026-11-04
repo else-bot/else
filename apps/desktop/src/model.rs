@@ -35,6 +35,23 @@ pub struct TurnError {
     pub message: Option<String>,
 }
 
+/// A bot's request for credentials: metadata only, never a value.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SecretRequest {
+    pub id: Uuid,
+    pub name: String,
+    pub reason: String,
+    pub env: Vec<String>,
+    /// `pending`, `stored`, or `cancelled`.
+    pub status: String,
+}
+
+impl SecretRequest {
+    pub fn is_pending(&self) -> bool {
+        self.status == "pending"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -44,6 +61,8 @@ pub struct Turn {
     pub status: String,
     pub error: Option<TurnError>,
     pub effect_uncertain: bool,
+    #[serde(default)]
+    pub secret_requests: Vec<SecretRequest>,
 }
 
 impl Turn {
@@ -258,6 +277,23 @@ impl Conversation {
         }
     }
 
+    /// Every secret request of the loaded turns, by turn number.
+    pub fn secret_requests(&self) -> Vec<(&Turn, &SecretRequest)> {
+        let mut turns: Vec<&Turn> = self.turns.values().collect();
+        turns.sort_by_key(|t| t.turn_no);
+        turns
+            .into_iter()
+            .flat_map(|t| t.secret_requests.iter().map(move |r| (t, r)))
+            .collect()
+    }
+
+    pub fn secret_request(&self, id: Uuid) -> Option<&SecretRequest> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.secret_requests)
+            .find(|r| r.id == id)
+    }
+
     pub fn has_request(&self, request_id: Uuid) -> bool {
         self.items
             .values()
@@ -416,5 +452,37 @@ mod tests {
         assert_eq!(c.older_before_seq, None);
         assert_eq!(c.cursor(), format!("{PREFIX}:9"), "live cursor unchanged");
         assert!(c.has_request(Uuid::from_u128(501)));
+    }
+
+    #[test]
+    fn turn_updates_carry_secret_request_metadata() {
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let request = Uuid::from_u128(77);
+        let turn = |status: &str, request_status: &str| {
+            json!({ "turn": {
+                "id": Uuid::from_u128(9), "request_id": Uuid::from_u128(8), "turn_no": 1,
+                "provider_id": "synthetic", "status": status, "error": null,
+                "effect_uncertain": false,
+                "secret_requests": [{ "id": request, "name": "deploy", "reason": "Deploy",
+                    "env": ["DEPLOY_KEY"], "status": request_status }],
+            }})
+        };
+        c.apply(&frame(2, "turn.updated", turn("waiting", "pending")))
+            .unwrap();
+        assert!(c.secret_request(request).unwrap().is_pending());
+        assert_eq!(c.secret_requests().len(), 1);
+        c.apply(&frame(3, "turn.updated", turn("queued", "stored")))
+            .unwrap();
+        assert_eq!(c.secret_request(request).unwrap().status, "stored");
+        // Servers without secret requests still parse.
+        let plain = json!({ "turn": {
+            "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 2,
+            "provider_id": "synthetic", "status": "queued", "error": null,
+            "effect_uncertain": false,
+        }});
+        assert_eq!(
+            c.apply(&frame(4, "turn.updated", plain)),
+            Ok(Applied::Changed)
+        );
     }
 }

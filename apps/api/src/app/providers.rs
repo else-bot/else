@@ -116,6 +116,9 @@ pub struct TurnInput {
     /// Provider attempt number of this turn (continuations count up).
     pub attempt: i32,
     pub delegation: DelegationContext,
+    /// The owner's answers to this turn's secret requests that no attempt
+    /// has received yet. Names only, never values.
+    pub secrets: Vec<SecretOutcome>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -145,6 +148,16 @@ pub struct DelegationOutcome {
     pub status: String,
     pub result: Option<String>,
     pub error: Option<String>,
+}
+
+/// The owner's answer to a secret request: which task secret and
+/// variables, and whether it was stored or declined. Never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretOutcome {
+    pub id: Uuid,
+    pub name: String,
+    pub env: Vec<String>,
+    pub stored: bool,
 }
 
 /// What an attempt knows about delegation, all derived by the server.

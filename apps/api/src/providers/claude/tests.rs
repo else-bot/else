@@ -107,7 +107,7 @@ fn other_tools_models_and_permission_prompts_are_refused() {
 }
 
 #[test]
-fn a_pending_delegation_is_noticed_from_its_tool_result() {
+fn a_pending_delegation_or_secret_request_is_noticed_from_its_tool_result() {
     let mut t = tracker();
     t.on(
         &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
@@ -115,7 +115,19 @@ fn a_pending_delegation_is_noticed_from_its_tool_result() {
     );
     let steps = t.on(&json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\"}"}]}]}}));
-    assert_eq!(steps, vec![Step::DelegationPending]);
+    assert_eq!(steps, vec![Step::Parked]);
+    // A pending secret request parks the attempt the same way; other
+    // tools' results never do.
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"s1","name":"mcp__elsebot__request_secret","input":{}},
+            {"type":"tool_use","id":"m1","name":"mcp__elsebot__memory_search","input":{}}]}}),
+    );
+    let steps = t.on(&json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"m1","content":[{"type":"text","text":"pending"}]},
+            {"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"{\"status\":\"pending\"}"}]}]}}));
+    assert_eq!(steps, vec![Step::Parked]);
 }
 
 #[test]

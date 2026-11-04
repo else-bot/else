@@ -324,11 +324,19 @@ impl Scheduler {
                             Tool::ReadHistory,
                             Tool::ReadMemory,
                             Tool::Computer,
+                            Tool::RequestSecret,
                             Tool::Delegate,
                             Tool::CreateBot,
                         ]
-                    } else {
+                    } else if input.delegation.delegated_task {
                         vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]
+                    } else {
+                        vec![
+                            Tool::ReadHistory,
+                            Tool::ReadMemory,
+                            Tool::Computer,
+                            Tool::RequestSecret,
+                        ]
                     },
                     memory_scope,
                     TOOL_GRANT_TTL,
