@@ -15,8 +15,10 @@
 //! and the bot's computer, over MCP, authorized by a per-turn task grant).
 //! Any other tool, web, or native-agent item, and any approval or tool
 //! request, is refused and ends the turn as a policy failure. A memory
-//! summary gets no tools at all.
+//! summary gets no tools at all. Only skills installed in the bot's project
+//! are enabled; owner, ancestor-repository, and bundled skills are excluded.
 
+mod skills;
 mod summary;
 
 use std::ffi::OsString;
@@ -179,6 +181,7 @@ impl Codex {
                 "tools:host"
             },
             "agents:disabled",
+            "skills:bot-project-only-v1",
             account,
             &profile.model,
             &profile.reasoning_effort,
@@ -434,6 +437,10 @@ impl Codex {
         profile: &Profile,
         fingerprint: &str,
     ) -> Result<(String, i64, Reported), TurnOutcome> {
+        let mut config = skills::config(server)
+            .await
+            .map_err(|reason| failed("provider_unavailable", reason))?;
+        config["model_reasoning_effort"] = json!(profile.reasoning_effort);
         let settings = json!({
             "model": profile.model,
             "serviceTier": profile.service_tier,
@@ -441,7 +448,7 @@ impl Codex {
             "approvalPolicy": "never",
             "sandbox": codex_home::sandbox_mode(true),
             "developerInstructions": prompt::instructions(input, &server.cwd),
-            "config": { "model_reasoning_effort": profile.reasoning_effort },
+            "config": config,
         });
         // Resume a compatible session; anything else starts a new one.
         if let Some(session) = input
@@ -969,6 +976,7 @@ for line in sys.stdin:
     if "id" not in m: continue
     method, p = m["method"], m.get("params") or {{}}
     if method == "mcpServerStatus/list": r = {{"data": []}}
+    elif method == "skills/list": r = {{"data": [{{"skills": []}}]}}
     elif method == "account/read": r = {{"account": {{"type": "chatgpt", "email": "o@example.test"}}}}
     elif method == "thread/resume": r = {{"thread": {{"id": p["threadId"]}}}}
     elif method == "thread/start": r = {{"thread": {{"id": "fresh-thread"}}}}
