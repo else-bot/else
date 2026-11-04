@@ -1,6 +1,6 @@
 use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
-use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
+use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -73,7 +73,10 @@ impl ElseApp {
                 request_id: Uuid::new_v4(),
                 in_doubt: None,
                 name: name.clone(),
-                avatar: Avatar::default(),
+                avatar: Avatar {
+                    shape: AvatarShape::ALL[rand::random_range(0..AvatarShape::ALL.len())],
+                    color: AvatarColor::ALL[rand::random_range(0..AvatarColor::ALL.len())],
+                },
                 profile,
                 category,
                 category_choices: choices,

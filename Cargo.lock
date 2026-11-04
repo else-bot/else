@@ -1870,6 +1870,7 @@ dependencies = [
  "gpui-kit",
  "libc",
  "notify",
+ "rand 0.10.3",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
