@@ -45,9 +45,7 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         if !self.moving.insert(bot) {
             return;
         }
@@ -174,7 +172,7 @@ impl ElseApp {
     }
 
     fn submit_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(holder)) = (self.client.clone(), self.category_form.clone()) else {
+        let (client, Some(holder)) = (self.client.clone(), self.category_form.clone()) else {
             return;
         };
         if holder.read(cx).form.busy {
@@ -300,9 +298,7 @@ impl ElseApp {
     }
 
     fn delete_category(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_category(id).await;
             let _ = this.update_in(cx, |app, _, cx| {

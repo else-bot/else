@@ -6,7 +6,7 @@ These are security requirements and proposed controls. They have not been implem
 
 Use one owner bearer token and a loopback-only Rust API. Provision a random 32-byte token independently of `SECRET_KEY` and provider credentials. Keep it in a private file, load its digest at startup, and require it on every owner route and message stream. The desktop can use an explicit private token file during development. OS keyring integration can follow without changing the protocol.
 
-For a VPS, start with an authenticated SSH tunnel to the same loopback API. Direct network deployment requires HTTPS. Development must not add an anonymous network-access mode.
+For a VPS or home server, the app reaches the loopback API through an authenticated SSH tunnel or an HTTPS reverse proxy that rewrites `Host` to the loopback address (the [README](../README.md#connect-the-app-to-a-server) has a Caddy example). The API itself keeps its loopback bind and `Host` check. The desktop sends the owner token over plain HTTP only to a loopback origin, verifies certificates, and follows no redirects. It saves the origin and token in a private `0600` profile. Development must not add an anonymous network-access mode.
 
 Provider sessions receive short-lived tool grants bound to a bot, conversation, task, and fixed allowlist. The API derives identity from the grant and checks current state before dispatch. Configured delegation and memory access specify permitted target bots. The owner token, database credentials, and `SECRET_KEY` stay outside the provider process. No user accounts, OAuth service, role editor, or general policy engine are needed initially.
 

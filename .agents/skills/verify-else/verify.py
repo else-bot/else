@@ -319,7 +319,8 @@ def native_session(name, binary):
         session = {"pid": api.child.pid, "url": api.url, "data": str(api.data)}
         (evidence / "session.json").write_text(json.dumps(session) + "\n")
         (evidence / "desktop.env").write_text(
-            f"ELSE_API_URL={api.url}\nELSE_OWNER_TOKEN_FILE={api.data / 'owner-token'}\n")
+            f"ELSE_API_URL={api.url}\nELSE_OWNER_TOKEN_FILE={api.data / 'owner-token'}\n"
+            f"ELSE_DESKTOP_CONFIG_FILE={evidence / 'desktop' / 'desktop.json'}\n")
         print(f"Ready: {api.url}; session {name}", flush=True)
         try:
             code = api.child.wait(timeout=3600)

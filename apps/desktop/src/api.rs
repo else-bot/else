@@ -3,6 +3,8 @@
 //! Requests run on a private Tokio runtime, away from GPUI's render path.
 //! Redirects are never followed, so the bearer token can only reach the one
 //! configured origin; it is attached as a sensitive header, never a URL.
+//! HTTPS and WSS share one TLS configuration that verifies certificates
+//! with the platform's trust store.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -180,10 +182,10 @@ struct ErrorDetail {
 /// Errors shown to the owner. None of them contain the token.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ClientError {
-    #[error("The API rejected the owner token. Check the token file and restart the desktop.")]
+    #[error("The API rejected the owner token. Use Change server to update it.")]
     Unauthorized,
-    #[error("Cannot reach the API at {0}. Is `else-api serve` running?")]
-    Unreachable(String),
+    #[error("Cannot reach the API at {origin} ({cause}). Is `else-api serve` running?")]
+    Unreachable { origin: String, cause: String },
     #[error("{message}")]
     Api {
         status: u16,
@@ -212,7 +214,7 @@ impl ClientError {
     /// not have been applied), as opposed to definitely rejected.
     pub fn outcome_unknown(&self) -> bool {
         match self {
-            Self::Unreachable(_) | Self::Protocol(_) => true,
+            Self::Unreachable { .. } | Self::Protocol(_) => true,
             // Refused before acceptance, so nothing was accepted.
             Self::Api { code, .. } if code == "provider_unavailable" => false,
             Self::Api { status, .. } => *status >= 500,
@@ -224,29 +226,43 @@ impl ClientError {
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
+    tls: Arc<rustls::ClientConfig>,
     origin: Origin,
     auth: HeaderValue,
     runtime: tokio::runtime::Handle,
 }
 
 impl Client {
-    pub fn new(origin: Origin, token: &OwnerToken, runtime: tokio::runtime::Handle) -> Self {
+    pub fn new(
+        origin: Origin,
+        token: &OwnerToken,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, String> {
+        use rustls_platform_verifier::BuilderVerifierExt as _;
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .and_then(|builder| builder.with_platform_verifier())
+            .map(|builder| builder.with_no_client_auth())
+            .map_err(|err| format!("Cannot set up TLS: {err}"))?;
         let http = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls.clone())
             .redirect(reqwest::redirect::Policy::none())
             // Never route the owner token through an environment proxy.
             .no_proxy()
-            .connect_timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(5))
             .build()
-            .expect("HTTP client");
+            .map_err(|err| format!("Cannot set up the HTTP client: {err}"))?;
         let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
             .expect("token is a valid header value");
         auth.set_sensitive(true);
-        Self {
+        Ok(Self {
             http,
+            tls: Arc::new(tls),
             origin,
             auth,
             runtime,
-        }
+        })
     }
 
     /// Run a future on the client's runtime and await it from any executor.
@@ -273,7 +289,10 @@ impl Client {
             .await
             .map_err(|err| {
                 if err.is_connect() || err.is_timeout() || err.is_request() {
-                    ClientError::Unreachable(self.origin.as_str().to_owned())
+                    ClientError::Unreachable {
+                        origin: self.origin.as_str().to_owned(),
+                        cause: root_cause(&err),
+                    }
                 } else {
                     ClientError::Protocol(err.without_url().to_string())
                 }
@@ -466,8 +485,16 @@ impl Client {
     }
 }
 
+fn root_cause(err: &reqwest::Error) -> String {
+    let mut cause: &dyn std::error::Error = err;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    cause.to_string()
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::live::{route, subscriptions};
     use super::*;
     use futures_util::{SinkExt as _, StreamExt as _};
@@ -475,7 +502,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A one-shot HTTP server returning `response` and capturing the request.
-    async fn serve_once(response: &'static str) -> (Origin, tokio::task::JoinHandle<String>) {
+    pub(crate) async fn serve_once(
+        response: &'static str,
+    ) -> (Origin, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let task = tokio::spawn(async move {
@@ -489,17 +518,8 @@ mod tests {
     }
 
     fn client(origin: Origin) -> Arc<Client> {
-        let token = crate::config::Config {
-            origin: origin.clone(),
-            token_source: crate::config::TokenSource::Env,
-        }
-        .load_token(|_| Some("T".repeat(43)))
-        .unwrap();
-        Arc::new(Client::new(
-            origin,
-            &token,
-            tokio::runtime::Handle::current(),
-        ))
+        let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
+        Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
     }
 
     #[tokio::test]
@@ -538,8 +558,41 @@ mod tests {
             .port();
         let origin = Origin::parse(&format!("http://127.0.0.1:{port}")).unwrap();
         let err = client(origin).bots().await.unwrap_err();
-        assert!(matches!(err, ClientError::Unreachable(_)));
+        assert!(matches!(err, ClientError::Unreachable { .. }), "{err:?}");
         assert!(!err.to_string().contains(&"T".repeat(43)));
+    }
+
+    async fn first_bytes() -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn https_and_wss_origins_send_the_token_only_over_tls() {
+        let token = "T".repeat(43);
+        let (address, server) = first_bytes().await;
+        let origin = Origin::parse(&format!("https://{address}")).unwrap();
+        let err = client(origin).bots().await.unwrap_err();
+        assert!(matches!(err, ClientError::Unreachable { .. }), "{err:?}");
+        let sent = server.await.unwrap();
+        assert_eq!(sent.first(), Some(&0x16), "a TLS handshake record");
+        assert!(!String::from_utf8_lossy(&sent).contains(&token));
+
+        let (address, server) = first_bytes().await;
+        let origin = Origin::parse(&format!("https://{address}")).unwrap();
+        let live = client(origin).live();
+        let sent = server.await.unwrap();
+        assert_eq!(sent.first(), Some(&0x16), "the WebSocket uses TLS");
+        assert!(!String::from_utf8_lossy(&sent).contains(&token));
+        drop(live);
     }
 
     #[tokio::test]

@@ -20,7 +20,6 @@ impl ElseApp {
                 (format!("Disconnected — retrying. {message}").into(), true)
             }
             Connection::InvalidCredentials(message) => (message.clone().into(), true),
-            Connection::Misconfigured(message) => (message.clone().into(), true),
         }
     }
 
@@ -590,8 +589,8 @@ impl ElseApp {
         }
         let message = match self.connection {
             Connection::Connected => "Create a bot to start a conversation.",
-            Connection::InvalidCredentials(_) | Connection::Misconfigured(_) => {
-                "Fix the desktop configuration shown in the sidebar, then restart the desktop."
+            Connection::InvalidCredentials(_) => {
+                "Use Change server to fix the address or owner token."
             }
             _ => "Waiting for the API…",
         };

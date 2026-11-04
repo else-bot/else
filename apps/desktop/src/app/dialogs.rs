@@ -76,7 +76,7 @@ impl ElseApp {
     }
 
     fn submit_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(welcome)) = (self.client.clone(), self.welcome.as_mut()) else {
+        let (client, Some(welcome)) = (self.client.clone(), self.welcome.as_mut()) else {
             return;
         };
         if welcome.busy {
@@ -323,7 +323,7 @@ impl ElseApp {
     }
 
     fn submit_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(holder)) = (self.client.clone(), self.create.clone()) else {
+        let (client, Some(holder)) = (self.client.clone(), self.create.clone()) else {
             return;
         };
         if holder.read(cx).form.busy {
@@ -450,9 +450,7 @@ impl ElseApp {
     }
 
     fn delete_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_bot(id).await;
             let _ = this.update_in(cx, |app, window, cx| {
