@@ -43,7 +43,12 @@ pub async fn notify(_conn: &mut SqliteConnection, _bot_id: Uuid) -> Result<(), s
 /// The bot's current state, with its routines and their last runs: every
 /// routine change and every turn change journals one.
 pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
-    if let Some(bot) = bots::find_in(conn, bot_id).await? {
+    if let Some(mut bot) = bots::find_in(conn, bot_id).await? {
+        bot.metadata_revision =
+            sqlx::query_scalar("SELECT last_event_seq + 1 FROM bots WHERE id = ?1")
+                .bind(bot_id)
+                .fetch_one(&mut *conn)
+                .await?;
         let routines: Vec<Value> = routines::list(conn, bot_id)
             .await?
             .iter()

@@ -29,6 +29,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         "conversation_id": bot.conversation_id,
         "created_at": bot.created_at,
         "last_message_at": bot.last_message_at,
+        "metadata_revision": bot.metadata_revision,
         "deleted_at": null,
         "selected_provider_id": bot.selected_provider_id,
         "category_id": bot.category_id,

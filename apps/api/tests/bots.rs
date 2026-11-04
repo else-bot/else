@@ -303,6 +303,9 @@ async fn metadata_update_saves_once_and_keeps_everything_else() {
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
     let bot = &saved.body["bot"];
     assert_eq!(bot["name"], "Planner", "the name is trimmed");
+    assert!(
+        bot["metadata_revision"].as_i64().unwrap() > before["metadata_revision"].as_i64().unwrap()
+    );
     assert_eq!(bot["category_id"], category);
     assert_eq!(bot["conversation_id"], before["conversation_id"]);
     let events = updated_events(&app, &id).await;
@@ -313,6 +316,7 @@ async fn metadata_update_saves_once_and_keeps_everything_else() {
     );
     let last = events.last().unwrap();
     assert_eq!(last["bot"]["name"], "Planner");
+    assert_eq!(last["bot"]["metadata_revision"], bot["metadata_revision"]);
 
     let again = update(&app, &id, json!({ "name": "Planner" })).await;
     assert_eq!(again.status, StatusCode::OK);
@@ -566,7 +570,11 @@ async fn last_message_at_follows_messages_not_metadata_edits() {
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap()
     };
-    assert_eq!(at(&messaged), newest, "the bot's reply is the newest message");
+    assert_eq!(
+        at(&messaged),
+        newest,
+        "the bot's reply is the newest message"
+    );
 
     update(
         &app,
