@@ -1173,13 +1173,15 @@ async fn the_routines_migration_preserves_existing_data() {
     .await
     .unwrap();
     let mut conn = db.pool.acquire().await.unwrap();
-    let before = common::rows(&mut conn, "SELECT * FROM items").await;
+    let saved_items =
+        "SELECT id, conversation_id, seq, turn_id, kind, text, provider_id, created_at FROM items";
+    let before = common::rows(&mut conn, saved_items).await;
     drop(conn);
 
     else_api::db::migrate(&db.pool).await.unwrap();
 
     let mut conn = db.pool.acquire().await.unwrap();
-    assert_eq!(common::rows(&mut conn, "SELECT * FROM items").await, before);
+    assert_eq!(common::rows(&mut conn, saved_items).await, before);
     drop(conn);
     let avatars: Vec<(Uuid, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT id, avatar_shape, avatar_color FROM bots ORDER BY id = ?1 DESC")
