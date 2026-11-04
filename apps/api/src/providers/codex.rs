@@ -888,6 +888,33 @@ mod tests {
     }
 
     #[test]
+    fn catalog_offers_current_and_legacy_models_as_exact_profiles() {
+        let codex = Codex::detect(None, None, None);
+        for model in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            assert!(codex.catalog().models.contains(&model), "missing {model}");
+            for effort in codex.catalog().efforts {
+                for tier in codex.catalog().tiers {
+                    let profile = Profile {
+                        model: model.into(),
+                        reasoning_effort: (*effort).into(),
+                        service_tier: (*tier).into(),
+                    };
+                    assert!(codex.validate_profile(&profile).is_ok(), "{profile:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn profile_validation_refuses_delegating_effort() {
         let codex = Codex::detect(None, None, None);
         assert!(codex.unavailable.is_some());
