@@ -324,15 +324,19 @@ impl ElseApp {
         let senders: Vec<_> = rows
             .iter()
             .map(|key| match *key {
-                RowKey::Item(id) => conversation
-                    .and_then(|c| c.item(id))
-                    .map_or((None, None), |item| {
-                        (Author::of(&item.kind), item.created_at)
-                    }),
+                RowKey::Item(id) => {
+                    conversation
+                        .and_then(|c| c.item(id))
+                        .map_or((None, None), |item| {
+                            let author = Author::of(&item.kind).filter(|_| item.reaction.is_none());
+                            (author, item.created_at)
+                        })
+                }
                 RowKey::Pending(request) => pending
                     .and_then(|list| list.iter().find(|p| p.request_id == request))
                     .map_or((None, None), |p| {
-                        let author = p.rejected.is_none().then_some(Author::Owner);
+                        let author =
+                            (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
                 RowKey::SecretRequest(_) | RowKey::Question(_) => (None, None),
