@@ -8,6 +8,7 @@ mod bot_menu;
 mod categories;
 mod conversation;
 mod create_bot;
+mod delete_dialog;
 mod dialogs;
 mod layout;
 mod link_target;
