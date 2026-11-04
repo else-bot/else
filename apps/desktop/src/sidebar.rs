@@ -72,11 +72,30 @@ impl<'a> Layout<'a> {
         Self { pinned, groups }
     }
 
-    /// The active bots in display order (keyboard navigation follows it).
-    pub fn order(&self) -> Vec<Uuid> {
+    pub fn with_preferences(mut self, preferences: &crate::preferences::Preferences) -> Self {
+        self.groups
+            .retain(|g| g.category.is_some() || !g.bots.is_empty());
+        self.groups.sort_by_key(|g| {
+            (
+                g.category.is_none(),
+                g.category
+                    .and_then(|c| preferences.category_order.iter().position(|id| *id == c.id))
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        self
+    }
+
+    pub fn visible_order(&self, collapsed: &std::collections::HashSet<Option<Uuid>>) -> Vec<Uuid> {
+        let grouped = self.groups.iter().any(|group| group.category.is_some());
         self.pinned
             .into_iter()
-            .chain(self.groups.iter().flat_map(|g| g.bots.iter().copied()))
+            .chain(
+                self.groups
+                    .iter()
+                    .filter(|g| !grouped || !collapsed.contains(&g.category.map(|c| c.id)))
+                    .flat_map(|g| g.bots.iter().copied()),
+            )
             .filter(|b| b.is_active())
             .map(|b| b.id)
             .collect()
@@ -103,6 +122,47 @@ mod tests {
             last_message_at: None,
             read_state: None,
         }
+    }
+
+    #[test]
+    fn saved_order_collapse_and_empty_unassigned_match_navigation() {
+        let categories = vec![
+            category(1, "Alpha"),
+            category(2, "Beta"),
+            category(3, "New"),
+        ];
+        let bots = vec![
+            bot(10, "Main", None),
+            bot(11, "A", Some(1)),
+            bot(12, "B", Some(2)),
+        ];
+        let mut prefs = crate::preferences::Preferences::default();
+        prefs.category_order = vec![Uuid::from_u128(2), Uuid::from_u128(999), Uuid::from_u128(1)];
+        prefs.collapsed.insert(Some(Uuid::from_u128(2)));
+        let layout =
+            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).with_preferences(&prefs);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Beta"), vec!["B"]),
+                (Some("Alpha"), vec!["A"]),
+                (Some("New"), vec![])
+            ]
+        );
+        assert_eq!(
+            layout.visible_order(&prefs.collapsed),
+            vec![Uuid::from_u128(10), Uuid::from_u128(11)]
+        );
+    }
+
+    #[test]
+    fn removing_last_category_keeps_unassigned_bots_visible() {
+        let bots = vec![bot(10, "Main", None), bot(11, "Other", None)];
+        let layout = Layout::new(&[], &bots, Some(Uuid::from_u128(10)));
+        assert_eq!(
+            layout.visible_order(&[None].into()),
+            vec![Uuid::from_u128(10), Uuid::from_u128(11)]
+        );
     }
 
     fn at(minute: u32) -> Option<DateTime<Utc>> {
@@ -161,7 +221,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            layout.order(),
+            layout.visible_order(&Default::default()),
             [13, 11, 15, 10, 12, 14].map(Uuid::from_u128).to_vec()
         );
     }
@@ -187,7 +247,10 @@ mod tests {
             shape(&layout),
             vec![(Some("Work"), vec!["Busy"]), (None, vec!["Loose"])]
         );
-        assert_eq!(layout.order(), [1, 2, 3].map(Uuid::from_u128).to_vec());
+        assert_eq!(
+            layout.visible_order(&Default::default()),
+            [1, 2, 3].map(Uuid::from_u128).to_vec()
+        );
     }
 
     #[test]
@@ -215,7 +278,7 @@ mod tests {
             vec![(None, vec!["Deleting", "New", "Talked", "Older", "Stale"])]
         );
         assert_eq!(
-            layout.order(),
+            layout.visible_order(&Default::default()),
             [3, 1, 2, 4].map(Uuid::from_u128).to_vec(),
             "navigation skips the bot being deleted"
         );

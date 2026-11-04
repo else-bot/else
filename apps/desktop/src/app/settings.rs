@@ -7,8 +7,8 @@ use crate::avatar::{Avatar, AvatarColor, AvatarShape, bot_avatar};
 use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
+use gpui_kit::base::HoverCard;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
@@ -19,8 +19,6 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use std::time::Duration;
 use uuid::Uuid;
-
-pub(super) const PANEL_WIDTH: Pixels = px(336.);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Metadata {
@@ -514,6 +512,7 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("routine-delete-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .outline()
                                 .track_focus(&cancel)
@@ -521,6 +520,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("routine-delete-confirm")
+                                .cursor_pointer()
                                 .label("Delete routine")
                                 .danger()
                                 .track_focus(&confirm)
@@ -628,13 +628,13 @@ impl ElseApp {
                         .justify_end()
                         .gap_2()
                         .child(
-                            Button::new("model-cancel")
+                            Button::new("model-cancel").cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("model-apply")
+                            Button::new("model-apply").cursor_pointer()
                                 .label("Apply")
                                 .primary()
                                 .loading(saving)
@@ -701,7 +701,12 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn render_settings(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_settings(
+        &self,
+        bot: &Bot,
+        viewport: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let header = h_flex()
             .flex_none()
@@ -717,6 +722,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("close-settings")
+                    .cursor_pointer()
                     .icon(IconName::PanelRightClose)
                     .small()
                     .ghost()
@@ -742,7 +748,9 @@ impl ElseApp {
         }
         let mut panel = v_flex()
             .id("bot-settings")
-            .w(PANEL_WIDTH)
+            .relative()
+            .w(px(self.preferences.details_width).min((viewport - px(360.)).max(px(280.))))
+            .on_drag_move(cx.listener(Self::resize_sidebar))
             .flex_none()
             .h_full()
             .bg(theme.sidebar)
@@ -750,7 +758,8 @@ impl ElseApp {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .child(header)
-            .child(body);
+            .child(body)
+            .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {
             let id = bot.id;
             panel = panel.child(
@@ -762,6 +771,7 @@ impl ElseApp {
                     .border_color(theme.sidebar_border)
                     .child(
                         Button::new("delete-bot")
+                            .cursor_pointer()
                             .label("Delete bot")
                             .danger()
                             .w_full()
@@ -776,34 +786,6 @@ impl ElseApp {
             );
         }
         panel.into_any_element()
-    }
-
-    /// The composer's shortcut to the model dialog, once the model is known.
-    pub(super) fn render_model_chip(
-        &self,
-        bot: Uuid,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let Some(ModelState::Ready(Some(saved))) = self.settings.get(&bot).map(|s| &s.model) else {
-            return None;
-        };
-        let choice = &saved.choice;
-        Some(
-            Button::new("composer-model")
-                .label(format!(
-                    "{} · {}",
-                    model_label(&choice.model),
-                    effort_label(&choice.reasoning_effort)
-                ))
-                .xsmall()
-                .ghost()
-                .tooltip("Change model")
-                .disabled(self.caps.is_none() || self.connection != Connection::Connected)
-                .on_click(
-                    cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)),
-                )
-                .into_any_element(),
-        )
     }
 
     fn render_details(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
@@ -829,7 +811,7 @@ impl ElseApp {
                 .rounded(theme.radius)
                 .border_1()
                 .border_color(transparent_black())
-                .cursor_text()
+                .cursor_pointer()
                 .hover(move |style| style.bg(hover).border_color(border))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_center()
@@ -850,6 +832,7 @@ impl ElseApp {
                 .child(note(format!("Couldn't save. {err}"), true, cx))
                 .child(
                     Button::new("retry-details")
+                        .cursor_pointer()
                         .label("Retry")
                         .xsmall()
                         .outline()
@@ -898,6 +881,7 @@ impl ElseApp {
                 Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(14.))),
             );
         let hero = Button::new("edit-avatar")
+            .cursor_pointer()
             .ghost()
             .w(px(112.))
             .h(px(112.))
@@ -951,6 +935,7 @@ impl ElseApp {
                     .child(
                         h_flex().child(
                             Button::new("retry-model")
+                                .cursor_pointer()
                                 .label("Retry")
                                 .small()
                                 .outline()
@@ -1015,6 +1000,7 @@ impl ElseApp {
         };
         // Button centers and nowraps its content; the card reads as a left-aligned block.
         Button::new("change-model")
+            .cursor_pointer()
             .outline()
             .with_size(Size::Size(px(16.)))
             .w_full()
@@ -1084,6 +1070,7 @@ impl ElseApp {
             _ => routine.enabled,
         };
         let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
+            .cursor_pointer()
             .checked(checked)
             .small()
             .tooltip(if checked {
@@ -1097,6 +1084,7 @@ impl ElseApp {
                 app.set_routine(bot, id, *enabled, window, cx)
             }));
         let delete = Button::new(ElementId::Name(format!("routine-delete-{id}").into()))
+            .cursor_pointer()
             .icon(gpui_kit::assets::IconName::Trash)
             .ghost()
             .xsmall()
@@ -1164,17 +1152,25 @@ impl ElseApp {
             (true, None) => Some("No further runs".to_owned()),
         };
         HoverCard::new(ElementId::Name(format!("routine-card-{id}").into()))
-            .trigger_style(StyleRefinement::default().w_full())
+            .w_full()
             .anchor(Anchor::RightCenter)
             .open_delay(Duration::from_millis(300))
-            .w(px(300.))
             .trigger(pill)
             .content(move |_, _, cx| {
                 let theme = cx.theme();
                 let line =
                     |text: String, color: Hsla| div().text_xs().text_color(color).child(text);
-                v_flex()
+                let card = v_flex()
+                    .w(px(300.))
+                    .min_w_0()
+                    .p_3()
                     .gap_2()
+                    .rounded(theme.radius_lg)
+                    .bg(theme.popover)
+                    .text_color(theme.popover_foreground)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
                     .child(
                         div()
                             .text_sm()
@@ -1207,6 +1203,38 @@ impl ElseApp {
                                     },
                                 )
                             })),
+                    );
+                let (border, background) = (theme.border, theme.popover);
+                h_flex()
+                    .id("routine-preview")
+                    .items_center()
+                    .pr_3()
+                    .child(card)
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                let mid = bounds.center().y;
+                                for (inset, color) in [(0., border), (1., background)] {
+                                    let mut path = PathBuilder::fill();
+                                    path.move_to(point(
+                                        bounds.left() - px(1.),
+                                        bounds.top() + px(inset),
+                                    ));
+                                    path.line_to(point(bounds.right() - px(inset), mid));
+                                    path.line_to(point(
+                                        bounds.left() - px(1.),
+                                        bounds.bottom() - px(inset),
+                                    ));
+                                    path.close();
+                                    if let Ok(path) = path.build() {
+                                        window.paint_path(path, color);
+                                    }
+                                }
+                            },
+                        )
+                        .w(px(8.))
+                        .h(px(16.)),
                     )
             })
             .into_any_element()
@@ -1384,6 +1412,7 @@ fn avatar_picker(app: WeakEntity<ElseApp>, bot: Uuid, current: Avatar, cx: &App)
         let picked = current.shape == shape;
         let avatar = Avatar { shape, ..current };
         Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
+            .cursor_pointer()
             .ghost()
             .w(px(44.))
             .h(px(44.))
@@ -1415,6 +1444,7 @@ fn avatar_picker(app: WeakEntity<ElseApp>, bot: Uuid, current: Avatar, cx: &App)
             .bg(theme.border)
             .child(div().size_full().rounded_full().bg(color.fill()));
         Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
+            .cursor_pointer()
             .ghost()
             .w(px(30.))
             .h(px(30.))
@@ -1437,6 +1467,7 @@ fn avatar_picker(app: WeakEntity<ElseApp>, bot: Uuid, current: Avatar, cx: &App)
         )
         .child(
             Button::new("reset-avatar")
+                .cursor_pointer()
                 .label("Reset")
                 .xsmall()
                 .ghost()

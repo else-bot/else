@@ -34,6 +34,15 @@ pub struct Item {
     /// Set on the owner's feedback message sent as a reaction.
     #[serde(default)]
     pub reaction: Option<Reaction>,
+    #[serde(default)]
+    pub bot_task: Option<BotTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BotTask {
+    pub sender_bot_id: Uuid,
+    pub sender_name: String,
+    pub prompt: String,
 }
 
 /// The owner's reaction to one of the bot's messages.
@@ -84,15 +93,6 @@ pub struct Turn {
     pub effect_uncertain: bool,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
-}
-
-impl Turn {
-    pub fn is_finished(&self) -> bool {
-        matches!(
-            self.status.as_str(),
-            "completed" | "interrupted" | "failed" | "uncertain"
-        )
-    }
 }
 
 /// The last due occurrence of a routine: the turn it started, or why it

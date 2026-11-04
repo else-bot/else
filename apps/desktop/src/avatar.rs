@@ -364,6 +364,7 @@ pub struct BotAvatar {
     avatar: Avatar,
     size: Pixels,
     live: bool,
+    working: bool,
 }
 
 pub fn bot_avatar(id: impl Into<ElementId>, avatar: Avatar, size: Pixels) -> BotAvatar {
@@ -372,10 +373,16 @@ pub fn bot_avatar(id: impl Into<ElementId>, avatar: Avatar, size: Pixels) -> Bot
         avatar,
         size,
         live: true,
+        working: false,
     }
 }
 
 impl BotAvatar {
+    pub fn working(mut self) -> Self {
+        self.working = true;
+        self
+    }
+
     /// Drawn at rest, without tracking the pointer (picker thumbnails).
     pub fn still(mut self) -> Self {
         self.live = false;
@@ -394,6 +401,7 @@ impl IntoElement for BotAvatar {
 /// Motion kept across frames for one live avatar.
 struct Live {
     motion: Motion,
+    started: Instant,
     /// Whether pointer moves outside the attention zone still matter: the
     /// eyes are away from center or still moving back.
     awake: Rc<Cell<bool>>,
@@ -471,10 +479,17 @@ impl Element for BotAvatar {
         let (pose, awake) = window.with_element_state(id, |live: Option<Live>, window| {
             let mut live = live.unwrap_or_else(|| Live {
                 motion: Motion::default(),
+                started: now,
                 awake: Rc::default(),
                 wake: None,
             });
-            let (pose, next) = live.motion.advance(now, input);
+            let (mut pose, next) = live.motion.advance(now, input);
+            if self.working {
+                let phase = now.duration_since(live.started).as_secs_f32() * 4.;
+                pose.gaze = (phase.sin() * 0.6, phase.cos() * 0.35);
+                pose.hover = (phase.sin() + 1.) * 0.5;
+                window.request_animation_frame();
+            }
             live.awake.set(next != Next::Rest || input.gaze != (0., 0.));
             match next {
                 Next::Frame => {
