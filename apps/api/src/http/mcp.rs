@@ -26,28 +26,7 @@ use crate::db::memory::{self, EntryRow, Kind, NewEntry, RESPONSE_BUDGET};
 use crate::db::memory_tree;
 use crate::grants::{Grant, Tool};
 
-pub const SERVER_NAME: &str = "elsebot";
-/// The tools this server offers. Adapters allow exactly these.
-pub const TOOL_NAMES: &[&str] = &[
-    "memory_bots",
-    "memory_search",
-    "memory_read",
-    "memory_view",
-    "memory_zoom",
-    "memory_date",
-    "delegate",
-    "computer_run",
-    "computer_job_start",
-    "computer_job",
-    "computer_job_cancel",
-    "computer_write_file",
-    "computer_read_file",
-    "computer_fetch",
-    "computer_browser",
-    "computer_secrets",
-    "computer_screenshot",
-    "computer_input",
-];
+use crate::app::tools::SERVER_NAME;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// Body bytes of one search hit; read the entry for the rest.
 const HIT_BODY: usize = 600;

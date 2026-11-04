@@ -146,7 +146,7 @@ pub const DENIED_TOOLS: &[&str] = &[
 pub fn mcp_json(tool_url: &str) -> String {
     json!({
         "mcpServers": {
-            crate::http::mcp::SERVER_NAME: {
+            crate::app::tools::SERVER_NAME: {
                 "type": "http",
                 "url": tool_url,
                 "headers": { "Authorization": format!("Bearer ${{{GRANT_ENV}}}") },
@@ -158,9 +158,9 @@ pub fn mcp_json(tool_url: &str) -> String {
 
 /// The tool names Claude reports for else.bot's tools.
 pub fn tool_names() -> Vec<String> {
-    crate::http::mcp::TOOL_NAMES
+    crate::app::tools::TOOL_NAMES
         .iter()
-        .map(|t| format!("mcp__{}__{t}", crate::http::mcp::SERVER_NAME))
+        .map(|t| format!("mcp__{}__{t}", crate::app::tools::SERVER_NAME))
         .collect()
 }
 

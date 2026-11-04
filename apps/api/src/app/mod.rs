@@ -5,3 +5,4 @@ pub mod bots;
 pub mod memory_tree;
 pub mod messages;
 pub mod providers;
+pub mod tools;

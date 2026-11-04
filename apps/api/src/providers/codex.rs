@@ -376,7 +376,7 @@ impl Codex {
                 servers.len()
             ));
         };
-        if server["name"].as_str() != Some(crate::http::mcp::SERVER_NAME) {
+        if server["name"].as_str() != Some(crate::app::tools::SERVER_NAME) {
             return Err("Codex reported an MCP server other than else.bot's.".into());
         }
         let mut tools: Vec<String> = match &server["tools"] {
@@ -388,7 +388,7 @@ impl Codex {
             _ => Vec::new(),
         };
         tools.sort();
-        let mut expected: Vec<String> = crate::http::mcp::TOOL_NAMES
+        let mut expected: Vec<String> = crate::app::tools::TOOL_NAMES
             .iter()
             .map(|t| (*t).to_owned())
             .collect();
@@ -403,10 +403,10 @@ impl Codex {
 
     fn allowed_tool(&self, item: &Value) -> bool {
         self.tool_url.is_some()
-            && item["server"].as_str() == Some(crate::http::mcp::SERVER_NAME)
+            && item["server"].as_str() == Some(crate::app::tools::SERVER_NAME)
             && item["tool"]
                 .as_str()
-                .is_some_and(|t| crate::http::mcp::TOOL_NAMES.contains(&t))
+                .is_some_and(|t| crate::app::tools::TOOL_NAMES.contains(&t))
     }
 
     /// Checks that need the running server: no effective MCP servers, and

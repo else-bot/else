@@ -434,7 +434,7 @@ impl Tracker {
             servers.is_empty()
         } else {
             matches!(servers.as_slice(), [(name, status)]
-                if name == crate::http::mcp::SERVER_NAME && status == "connected")
+                if name == crate::app::tools::SERVER_NAME && status == "connected")
         };
         if !ok {
             let reason = format!("Claude reported MCP servers {servers:?}");
@@ -476,7 +476,7 @@ impl Tracker {
                         continue;
                     }
                     let id = block["tool_use_id"].as_str().unwrap_or_default();
-                    let delegate = format!("mcp__{}__delegate", crate::http::mcp::SERVER_NAME);
+                    let delegate = format!("mcp__{}__delegate", crate::app::tools::SERVER_NAME);
                     if self.tools_by_id.get(id) == Some(&delegate)
                         && block["content"].to_string().contains("pending")
                     {
