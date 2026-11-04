@@ -1,0 +1,24 @@
+
+==> Configuration (/Users/lume/.else/config/.env)
+    ✓ written (mode 0600)
+
+==> API service
+    ✓ launchd agent, starts with: elsebot start (--autostart to start it at login)
+
+==> else-api setup
+    owner token: created (/Users/lume/.else/data/owner-token)
+    secret key: created (/Users/lume/.else/data/secret-key)
+    provider profile codex: created default
+    main bot: created (b3cf8ecd-612d-491e-808d-7512b4c43ae9)
+df512d65e162d8c1f966e45ab8b9af0d2d738a5a3645d5ed2f6c440b36d77132  /Users/lume/.else/current/bin/else-api
+2fcfbc1697d0cc65c3aa446b7669601ee880147ceae7941687aeef60eb83ff39  /Users/lume/.else/current/bin/else-desktop
+2fcfbc1697d0cc65c3aa446b7669601ee880147ceae7941687aeef60eb83ff39  /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop
+home:        /Users/lume/.else
+source:      /Users/lume/.else/src
+release:     versions/0.0.12
+settings:    /Users/lume/.else/config/.env
+app server:  /Users/lume/.else/config/desktop.json
+app:         /Users/lume/Applications/else.bot.app
+data:        /Users/lume/.else/data
+logs:        /Users/lume/.else/logs
+service:     launchd (/Users/lume/.else/config/bot.else.pr50-local.plist)

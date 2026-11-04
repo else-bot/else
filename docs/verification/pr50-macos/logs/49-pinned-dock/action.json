@@ -1,0 +1,26 @@
+{
+  "tool": "click",
+  "arguments": {
+    "scope": "desktop",
+    "delivery_mode": "foreground",
+    "x": 783.0,
+    "y": 738.0,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_000000000000002f"
+  },
+  "is_error": false,
+  "text": "\u2705 Sent screen-absolute click at desktop-pixel (783,738) \u2192 screen-point (783,738) (desktop scope; not driver-verified).",
+  "structured": {
+    "delivery": {
+      "mode": "not_applicable"
+    },
+    "effect": "unverifiable",
+    "hint": "The click was sent but nothing confirmed it. Read what changed before clicking again; a repeat can toggle or double-fire.",
+    "route": "global_input",
+    "summary": "\u2705 Sent screen-absolute click at desktop-pixel (783,738) \u2192 screen-point (783,738) (desktop scope; not driver-verified)."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

@@ -1,0 +1,33 @@
+[
+  {
+    "archive_member": "logs/79-close-regression/close-menu/before.json",
+    "sha256": "5a92698312afd8be5540d04fe36ac782f85dc02f49c2702cc51c85c030e1b8d3",
+    "captured_at": "2026-11-04T18:32:57Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 681.0,
+        "width": 1024.0,
+        "x": 0.0,
+        "y": 30.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 2365,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 206,
+      "z_index": 6
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_0000000000000049",
+    "window_title": "else.bot",
+    "screenshot_width": 1024,
+    "screenshot_height": 681
+  }
+]

@@ -1,0 +1,42 @@
+735
+{"post_reboot_authenticated": true, "origin": "http://127.0.0.1:7893", "onboarding_required": true}
+gui/501/bot.else.pr50-quoted = {
+	active count = 1
+	path = /Users/lume/pr50/quoted install it's/config/bot.else.pr50-quoted.plist
+	type = LaunchAgent
+	state = running
+
+	program = /Users/lume/pr50/quoted install it's/current/bin/else-api
+	arguments = {
+		/Users/lume/pr50/quoted install it's/current/bin/else-api
+		serve
+	}
+
+	working directory = /Users/lume/pr50/quoted install it's/config
+
+	stdout path = /Users/lume/pr50/quoted install it's/logs/else-api.log
+	stderr path = /Users/lume/pr50/quoted install it's/logs/else-api.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.yGnHS33rAZ/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		PATH => /Users/lume/pr50/quoted install it's/bin:/Users/lume/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+		XPC_SERVICE_NAME => bot.else.pr50-quoted
+	}
+
+	domain = gui/501 [100002]
+	asid = 100002
+	minimum runtime = 5
+	exit timeout = 60
+	runs = 1
+	pid = 762
+	immediate reason = speculative
+	forks = 1
+5ad0b08164ddf352703798ea63f2ef92d263d12f829246dfe59f969744262d0b  /Users/lume/pr50/quoted install it's/Applications/else.bot.app/Contents/MacOS/else-desktop
+df512d65e162d8c1f966e45ab8b9af0d2d738a5a3645d5ed2f6c440b36d77132  /Users/lume/.else/current/bin/else-api

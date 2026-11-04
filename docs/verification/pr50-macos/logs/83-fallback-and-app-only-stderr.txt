@@ -1,0 +1,1 @@
+/Users/lume/Applications/else.bot.app was not installed for /Users/lume/.else; leaving it alone

@@ -1,0 +1,22 @@
+{
+  "tool": "click",
+  "arguments": {
+    "element_token": "s00000005:85"
+  },
+  "is_error": false,
+  "text": "\u2705 Performed AXPress on [85] AXMenuItem \"Close Window\".",
+  "structured": {
+    "delivery": {
+      "mode": "background"
+    },
+    "effect": "unverifiable",
+    "hint": "The click was sent but nothing confirmed it. Read what changed before clicking again; a repeat can toggle or double-fire. Three single actions in a row: send the next ones as one run_steps call. It runs them in order, stops at the first failure and returns what changed.",
+    "route": "accessibility",
+    "summary": "\u2705 Performed AXPress on [85] AXMenuItem \"Close Window\"."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

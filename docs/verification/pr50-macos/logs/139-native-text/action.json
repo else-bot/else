@@ -1,0 +1,25 @@
+{
+  "tool": "move_cursor",
+  "arguments": {
+    "scope": "desktop",
+    "delivery_mode": "foreground",
+    "x": 625.0,
+    "y": 362.0
+  },
+  "is_error": false,
+  "text": "Moved the real desktop pointer to (625.0, 362.0).",
+  "structured": {
+    "delivery": {
+      "mode": "not_applicable"
+    },
+    "effect": "unverifiable",
+    "hint": "The action was sent but not confirmed. Read what changed, or check a postcondition with verify_state, before repeating it.",
+    "route": "global_input",
+    "summary": "Moved the real desktop pointer to (625.0, 362.0)."
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

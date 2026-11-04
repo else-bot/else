@@ -1,0 +1,33 @@
+[
+  {
+    "archive_member": "logs/67-readiness-timeout/before.json",
+    "sha256": "a68352b8936a59073da05a452df78571ce8bf8b9e40e0c0e64a1b0af909b53fa",
+    "captured_at": "2026-11-04T18:30:06Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 420.0,
+        "width": 640.0,
+        "x": 78.0,
+        "y": 69.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 1897,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 131,
+      "z_index": 4
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_000000000000003e",
+    "window_title": "else.bot",
+    "screenshot_width": 640,
+    "screenshot_height": 420
+  }
+]

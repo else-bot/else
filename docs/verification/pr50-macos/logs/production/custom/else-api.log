@@ -1,0 +1,3 @@
+[2m2026-11-04T18:36:05.551254Z[0m [33m WARN[0m [2melse_api[0m[2m:[0m bot computers unavailable [3merror[0m[2m=[0mthe computer runtime is unavailable: this msb is not the verified runtime (msb 0.7.13); set ELSE_MSB_ALLOW_UNVERIFIED=1 after checking it
+[2m2026-11-04T18:36:05.555942Z[0m [32m INFO[0m [2melse_api[0m[2m:[0m API listening [3maddr[0m[2m=[0m127.0.0.1:7889
+[2m2026-11-04T18:36:05.610621Z[0m [32m INFO[0m [2melse_api::backup::worker[0m[2m:[0m backup set completed [3mset[0m[2m=[0m20261104T183605558Z-3a693254 [3mbytes[0m[2m=[0m504195

@@ -1,0 +1,33 @@
+[
+  {
+    "archive_member": "logs/149-post-reboot-final-close/close-menu/before.json",
+    "sha256": "c20b05cea8de5263e5e6b0a586fa6da512a084904e0f7f7fb3f39acbb5ec2a02",
+    "captured_at": "2026-11-04T18:55:04Z",
+    "window": {
+      "app_name": "else.bot",
+      "bounds": {
+        "height": 680.0,
+        "width": 1024.0,
+        "x": 0.0,
+        "y": 30.0
+      },
+      "current_space_id": 1,
+      "is_on_screen": true,
+      "layer": 0,
+      "on_current_space": true,
+      "pid": 959,
+      "space_ids": [
+        1
+      ],
+      "title": "else.bot",
+      "window_id": 70,
+      "z_index": 5
+    },
+    "is_error": false,
+    "screenshot_frame_valid": true,
+    "capture_id": "capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000004",
+    "window_title": "else.bot",
+    "screenshot_width": 1024,
+    "screenshot_height": 680
+  }
+]

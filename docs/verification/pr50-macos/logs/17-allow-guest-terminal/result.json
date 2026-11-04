@@ -1,0 +1,20 @@
+{
+  "tool": "click",
+  "arguments": {
+    "scope": "desktop",
+    "x": 572,
+    "y": 345,
+    "capture_id": "capture_6efdf0e0b61a4d92b4b83ac7e510e48b_000000000000000b"
+  },
+  "is_error": true,
+  "text": "capture binding failed: capture belongs to another runtime or session generation. Not dispatching click.",
+  "structured": {
+    "code": "capture_generation_mismatch",
+    "effect": "refused"
+  },
+  "endpoint": "http://192.168.64.6:3211/mcp",
+  "server": {
+    "name": "cua-driver",
+    "version": "0.38.0"
+  }
+}

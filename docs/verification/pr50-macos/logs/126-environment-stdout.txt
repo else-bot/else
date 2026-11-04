@@ -1,0 +1,18 @@
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+arm64
+/Library/Developer/CommandLineTools
+gui/501 = {
+	type = login
+	handle = 100002
+	active count = 431
+	service count = 430
+	active service count = 183
+	creator = loginwindow[159]
+	creator euid = 0
+	session = Aqua
+	endpoint destination = com.apple.xpc.launchd.domain.user.501
+	auxiliary bootstrapper = com.apple.xpc.otherbsd (complete)
+	security context = {
+fixture secret hashes prepared for export scan

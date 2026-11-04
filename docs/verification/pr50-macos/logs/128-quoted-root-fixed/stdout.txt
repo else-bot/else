@@ -1,0 +1,14 @@
+
+==> Configuration (/Users/lume/pr50/quoted install it's/config/.env)
+    ✓ written (mode 0600)
+
+==> API service
+    ✓ launchd agent, starts with: elsebot start (--autostart to start it at login)
+
+==> else-api setup
+    owner token: created (/Users/lume/pr50/quoted install it's/owner keys/token)
+    secret key: created (/Users/lume/pr50/quoted install it's/custom storage/secret-key)
+    provider profile codex: created default
+    main bot: created (651dda70-e19a-48af-9a6f-7f20c8739869)
+1
+3308

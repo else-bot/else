@@ -1,0 +1,20 @@
+[
+  {
+    "action": "cmd-w",
+    "desktop_pid": 735,
+    "api_pid": 762,
+    "result": "PASS"
+  },
+  {
+    "action": "close-menu",
+    "desktop_pid": 959,
+    "api_pid": 762,
+    "result": "PASS"
+  },
+  {
+    "action": "cmd-q",
+    "desktop_pid": 986,
+    "api_pid": 762,
+    "result": "PASS"
+  }
+]

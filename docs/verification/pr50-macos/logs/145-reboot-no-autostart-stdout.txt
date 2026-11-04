@@ -1,0 +1,17 @@
+	state = running
+	runs = 1
+	pid = 1657
+		state = active
+		state = active
+	state = running
+	runs = 1
+	pid = 2779
+		state = active
+		state = active
+	state = running
+	runs = 1
+	pid = 3370
+		state = active
+		state = active
+{ sec = 1793816370, usec = 379507 } Wed Nov  4 10:19:30 2026
+scheduled reboot of the owned disposable guest

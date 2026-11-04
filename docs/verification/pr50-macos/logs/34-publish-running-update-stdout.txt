@@ -1,0 +1,4 @@
+  PID  PPID COMMAND
+ 1014     1 /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop
+5dff600aeb1e0a69e66007b5375c12f572b02d5d992516dc2e674efaf655e537  /Users/lume/Applications/else.bot.app/Contents/MacOS/else-desktop
+previous mapped desktop remains alive after publication
