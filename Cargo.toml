@@ -13,3 +13,7 @@ edition = "2024"
 # large dependency graph. Use CARGO_PROFILE_DEV_DEBUG=2 for full debugging.
 [profile.dev]
 debug = 0
+
+# Markdown wrapping and link previews, pinned until these fixes land upstream.
+[patch.crates-io]
+gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "35e493484fcab19a5a7fd8184fb207b6b18beb20" }

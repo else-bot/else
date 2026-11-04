@@ -503,6 +503,13 @@ To run the desktop against a session that no other checkout can touch, use `scri
 
 The workspace shares its root `Cargo.lock` and `target` directory. The backup research crate remains excluded so its documented standalone commands still work. See [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html).
 
+The workspace patches `gpui-base` to a fixed commit in the
+[else-bot/gpui-kit fork](https://github.com/else-bot/gpui-kit/tree/else/0.8.1-markdown-links).
+It carries inline-code punctuation wrapping and the native link-preview hook.
+The other toolkit crates retain their published versions. The fork's
+[patch notes](https://github.com/else-bot/gpui-kit/blob/35e493484fcab19a5a7fd8184fb207b6b18beb20/docs/else-bot-patches.md)
+describe the changes and when the patch can be removed.
+
 ## Run isolated development sessions
 
 `scripts/dev.py` runs the API and the desktop against a session that belongs to this checkout. Two worktrees can run sessions at the same time: each session has its own SQLite database, data directory, credentials, bot projects, and port. Use it instead of `cargo run -p else-api` whenever another checkout or the installation may run on this machine. It needs only Python 3.11 or later and Cargo.
