@@ -118,6 +118,9 @@ pub struct TurnInput {
     /// The owner's answers to this turn's secret requests that no attempt
     /// has received yet. Names only, never values.
     pub secrets: Vec<SecretOutcome>,
+    /// The owner's answers to this turn's questions and approval requests
+    /// that no attempt has received yet.
+    pub questions: Vec<QuestionOutcome>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -168,6 +171,29 @@ pub struct SecretOutcome {
     pub name: String,
     pub env: Vec<String>,
     pub stored: bool,
+}
+
+/// One option of an owner question, by its stable id and shown label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// The owner's answer to a question or approval request: which question
+/// (its kind, title, and bound action) and the choice the owner made, or
+/// that it ended unanswered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOutcome {
+    pub id: Uuid,
+    /// `choice`, `destructive`, or `external`.
+    pub kind: String,
+    pub title: String,
+    /// For an approval: the tool call or described host action.
+    pub action: Option<serde_json::Value>,
+    /// `answered`, `skipped`, or `cancelled`.
+    pub status: String,
+    pub answer: Option<QuestionChoice>,
 }
 
 /// What a turn's work traces back to, derived by the server from stored

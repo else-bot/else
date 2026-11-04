@@ -186,8 +186,11 @@ impl Provider for Synthetic {
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
+        // The shared turn packet, as a host adapter sends it: recorded
+        // outcomes for a continuation, then the owner's message. Memory is
+        // never injected here (nothing reads it).
         let (packet, selection) =
-            super::prompt::packet_with_selection(&input, state.considered_through_turn);
+            super::prompt::turn_packet(&input, state.considered_through_turn, None);
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
         }

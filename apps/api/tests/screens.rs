@@ -445,7 +445,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     } = setup(true).await;
     let bot = app.create_bot("Hands").await;
     let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
-    let batch = json!({ "frame": [1280, 800],
+    let batch = json!({ "frame": [1280, 800], "effect": "local",
         "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });
     let done = tool(&app, &token, "computer_input", batch.clone()).await;
     assert_ne!(done["isError"], true, "{done}");
@@ -454,10 +454,12 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         (result["done"].clone(), result["of"].clone()),
         (json!(2), json!(2))
     );
+    let mut sent = batch.clone();
+    sent.as_object_mut().unwrap().remove("effect");
     assert_eq!(
         guest.inputs.lock().unwrap()[0],
-        batch,
-        "the batch reached the guest as sent"
+        sent,
+        "the batch reached the guest as sent; the effect declaration stays in the API"
     );
     let logged: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",

@@ -17,6 +17,8 @@ pub(super) enum RowKey {
     Pending(Uuid),
     /// A bot's request for credentials, by request ID.
     SecretRequest(Uuid),
+    /// A bot's question or approval request, by question ID.
+    Question(Uuid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,8 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
+    /// An answer in flight, or its failure, per pending question.
+    pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
     /// The end of the latest loaded reply was on screen at the last check.
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
@@ -89,6 +93,7 @@ impl ConversationView {
             texts: HashMap::new(),
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
+            question_submits: HashMap::new(),
             latest_seen: false,
             reply_layout: None,
             _load: None,
@@ -176,6 +181,9 @@ impl ElseApp {
                 match conversation.apply(&frame) {
                     Ok(Applied::Duplicate) => {}
                     Ok(Applied::Changed) => {
+                        if frame.event == "turn.updated" {
+                            view.list.remeasure();
+                        }
                         // The channel's activity is fresher than the list.
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
@@ -252,12 +260,27 @@ impl ElseApp {
         }
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        // A turn's secret requests follow its last loaded item.
-        let mut requests: Vec<(Uuid, Uuid)> = conversation
+        // Settled question cards stay before the continuation they authorized.
+        let mut requests: Vec<(Uuid, RowKey, Option<Uuid>)> = conversation
             .into_iter()
-            .flat_map(|c| c.secret_requests())
-            .map(|(turn, request)| (turn.id, request.id))
+            .flat_map(|c| {
+                c.secret_requests()
+                    .into_iter()
+                    .map(|(turn, request)| (turn.id, RowKey::SecretRequest(request.id), None))
+                    .chain(c.questions().into_iter().map(|(turn, question)| {
+                        (
+                            turn.id,
+                            RowKey::Question(question.id),
+                            c.question_anchor(turn.id, question.settled_at),
+                        )
+                    }))
+            })
             .collect();
+        requests.sort_by_key(|(turn, _, _)| {
+            conversation
+                .and_then(|c| c.turn(*turn))
+                .map_or(i64::MAX, |t| t.turn_no)
+        });
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
         for (ix, item) in items.iter().enumerate() {
             rows.push(RowKey::Item(item.id));
@@ -267,24 +290,18 @@ impl ElseApp {
                 RowFormat::Plain
             };
             texts.push((RowKey::Item(item.id), item.text.clone(), format));
-            if items
+            let last_in_turn = items
                 .get(ix + 1)
-                .is_none_or(|next| next.turn_id != item.turn_id)
-            {
-                requests.retain(|(turn, request)| {
-                    let here = *turn == item.turn_id;
-                    if here {
-                        rows.push(RowKey::SecretRequest(*request));
-                    }
-                    !here
-                });
-            }
+                .is_none_or(|next| next.turn_id != item.turn_id);
+            requests.retain(|(turn, key, anchor)| {
+                let here = anchor.map_or(*turn == item.turn_id && last_in_turn, |id| id == item.id);
+                if here {
+                    rows.push(*key);
+                }
+                !here
+            });
         }
-        rows.extend(
-            requests
-                .into_iter()
-                .map(|(_, request)| RowKey::SecretRequest(request)),
-        );
+        rows.extend(requests.into_iter().map(|(_, key, _)| key));
         for pending in self.pending.get(&bot).into_iter().flatten() {
             rows.push(RowKey::Pending(pending.request_id));
             texts.push((
@@ -308,7 +325,7 @@ impl ElseApp {
                         let author = p.rejected.is_none().then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_) => (None, None),
+                RowKey::SecretRequest(_) | RowKey::Question(_) => (None, None),
             })
             .collect();
         let rows: Vec<TranscriptRow> = rows
@@ -383,6 +400,7 @@ impl ElseApp {
         }
         view.rows = rows;
         self.sync_secret_forms(window, cx);
+        self.sync_question_submits();
         self.check_reading(window, cx);
         cx.notify();
     }

@@ -74,6 +74,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "created_at": turn.created_at,
         "finished_at": turn.finished_at,
         "secret_requests": turn.secret_requests,
+        "questions": turn.questions,
     })
 }
 

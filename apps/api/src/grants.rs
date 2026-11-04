@@ -36,6 +36,8 @@ pub enum Tool {
     Computer,
     /// Ask the owner for credentials (owner conversations only).
     RequestSecret,
+    /// Ask the owner a question or for permission (owner conversations only).
+    AskOwner,
     /// Manage the bot's own routines (work rooted in an owner message,
     /// including a task delegated for one; never a routine run or its tasks).
     Routines,

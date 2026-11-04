@@ -85,6 +85,7 @@ pub async fn endpoint(
                 Some("delegate") => Tool::Delegate,
                 Some("create_bot") => Tool::CreateBot,
                 Some("request_secret") => Tool::RequestSecret,
+                Some("ask_owner") | Some("ask_permission") => Tool::AskOwner,
                 Some(name) if name.starts_with("routine_") => Tool::Routines,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 _ => Tool::ReadMemory,
@@ -262,6 +263,64 @@ fn tool_list() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
+        {
+            "name": "ask_owner",
+            "description": "Ask the owner a question in a native card. Offer 2 to 4 options \
+                when a pick settles it, or omit choices for an open question answered in chat. The owner \
+                sees a card with the question, the optional context (for example a draft), and \
+                the choices, and picks one in the app. Returns status pending at once: tell the \
+                owner briefly what you are asking, end this attempt, and you continue \
+                automatically with their choice. A new owner message instead skips the card. \
+                At most one per attempt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "minLength": 1,
+                                  "maxLength": crate::db::owner_questions::MAX_TITLE,
+                                  "description": "One short question." },
+                    "choices": { "type": "array", "minItems": 0,
+                                 "maxItems": crate::db::owner_questions::MAX_CHOICES, "uniqueItems": true,
+                                 "items": { "type": "string", "minLength": 1,
+                                            "maxLength": crate::db::owner_questions::MAX_CHOICE_LABEL },
+                                 "description": "2 to 4 short labels, in the order shown. Omit or leave empty for a chat answer." },
+                    "context": { "type": "string", "maxLength": crate::db::owner_questions::MAX_CONTEXT,
+                                 "description": "Optional: what the choice is about, such as a draft." },
+                },
+                "required": ["question"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "ask_permission",
+            "description": "Ask the owner to approve one destructive or external action you will \
+                take with your HOST shell or file tools (the owner's machine), which the API \
+                cannot gate itself. Computer tools do not need this: declare their effect \
+                argument instead. destructive: deletes, overwrites, or changes something hard to \
+                undo. external: sends a message or email, posts or edits anything others can see, \
+                pays, or otherwise reaches people or services outside. Returns approved at once \
+                when the owner gave this bot standing permission for destructive actions; \
+                otherwise status pending: tell the owner briefly what and why, end this attempt, \
+                and act only after the approval arrives in the continuation, on exactly that \
+                action, once. External actions are approved one at a time, always. At most one \
+                per attempt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["destructive", "external"] },
+                    "action": { "type": "string", "minLength": 1,
+                                "maxLength": crate::db::owner_questions::MAX_CONTEXT,
+                                "description": "Exactly what will be done: the command, or the message and its recipients." },
+                    "reason": { "type": "string", "maxLength": crate::db::owner_questions::MAX_TITLE,
+                                "description": "Shown as the card's title: what it is for." },
+                },
+                "required": ["kind", "action"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
         super::routines::create_schema(),
         super::routines::list_schema(),
         super::routines::update_schema(),
@@ -427,6 +486,8 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "delegate" => delegate(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
         "request_secret" => request_secret(state, grant, args).await,
+        "ask_owner" => ask_owner(state, grant, args).await,
+        "ask_permission" => ask_permission(state, grant, args).await,
         "routine_create" => super::routines::create(state, grant, args).await,
         "routine_list" => super::routines::list(state, grant).await,
         "routine_update" => super::routines::update(state, grant, args).await,
@@ -869,6 +930,7 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             );
             let result = json!({
                 "status": "pending",
+                "parked": true,
                 "task_id": accepted.delegation_id,
                 "target": { "bot_id": accepted.target_bot_id, "name": accepted.target_name },
                 "next": "Tell the owner it is in progress and end this attempt now. Do not wait, \
@@ -993,6 +1055,7 @@ async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcom
             let log = format!("pending {} for {}", request.id, request.name);
             let result = json!({
                 "status": "pending",
+                "parked": true,
                 "request_id": request.id,
                 "secret": request.name,
                 "env": request.env,
@@ -1013,5 +1076,133 @@ async fn request_secret(state: &AppState, grant: &Grant, args: &Value) -> Outcom
             let log = format!("rejected {code}");
             (tool_error(&format!("{code}: {err}")), Some(log))
         }
+    }
+}
+
+/// The tool error for a refused question, with its code.
+pub(crate) fn question_refused(err: crate::db::owner_questions::RequestError) -> Outcome {
+    use crate::db::owner_questions::RequestError;
+    let code = match err {
+        RequestError::NotAllowed => "NOT_ALLOWED",
+        RequestError::AttemptParked => "ATTEMPT_PARKED",
+        RequestError::BudgetExhausted => "BUDGET_EXHAUSTED",
+        RequestError::Conflict => "CONFLICT",
+        RequestError::NotRunning => "NOT_RUNNING",
+        RequestError::Db => "UNAVAILABLE",
+    };
+    (
+        tool_error(&format!("{code}: {err}")),
+        Some(format!("rejected {code}")),
+    )
+}
+
+async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::owner_questions::{self, Spec, Status};
+    let spec = match Spec::choice(args) {
+        Ok(spec) => spec,
+        Err(message) => return (tool_error(&format!("INVALID_QUESTION: {message}")), None),
+    };
+    match owner_questions::create(&state.db, grant.turn_id, &spec).await {
+        Ok(question) if question.status != Status::Pending => {
+            let log = format!("already {} {}", question.status.as_str(), question.id);
+            let result = json!({
+                "status": question.status,
+                "question_id": question.id,
+                "answer": question.chosen(),
+                "next": match question.status {
+                    Status::Answered => "The owner already chose; continue with that choice.",
+                    _ => "The owner did not answer this; a newer message of theirs governs. Do not treat it as a choice.",
+                },
+            });
+            (tool_result(result), Some(log))
+        }
+        Ok(question) => {
+            // This attempt must now end; the API refuses its further calls.
+            state.scheduler.grants().park(grant.turn_id).await;
+            let log = format!("pending {} {:?}", question.id, question.title);
+            let result = json!({
+                "status": "pending",
+                "parked": true,
+                "question_id": question.id,
+                "choices": question.choices,
+                "next": "Tell the owner briefly what you are asking and end this attempt now. \
+                         Do not wait, poll, or call more tools; their choice arrives in a \
+                         continuation.",
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => question_refused(err),
+    }
+}
+
+async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::owner_questions::{self, DESTRUCTIVE_SCOPE, Kind, Spec, Status};
+    let spec = match Spec::permission(args) {
+        Ok(spec) => spec,
+        Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
+    };
+    if spec.kind == Kind::Destructive {
+        let standing = async {
+            let mut conn = state.db.acquire().await?;
+            owner_questions::has_permission(&mut conn, grant.bot_id, DESTRUCTIVE_SCOPE).await
+        }
+        .await;
+        match standing {
+            Ok(true) => {
+                let log = format!("standing destructive permission for {:?}", spec.context);
+                let result = json!({
+                    "status": "approved",
+                    "standing": true,
+                    "next": "The owner allowed destructive actions for you in advance. Do exactly \
+                             this action now, and report what you did.",
+                });
+                return (tool_result(result), Some(log));
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "reading standing permissions failed");
+                return (
+                    tool_error("UNAVAILABLE: permissions could not be read."),
+                    None,
+                );
+            }
+        }
+    }
+    match owner_questions::create(&state.db, grant.turn_id, &spec).await {
+        Ok(question) if question.status != Status::Pending => {
+            let approved = question.approved();
+            let log = format!("already {} {}", question.status.as_str(), question.id);
+            let result = json!({
+                "status": if approved { "approved" } else if question.status == Status::Answered { "denied" } else { question.status.as_str() },
+                "question_id": question.id,
+                "next": if approved {
+                    "The owner approved exactly this action for this request; do it once, then report."
+                } else {
+                    "The owner did not approve this. Do not do it or an equivalent; continue without it or ask what they want."
+                },
+            });
+            (tool_result(result), Some(log))
+        }
+        Ok(question) => {
+            state.scheduler.grants().park(grant.turn_id).await;
+            let log = format!(
+                "pending {} {} {:?}",
+                question.id,
+                spec.kind.as_str(),
+                spec.context
+            );
+            let result = json!({
+                "status": "pending",
+                "parked": true,
+                "question_id": question.id,
+                "kind": question.kind,
+                "next": "Tell the owner briefly what this will do and why, then end this attempt \
+                         now. Do not act, wait, poll, or call more tools. The decision arrives in \
+                         a continuation: approved means exactly this action, once; otherwise do \
+                         not do it.",
+            });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => question_refused(err),
     }
 }

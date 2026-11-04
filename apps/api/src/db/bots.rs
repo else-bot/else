@@ -189,14 +189,7 @@ async fn authorize(conn: &mut sqlx::SqliteConnection, turn_id: Uuid) -> Result<(
     if !matches!(status.as_str(), "sending" | "running") || bot_status != BotStatus::Active {
         return Err(Refusal::NotRunning.into());
     }
-    let delegated: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM delegations WHERE root_turn_id = ?1 AND parent_attempt = ?2)",
-    )
-    .bind(turn_id)
-    .bind(attempt)
-    .fetch_one(&mut *conn)
-    .await?;
-    if delegated {
+    if super::turns::attempt_parked(conn, turn_id, attempt).await? {
         return Err(Refusal::AttemptDelegated.into());
     }
     Ok(())
