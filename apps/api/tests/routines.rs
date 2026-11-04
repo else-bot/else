@@ -978,11 +978,15 @@ async fn the_routines_migration_preserves_existing_data() {
         .run(&db.pool)
         .await
         .unwrap();
-    else_api::db::installation::setup(&db.pool).await.unwrap();
-    let main: Uuid = sqlx::query_scalar("SELECT default_bot_id FROM installation")
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+    // An installation saved by that build; today's setup writes newer columns.
+    let main = Uuid::new_v4();
+    for sql in [
+        "INSERT INTO bots (id, name) VALUES (?1, 'Assistant')",
+        "INSERT INTO conversations (id, bot_id) VALUES (randomblob(16), ?1)",
+        "INSERT INTO installation (default_bot_id) VALUES (?1)",
+    ] {
+        sqlx::query(sql).bind(main).execute(&db.pool).await.unwrap();
+    }
     // An owner message on the old schema (application code would already
     // read the new tables).
     let root = Uuid::new_v4();
@@ -1076,6 +1080,20 @@ async fn the_routines_migration_preserves_existing_data() {
     let mut conn = db.pool.acquire().await.unwrap();
     assert_eq!(common::rows(&mut conn, "SELECT * FROM items").await, before);
     drop(conn);
+    let avatars: Vec<(Uuid, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, avatar_shape, avatar_color FROM bots ORDER BY id = ?1 DESC")
+            .bind(main)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        avatars,
+        [
+            (main, Some("star".into()), Some("blue".into())),
+            (leaf, None, None)
+        ],
+        "the main bot becomes the blue star; others keep a derived avatar"
+    );
     let index: Option<String> =
         sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'items_turn'")
             .fetch_optional(&db.pool)

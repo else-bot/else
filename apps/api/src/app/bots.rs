@@ -55,6 +55,75 @@ impl BotName {
     }
 }
 
+/// A preset avatar: one of the shapes the desktop draws, in one of its
+/// named colors. The API stores and validates the names; it draws nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Avatar {
+    pub shape: AvatarShape,
+    pub color: AvatarColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum AvatarShape {
+    Star,
+    Round,
+    Cloud,
+    Tile,
+    Sparkle,
+    Flower,
+    Egg,
+    Bean,
+    Cone,
+    House,
+    Gem,
+    Ghost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum AvatarColor {
+    White,
+    Brown,
+    Red,
+    Orange,
+    Amber,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+    Gray,
+}
+
+impl Avatar {
+    /// The main bot's avatar, and what the desktop's Reset restores.
+    pub const DEFAULT: Self = Self {
+        shape: AvatarShape::Star,
+        color: AvatarColor::Blue,
+    };
+
+    /// A stable starting avatar for a new bot, so bots differ at a glance
+    /// before the owner picks one.
+    pub fn derived(bot_id: uuid::Uuid) -> Self {
+        use AvatarColor::*;
+        use AvatarShape::*;
+        const SHAPES: [AvatarShape; 12] = [
+            Star, Round, Cloud, Tile, Sparkle, Flower, Egg, Bean, Cone, House, Gem, Ghost,
+        ];
+        const COLORS: [AvatarColor; 8] = [Blue, Teal, Green, Pink, Purple, Orange, Red, Amber];
+        let bytes = bot_id.as_bytes();
+        Self {
+            shape: SHAPES[usize::from(bytes[0]) % SHAPES.len()],
+            color: COLORS[usize::from(bytes[1]) % COLORS.len()],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +136,37 @@ mod tests {
         assert_eq!(BotName::parse(&"é".repeat(81)), Err(InvalidBot::Name));
         assert_eq!(BotName::parse("a\0b"), Err(InvalidBot::Nul));
         assert!(BotName::parse(MAIN_BOT_NAME).is_ok());
+    }
+
+    #[test]
+    fn avatars_use_names_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(Avatar::DEFAULT).unwrap(),
+            serde_json::json!({ "shape": "star", "color": "blue" })
+        );
+        for bad in [
+            serde_json::json!({ "shape": "dragon", "color": "blue" }),
+            serde_json::json!({ "shape": "star", "color": "#0000ff" }),
+            serde_json::json!({ "shape": "star" }),
+            serde_json::json!({ "shape": "star", "color": "blue", "image": "x" }),
+        ] {
+            assert!(
+                serde_json::from_value::<Avatar>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_avatars_are_stable_per_bot() {
+        let id = uuid::Uuid::from_bytes([3, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(Avatar::derived(id), Avatar::derived(id));
+        assert_eq!(
+            Avatar::derived(id),
+            Avatar {
+                shape: AvatarShape::Tile,
+                color: AvatarColor::Teal
+            }
+        );
     }
 }

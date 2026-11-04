@@ -2,6 +2,7 @@ use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
 
 use crate::api::{Bot, BotProfile, ClientError, ProfileChoice};
+use crate::avatar::{Avatar, AvatarColor, AvatarShape, bot_avatar};
 use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
@@ -9,8 +10,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::*;
 use uuid::Uuid;
@@ -20,12 +21,14 @@ pub(super) const PANEL_WIDTH: Pixels = px(336.);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Metadata {
     name: String,
+    avatar: Avatar,
 }
 
 impl Metadata {
     fn of(bot: &Bot) -> Self {
         Self {
             name: bot.name.clone(),
+            avatar: bot.avatar,
         }
     }
 
@@ -59,6 +62,8 @@ struct Details {
     seen: Metadata,
     saved: Metadata,
     name: Entity<InputState>,
+    avatar: Avatar,
+    picking: bool,
     save: Save,
     _edits: Subscription,
 }
@@ -67,13 +72,15 @@ impl Details {
     fn draft(&self, cx: &App) -> Metadata {
         Metadata {
             name: self.name.read(cx).value().to_string(),
+            avatar: self.avatar,
         }
     }
 
-    fn show(&self, values: &Metadata, window: &mut Window, cx: &mut App) {
+    fn show(&mut self, values: &Metadata, window: &mut Window, cx: &mut App) {
         let name = values.name.clone();
         self.name
             .update(cx, |state, cx| state.set_value(name, window, cx));
+        self.avatar = values.avatar;
     }
 }
 
@@ -188,6 +195,9 @@ impl ElseApp {
                         state.set_value(latest.name.clone(), window, cx)
                     });
                 }
+                if draft.avatar == details.saved.avatar {
+                    details.avatar = latest.avatar;
+                }
             }
             details.seen = latest.clone();
             details.saved = latest;
@@ -204,11 +214,13 @@ impl ElseApp {
         if details.save.busy() || draft.problem().is_some() {
             return;
         }
+        let name = (draft.name != details.saved.name).then(|| draft.name.clone());
+        let avatar = (draft.avatar != details.saved.avatar).then_some(draft.avatar);
         let attempt = Uuid::new_v4();
         details.save = Save::Saving(attempt);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.update_bot(bot, draft.name.clone()).await;
+            let result = client.update_bot(bot, name, avatar).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 app.finish_details(bot, attempt, draft, result, window, cx)
             });
@@ -239,6 +251,7 @@ impl ElseApp {
                 }
                 details.saved = saved;
                 details.save = Save::Saved;
+                details.picking = false;
             }
             Err(err) => details.save = Save::Failed(err.to_string()),
         }
@@ -247,8 +260,26 @@ impl ElseApp {
 
     fn cancel_details(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
-            details.show(&details.saved, window, cx);
+            let saved = details.saved.clone();
+            details.show(&saved, window, cx);
             details.save = Save::Idle;
+            details.picking = false;
+            cx.notify();
+        }
+    }
+
+    fn toggle_avatar_picker(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
+            details.picking = !details.picking;
+            cx.notify();
+        }
+    }
+
+    fn pick_avatar(&mut self, bot: Uuid, avatar: Avatar, cx: &mut Context<Self>) {
+        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details)
+            && !details.save.busy()
+        {
+            details.avatar = avatar;
             cx.notify();
         }
     }
@@ -562,10 +593,194 @@ impl ElseApp {
                         cx.listener(move |app, _, window, cx| app.cancel_details(bot, window, cx)),
                     ),
             );
-        section("Details", cx)
-            .child(field("Name", Input::new(&details.name).disabled(saving)))
-            .children(status)
-            .child(actions)
+        v_flex()
+            .gap_4()
+            .child(self.render_avatar_editor(bot, details, cx))
+            .child(
+                section("Details", cx)
+                    .child(field("Name", Input::new(&details.name).disabled(saving)))
+                    .children(status)
+                    .child(actions),
+            )
+            .into_any_element()
+    }
+
+    fn render_avatar_editor(
+        &self,
+        bot: Uuid,
+        details: &Details,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let editing = if details.picking {
+            "Close avatar picker"
+        } else {
+            "Edit avatar"
+        };
+        let badge = div()
+            .absolute()
+            .right(px(2.))
+            .bottom(px(2.))
+            .size(px(26.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_color(theme.popover_foreground)
+            .shadow_sm()
+            .opacity(if details.picking { 1. } else { 0. })
+            .group_hover("avatar-editor", |style| style.opacity(1.))
+            .child(
+                Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(14.))),
+            );
+        let hero = Button::new("edit-avatar")
+            .ghost()
+            .w(px(112.))
+            .h(px(112.))
+            .p_0()
+            .rounded(px(28.))
+            .tooltip(editing)
+            .accessibility_label(editing)
+            .toggled(details.picking)
+            .child(
+                div()
+                    .relative()
+                    .group("avatar-editor")
+                    .child(bot_avatar(
+                        ElementId::Name(format!("settings-avatar-{bot}").into()),
+                        details.avatar,
+                        px(96.),
+                    ))
+                    .child(badge),
+            )
+            .on_click(cx.listener(move |app, _, _, cx| app.toggle_avatar_picker(bot, cx)));
+        let mut editor = v_flex()
+            .items_center()
+            .gap_3()
+            .child(h_flex().justify_center().child(hero));
+        if details.picking {
+            editor = editor.child(self.render_avatar_picker(bot, details, cx));
+        }
+        editor.into_any_element()
+    }
+
+    fn render_avatar_picker(
+        &self,
+        bot: Uuid,
+        details: &Details,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let saving = details.save.busy();
+        let current = details.avatar;
+        let shapes = AvatarShape::ALL.map(|shape| {
+            let picked = current.shape == shape;
+            let avatar = Avatar { shape, ..current };
+            Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
+                .ghost()
+                .w(px(44.))
+                .h(px(44.))
+                .p_0()
+                .rounded(px(12.))
+                .selected(picked)
+                .toggled(picked)
+                .disabled(saving)
+                .tooltip(shape.label())
+                .accessibility_label(format!("{} shape", shape.label()))
+                .border_2()
+                .border_color(if picked {
+                    theme.ring
+                } else {
+                    transparent_black()
+                })
+                .child(
+                    bot_avatar(
+                        ElementId::Name(format!("avatar-shape-art-{shape:?}").into()),
+                        avatar,
+                        px(32.),
+                    )
+                    .still(),
+                )
+                .on_click(cx.listener(move |app, _, _, cx| app.pick_avatar(bot, avatar, cx)))
+        });
+        let colors = AvatarColor::ALL.map(|color| {
+            let picked = current.color == color;
+            let avatar = Avatar { color, ..current };
+            Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
+                .ghost()
+                .w(px(30.))
+                .h(px(30.))
+                .p_0()
+                .rounded_full()
+                .selected(picked)
+                .toggled(picked)
+                .disabled(saving)
+                .tooltip(color.label())
+                .accessibility_label(format!("{} color", color.label()))
+                .border_2()
+                .border_color(if picked {
+                    theme.ring
+                } else {
+                    transparent_black()
+                })
+                .child(
+                    div()
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(color.fill())
+                        .border_1()
+                        .border_color(theme.border),
+                )
+                .on_click(cx.listener(move |app, _, _, cx| app.pick_avatar(bot, avatar, cx)))
+        });
+        let header = h_flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("AVATAR"),
+            )
+            .child(
+                Button::new("reset-avatar")
+                    .label("Reset")
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Back to the blue star")
+                    .disabled(saving || current == Avatar::default())
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.pick_avatar(bot, Avatar::default(), cx)
+                    })),
+            );
+        v_flex()
+            .w_full()
+            .gap_3()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .child(header)
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .justify_center()
+                    .children(shapes),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .justify_center()
+                    .children(colors),
+            )
+            .child(muted("Save changes to keep the new look.", cx))
             .into_any_element()
     }
 
@@ -848,9 +1063,11 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
     });
     Details {
         _edits: cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
+        avatar: values.avatar,
         seen: values.clone(),
         saved: values,
         name,
+        picking: false,
         save: Save::Idle,
     }
 }
@@ -892,7 +1109,10 @@ mod tests {
     use super::Metadata;
 
     fn metadata(name: &str) -> Metadata {
-        Metadata { name: name.into() }
+        Metadata {
+            name: name.into(),
+            avatar: Default::default(),
+        }
     }
 
     #[test]

@@ -378,3 +378,145 @@ async fn metadata_update_validates_and_refuses_deleted_bots() {
         .await;
     assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
 }
+
+fn listed(listing: &common::Reply, id: &str) -> serde_json::Value {
+    listing.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn avatars_persist_with_the_name_and_journal_only_changes() {
+    let app = TestApp::installed().await;
+    let main = app.main_bot().await;
+    let shown = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
+    assert_eq!(
+        shown.body["bot"]["avatar"],
+        json!({ "shape": "star", "color": "blue" }),
+        "the main bot starts as the default"
+    );
+    let id = app.create_bot("Work").await;
+    let created = app.owner("GET", &format!("/v1/bots/{id}"), None).await;
+    let initial = created.body["bot"]["avatar"].clone();
+    assert!(initial["shape"].is_string() && initial["color"].is_string());
+
+    let pink_cloud = json!({ "shape": "cloud", "color": "pink" });
+    let saved = update(&app, &id, json!({ "avatar": pink_cloud })).await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.body["bot"]["avatar"], pink_cloud);
+    assert_eq!(
+        saved.body["bot"]["name"], "Work",
+        "an avatar-only save keeps the name"
+    );
+    let events = updated_events(&app, &id).await;
+    assert_eq!(events.len(), 1, "one bot.updated for the change");
+    assert_eq!(events[0]["bot"]["avatar"], pink_cloud);
+
+    let again = update(&app, &id, json!({ "avatar": pink_cloud })).await;
+    assert_eq!(again.body, saved.body, "a retry returns the same bot");
+    assert_eq!(
+        updated_events(&app, &id).await.len(),
+        1,
+        "and journals nothing"
+    );
+
+    let renamed = update(&app, &id, json!({ "name": "Planner" })).await;
+    assert_eq!(
+        renamed.body["bot"]["avatar"], pink_cloud,
+        "a name-only save keeps the avatar"
+    );
+
+    let teal_gem = json!({ "shape": "gem", "color": "teal" });
+    let both = update(&app, &id, json!({ "name": "Scout", "avatar": teal_gem })).await;
+    assert_eq!(both.status, StatusCode::OK);
+    assert_eq!(both.body["bot"]["name"], "Scout");
+    assert_eq!(both.body["bot"]["avatar"], teal_gem);
+    let events = updated_events(&app, &id).await;
+    assert_eq!(events.len(), 3, "each change journals once");
+    assert_eq!(events[2]["bot"]["name"], "Scout");
+    assert_eq!(events[2]["bot"]["avatar"], teal_gem);
+
+    let app = app.restart().await;
+    let listing = app.owner("GET", "/v1/bots", None).await;
+    assert_eq!(
+        listed(&listing, &id),
+        both.body["bot"],
+        "listed as saved after a restart"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bots_saved_before_avatars_get_a_stable_one() {
+    let app = TestApp::installed().await;
+    let id = app.create_bot("Old").await;
+    sqlx::query("UPDATE bots SET avatar_shape = NULL, avatar_color = NULL WHERE id = ?1")
+        .bind(id.parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let first = app.owner("GET", "/v1/bots", None).await;
+    let second = app.owner("GET", "/v1/bots", None).await;
+    let derived = listed(&first, &id)["avatar"].clone();
+    assert!(derived["shape"].is_string());
+    assert_eq!(
+        listed(&second, &id)["avatar"],
+        derived,
+        "the same avatar on every read"
+    );
+
+    let same = update(&app, &id, json!({ "avatar": derived })).await;
+    assert_eq!(same.status, StatusCode::OK);
+    assert!(
+        updated_events(&app, &id).await.is_empty(),
+        "saving the avatar it already shows journals nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn avatar_updates_validate_and_refuse_deleted_bots() {
+    let app = TestApp::installed().await;
+    let id = app.create_bot("Work").await;
+    let before = app.owner("GET", &format!("/v1/bots/{id}"), None).await.body["bot"].clone();
+    for body in [
+        json!({ "avatar": { "shape": "dragon", "color": "blue" } }),
+        json!({ "avatar": { "shape": "star", "color": "#3b82f6" } }),
+        json!({ "avatar": { "shape": "star" } }),
+        json!({ "avatar": { "shape": "star", "color": "blue", "image_url": "x" } }),
+        json!({ "avatar": "star" }),
+        json!({ "avatar": null }),
+        json!({ "name": " ", "avatar": { "shape": "star", "color": "blue" } }),
+    ] {
+        let reply = update(&app, &id, body.clone()).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let after = app.owner("GET", &format!("/v1/bots/{id}"), None).await.body["bot"].clone();
+    assert_eq!(after, before, "rejected input changes nothing");
+    assert!(updated_events(&app, &id).await.is_empty());
+
+    let avatar = json!({ "avatar": { "shape": "egg", "color": "green" } });
+    let unknown = update(&app, &Uuid::new_v4().to_string(), avatar.clone()).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    let unauthorized = app
+        .call(
+            "PATCH",
+            &format!("/v1/bots/{id}"),
+            Some(avatar.clone()),
+            None,
+        )
+        .await;
+    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+
+    app.owner("DELETE", &format!("/v1/bots/{id}"), None).await;
+    let gone = update(&app, &id, avatar).await;
+    assert_eq!(gone.status, StatusCode::GONE);
+    assert_eq!(gone.body["error"]["code"], "bot_deleted");
+    let receipt = app.owner("GET", &format!("/v1/bots/{id}"), None).await;
+    assert_eq!(
+        receipt.body["bot"]["avatar"], before["avatar"],
+        "never revived or changed"
+    );
+}

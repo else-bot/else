@@ -19,6 +19,7 @@ mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 use serde_json::json;
 
+use crate::avatar::Avatar;
 use crate::config::{Origin, OwnerToken};
 use crate::model::{Item, Routine, Snapshot, Turn};
 
@@ -124,6 +125,9 @@ pub struct Cleanup {
 pub struct Bot {
     pub id: Uuid,
     pub name: String,
+    /// Absent from older servers, which draw every bot the same.
+    #[serde(default)]
+    pub avatar: Avatar,
     #[serde(default)]
     pub conversation_id: Option<Uuid>,
     #[serde(default)]
@@ -490,10 +494,23 @@ impl Client {
         .map(|(_, v)| v.bot)
     }
 
-    /// Rename a bot. Repeating the same name is a no-op, so a retry after
-    /// an unknown outcome is safe.
-    pub async fn update_bot(self: Arc<Self>, bot: Uuid, name: String) -> Result<Bot, ClientError> {
-        let body = json!({ "name": name });
+    /// Change a bot's name, avatar, or both in one save; `None` keeps the
+    /// current value. Saving values it already has is a no-op, so a retry
+    /// after an unknown outcome is safe.
+    pub async fn update_bot(
+        self: Arc<Self>,
+        bot: Uuid,
+        name: Option<String>,
+        avatar: Option<Avatar>,
+    ) -> Result<Bot, ClientError> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = name {
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(avatar) = avatar {
+            body.insert("avatar".into(), json!(avatar));
+        }
+        let body = serde_json::Value::Object(body);
         self.call::<BotEnvelope>(Method::PATCH, format!("/v1/bots/{bot}"), Some(body))
             .await
             .map(|(_, v)| v.bot)
