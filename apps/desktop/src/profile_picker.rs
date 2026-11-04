@@ -1,101 +1,67 @@
-//! Choosing a bot's provider and model: a button per provider, then the
-//! model and reasoning level from that provider's catalog, and a Fast
-//! switch when the provider offers it. Used by the welcome screen, the
-//! create-bot dialog, and the bot settings panel. Only exact values the API
-//! reported are offered.
+//! One catalog-backed profile picker for onboarding and bot dialogs.
 
-use gpui_kit::component::IndexPath;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::searchable_list::SearchableListItem;
-use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, h_flex, v_flex,
+};
 use gpui_kit::*;
 
 use crate::api::{Capabilities, ProfileChoice, ProviderInfo};
 
-/// The Fast tier's request value; `default` is normal speed.
 const FAST: &str = "priority";
-
-/// A dropdown entry: the exact value the API takes, shown by a readable name.
-#[derive(Clone)]
-pub struct Labeled {
-    value: String,
-    title: SharedString,
-}
-
-impl SearchableListItem for Labeled {
-    type Value = String;
-
-    fn title(&self) -> SharedString {
-        self.title.clone()
-    }
-
-    fn value(&self) -> &String {
-        &self.value
-    }
-}
-
-type Choices = Entity<SelectState<Vec<Labeled>>>;
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
-    provider: Option<String>,
-    model: Choices,
-    effort: Choices,
-    fast: bool,
-    stacked: bool,
+    choice: Option<ProfileChoice>,
+    search: Entity<InputState>,
+    change_focus: FocusHandle,
+    browsing: bool,
+    customizing: bool,
     disabled: bool,
-    _selects: [Subscription; 2],
+    _search: Subscription,
 }
 
 impl ProfilePicker {
-    /// Start from `initial` (the defaults, or a bot's own), else the first
-    /// provider whose CLI runs.
     pub fn new(
         caps: &Capabilities,
         initial: Option<&ProfileChoice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let providers: Vec<ProviderInfo> = caps
+        let providers: Vec<_> = caps
             .providers
             .iter()
-            .filter(|p| !p.catalog.models.is_empty())
+            .filter(|p| !p.catalog.models.is_empty() && !p.catalog.efforts.is_empty())
             .cloned()
             .collect();
-        let start = initial
-            .filter(|c| providers.iter().any(|p| p.id == c.provider_id))
-            .cloned()
+        let choice = initial
+            .and_then(|c| providers.iter().find(|p| p.id == c.provider_id))
+            .and_then(|p| catalog_choice(p, initial))
             .or_else(|| {
                 providers
                     .iter()
-                    .find(|p| p.cli_available)
-                    .map(|p| first_choice(p))
+                    .filter(|p| p.cli_available)
+                    .find_map(|p| catalog_choice(p, None))
             });
-        let (model, effort) = selects(
-            start
-                .as_ref()
-                .and_then(|c| providers.iter().find(|p| p.id == c.provider_id)),
-            start.as_ref(),
-            window,
-            cx,
-        );
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a model…"));
+        let subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         Self {
-            fast: start.as_ref().is_some_and(|c| c.service_tier == FAST),
-            provider: start.map(|c| c.provider_id),
+            browsing: choice.is_none(),
+            choice,
             providers,
-            _selects: observe(&model, &effort, cx),
-            model,
-            effort,
-            stacked: false,
+            search,
+            change_focus: cx.focus_handle(),
+            customizing: false,
             disabled: false,
+            _search: subscription,
         }
-    }
-
-    pub fn stacked(mut self) -> Self {
-        self.stacked = true;
-        self
     }
 
     pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
@@ -105,121 +71,263 @@ impl ProfilePicker {
         }
     }
 
-    /// The complete choice, or `None` while nothing usable is chosen.
-    pub fn choice(&self, cx: &App) -> Option<ProfileChoice> {
-        let provider = self.current()?;
-        let model = self.model.read(cx).selected_value()?.clone();
-        let reasoning_effort = self.effort.read(cx).selected_value()?.clone();
-        let service_tier = if self.fast && provider.catalog.tiers.iter().any(|t| t == FAST) {
-            FAST
-        } else {
-            "default"
-        };
-        Some(ProfileChoice {
-            provider_id: provider.id.clone(),
-            model,
-            reasoning_effort,
-            service_tier: service_tier.to_owned(),
-        })
+    pub fn choice(&self) -> Option<ProfileChoice> {
+        self.choice.clone()
     }
 
-    /// Whether any provider's CLI runs, i.e. whether a choice is possible.
     pub fn any_available(&self) -> bool {
         self.providers.iter().any(|p| p.cli_available)
     }
 
     fn current(&self) -> Option<&ProviderInfo> {
-        let id = self.provider.as_deref()?;
-        self.providers.iter().find(|p| p.id == id)
+        let choice = self.choice.as_ref()?;
+        self.providers.iter().find(|p| p.id == choice.provider_id)
     }
 
-    fn choose_provider(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.provider.as_deref() == Some(id) {
-            return;
-        }
-        let Some(info) = self.providers.iter().find(|p| p.id == id).cloned() else {
-            return;
-        };
-        let start = first_choice(&info);
-        let (model, effort) = selects(Some(&info), Some(&start), window, cx);
-        self._selects = observe(&model, &effort, cx);
-        self.model = model;
-        self.effort = effort;
-        self.fast = false;
-        self.provider = Some(info.id);
+    fn choose_model(
+        &mut self,
+        provider: &str,
+        model: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let info = self.providers.iter().find(|p| p.id == provider).unwrap();
+        self.choice = catalog_choice(info, self.choice.as_ref()).map(|mut choice| {
+            choice.model = model;
+            choice
+        });
+        self.browsing = false;
+        self.change_focus.focus(window, cx);
         cx.notify();
     }
-}
 
-/// A provider's first model at medium reasoning (else its first level),
-/// normal speed.
-fn first_choice(provider: &ProviderInfo) -> ProfileChoice {
-    let efforts = &provider.catalog.efforts;
-    ProfileChoice {
-        provider_id: provider.id.clone(),
-        model: provider.catalog.models.first().cloned().unwrap_or_default(),
-        reasoning_effort: efforts
-            .iter()
-            .find(|e| *e == "medium")
-            .or(efforts.first())
-            .cloned()
-            .unwrap_or_default(),
-        service_tier: "default".to_owned(),
+    fn render_catalog(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let mut groups = v_flex()
+            .id("model-catalog")
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .p_1();
+        let mut found = false;
+        for provider in &self.providers {
+            let models: Vec<_> = provider
+                .catalog
+                .models
+                .iter()
+                .filter(|model| {
+                    format!("{} {} {model}", provider.label, model_label(model))
+                        .to_lowercase()
+                        .contains(&query)
+                })
+                .collect();
+            if models.is_empty() {
+                continue;
+            }
+            found = true;
+            groups = groups.child(
+                v_flex()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(provider.label.clone()),
+                    )
+                    .children(provider.cli_unavailable_reason.as_ref().map(|reason| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(reason.clone())
+                    })),
+            );
+            for model in models {
+                let selected = self.choice.as_ref().is_some_and(|choice| {
+                    choice.provider_id == provider.id && choice.model == *model
+                });
+                let provider_id = provider.id.clone();
+                let model_id = model.clone();
+                groups = groups.child(
+                    Button::new(SharedString::from(format!("model-{provider_id}-{model}")))
+                        .cursor_pointer()
+                        .ghost()
+                        .selected(selected)
+                        .toggled(selected)
+                        .with_size(Size::Size(px(14.)))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .disabled(self.disabled || !provider.cli_available)
+                        .accessibility_label(format!("{} · {}", model_label(model), provider.label))
+                        .tooltip(model.clone())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_left()
+                                .child(model_label(model)),
+                        )
+                        .child(
+                            Icon::new(if selected {
+                                IconName::Check
+                            } else {
+                                IconName::Circle
+                            })
+                            .size_3()
+                            .text_color(if selected {
+                                theme.primary
+                            } else {
+                                theme.border
+                            }),
+                        )
+                        .on_click(cx.listener(move |picker, _, window, cx| {
+                            picker.choose_model(&provider_id, model_id.clone(), window, cx);
+                        })),
+                );
+            }
+        }
+        if !found {
+            groups = groups.child(
+                div()
+                    .p_3()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("No matching models."),
+            );
+        }
+        v_flex()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .overflow_hidden()
+            .child(
+                div().p_2().border_b_1().border_color(theme.border).child(
+                    Input::new(&self.search)
+                        .small()
+                        .prefix(Icon::new(IconName::Search).size_3())
+                        .aria_label("Find a model")
+                        .disabled(self.disabled),
+                ),
+            )
+            .child(groups)
+            .into_any_element()
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(provider) = self.current() else {
+            return div().into_any_element();
+        };
+        let choice = self.choice.as_ref().unwrap();
+        let fast_offered = provider.catalog.tiers.iter().any(|tier| tier == FAST);
+        let efforts = provider.catalog.efforts.iter().map(|effort| {
+            let value = effort.clone();
+            let selected = choice.reasoning_effort == *effort;
+            Button::new(SharedString::from(format!("effort-{effort}")))
+                .cursor_pointer()
+                .ghost()
+                .small()
+                .selected(selected)
+                .toggled(selected)
+                .label(effort_label(effort).to_owned())
+                .accessibility_label(format!("{} reasoning", effort_label(effort)))
+                .disabled(self.disabled)
+                .on_click(cx.listener(move |picker, _, _, cx| {
+                    picker.choice.as_mut().unwrap().reasoning_effort = value.clone();
+                    cx.notify();
+                }))
+        });
+        v_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(div().text_xs().child("Reasoning"))
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .p_1()
+                            .bg(theme.muted.opacity(0.3))
+                            .rounded(theme.radius)
+                            .children(efforts),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Choose how much reasoning the model uses."),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_1()
+                            .child(div().text_sm().child("Fast mode"))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                if fast_offered {
+                                    "Use priority processing."
+                                } else {
+                                    "Not available through this provider."
+                                },
+                            )),
+                    )
+                    .child(
+                        Switch::new("pick-fast")
+                            .cursor_pointer()
+                            .accessibility_label("Fast mode")
+                            .checked(choice.service_tier == FAST)
+                            .disabled(self.disabled || !fast_offered)
+                            .on_click(cx.listener(|picker, checked: &bool, _, cx| {
+                                picker.choice.as_mut().unwrap().service_tier =
+                                    if *checked { FAST } else { "default" }.to_owned();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
-fn observe(
-    model: &Choices,
-    effort: &Choices,
-    cx: &mut Context<ProfilePicker>,
-) -> [Subscription; 2] {
-    [
-        cx.observe(model, |_, _, cx| cx.notify()),
-        cx.observe(effort, |_, _, cx| cx.notify()),
-    ]
-}
-
-type Selects = (Choices, Choices);
-
-fn selects(
-    provider: Option<&ProviderInfo>,
-    choice: Option<&ProfileChoice>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Selects {
-    let labeled = |values: &[String], label: fn(&str) -> String| -> Vec<Labeled> {
-        values
+fn catalog_choice(
+    provider: &ProviderInfo,
+    previous: Option<&ProfileChoice>,
+) -> Option<ProfileChoice> {
+    let previous = previous.filter(|choice| choice.provider_id == provider.id);
+    let model = previous
+        .map(|choice| &choice.model)
+        .filter(|model| provider.catalog.models.contains(model))
+        .or(provider.catalog.models.first())?;
+    let effort = match previous {
+        Some(choice) => provider
+            .catalog
+            .efforts
             .iter()
-            .map(|v| Labeled {
-                value: v.clone(),
-                title: label(v).into(),
-            })
-            .collect()
-    };
-    let models = labeled(
-        provider
-            .map(|p| p.catalog.models.as_slice())
-            .unwrap_or_default(),
-        model_label,
-    );
-    let efforts = labeled(
-        provider
-            .map(|p| p.catalog.efforts.as_slice())
-            .unwrap_or_default(),
-        |e| effort_label(e).to_owned(),
-    );
-    let at = |items: &[Labeled], value: Option<&String>| {
-        value
-            .and_then(|v| items.iter().position(|i| i.value == *v))
-            .or((!items.is_empty()).then_some(0))
-            .map(IndexPath::new)
-    };
-    let model_ix = at(&models, choice.map(|c| &c.model));
-    let effort_ix = at(&efforts, choice.map(|c| &c.reasoning_effort));
-    (
-        cx.new(|cx| SelectState::new(models, model_ix, window, cx)),
-        cx.new(|cx| SelectState::new(efforts, effort_ix, window, cx)),
-    )
+            .find(|effort| **effort == choice.reasoning_effort),
+        None => provider
+            .catalog
+            .efforts
+            .iter()
+            .find(|effort| *effort == "medium"),
+    }
+    .or(provider.catalog.efforts.first())?;
+    let fast = previous.is_some_and(|choice| choice.service_tier == FAST)
+        && provider.catalog.tiers.iter().any(|tier| tier == FAST);
+    Some(ProfileChoice {
+        provider_id: provider.id.clone(),
+        model: model.clone(),
+        reasoning_effort: effort.clone(),
+        service_tier: if fast { FAST } else { "default" }.to_owned(),
+    })
 }
 
 /// "gpt-6.1-sol" -> "GPT 6.1 Sol", "claude-opus-5-5" -> "Claude Opus 5.5".
@@ -262,93 +370,242 @@ pub fn effort_label(id: &str) -> &str {
 impl Render for ProfilePicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let label = |text: &'static str| {
-            div()
+        let choice = self.choice.as_ref();
+        let fast = choice.is_some_and(|choice| choice.service_tier == FAST);
+        let chip = |icon, text: String, active| {
+            h_flex()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
                 .text_xs()
-                .text_color(theme.muted_foreground)
+                .text_color(if active {
+                    theme.primary
+                } else {
+                    theme.muted_foreground
+                })
+                .child(Icon::new(icon).size_3())
                 .child(text)
         };
-        let mut buttons = h_flex().flex_wrap().gap_2();
-        for info in &self.providers {
-            let id = info.id.clone();
-            let mut button = Button::new(SharedString::from(format!("pick-{}", info.id)))
-                .cursor_pointer()
-                .label(info.label.clone())
-                .small()
-                .disabled(self.disabled || !info.cli_available);
-            button = if self.provider.as_deref() == Some(info.id.as_str()) {
-                button.primary()
-            } else {
-                button.outline()
-            };
-            if let Some(reason) = &info.cli_unavailable_reason {
-                button = button.tooltip(reason.clone());
-            }
-            buttons = buttons.child(button.on_click(cx.listener(move |picker, _, window, cx| {
-                picker.choose_provider(&id, window, cx);
-            })));
-        }
-        let mut body = v_flex()
+        let summary = v_flex()
+            .p_4()
             .gap_3()
-            .child(v_flex().gap_1().child(label("Provider")).child(buttons));
-        let Some(provider) = self.current() else {
-            return body.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child("Neither Codex nor Claude Code runs on this computer yet."),
-            );
-        };
-        let fast_offered = provider.catalog.tiers.iter().any(|t| t == FAST);
-        let selects = if self.stacked { v_flex() } else { h_flex() };
-        body = body
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius_lg)
+            .bg(theme.muted.opacity(0.2))
             .child(
-                selects
+                h_flex()
                     .gap_3()
                     .child(
-                        v_flex().flex_1().gap_1().child(label("Model")).child(
-                            Select::new(&self.model)
-                                .cursor_pointer()
-                                .accessibility_label("Model")
-                                .disabled(self.disabled),
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size_10()
+                            .flex_none()
+                            .rounded(theme.radius)
+                            .bg(theme.primary.opacity(0.1))
+                            .text_color(theme.primary)
+                            .child(Icon::new(IconName::Cpu).size_5()),
                     )
                     .child(
-                        v_flex().flex_1().gap_1().child(label("Reasoning")).child(
-                            Select::new(&self.effort)
-                                .cursor_pointer()
-                                .accessibility_label("Reasoning")
-                                .disabled(self.disabled),
-                        ),
-                    ),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                                    choice
+                                        .map(|c| model_label(&c.model))
+                                        .unwrap_or_else(|| "Choose a model".into()),
+                                ),
+                            )
+                            .children(self.current().map(|provider| {
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(provider.label.clone())
+                            })),
+                    )
+                    .children(choice.map(|_| {
+                        Button::new("pick-change")
+                            .cursor_pointer()
+                            .link()
+                            .small()
+                            .label(if self.browsing { "Done" } else { "Change" })
+                            .accessibility_label(if self.browsing {
+                                "Close model browser"
+                            } else {
+                                "Change model"
+                            })
+                            .track_focus(&self.change_focus)
+                            .disabled(self.disabled)
+                            .on_click(cx.listener(|picker, _, window, cx| {
+                                picker.browsing = !picker.browsing;
+                                if picker.browsing {
+                                    picker
+                                        .search
+                                        .update(cx, |search, cx| search.set_value("", window, cx));
+                                    picker.search.read(cx).focus_handle(cx).focus(window, cx);
+                                } else {
+                                    picker.change_focus.focus(window, cx);
+                                }
+                                cx.notify();
+                            }))
+                    })),
             )
-            .child(
-                Switch::new("pick-fast")
+            .children(choice.map(|choice| {
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(chip(
+                        IconName::SlidersHorizontal,
+                        format!("{} reasoning", effort_label(&choice.reasoning_effort)),
+                        false,
+                    ))
+                    .child(chip(
+                        if fast { IconName::Zap } else { IconName::Clock },
+                        if fast { "Fast mode" } else { "Standard speed" }.to_owned(),
+                        fast,
+                    ))
+            }));
+        let mut body = v_flex().gap_3().child(summary);
+        if self.browsing {
+            body = body.child(self.render_catalog(cx));
+        }
+        if !self.any_available() {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child("No provider is available on this computer yet."),
+            );
+        }
+        if choice.is_some() {
+            body = body.child(
+                Button::new("pick-customize")
                     .cursor_pointer()
-                    .checked(self.fast && fast_offered)
-                    .label(if fast_offered {
-                        "Fast mode"
-                    } else {
-                        "Fast mode (not offered by this provider)"
-                    })
-                    .disabled(self.disabled || !fast_offered)
-                    .on_click(cx.listener(|picker, checked: &bool, _, cx| {
-                        picker.fast = *checked;
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .accessibility_label("Customize reasoning & speed")
+                    .toggled(self.customizing)
+                    .disabled(self.disabled)
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .gap_2()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::SlidersHorizontal).size_3())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_left()
+                                    .child("Customize reasoning & speed"),
+                            )
+                            .child(
+                                Icon::new(if self.customizing {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size_3(),
+                            ),
+                    )
+                    .on_click(cx.listener(|picker, _, _, cx| {
+                        picker.customizing = !picker.customizing;
                         cx.notify();
                     })),
             );
+            if self.customizing {
+                body = body.child(self.render_settings(cx));
+            } else {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("You can change this model and its settings anytime."),
+                );
+            }
+        }
         body
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::model_label;
+    use super::{FAST, catalog_choice, model_label};
+    use crate::api::{Catalog, ProviderInfo};
+
+    fn provider(id: &str, fast: bool) -> ProviderInfo {
+        ProviderInfo {
+            id: id.into(),
+            label: id.into(),
+            cli_available: true,
+            cli_unavailable_reason: None,
+            catalog: Catalog {
+                models: vec!["first".into(), "second".into()],
+                efforts: vec!["low".into(), "medium".into(), "high".into()],
+                tiers: if fast {
+                    vec!["default".into(), FAST.into()]
+                } else {
+                    vec!["default".into()]
+                },
+            },
+        }
+    }
 
     #[test]
     fn model_ids_read_as_names() {
         assert_eq!(model_label("gpt-6.1-sol"), "GPT 6.1 Sol");
         assert_eq!(model_label("claude-opus-5-5"), "Claude Opus 5.5");
         assert_eq!(model_label("claude-fable-5-1"), "Claude Fable 5.1");
+    }
+
+    #[test]
+    fn saved_profile_keeps_its_model_reasoning_and_speed() {
+        let provider = provider("codex", true);
+        let mut saved = catalog_choice(&provider, None).unwrap();
+        saved.model = "second".into();
+        saved.reasoning_effort = "high".into();
+        saved.service_tier = FAST.into();
+        assert_eq!(catalog_choice(&provider, Some(&saved)), Some(saved));
+    }
+
+    #[test]
+    fn switching_provider_starts_at_medium_and_standard_speed() {
+        let mut saved = catalog_choice(&provider("codex", true), None).unwrap();
+        saved.reasoning_effort = "high".into();
+        saved.service_tier = FAST.into();
+        let choice = catalog_choice(&provider("claude", false), Some(&saved)).unwrap();
+        assert_eq!(choice.provider_id, "claude");
+        assert_eq!(choice.reasoning_effort, "medium");
+        assert_eq!(choice.service_tier, "default");
+    }
+
+    #[test]
+    fn removed_catalog_values_fall_back_to_supported_values() {
+        let mut saved = catalog_choice(&provider("codex", true), None).unwrap();
+        saved.model = "removed".into();
+        saved.reasoning_effort = "removed".into();
+        saved.service_tier = FAST.into();
+        let choice = catalog_choice(&provider("codex", false), Some(&saved)).unwrap();
+        assert_eq!(choice.model, "first");
+        assert_eq!(choice.reasoning_effort, "low");
+        assert_eq!(choice.service_tier, "default");
+    }
+
+    #[test]
+    fn incomplete_catalog_cannot_produce_a_profile() {
+        let mut provider = provider("codex", true);
+        provider.catalog.models.clear();
+        assert!(catalog_choice(&provider, None).is_none());
+        provider.catalog.models.push("first".into());
+        provider.catalog.efforts.clear();
+        assert!(catalog_choice(&provider, None).is_none());
     }
 }

@@ -37,7 +37,14 @@ gpui_kit::assets::icon_assets!(
         FolderPlus,
         Laptop,
         Eye,
-        EyeOff
+        EyeOff,
+        Cpu,
+        SlidersHorizontal,
+        Zap,
+        Clock,
+        Circle,
+        Search,
+        ChevronUp
     ]
 );
 

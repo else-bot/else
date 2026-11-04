@@ -168,7 +168,7 @@ pub(super) struct ModelDialog {
 
 impl ModelDialog {
     fn dirty(&self, cx: &App) -> bool {
-        self.picker.read(cx).choice(cx) != self.saved
+        self.picker.read(cx).choice() != self.saved
     }
 }
 
@@ -574,7 +574,7 @@ impl ElseApp {
             return;
         };
         let saved = saved.as_ref().map(|p| p.choice.clone());
-        let picker = cx.new(|cx| ProfilePicker::new(&caps, saved.as_ref(), window, cx).stacked());
+        let picker = cx.new(|cx| ProfilePicker::new(&caps, saved.as_ref(), window, cx));
         let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
         let holder = cx.new(|_| ModelDialog {
             bot,
@@ -591,7 +591,7 @@ impl ElseApp {
             let connected = app
                 .upgrade()
                 .is_some_and(|app| app.read(cx).connection == Connection::Connected);
-            let ready = form.dirty(cx) && form.picker.read(cx).choice(cx).is_some();
+            let ready = form.dirty(cx) && form.picker.read(cx).choice().is_some();
             let body = v_flex()
                 .gap_3()
                 .child(picker.clone())
@@ -655,7 +655,7 @@ impl ElseApp {
             let form = holder.read(cx);
             (form.bot, form.picker.clone())
         };
-        let Some(choice) = picker.read(cx).choice(cx) else {
+        let Some(choice) = picker.read(cx).choice() else {
             return;
         };
         if holder.read(cx).save.busy() || !holder.read(cx).dirty(cx) {
@@ -1010,6 +1010,7 @@ impl ElseApp {
             .w_full()
             .p_3()
             .tooltip("Change model")
+            .accessibility_label("Change model")
             .disabled(self.caps.is_none() || self.connection != Connection::Connected)
             .child(
                 content
