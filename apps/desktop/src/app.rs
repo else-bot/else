@@ -13,7 +13,7 @@ mod view;
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
 use dialogs::{CreateFormHolder, Welcome};
-use settings::BotSettings;
+use settings::{BotSettings, ModelDialog};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -109,6 +109,7 @@ pub struct ElseApp {
     welcome: Option<Welcome>,
     _welcome_enter: Option<Subscription>,
     category_form: Option<Entity<CategoryFormHolder>>,
+    model_dialog: Option<Entity<ModelDialog>>,
     _category_enter: Option<Subscription>,
     /// Bots with a move in flight: one at a time per bot, so an earlier
     /// choice can never land after a later one.
@@ -161,6 +162,7 @@ impl ElseApp {
             welcome: None,
             _welcome_enter: None,
             category_form: None,
+            model_dialog: None,
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
@@ -254,7 +256,6 @@ impl ElseApp {
                     self.open_welcome(&caps, window, cx);
                 }
                 self.caps = Some(caps);
-                self.build_pickers(window, cx);
             }
             Err(ClientError::Unauthorized) => {
                 self.connection =
