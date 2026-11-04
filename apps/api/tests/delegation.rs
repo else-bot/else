@@ -231,6 +231,10 @@ async fn a_delegation_receipt_is_shown_once_before_the_child_runs() {
         .map(|i| (i.kind.as_str(), i.turn_id))
         .collect();
     assert_eq!(shown, [("status", child)], "one receipt, no owner message");
+    let task = snapshot.items[0].bot_task.as_ref().unwrap();
+    assert_eq!(task.sender_bot_id, main);
+    assert_eq!(task.sender_name, sender);
+    assert_eq!(task.prompt, "seeded task");
     let receipt = &snapshot.items[0].text;
     assert!(
         receipt.contains(&sender) && receipt.contains("seeded task"),
@@ -256,6 +260,11 @@ async fn a_delegation_receipt_is_shown_once_before_the_child_runs() {
 
     let conversation = owner_conversation(&db.pool, target).await;
     let events = turn_events(&db.pool, target, child).await;
+    assert_eq!(
+        events[0].1["item"]["bot_task"]["sender_bot_id"],
+        main.to_string()
+    );
+    assert_eq!(events[0].1["item"]["bot_task"]["prompt"], "seeded task");
     let kinds: Vec<&str> = events.iter().map(|(kind, _)| kind.as_str()).collect();
     assert_eq!(kinds, ["item.upsert", "turn.updated"], "{events:?}");
     for (_, data) in &events {

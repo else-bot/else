@@ -1,12 +1,12 @@
 use super::reply::Author;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
+use crate::avatar::bot_avatar;
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::*;
 
@@ -35,14 +35,24 @@ impl ElseApp {
                     .bg(theme.secondary)
                     .child(text.render())
             } else {
-                card.py_0p5().child(text.render())
+                card.px_3p5()
+                    .py_2()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .bg(theme.sidebar.opacity(0.6))
+                    .child(text.render())
             }
         };
         // Wrapped text needs a definite width, so bubbles span the row and
         // owner messages are inset from the left.
         let side = |user: bool, card: AnyElement| {
             let side = div().w_full();
-            let side = if user { side.pl(relative(0.15)) } else { side };
+            let side = if user {
+                side.pl(relative(0.15))
+            } else {
+                side.pr(relative(0.06))
+            };
             side.child(card)
         };
         let reacted = |card: AnyElement, kind: ReactionKind| {
@@ -98,10 +108,47 @@ impl ElseApp {
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
                 let mut column = super::view::reading_column().gap_1().py_1p5();
-                let card = with_exact_time(
-                    card(text, user).id(SharedString::from(format!("message-{id}"))),
-                    item.created_at,
-                );
+                let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
+                if let Some(task) = &item.bot_task {
+                    let sender = self.bots.iter().find(|b| b.id == task.sender_bot_id);
+                    let recipient = self.bots.iter().find(|b| b.id == view.bot_id);
+                    let label = h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .children(
+                            sender.map(|b| bot_avatar("task-sender", b.avatar, px(18.)).still()),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(format!(
+                            "{} → {} · Task",
+                            task.sender_name,
+                            recipient.map_or("Bot", |b| b.name.as_str())
+                        )));
+                    card = div()
+                        .id(SharedString::from(format!("message-{id}")))
+                        .w_full()
+                        .p_3()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.primary.opacity(0.3))
+                        .bg(theme.primary.opacity(0.05))
+                        .child(label)
+                        .child(div().pt_2().child(text.render()));
+                } else if !user && run.first {
+                    if let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
+                        column = column.child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(bot_avatar("message-author", bot.avatar, px(18.)).still())
+                                .child(bot.name.clone()),
+                        );
+                    }
+                }
                 let card = if conversation
                     .latest_reply()
                     .is_some_and(|reply| reply.id == id)
@@ -145,17 +192,34 @@ impl ElseApp {
                     .child(side(user, card))
                     .children(footer.map(|at| beside(user, note(at, false))));
                 if let Some(turn) = turn {
-                    let show_on_user = user && !turn.is_finished()
-                        || user
-                            && turn.status != "completed"
-                            && !conversation
-                                .items()
-                                .any(|i| i.turn_id == turn.id && i.kind == "assistant");
-                    let show_on_assistant = !user && run.last && turn.status != "completed";
-                    if show_on_user || show_on_assistant {
+                    let last_in_turn = conversation
+                        .items()
+                        .rev()
+                        .find(|i| i.turn_id == turn.id)
+                        .is_some_and(|i| i.id == id);
+                    if last_in_turn {
                         let (label, error) = turn_label(turn);
                         if !label.is_empty() {
-                            column = column.child(beside(user, note(label, error)));
+                            let active =
+                                matches!(turn.status.as_str(), "preparing" | "sending" | "running");
+                            let status = h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .children(
+                                    active
+                                        .then(|| self.bots.iter().find(|b| b.id == view.bot_id))
+                                        .flatten()
+                                        .map(|bot| {
+                                            bot_avatar(
+                                                SharedString::from(format!("working-{}", turn.id)),
+                                                bot.avatar,
+                                                px(20.),
+                                            )
+                                            .working()
+                                        }),
+                                )
+                                .child(note(label, error));
+                            column = column.child(status);
                         }
                     }
                 }
@@ -178,12 +242,9 @@ impl ElseApp {
                     .py_1p5()
                     .child(side(
                         true,
-                        with_exact_time(
-                            card(text, true)
-                                .id(SharedString::from(format!("pending-{request_id}"))),
-                            Some(pending.sent_at),
-                        )
-                        .into_any_element(),
+                        card(text, true)
+                            .id(SharedString::from(format!("pending-{request_id}")))
+                            .into_any_element(),
                     ))
                     .children(footer.map(|at| beside(true, note(at, false))));
                 if let Some(reason) = &pending.rejected {
@@ -198,6 +259,7 @@ impl ElseApp {
                                     Button::new(SharedString::from(format!(
                                         "restore-{request_id}"
                                     )))
+                                    .cursor_pointer()
                                     .label("Restore to composer")
                                     .xsmall()
                                     .on_click(cx.listener(move |app, _, window, cx| {
@@ -208,6 +270,7 @@ impl ElseApp {
                                     Button::new(SharedString::from(format!(
                                         "dismiss-{request_id}"
                                     )))
+                                    .cursor_pointer()
                                     .label("Dismiss")
                                     .xsmall()
                                     .ghost()
@@ -230,6 +293,7 @@ impl ElseApp {
                         .child(
                             h_flex().w_full().justify_end().gap_2().child(
                                 Button::new(SharedString::from(format!("retry-{request_id}")))
+                                    .cursor_pointer()
                                     .label("Retry")
                                     .xsmall()
                                     .on_click(cx.listener(move |app, _, window, cx| {
@@ -280,25 +344,6 @@ fn beside(user: bool, note: Div) -> Div {
     if user { row.justify_end() } else { row }
 }
 
-fn with_exact_time(card: Stateful<Div>, at: Option<DateTime<Utc>>) -> Stateful<Div> {
-    match at {
-        Some(at) => {
-            let exact = SharedString::from(exact_stamp_in(at, &Local));
-            card.tooltip(move |window, cx| Tooltip::new(exact.clone()).build(window, cx))
-        }
-        None => card,
-    }
-}
-
-fn exact_stamp_in<Tz: TimeZone>(at: DateTime<Utc>, zone: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    at.with_timezone(zone)
-        .format("%A, %-d %B %Y, %H:%M:%S UTC%:z")
-        .to_string()
-}
-
 fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
@@ -317,7 +362,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_stamp_in, stamp_in};
+    use super::stamp_in;
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -333,16 +378,6 @@ mod tests {
         assert_eq!(
             stamp_in(at("2025-12-31T21:59:00Z"), now),
             "31 Dec 2025, 23:59"
-        );
-    }
-
-    #[test]
-    fn exact_stamps_name_the_year_seconds_and_offset_in_the_viewer_zone() {
-        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
-        let at = "2026-11-04T22:30:07Z".parse::<DateTime<Utc>>().unwrap();
-        assert_eq!(
-            exact_stamp_in(at, &zone),
-            "Thursday, 5 November 2026, 00:30:07 UTC+02:00"
         );
     }
 }

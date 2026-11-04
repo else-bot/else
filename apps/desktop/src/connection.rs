@@ -408,6 +408,7 @@ impl Shell {
             .child(div().flex_1())
             .child(
                 Button::new("server-change")
+                    .cursor_pointer()
                     .label("Change server")
                     .xsmall()
                     .ghost()
@@ -460,6 +461,7 @@ impl Shell {
         if !first {
             actions = actions.child(
                 Button::new("connection-cancel")
+                    .cursor_pointer()
                     .label("Cancel")
                     .ghost()
                     .on_click(cx.listener(|shell, _, window, cx| shell.cancel(window, cx))),
@@ -468,6 +470,7 @@ impl Shell {
         actions = actions
             .child(
                 Button::new("connection-check")
+                    .cursor_pointer()
                     .label("Check connection")
                     .loading(checking)
                     .disabled(checking)
@@ -475,6 +478,7 @@ impl Shell {
             )
             .child(
                 Button::new("connection-save")
+                    .cursor_pointer()
                     .label(if first { "Continue" } else { "Save" })
                     .primary()
                     .disabled(!ready)

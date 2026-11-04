@@ -1,5 +1,6 @@
 //! Rendering of the sidebar, header, conversation, and composer.
 
+use super::layout::{CategoryDrag, SidebarEdge};
 use super::reply::{Author, MessageReference};
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
@@ -9,9 +10,10 @@ use super::{
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -75,7 +77,7 @@ impl ElseApp {
             .flex_1()
             .overflow_y_scroll();
         let grouped = !self.categories.is_empty();
-        let layout = crate::sidebar::Layout::new(&self.categories, &self.bots, self.default_bot_id);
+        let layout = self.sidebar_layout();
         let can_edit = self.connection == Connection::Connected;
         let owner = cx.entity().downgrade();
         if let Some(notice) = self.category_notice.clone() {
@@ -94,6 +96,7 @@ impl ElseApp {
         for group in layout.groups {
             let destination = group.category.map(|c| c.id);
             let drop_owner = owner.clone();
+            let category_target = destination;
             let mut zone = v_flex()
                 .id(SharedString::from(match destination {
                     Some(id) => format!("category-group-{id}"),
@@ -102,33 +105,50 @@ impl ElseApp {
                 .gap_0p5()
                 .rounded(theme.radius)
                 .can_drop(move |value, _, cx| {
-                    value.downcast_ref::<BotDrag>().is_some_and(|drag| {
-                        drop_owner.upgrade().is_some_and(|app| {
-                            app.read(cx).can_assign_category(drag.bot, destination)
+                    value
+                        .downcast_ref::<CategoryDrag>()
+                        .is_some_and(|drag| category_target.is_some_and(|id| id != drag.id))
+                        || value.downcast_ref::<BotDrag>().is_some_and(|drag| {
+                            drop_owner.upgrade().is_some_and(|app| {
+                                app.read(cx).can_assign_category(drag.bot, destination)
+                            })
                         })
-                    })
                 })
                 .drag_over::<BotDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
                 .on_drop(cx.listener(move |app, drag: &BotDrag, window, cx| {
                     app.assign_category(drag.bot, destination, window, cx)
                 }));
             if grouped {
-                // A header per category (empty ones stay), then Unassigned.
                 let name = group
                     .category
                     .map_or_else(|| "Unassigned".to_owned(), |c| c.name.clone());
+                let collapsed = self.preferences.collapsed.contains(&destination);
                 let mut header = h_flex()
-                    .id(SharedString::from(match destination {
-                        Some(id) => format!("category-header-{id}"),
-                        None => "category-header-unassigned".to_owned(),
-                    }))
+                    .id(SharedString::from(format!(
+                        "category-header-{destination:?}"
+                    )))
                     .mt_3()
-                    .h(px(24.))
-                    .pl_2()
+                    .h(px(28.))
+                    .px_2()
                     .gap_1()
                     .items_center()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(theme.sidebar_accent)
+                            .text_color(theme.sidebar_foreground)
+                    })
                     .text_xs()
                     .text_color(theme.muted_foreground)
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall(),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -137,29 +157,34 @@ impl ElseApp {
                             .truncate()
                             .child(name.clone()),
                     )
-                    .child(div().flex_none().child(group.bots.len().to_string()));
-                if let Some(category) = group.category.cloned() {
-                    let (button, context) = (owner.clone(), owner.clone());
-                    let for_button = category.clone();
-                    header = header.child(
-                        Button::new(SharedString::from(format!("category-menu-{}", category.id)))
-                            .icon(IconName::Ellipsis)
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Category actions")
-                            .accessibility_label(format!("{name} actions"))
-                            .disabled(!can_edit)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                                Self::category_menu(button.clone(), &for_button, menu, cx)
-                            }),
+                    .on_click(
+                        cx.listener(move |app, _, _, cx| app.toggle_category(destination, cx)),
                     );
-                    zone = zone.child(header.context_menu(move |menu, _, cx| {
-                        Self::category_menu(context.clone(), &category, menu, cx)
-                    }));
+                if let Some(category) = group.category.cloned() {
+                    let context = owner.clone();
+                    header = header.on_drag(
+                        CategoryDrag {
+                            id: category.id,
+                            name: name.clone().into(),
+                        },
+                        |drag, _, _, cx| cx.new(|_| drag.clone()),
+                    );
+                    zone = zone
+                        .drag_over::<CategoryDrag>(|style, _, _, cx| {
+                            style.bg(cx.theme().drop_target)
+                        })
+                        .on_drop(cx.listener(move |app, drag: &CategoryDrag, _, cx| {
+                            app.reorder_category(drag.id, category.id, cx);
+                        }))
+                        .child(header.context_menu(move |menu, _, cx| {
+                            Self::category_menu(context.clone(), &category, menu, cx)
+                        }));
                 } else {
-                    zone = zone.child(header.pr(px(26.)));
+                    zone = zone.child(header);
                 }
-                if group.bots.is_empty() {
+            }
+            if !grouped || !self.preferences.collapsed.contains(&destination) {
+                if grouped && group.bots.is_empty() {
                     zone = zone.child(
                         div()
                             .px_2()
@@ -169,9 +194,9 @@ impl ElseApp {
                             .child("No bots"),
                     );
                 }
-            }
-            for bot in group.bots {
-                zone = zone.child(self.render_bot_row(bot, cx));
+                for bot in group.bots {
+                    zone = zone.child(self.render_bot_row(bot, cx));
+                }
             }
             list = list.child(zone);
         }
@@ -191,6 +216,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("new-bot")
+                    .cursor_pointer()
                     .icon(IconName::SquarePen)
                     .small()
                     .ghost()
@@ -208,6 +234,7 @@ impl ElseApp {
                 .border_color(theme.sidebar_border)
                 .child(
                     Button::new("new-category")
+                        .cursor_pointer()
                         .icon(IconName::FolderPlus)
                         .label("New category")
                         .small()
@@ -230,7 +257,9 @@ impl ElseApp {
             .on_action(
                 cx.listener(|app, _: &SelectPrev, window, cx| app.move_selection(-1, window, cx)),
             )
-            .w(SIDEBAR_WIDTH)
+            .relative()
+            .w(px(self.preferences.sidebar_width))
+            .on_drag_move(cx.listener(Self::resize_sidebar))
             .flex_none()
             .h_full()
             .bg(theme.sidebar)
@@ -240,6 +269,7 @@ impl ElseApp {
             .child(brand)
             .child(list)
             .child(footer)
+            .child(self.sidebar_handle(SidebarEdge::Left, cx))
     }
 
     fn render_bot_row(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
@@ -335,6 +365,7 @@ impl ElseApp {
         if busy || stopping {
             actions = actions.child(
                 Button::new("stop-work")
+                    .cursor_pointer()
                     .label(if stopping { "Stopping…" } else { "Stop work" })
                     .small()
                     .outline()
@@ -343,34 +374,18 @@ impl ElseApp {
                     .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
             );
         }
-        let (owner, id) = (cx.entity().downgrade(), bot.id);
-        let details = if self.settings_open {
-            ("Hide bot details", IconName::PanelRightClose)
-        } else {
-            ("Show bot details", IconName::PanelRightOpen)
-        };
-        actions = actions
-            .child(
-                Button::new("bot-actions")
-                    .icon(IconName::Ellipsis)
-                    .small()
-                    .ghost()
-                    .tooltip("Bot actions")
-                    .accessibility_label("Bot actions")
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
-                        Self::bot_menu(owner.clone(), id, menu, window, cx)
-                    }),
-            )
-            .child(
+        if !self.settings_open {
+            actions = actions.child(
                 Button::new("toggle-settings")
-                    .icon(details.1)
+                    .cursor_pointer()
+                    .icon(IconName::PanelRightOpen)
                     .small()
                     .ghost()
-                    .toggled(self.settings_open)
-                    .accessibility_label(details.0)
-                    .tooltip_with_action(details.0, &ToggleSettings, Some(APP_CONTEXT))
+                    .accessibility_label("Show bot details")
+                    .tooltip_with_action("Show bot details", &ToggleSettings, Some(APP_CONTEXT))
                     .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
             );
+        }
         let main = self.default_bot_id == Some(bot.id);
         h_flex()
             .flex_none()
@@ -437,6 +452,7 @@ impl ElseApp {
                             column.child(
                                 h_flex().justify_center().py_1().child(
                                     Button::new("load-older")
+                                        .cursor_pointer()
                                         .label(if loading {
                                             "Loading…"
                                         } else {
@@ -474,6 +490,7 @@ impl ElseApp {
                                 .justify_center()
                                 .child(
                                     Button::new("jump-to-latest")
+                                        .cursor_pointer()
                                         .label("New messages")
                                         .icon(IconName::ArrowDown)
                                         .small()
@@ -537,21 +554,17 @@ impl ElseApp {
                     .aria_label(format!("Message {}", bot.name)),
             )
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .children(self.render_model_chip(bot.id, cx))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("send")
-                            .icon(IconName::ArrowUp)
-                            .primary()
-                            .small()
-                            .accessibility_label("Send message")
-                            .tooltip("Send")
-                            .disabled(!can_send)
-                            .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
-                    ),
+                h_flex().gap_2().items_center().child(div().flex_1()).child(
+                    Button::new("send")
+                        .cursor_pointer()
+                        .icon(IconName::ArrowUp)
+                        .primary()
+                        .small()
+                        .accessibility_label("Send message")
+                        .tooltip("Send")
+                        .disabled(!can_send)
+                        .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
+                ),
             );
         let footer = reading_column()
             .flex_none()
@@ -624,6 +637,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("cancel-reply")
+                    .cursor_pointer()
                     .flex_none()
                     .icon(IconName::Close)
                     .xsmall()
@@ -668,6 +682,7 @@ impl ElseApp {
         if self.connection == Connection::Connected {
             body = body.child(
                 Button::new("empty-create")
+                    .cursor_pointer()
                     .label("Create bot")
                     .primary()
                     .on_click(cx.listener(|app, _, window, cx| app.open_create_dialog(window, cx))),
@@ -700,9 +715,6 @@ fn subtitle(bot: &Bot, main: bool) -> String {
     }
 }
 
-const NARROW: Pixels = px(1000.);
-
-const SIDEBAR_WIDTH: Pixels = px(240.);
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
 const READING_WIDTH: Pixels = px(760.);
 
@@ -727,7 +739,9 @@ impl Render for ElseApp {
             .then(|| self.selected_bot().cloned())
             .flatten();
         let width = window.viewport_size().width;
-        let crowded = settings.is_some() && width < NARROW;
+        let crowded = settings.is_some()
+            && f32::from(width)
+                < self.preferences.sidebar_width + self.preferences.details_width + 360.;
         let theme = cx.theme();
         h_flex()
             .key_context(APP_CONTEXT)
@@ -772,7 +786,7 @@ impl Render for ElseApp {
             .text_color(theme.foreground)
             .children((!crowded).then(|| self.render_sidebar(cx)))
             .child(self.render_main(window, cx))
-            .children(settings.map(|bot| self.render_settings(&bot, cx)))
+            .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
             .into_any_element()
     }
 }

@@ -266,7 +266,13 @@ impl ElseApp {
             } else {
                 RowFormat::Plain
             };
-            texts.push((RowKey::Item(item.id), item.text.clone(), format));
+            texts.push((
+                RowKey::Item(item.id),
+                item.bot_task
+                    .as_ref()
+                    .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
+                format,
+            ));
             if items
                 .get(ix + 1)
                 .is_none_or(|next| next.turn_id != item.turn_id)

@@ -4,3 +4,4 @@
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
+- Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
