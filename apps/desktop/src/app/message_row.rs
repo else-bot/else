@@ -7,7 +7,7 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::*;
 
 impl ElseApp {
@@ -27,29 +27,22 @@ impl ElseApp {
         let footer = row.footer_stamp.map(stamp);
         let theme = cx.theme().clone();
         let card = |text: &RowText, user: bool| {
-            div()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .bg(if user {
-                    theme.secondary
-                } else {
-                    theme.background
-                })
-                .border_1()
-                .border_color(theme.border)
-                .child(text.render())
+            let card = div().w_full();
+            if user {
+                card.px_3p5()
+                    .py_2()
+                    .rounded(theme.radius_lg)
+                    .bg(theme.secondary)
+                    .child(text.render())
+            } else {
+                card.py_0p5().child(text.render())
+            }
         };
         // Wrapped text needs a definite width, so bubbles span the row and
-        // are offset to their side.
+        // owner messages are inset from the left.
         let side = |user: bool, card: AnyElement| {
             let side = div().w_full();
-            let side = if user {
-                side.pl(px(96.))
-            } else {
-                side.pr(px(96.))
-            };
+            let side = if user { side.pl(relative(0.15)) } else { side };
             side.child(card)
         };
         let reacted = |card: AnyElement, kind: ReactionKind| {
@@ -104,7 +97,7 @@ impl ElseApp {
                 let run = conversation.run(id);
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
-                let mut column = v_flex().w_full().gap_1().px_4().py_1();
+                let mut column = super::view::reading_column().gap_1().py_1p5();
                 let card = with_exact_time(
                     card(text, user).id(SharedString::from(format!("message-{id}"))),
                     item.created_at,
@@ -180,11 +173,9 @@ impl ElseApp {
                 let Some(text) = view.texts.get(&key) else {
                     return div().into_any_element();
                 };
-                let mut column = v_flex()
-                    .w_full()
+                let mut column = super::view::reading_column()
                     .gap_1()
-                    .px_4()
-                    .py_1()
+                    .py_1p5()
                     .child(side(
                         true,
                         with_exact_time(
@@ -197,12 +188,12 @@ impl ElseApp {
                     .children(footer.map(|at| beside(true, note(at, false))));
                 if let Some(reason) = &pending.rejected {
                     return column
+                        .child(note(format!("Not sent. {reason}"), true).w_full())
                         .child(
                             h_flex()
                                 .w_full()
                                 .justify_end()
                                 .gap_2()
-                                .child(note(format!("Not sent. {reason}"), true))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "restore-{request_id}"
@@ -234,13 +225,10 @@ impl ElseApp {
                             .justify_end()
                             .child(note("Sending…".into(), false)),
                     ),
-                    Some(reason) => column.child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .gap_2()
-                            .child(note(format!("Not confirmed. {reason}"), true))
-                            .child(
+                    Some(reason) => column
+                        .child(note(format!("Not confirmed. {reason}"), true).w_full())
+                        .child(
+                            h_flex().w_full().justify_end().gap_2().child(
                                 Button::new(SharedString::from(format!("retry-{request_id}")))
                                     .label("Retry")
                                     .xsmall()
@@ -248,7 +236,7 @@ impl ElseApp {
                                         app.retry_pending(request_id, window, cx)
                                     })),
                             ),
-                    ),
+                        ),
                 };
                 column.into_any_element()
             }

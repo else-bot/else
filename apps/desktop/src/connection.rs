@@ -9,8 +9,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::api::{Client, ClientError};
@@ -360,37 +361,48 @@ impl Shell {
         }
     }
 
-    fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The server and its connection state. On macOS this is the window's
+    /// title bar, beside the traffic lights; elsewhere a slim strip under the
+    /// desktop's own decorations.
+    fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let app = active.app.read(cx);
         let (connected, (status, _)) = (app.connected(), app.status_text());
-        let detail: SharedString = format!("{} · {status}", active.profile.origin.as_str()).into();
+        let origin = active.profile.origin.as_str().to_owned();
+        let detail: SharedString = format!("{origin} · {status}").into();
         let tooltip = detail.clone();
-        h_flex()
-            .px_3()
-            .py_1()
+        let label: SharedString = if connected { origin.into() } else { status };
+        let content = h_flex()
+            .flex_1()
+            .min_w_0()
             .gap_2()
             .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.sidebar)
             .child(
                 h_flex()
                     .id("server-status")
-                    .gap_2()
+                    .min_w_0()
+                    .gap_1p5()
                     .items_center()
                     .aria_label(detail)
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child(div().flex_none().size_2().rounded_full().bg(if connected {
-                        theme.success
-                    } else {
-                        theme.danger
-                    }))
                     .child(
                         div()
+                            .flex_none()
+                            .size_1p5()
+                            .rounded_full()
+                            .bg(if connected {
+                                theme.success
+                            } else {
+                                theme.danger
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
                             .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("else.bot"),
+                            .text_color(theme.muted_foreground)
+                            .child(label),
                     ),
             )
             .child(div().flex_1())
@@ -400,7 +412,19 @@ impl Shell {
                     .xsmall()
                     .ghost()
                     .on_click(cx.listener(|shell, _, window, cx| shell.change_server(window, cx))),
-            )
+            );
+        if cfg!(target_os = "macos") {
+            return TitleBar::new().pr_2().child(content).into_any_element();
+        }
+        h_flex()
+            .flex_none()
+            .h(px(30.))
+            .px_3()
+            .border_b_1()
+            .border_color(theme.title_bar_border)
+            .bg(theme.title_bar)
+            .child(content)
+            .into_any_element()
     }
 
     fn render_editor(&self, editor: &Editor, cx: &mut Context<Self>) -> AnyElement {
@@ -460,7 +484,7 @@ impl Shell {
             .w(px(560.))
             .gap_4()
             .p_6()
-            .rounded_lg()
+            .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
             .bg(theme.background)
@@ -505,7 +529,17 @@ impl Render for Shell {
             .bg(theme.background)
             .text_color(theme.foreground);
         if let Some(editor) = &self.editor {
-            return root.child(self.render_editor(editor, cx));
+            // macOS still needs a title bar to drag the window by.
+            return root
+                .when(cfg!(target_os = "macos"), |root| {
+                    root.child(TitleBar::new())
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_editor(editor, cx)),
+                );
         }
         let Some(active) = &self.active else {
             return root;

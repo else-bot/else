@@ -288,7 +288,7 @@ impl ElseApp {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let row = v_flex().w_full().px_4().py_1();
+        let row = super::view::reading_column().py_1p5();
         let form = view.secret_forms.get(&id);
         let (Some(form), true) = (form, request.is_pending()) else {
             let text = match request.status.as_str() {
@@ -347,7 +347,7 @@ impl ElseApp {
             .w_full()
             .gap_2()
             .p_3()
-            .rounded_lg()
+            .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
@@ -401,8 +401,7 @@ impl ElseApp {
                         })),
                 ),
         );
-        row.child(div().w_full().pr(px(96.)).child(card))
-            .into_any_element()
+        row.child(card).into_any_element()
     }
 }
 

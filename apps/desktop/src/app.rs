@@ -51,13 +51,27 @@ actions!(
         LoadOlder,
         NewCategory,
         MoveBot,
-        ToggleSettings
+        ToggleSettings,
+        Quit,
+        CloseWindow
     ]
 );
 
 const SIDEBAR_CONTEXT: &str = "Sidebar";
 const COMPOSER_CONTEXT: &str = "Composer";
 const APP_CONTEXT: &str = "ElseApp";
+
+/// The platform's command modifier: Cmd on macOS, Ctrl elsewhere.
+/// `KeyBinding::new` needs the literal modifier.
+macro_rules! primary {
+    ($keys:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!("cmd-", $keys)
+        } else {
+            concat!("ctrl-", $keys)
+        }
+    };
+}
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -67,13 +81,62 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", SelectPrev, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("enter", FocusComposer, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("escape", FocusSidebar, Some(COMPOSER_CONTEXT)),
-        KeyBinding::new("ctrl-shift-n", NewBot, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-x", StopWork, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-d", DeleteBot, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-up", LoadOlder, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-g", NewCategory, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-m", MoveBot, Some(APP_CONTEXT)),
-        KeyBinding::new("ctrl-shift-b", ToggleSettings, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-n"), NewBot, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-x"), StopWork, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-d"), DeleteBot, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-up"), LoadOlder, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-g"), NewCategory, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-m"), MoveBot, Some(APP_CONTEXT)),
+        KeyBinding::new(primary!("shift-b"), ToggleSettings, Some(APP_CONTEXT)),
+    ]);
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-,", ToggleSettings, Some(APP_CONTEXT)),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
+    }
+}
+
+/// The macOS menu bar. Edit commands reach the focused text field through
+/// the input's own actions.
+pub fn install_menus(cx: &mut App) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    use gpui_kit::base::input;
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &CloseWindow, cx| {
+        if let Some(window) = cx.active_window() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+    cx.set_menus(vec![
+        Menu::new("else.bot").items([
+            MenuItem::action("Bot details", ToggleSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit else.bot", Quit),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        Menu::new("Bot").items([
+            MenuItem::action("New Bot", NewBot),
+            MenuItem::action("New Category", NewCategory),
+            MenuItem::action("Move to Category…", MoveBot),
+            MenuItem::separator(),
+            MenuItem::action("Load Older Messages", LoadOlder),
+            MenuItem::action("Stop Work", StopWork),
+            MenuItem::separator(),
+            MenuItem::action("Delete Bot…", DeleteBot),
+        ]),
+        Menu::new("Window").items([MenuItem::action("Close Window", CloseWindow)]),
     ]);
 }
 
@@ -150,7 +213,7 @@ impl ElseApp {
         sidebar_focus.focus(window, cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message… (Enter to send, Shift+Enter for a new line)")
+                .placeholder("Message…")
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
         });
@@ -197,7 +260,7 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
-            settings_open: true,
+            settings_open: false,
             settings: HashMap::new(),
             sidebar_focus,
             live: None,
@@ -370,8 +433,14 @@ impl ElseApp {
             .and_then(|id| self.drafts.get(&id))
             .map(|draft| draft.text.clone())
             .unwrap_or_default();
-        self.composer
-            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        let placeholder = match self.selected_bot() {
+            Some(bot) => format!("Message {}…", bot.name),
+            None => "Message…".to_owned(),
+        };
+        self.composer.update(cx, |state, cx| {
+            state.set_value(draft, window, cx);
+            state.set_placeholder(placeholder, window, cx);
+        });
         self.notice = None;
         // Leaving a conversation unsubscribes from its channel and drops its
         // fetch tasks; the bot's server work is unaffected.

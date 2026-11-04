@@ -1869,6 +1869,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "libc",
+ "notify",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
@@ -1878,6 +1879,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "toml 0.8.23",
  "url",
  "uuid",
 ]
