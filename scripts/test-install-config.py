@@ -215,6 +215,11 @@ class InstallerComponentTests(unittest.TestCase):
             if not chunk:
                 break
             output += chunk
+            if output.count(b"Choose 1-3") > len(answers):
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                os.close(fd)
+                self.fail(f"installer asked an unexpected question: {output.decode(errors='replace')}")
             if pending and output.count(b"Choose 1-3") > len(answers) - len(pending):
                 os.write(fd, pending.pop(0).encode() + b"\n")
         _, status = os.waitpid(pid, 0)
@@ -287,10 +292,35 @@ class InstallerComponentTests(unittest.TestCase):
         self.assertEqual(self.lines("events"), ["packages app"])
         self.assertEqual(os.readlink(self.else_home / "current"), "versions/0.0.6")
         self.assertTrue(self.binary("0.0.5", "else-desktop").exists(), "previous release kept")
-        code, output = self.install_on_terminal([""])
+        code, output = self.install_on_terminal([])
         self.assertEqual(code, 0, output)
-        self.assertIn("Choose 1-3 [app]", output)
         self.assertIn("already built", output)
+
+    def test_terminal_updates_keep_the_installed_components_without_asking(self):
+        for flag, components, packages in (
+            ("--both", "both", "-p else-api -p else-desktop"),
+            ("--server-only", "server", "-p else-api"),
+            ("--app-only", "app", "-p else-desktop"),
+        ):
+            for legacy in (False, True):
+                with self.subTest(components=components, legacy=legacy):
+                    shutil.rmtree(self.else_home / "versions", ignore_errors=True)
+                    (self.else_home / "current").unlink(missing_ok=True)
+                    shutil.rmtree(self.else_home / "config", ignore_errors=True)
+                    self.assert_ok(self.install(flag, "--yes", version="0.0.5"))
+                    if components != "app":
+                        (self.else_home / "config/.env").write_text("ELSE_API_BIND=127.0.0.1:7878\n")
+                    if legacy:
+                        (self.else_home / "config/components").unlink()
+                    code, output = self.install_on_terminal([], version="0.0.6")
+                    self.assertEqual(code, 0, output)
+                    self.assertIn(f"Updating else.bot 0.0.5 -> 0.0.6 ({components})", output)
+                    self.assertEqual(self.lines("cargo.log"), [f"build --profile release --locked {packages}"])
+                    self.assertEqual(self.components(), components)
+                    code, output = self.install_on_terminal([], version="0.0.6")
+                    self.assertEqual(code, 0, output)
+                    self.assertIn("already built", output)
+                    self.assertEqual(self.lines("cargo.log"), [])
 
     def test_adding_the_server_to_the_app_keeps_the_app(self):
         self.assert_ok(self.install("--app-only", "--yes"))

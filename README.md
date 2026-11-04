@@ -61,7 +61,7 @@ It first asks what this machine runs. Press Enter for both, or skip the question
 - **server**: the API, bot computers, and everything bots need, on home hardware or a VPS.
 - **app**: only the desktop app, which connects to a server on another machine. It needs no Docker, KVM, Microsandbox, provider CLIs, or API service.
 
-Updates keep the choice. Adding a component keeps what is installed: `--app-only` on a server installs both, and nothing is deleted.
+Updates keep what is installed without asking. Adding a component keeps what is installed: `--app-only` on a server installs both, and nothing is deleted.
 
 It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
 
