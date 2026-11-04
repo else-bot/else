@@ -12,6 +12,32 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use uuid::Uuid;
+
+#[derive(Clone)]
+struct BotDrag {
+    bot: Uuid,
+    name: SharedString,
+}
+
+impl Render for BotDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .w(px(244.))
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.drag_border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_md()
+            .text_sm()
+            .truncate()
+            .child(self.name.clone())
+    }
+}
 
 impl ElseApp {
     fn status_text(&self) -> (SharedString, bool) {
@@ -45,7 +71,28 @@ impl ElseApp {
         let grouped = !self.categories.is_empty();
         let groups = crate::sidebar::groups(&self.categories, &self.bots);
         let can_edit = self.connection == Connection::Connected;
+        let owner = cx.entity().downgrade();
         for group in groups {
+            let destination = group.category.map(|c| c.id);
+            let owner = owner.clone();
+            let mut zone = v_flex()
+                .id(SharedString::from(match destination {
+                    Some(id) => format!("category-group-{id}"),
+                    None => "category-group-unassigned".to_owned(),
+                }))
+                .gap_1()
+                .rounded_md()
+                .can_drop(move |value, _, cx| {
+                    value.downcast_ref::<BotDrag>().is_some_and(|drag| {
+                        owner.upgrade().is_some_and(|app| {
+                            app.read(cx).can_assign_category(drag.bot, destination)
+                        })
+                    })
+                })
+                .drag_over::<BotDrag>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+                .on_drop(cx.listener(move |app, drag: &BotDrag, window, cx| {
+                    app.assign_category(drag.bot, destination, window, cx)
+                }));
             if grouped {
                 // A header per category (empty ones stay), then Unassigned.
                 let mut header = h_flex().mt_2().px_2().gap_1().items_center().child(
@@ -86,9 +133,9 @@ impl ElseApp {
                                 })),
                         );
                 }
-                list = list.child(header);
+                zone = zone.child(header);
                 if group.bots.is_empty() {
-                    list = list.child(
+                    zone = zone.child(
                         div()
                             .px_2()
                             .text_xs()
@@ -99,8 +146,9 @@ impl ElseApp {
                 }
             }
             for bot in group.bots {
-                list = list.child(self.render_bot_row(bot, cx));
+                zone = zone.child(self.render_bot_row(bot, cx));
             }
+            list = list.child(zone);
         }
         let can_create = self.connection == Connection::Connected;
         v_flex()
@@ -217,6 +265,15 @@ impl ElseApp {
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.list_hover))
                 .on_click(cx.listener(move |app, _, window, cx| app.select(Some(id), window, cx)));
+        }
+        if !self.categories.is_empty() && self.movable_bot(id).is_some() {
+            row = row.on_drag(
+                BotDrag {
+                    bot: id,
+                    name: bot.name.clone().into(),
+                },
+                |drag, _, _, cx| cx.new(|_| drag.clone()),
+            );
         }
         if selected {
             row = row.bg(theme.list_active);

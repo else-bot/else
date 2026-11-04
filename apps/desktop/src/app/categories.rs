@@ -1,7 +1,8 @@
 //! Category forms, assignment, and move dialogs.
 
-use super::ElseApp;
-use crate::api::Category;
+use super::{Connection, ElseApp};
+use crate::api::{Bot, Category};
+use crate::sidebar::known_category;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::RadioGroup;
@@ -35,20 +36,35 @@ struct MoveHolder {
 impl ElseApp {
     // ----- Categories (POC-031) ---------------------------------------------
 
+    pub(super) fn movable_bot(&self, bot: Uuid) -> Option<&Bot> {
+        if self.connection != Connection::Connected || self.moving.contains(&bot) {
+            return None;
+        }
+        self.bots.iter().find(|b| b.id == bot && b.is_active())
+    }
+
+    pub(super) fn can_assign_category(&self, bot: Uuid, category: Option<Uuid>) -> bool {
+        self.movable_bot(bot).is_some_and(|b| {
+            category.is_none_or(|id| self.categories.iter().any(|c| c.id == id))
+                && known_category(&self.categories, b.category_id) != category
+        })
+    }
+
     /// Assign (or with `None` unassign) a bot. One move per bot at a time.
     /// The list itself changes only from the server's `bots` snapshots (the
     /// one ordered source), never from this response or an extra fetch.
-    fn assign_category(
+    pub(super) fn assign_category(
         &mut self,
         bot: Uuid,
         category: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
-        if !self.moving.insert(bot) {
+        if !self.can_assign_category(bot, category) {
             return;
         }
+        let client = self.client.clone();
+        self.moving.insert(bot);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.set_category(bot, category).await;
@@ -318,16 +334,11 @@ impl ElseApp {
     /// Move the selected bot: a radio group of every category and
     /// Unassigned (Tab and Space, or a click, choose; Enter or Move applies).
     pub(super) fn open_move_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
+        let Some(bot) = self.selected.and_then(|id| self.movable_bot(id)).cloned() else {
             return;
         };
-        if self.moving.contains(&bot.id) {
-            return;
-        }
         let categories = self.categories.clone();
-        let current = bot
-            .category_id
-            .filter(|c| categories.iter().any(|k| k.id == *c));
+        let current = known_category(&categories, bot.category_id);
         let holder = cx.new(|_| MoveHolder {
             bot: bot.id,
             current,
