@@ -16,6 +16,11 @@ pub fn fold(name: &str) -> String {
     name.to_uppercase().to_lowercase()
 }
 
+/// The bot's category if the client knows it; otherwise unassigned.
+pub fn known_category(categories: &[Category], category: Option<Uuid>) -> Option<Uuid> {
+    category.filter(|id| categories.iter().any(|c| c.id == *id))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group<'a> {
     /// `None` is the unassigned group.
@@ -26,14 +31,13 @@ pub struct Group<'a> {
 pub fn groups<'a>(categories: &'a [Category], bots: &'a [Bot]) -> Vec<Group<'a>> {
     let mut sorted: Vec<&Category> = categories.iter().collect();
     sorted.sort_by_key(|c| (fold(&c.name), c.id));
-    let known = |id: Option<Uuid>| id.filter(|id| categories.iter().any(|c| c.id == *id));
     let mut out: Vec<Group> = sorted
         .into_iter()
         .map(|category| Group {
             category: Some(category),
             bots: bots
                 .iter()
-                .filter(|b| known(b.category_id) == Some(category.id))
+                .filter(|b| known_category(categories, b.category_id) == Some(category.id))
                 .collect(),
         })
         .collect();
@@ -41,7 +45,7 @@ pub fn groups<'a>(categories: &'a [Category], bots: &'a [Bot]) -> Vec<Group<'a>>
         category: None,
         bots: bots
             .iter()
-            .filter(|b| known(b.category_id).is_none())
+            .filter(|b| known_category(categories, b.category_id).is_none())
             .collect(),
     });
     for group in &mut out {
