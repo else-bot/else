@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::bots::{BotError, lock_request};
+use super::bots::BotError;
 use super::events;
 use super::turns::ACTIVE_STATUSES;
 
@@ -158,7 +158,6 @@ pub async fn stop_work(
     request_id: Uuid,
 ) -> Result<StopReceipt, StopError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    lock_request(&mut tx, request_id).await?;
     if crate::db::categories::used_by_category(&mut tx, request_id).await? {
         return Err(BotError::RequestConflict.into());
     }

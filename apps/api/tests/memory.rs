@@ -635,7 +635,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .collect();
     let mut sorted = names.clone();
     sorted.sort();
-    let mut expected = else_api::http::mcp::TOOL_NAMES.to_vec();
+    let mut expected = else_api::app::tools::TOOL_NAMES.to_vec();
     expected.sort();
     assert_eq!(sorted, expected);
     // Memory tools only read; delegation and guest actions say they act.

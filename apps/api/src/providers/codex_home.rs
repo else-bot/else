@@ -89,7 +89,7 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
     text.push_str(&format!("code_mode_host = {}\n", tool_url.is_some()));
     text.push_str("\n[mcp_servers]\n");
     if let Some(url) = tool_url {
-        let tools: Vec<String> = crate::http::mcp::TOOL_NAMES
+        let tools: Vec<String> = crate::app::tools::TOOL_NAMES
             .iter()
             .map(|t| format!("\"{t}\""))
             .collect();
@@ -102,7 +102,7 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
              default_tools_approval_mode = \"approve\"\n\
              startup_timeout_sec = 15\n\
              tool_timeout_sec = 360\n",
-            name = crate::http::mcp::SERVER_NAME,
+            name = crate::app::tools::SERVER_NAME,
             tools = tools.join(", "),
         ));
     }
@@ -199,7 +199,7 @@ mod tests {
             text.contains("[mcp_servers.elsebot]\nurl = \"http://127.0.0.1:7878/tools/v1/mcp\"")
         );
         assert!(text.contains("bearer_token_env_var = \"ELSE_TASK_GRANT\""));
-        let expected: Vec<String> = crate::http::mcp::TOOL_NAMES
+        let expected: Vec<String> = crate::app::tools::TOOL_NAMES
             .iter()
             .map(|t| format!("\"{t}\""))
             .collect();

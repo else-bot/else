@@ -11,7 +11,7 @@ The project should use a monorepo. Start with the Rust API and GPUI desktop clie
 | `Cargo.toml` and `Cargo.lock` | Workspace membership, dependency resolution, and the shared application lockfile. |
 | `apps/api` | Rust API executable and future server application behavior. |
 | `apps/desktop` | Rust desktop executable and future GPUI interface. |
-| `infra/compose.yaml` | Local SQLite and future supporting container services. |
+| `infra/compose.yaml` | Optional S3 emulator for replication tests. SQLite runs inside the API. |
 | `docs` | Product decisions, research, and development instructions. |
 | `docs/experiments` | Independent verification fixtures, outside the application workspace. |
 
@@ -19,7 +19,48 @@ The desktop uses GPUI through the exactly pinned `gpui-kit` with a private Tokio
 
 The desktop connects to the API through its public contract. It must not depend on the API executable or connect directly to SQLite. Infrastructure configuration starts supporting services; the Rust programs run on the host.
 
-Within the future API, application rules own their data types and required interfaces. HTTP handlers call application operations. SQLite, provider CLI, and VM adapters implement those interfaces. Application rules must not depend on transport or storage frameworks. Add shared library crates only when concrete code needs a shared boundary.
+Within the API, `app` owns validated values and provider/tool contracts. `http` translates requests and errors, `db` owns transactional writes, and the scheduler coordinates provider attempts. Provider adapters depend on application contracts, including `app/tools.rs`, rather than HTTP handlers. The VM subsystem owns its runtime interface and lifecycle. Shared library crates are unnecessary until another executable needs the same Rust contract.
+
+### Ownership within the applications
+
+| Module | Owns |
+| --- | --- |
+| `db/turns.rs` | Message acceptance, queue claims, attempt inputs, and restart recovery. |
+| `db/turn_sink.rs` | One attempt's fenced writes and bounded text buffer, owned by its actor. |
+| `computers/mod.rs` | Runtime admission, startup/wake transitions, resource budgets, and per-bot operation coordination. |
+| `computers/leases.rs` | Lease creation, renewal, release, and validation before execution. |
+| `computers/maintenance.rs` | Owner stops, reconciliation, idle policy, and maintenance loops. |
+| `computers/desktop.rs` and `snapshot.rs` | Desktop access and service startup; stopped-disk backup capture. |
+| `computers/jobs.rs` | Durable background-job admission, inspection, cancellation, and completion. |
+| `computers/jobs/commands.rs` and `files.rs` | Foreground execution/interruption; guest files and artifact transfer. |
+| `providers/claude/protocol.rs` | Claude event decoding and verification of terminal outcomes. |
+| `providers/codex/summary.rs` | Ephemeral sessions that enforce a no-tool policy for summaries and checkpoints. |
+| `providers/prompt.rs` | Shared instructions and context packets, including checkpoint instructions used by both adapters. |
+| Desktop `app.rs` | Connection state, selection, drafts, pending sends, and composition of the window. |
+| Desktop `app/categories.rs`, `dialogs.rs`, `conversation.rs`, and `view.rs` | Category flows, bot/onboarding forms, committed transcript updates, and rendering. Form details stay private to their module. |
+| Desktop `api.rs` and `api/live.rs` | REST commands and typed requests; bounded WebSocket delivery and reconnection. |
+
+State actors have bounded mailboxes. Runtime operations serialize per bot, so one bot's operation does not hold another bot's runtime lock. SQLite immediate transactions arbitrate database writers; readers use WAL connections. There is no application-level global lock around unrelated runtime operations, and no advisory-lock wrapper pretending to provide coordination. Independent async operations run together; transactions and runtime transitions retain their required order.
+
+Bot creation is one transaction containing the bot, owner conversation, optional profile and category, receipt, and notification. Its receipt hashes the full creation input. The desktop retains that complete typed request while its outcome is unknown. A matching retry reads current state and never reapplies old profile or category choices. Plain create receipts from earlier versions remain compatible; old receipts created with a profile cannot prove that original profile and safely conflict with a profiled retry.
+
+### Foundation review
+
+The November 2026 review found and fixed these issues in separate commits:
+
+| Finding | Fix commit |
+| --- | --- |
+| Creation could commit without its profile; retries could overwrite later settings; category assignment required another request. | `56b5c4c` makes creation atomic and retries immutable. |
+| Provider adapters depended on HTTP's tool inventory. | `fee7228` gives the application layer ownership of the shared contract. |
+| Queue operations and actor-owned provider writes shared one large file; the old request-lock API did nothing. | `08cb6ed` separates the SQLite sink, removes its redundant buffer wrapper, and deletes the no-op lock API. |
+| Input counter cleanup reset active turns' allowances. | `e329183` retires settled counters while retaining live allowances. |
+| VM lifecycle, desktop access, backup capture, commands, and file transfer accumulated in two oversized modules. | `640f56b` separates those responsibilities while preserving their operation guards. |
+| Provider process orchestration mixed with event policy and no-tool execution; Claude's shared checkpoint instructions lived in Codex. | `35cd2c0` separates policies and moves shared instructions to the prompt module. |
+| The desktop window mixed form state, network effects, transcript reconciliation, and rendering. | `ad723db` gives those concerns separate modules and isolates socket handling. |
+
+Regression coverage includes a forced profile-write failure, matching and changed creation retries, later profile/category edits, and input-counter cleanup while a turn remains active. Existing suites cover cancellation, restart recovery, concurrent category changes, bounded actors, provider event policy, handoffs, backups, and WebSocket replay. Validation passed formatting, locked workspace compilation, and every compiled workspace test suite. Tests ran inside an isolated omabox session, with the dependency source assets mounted for debug-build localization. Live opt-in flags were unset; no new manual GPUI walkthrough was performed.
+
+This remains a single-owner, single-API-process application, enforced by its runtime lock. Live provider authentication, Microsandbox behavior, and S3 interoperability retain their opt-in acceptance checks; mocked runtime and protocol tests do not replace those checks.
 
 ## API
 
@@ -57,7 +98,7 @@ The first desktop client should show a bot list, the selected conversation, and 
 
 Use ordinary authenticated HTTP requests for commands and one owner WebSocket for live updates, with pub/sub channels for the bot list and each open conversation. An SSE stream plus sidebar polling was tried first and replaced; the [contract](research/desktop-and-feature-contracts.md#history-sse-and-polling-were-tried-first) records why. SQLite owns conversation snapshots and replay cursors. The desktop deduplicates messages by stable IDs and keeps an unsent draft per bot. Opening another conversation or closing the window does not cancel server work.
 
-The [desktop contracts](research/desktop-and-feature-contracts.md) define the proposed screens, endpoints, stream events, cancellation, and soft deletion. Twelve synthetic contract cases pass. A live GPUI build and real transport remain implementation checks. Rich markdown, attachments, account screens, and remote desktop tabs are outside the first slice.
+The [desktop contracts](research/desktop-and-feature-contracts.md) describe screens, endpoints, stream events, cancellation, and soft deletion. The implemented GPUI client uses the real HTTP and WebSocket transports, with automated client/model tests and the live scenarios recorded in the [acceptance record](implementation/acceptance.md). Rich markdown, attachments, account screens, and remote desktop tabs are outside the first slice.
 
 Later, tabs across the top, like a browser, should let me open email, kanban, notes, and conversations.
 

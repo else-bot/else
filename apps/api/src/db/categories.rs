@@ -107,7 +107,6 @@ pub async fn create(
     let name = normalize(name)?;
     let hash = Sha256::digest(format!("create_category\0{name}").as_bytes()).to_vec();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    super::bots::lock_request(&mut tx, request_id).await?;
     let other: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM request_receipts WHERE request_id = ?1)")
             .bind(request_id)
