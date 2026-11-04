@@ -1,18 +1,18 @@
 # Memory and storage
 
-PostgreSQL is the database choice. The [November 2 memory research](research/memory.md) defines the per-bot design from the exact requested gist and passes 11 checks on PostgreSQL 18.6. The original log, lexical search, explicit owner corrections, cross-bot read grants, and Codex retrieval over MCP are implemented (POC-013); the deterministic summary tree, saved view, rebuilds, and overview/zoom/date tools are implemented too (POC-014); model summaries through a no-tools Codex profile and bounded memory for new sessions are implemented as well (POC-015). Summary quality was inspected on one small synthetic corpus only; recall is not guaranteed. The database comparison below preserves the October 25 research.
+SQLite is the current database. The original memory log, corrections, cross-bot grants, summary tree, saved views, rebuilds, and retrieval tools are preserved. Indexed lexical search uses FTS5 with Unicode tokenization, phrases, OR alternatives, and exclusions. FTS5 ranking and tokenization can differ from PostgreSQL's `simple` text search. The PostgreSQL research and comparison below are historical; this alpha switches to fresh SQLite storage and does not import old databases.
 
 ## Memory design
 
 Learning from the owner's usage over time is one of the main requirements. The assistant needs persistent memory, a way to improve that memory as it learns, and efficient search.
 
-Use [Victor Taelin's UniiChat design](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449/3c190e06f34aba0c69f49042c526093269604935), adapted to PostgreSQL, for every bot including the main assistant. This is the exact gist the owner selected, pinned to its inspected revision. It refines the earlier [OptMem](https://github.com/VictorTaelin/OptMem) inspiration with a saved memory view and deterministic merge schedule.
+Use [Victor Taelin's UniiChat design](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449/3c190e06f34aba0c69f49042c526093269604935), adapted to SQLite, for every bot including the main assistant. This is the exact gist the owner selected, pinned to its inspected revision. It refines the earlier [OptMem](https://github.com/VictorTaelin/OptMem) inspiration with a saved memory view and deterministic merge schedule.
 
 Each bot has one ordered log of original messages and observable tool results, immutable binary summary nodes, a saved view over source ranges, and persisted summary jobs. Four logical tables are enough. The summary tree can be rebuilt explicitly. The live view is saved state and must survive startup unchanged.
 
 Code controls append order, parent eligibility, merge priority, byte budgets, job fencing, provenance, and retrieval. A model only summarizes inputs that cannot be copied or joined within the configured node limit. Use the same host-provider budget as interactive work, with compaction at lower priority. Start with 512-byte nodes, a main view that compacts from above 128,000 bytes toward 64,000 bytes, and one summary request at a time. These are configurable defaults. Byte limits do not establish provider token limits.
 
-Use overview and zoom tools to navigate from summaries to originals. Retain bounded PostgreSQL text search as an explicit else.bot adaptation. The gist omits that manual-search path. Keep accepted native provider sessions rather than adopting the gist's fresh session for every turn. Provider caching claims from the reference have not been verified for subscription CLIs.
+Use overview and zoom tools to navigate from summaries to originals. Retain bounded SQLite FTS5 search as an explicit else.bot adaptation. The gist omits that manual-search path. Keep accepted native provider sessions rather than adopting the gist's fresh session for every turn. Provider caching claims from the reference have not been verified for subscription CLIs.
 
 Skills access memory through the Rust API with bot and task authorization. Cross-bot reads require configured target grants. Every result retains bot, range, source, and trust information. Preserve original corrections and superseded assertions. Summaries cannot grant authority or prove an external action completed.
 
@@ -24,7 +24,7 @@ The [detailed report](research/memory.md) includes schema, append and compaction
 
 Research date, 2026-10-25.
 
-The decision is to use PostgreSQL as the primary database for bot memory and the rest of else.bot's data. The planned system already has a central Rust API, and bots, routines, email processing, and memory maintenance can produce overlapping writes. PostgreSQL fits that direction and provides an extension for vector search if we need it.
+The earlier decision was to use PostgreSQL as the primary database for bot memory and the rest of else.bot's data. The planned system already has a central Rust API, and bots, routines, email processing, and memory maintenance can produce overlapping writes. PostgreSQL fits that direction and provides an extension for vector search if we need it.
 
 SQLite is a credible alternative for an installation that prioritizes fewer services. It can run behind an application server, so having desktop and mobile clients does not rule it out. Those clients would talk to the API, which owns the local database file. SQLite explicitly documents this deployment pattern. [SQLite deployment guidance](https://sqlite.org/whentouse.html).
 

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use sqlx::Connection;
 use uuid::Uuid;
 
 fn live() -> bool {
@@ -205,22 +204,22 @@ impl Drop for Api {
 
 /// Wait for a turn's final state; returns (status, error, assistant text).
 async fn finish(
-    db: &sqlx::PgPool,
+    db: &sqlx::SqlitePool,
     turn: Uuid,
     timeout: Duration,
 ) -> (String, Option<String>, String) {
     let started = Instant::now();
     loop {
         let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = $1")
+            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
         if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
             let text: String = sqlx::query_scalar(
-                "SELECT coalesce(string_agg(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = $1 AND kind = 'assistant'",
+                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
             )
             .bind(turn)
             .fetch_one(db)
@@ -237,9 +236,9 @@ async fn finish(
     }
 }
 
-async fn wait_status(db: &sqlx::PgPool, turn: Uuid, wanted: &str) {
+async fn wait_status(db: &sqlx::SqlitePool, turn: Uuid, wanted: &str) {
     for _ in 0..2400 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(turn)
             .fetch_one(db)
             .await
@@ -313,7 +312,7 @@ fn runtime_states(home: &Path) -> Vec<(String, String)> {
 struct Cleanup {
     homes: std::sync::Mutex<Vec<PathBuf>>,
     databases: std::sync::Mutex<Vec<String>>,
-    admin: sqlx::postgres::PgConnectOptions,
+    admin: sqlx::sqlite::SqliteConnectOptions,
     s3: else_api::backup::s3::S3,
 }
 
@@ -352,14 +351,8 @@ impl Drop for Cleanup {
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(async move {
-                    if let Ok(mut conn) = sqlx::PgConnection::connect_with(&admin).await {
-                        for db in databases {
-                            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                                "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"
-                            )))
-                            .execute(&mut conn)
-                            .await;
-                        }
+                    for db in databases {
+                        common::remove_database(&admin, &db);
                     }
                     if let Ok(uploads) = s3.list_multipart(&s3.key("")).await {
                         for (key, id) in uploads {
@@ -377,10 +370,10 @@ impl Drop for Cleanup {
     }
 }
 
-async fn tool_activity(db: &sqlx::PgPool, bot: &str) -> Vec<(String, String)> {
+async fn tool_activity(db: &sqlx::SqlitePool, bot: &str) -> Vec<(String, String)> {
     sqlx::query_as(
         "SELECT coalesce(source->>'turn_id', ''), body FROM memory_entry
-         WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+         WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(db)
@@ -388,10 +381,10 @@ async fn tool_activity(db: &sqlx::PgPool, bot: &str) -> Vec<(String, String)> {
     .unwrap()
 }
 
-async fn items_of(db: &sqlx::PgPool, bot: &str) -> i64 {
+async fn items_of(db: &sqlx::SqlitePool, bot: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id
-         WHERE c.bot_id = $1",
+         WHERE c.bot_id = ?1",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(db)
@@ -409,7 +402,7 @@ fn version(program: &str) -> String {
 
 /// A computer manager over an installation's database and runtime, used
 /// with the API stopped to read guest bytes directly (not through a model).
-async fn guest_sha256(pool: &sqlx::PgPool, data: &Path, bot: &str, file: &str) -> String {
+async fn guest_sha256(pool: &sqlx::SqlitePool, data: &Path, bot: &str, file: &str) -> String {
     use else_api::computers::{Acquire, ComputerConfig, ComputerManager, runtime::Msb};
     let manager = ComputerManager::new(
         pool.clone(),
@@ -475,14 +468,14 @@ async fn the_assistant_poc_works_end_to_end() {
     let _ = std::fs::remove_file(&log);
     LOG.set(log.clone()).unwrap();
     note(&format!(
-        "versions: {} | {} | {} | PostgreSQL {}",
+        "versions: {} | {} | {} | SQLite {}",
         version("codex"),
         version("claude"),
         version(&msb()),
-        version("pg_dump")
+        "bundled"
     ));
     let db = common::TestDb::empty().await;
-    let params = else_api::backup::PgParams::parse(db.url.expose()).unwrap();
+    let params = else_api::backup::DatabaseParams::parse(db.url.expose()).unwrap();
     let data = dir.path().join("installation");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -509,7 +502,7 @@ async fn the_assistant_poc_works_end_to_end() {
     let cleanup = Cleanup {
         homes: std::sync::Mutex::new(vec![home.clone(), restored_dir.join("microsandbox")]),
         databases: std::sync::Mutex::new(vec![target.clone()]),
-        admin: params.with_database("postgres").options.clone(),
+        admin: params.options.clone(),
         s3: s3.clone(),
     };
     let install = Install {
@@ -668,7 +661,7 @@ async fn the_assistant_poc_works_end_to_end() {
         "the parent's final answer carries the child's result: {answer}"
     );
     let delegations: Vec<(Uuid, String, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT target_bot_id, status, delivered_attempt, result FROM delegations WHERE root_turn_id = $1",
+        "SELECT target_bot_id, status, delivered_attempt, result FROM delegations WHERE root_turn_id = ?1",
     )
     .bind(ask)
     .fetch_all(&pool)
@@ -691,7 +684,7 @@ async fn the_assistant_poc_works_end_to_end() {
         delegations[0].3.as_deref().unwrap_or("").contains(&tag),
         "the child produced the tag"
     );
-    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = $1")
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
         .bind(ask)
         .fetch_one(&pool)
         .await
@@ -740,7 +733,7 @@ async fn the_assistant_poc_works_end_to_end() {
     let (status, error, text) = finish(&pool, work, Duration::from_secs(600)).await;
     assert_eq!(status, "completed", "{error:?}");
     let jobs: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = $1")
+        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = ?1")
             .bind(builder.parse::<Uuid>().unwrap())
             .fetch_all(&pool)
             .await
@@ -839,7 +832,7 @@ async fn the_assistant_poc_works_end_to_end() {
         "Claude checked the same running job by its recorded ID"
     );
     let jobs: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = $1")
+        sqlx::query_as("SELECT id, status FROM guest_jobs WHERE bot_id = ?1")
             .bind(builder.parse::<Uuid>().unwrap())
             .fetch_all(&pool)
             .await
@@ -850,7 +843,7 @@ async fn the_assistant_poc_works_end_to_end() {
         "the same job, not started again"
     );
     let handoff: (String, String, String) = sqlx::query_as(
-        "SELECT source_provider_id, target_provider_id, state FROM handoffs WHERE turn_id = $1",
+        "SELECT source_provider_id, target_provider_id, state FROM handoffs WHERE turn_id = ?1",
     )
     .bind(switched)
     .fetch_one(&pool)
@@ -926,7 +919,7 @@ async fn the_assistant_poc_works_end_to_end() {
         let (status, jobs_live): (String, i64) = sqlx::query_as(
             "SELECT b.status, (SELECT count(*) FROM guest_jobs j WHERE j.bot_id = b.id
                                 AND j.status IN ('starting', 'running', 'cancelling'))
-             FROM bots b WHERE b.id = $1",
+             FROM bots b WHERE b.id = ?1",
         )
         .bind(scratch.parse::<Uuid>().unwrap())
         .fetch_one(&pool)
@@ -983,7 +976,7 @@ async fn the_assistant_poc_works_end_to_end() {
     note(&format!("bots after restart: {names:?}"));
     assert_eq!(names.len(), 3, "{names:?}");
     assert!(!names.contains(&"Scratch"), "deleted stays deleted");
-    let tombstone: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let tombstone: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(scratch.parse::<Uuid>().unwrap())
         .fetch_one(&pool)
         .await
@@ -1049,11 +1042,12 @@ async fn the_assistant_poc_works_end_to_end() {
     std::fs::remove_dir_all(&home).unwrap();
     std::fs::remove_dir_all(data.join("backups")).unwrap();
     let restored_url = format!(
-        "postgresql://{}:{}@{}:{}/{target}",
-        params.user(),
-        params.password().unwrap_or_default(),
-        params.host(),
-        params.port()
+        "sqlite://{}",
+        params
+            .with_database(&format!("{target}"))
+            .options
+            .get_filename()
+            .display()
     );
     install.run(&[
         "restore-remote",
@@ -1068,7 +1062,7 @@ async fn the_assistant_poc_works_end_to_end() {
         log: log.clone(),
     };
     let mut api3 = restored.serve().await;
-    let rpool = sqlx::PgPool::connect(&restored_url).await.unwrap();
+    let rpool = sqlx::SqlitePool::connect(&restored_url).await.unwrap();
     let restored_profiles = (
         api3.get("/v1/settings/providers/codex").await["profile"].clone(),
         api3.get("/v1/settings/providers/claude").await["profile"].clone(),
@@ -1140,7 +1134,7 @@ async fn the_assistant_poc_works_end_to_end() {
     }
     let sessions: Vec<(String, String)> = sqlx::query_as(
         "SELECT provider_id, status FROM provider_sessions s JOIN conversations c ON c.id = s.conversation_id
-         WHERE c.bot_id = $1 ORDER BY s.created_at",
+         WHERE c.bot_id = ?1 ORDER BY s.created_at",
     )
     .bind(travel.parse::<Uuid>().unwrap())
     .fetch_all(&rpool)
@@ -1175,7 +1169,7 @@ async fn the_assistant_poc_works_end_to_end() {
         finish(&rpool, hello, Duration::from_secs(300)).await.0,
         "completed"
     );
-    let reported: Value = sqlx::query_scalar("SELECT reported_profile FROM turns WHERE id = $1")
+    let reported: Value = sqlx::query_scalar("SELECT reported_profile FROM turns WHERE id = ?1")
         .bind(hello)
         .fetch_one(&rpool)
         .await

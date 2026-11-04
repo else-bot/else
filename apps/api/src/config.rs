@@ -16,7 +16,7 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7879";
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 
-/// PostgreSQL connection URL. It may contain a password, so it is never
+/// SQLite connection URL. It is never
 /// printed through `Debug` or error messages.
 #[derive(Clone)]
 pub struct DatabaseUrl(String);
@@ -39,8 +39,7 @@ impl std::fmt::Debug for DatabaseUrl {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// `None` when neither `DATABASE_URL` nor the Compose `POSTGRES_*`
-    /// variables are set. Commands that need the database report it.
+    /// SQLite URL, defaulting to `<data_dir>/else.sqlite3`.
     pub database_url: Option<DatabaseUrl>,
     pub bind: SocketAddr,
     /// Private runtime storage: credentials, the singleton lock, and bot
@@ -154,14 +153,6 @@ impl Config {
             dir: match source.get("ELSE_BACKUP_DIR") {
                 Some(path) => absolute_path("ELSE_BACKUP_DIR", path)?,
                 None => data_dir.join("backups"),
-            },
-            pg_dump: match source.get("ELSE_PG_DUMP") {
-                Some(path) => absolute_path("ELSE_PG_DUMP", path)?,
-                None => PathBuf::from("pg_dump"),
-            },
-            pg_restore: match source.get("ELSE_PG_RESTORE") {
-                Some(path) => absolute_path("ELSE_PG_RESTORE", path)?,
-                None => PathBuf::from("pg_restore"),
             },
             keep: parse_number(source, "ELSE_BACKUP_KEEP", 7, 1, 1000)? as usize,
             max_bytes: parse_number(
@@ -280,7 +271,7 @@ impl Config {
             synthetic_provider,
             bots_dir,
             max_active_turns,
-            database_url: database_url(source)?,
+            database_url: Some(database_url(source, &data_dir)?),
             bind,
             data_dir,
             owner_token_file,
@@ -291,49 +282,23 @@ impl Config {
     }
 }
 
-/// `DATABASE_URL` wins. Otherwise the development `.env` Compose variables
-/// describe the local container on 127.0.0.1.
-fn database_url(source: &dyn Source) -> Result<Option<DatabaseUrl>, ConfigError> {
-    if let Some(url) = source.get("DATABASE_URL") {
-        return Ok(Some(DatabaseUrl(url)));
-    }
-    let (Some(user), Some(password), Some(db)) = (
-        source.get("POSTGRES_USER"),
-        source.get("POSTGRES_PASSWORD"),
-        source.get("POSTGRES_DB"),
-    ) else {
-        return Ok(None);
-    };
-    let port = parse_number(source, "POSTGRES_PORT", 5432, 1, 65535)?;
-    Ok(Some(DatabaseUrl(format!(
-        "postgresql://{}:{}@127.0.0.1:{port}/{}",
-        percent_encode(&user),
-        percent_encode(&password),
-        percent_encode(&db)
-    ))))
-}
-
-fn percent_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+/// An explicit SQLite URL wins; otherwise the DB lives with private state.
+fn database_url(
+    source: &dyn Source,
+    data_dir: &std::path::Path,
+) -> Result<DatabaseUrl, ConfigError> {
+    let url = source
+        .get("DATABASE_URL")
+        .unwrap_or_else(|| format!("sqlite://{}", data_dir.join("else.sqlite3").display()));
+    crate::db::options(&url).map_err(|_| invalid("DATABASE_URL", "expected a SQLite URL (sqlite:///absolute/path/else.sqlite3); alpha installations use a fresh SQLite database"))?;
+    Ok(DatabaseUrl(url))
 }
 
 impl Config {
     pub fn require_database(&self) -> Result<&DatabaseUrl, ConfigError> {
-        self.database_url.as_ref().ok_or_else(|| {
-            invalid(
-                "DATABASE_URL",
-                "not set; set it or the POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_DB \
-                 variables from .env.example",
-            )
-        })
+        self.database_url
+            .as_ref()
+            .ok_or_else(|| invalid("DATABASE_URL", "no SQLite database configured"))
     }
 }
 
@@ -344,16 +309,9 @@ fn absolute_path(name: &'static str, value: String) -> Result<PathBuf, ConfigErr
 }
 
 fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
-    // The XDG specification treats an empty value as unset.
-    if let Some(xdg) = source.get("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        return Ok(absolute_path("XDG_DATA_HOME", xdg)?.join("else-bot"));
-    }
     match source.get("HOME").filter(|v| !v.is_empty()) {
-        Some(home) => Ok(absolute_path("HOME", home)?.join(".local/share/else-bot")),
-        None => Err(invalid(
-            "ELSE_DATA_DIR",
-            "not set, and neither XDG_DATA_HOME nor HOME is available",
-        )),
+        Some(home) => Ok(absolute_path("HOME", home)?.join(".else")),
+        None => Err(invalid("ELSE_DATA_DIR", "not set, and HOME is unavailable")),
     }
 }
 
@@ -449,10 +407,7 @@ pub mod tests {
     fn defaults_bind_loopback() {
         let config = Config::load(&MapSource::new(&[("HOME", "/home/x")])).unwrap();
         assert_eq!(config.bind.to_string(), DEFAULT_BIND);
-        assert_eq!(
-            config.data_dir,
-            PathBuf::from("/home/x/.local/share/else-bot")
-        );
+        assert_eq!(config.data_dir, PathBuf::from("/home/x/.else"));
         assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
         assert_eq!(config.bots_dir, PathBuf::from("/home/x/.else-dev/bots"));
         assert_eq!(
@@ -462,28 +417,27 @@ pub mod tests {
     }
 
     #[test]
-    fn database_url_falls_back_to_compose_variables() {
+    fn database_defaults_to_a_private_file_and_rejects_postgres() {
+        let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+        assert_eq!(
+            config.require_database().unwrap().expose(),
+            "sqlite:///h/.else/else.sqlite3"
+        );
+        assert!(
+            Config::load(&MapSource::new(&[
+                ("HOME", "/h"),
+                ("DATABASE_URL", "postgres://localhost/else")
+            ]))
+            .is_err()
+        );
         let config = Config::load(&MapSource::new(&[
             ("HOME", "/h"),
-            ("POSTGRES_USER", "else"),
-            ("POSTGRES_PASSWORD", "p@ss word"),
-            ("POSTGRES_DB", "else"),
-            ("POSTGRES_PORT", "5433"),
+            ("ELSE_DATA_DIR", "/custom"),
         ]))
         .unwrap();
-        let url = config.require_database().unwrap();
         assert_eq!(
-            url.expose(),
-            "postgresql://else:p%40ss%20word@127.0.0.1:5433/else"
-        );
-        assert!(!format!("{config:?}").contains("p%40ss"));
-        let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        assert!(
-            config
-                .require_database()
-                .unwrap_err()
-                .to_string()
-                .starts_with("DATABASE_URL")
+            config.require_database().unwrap().expose(),
+            "sqlite:///custom/else.sqlite3"
         );
     }
 
@@ -499,7 +453,7 @@ pub mod tests {
         assert!(Config::load(&MapSource::new(&[("HOME", "/h"), ("ELSE_DATA_DIR", "")])).is_err());
         let config =
             Config::load(&MapSource::new(&[("HOME", "/h"), ("XDG_DATA_HOME", "")])).unwrap();
-        assert_eq!(config.data_dir, PathBuf::from("/h/.local/share/else-bot"));
+        assert_eq!(config.data_dir, PathBuf::from("/h/.else"));
     }
 
     #[test]

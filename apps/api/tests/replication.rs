@@ -1,6 +1,6 @@
 //! POC-023: bucket replication, end to end against the SeaweedFS emulator in
-//! Compose (`docker compose up -d --wait seaweedfs`). Like the PostgreSQL
-//! tests, these require the emulator: a missing one fails with a message.
+//! Compose (`docker compose up -d --wait seaweedfs`). Run with `--ignored`;
+//! these optional tests require the emulator and synthetic S3 credentials.
 //! Each test uses its own bucket. Normal operations share access to the
 //! emulator; tests that stop or restart its container take exclusive access.
 
@@ -19,7 +19,7 @@ use else_api::backup::replicate::Replicator;
 use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
 use else_api::backup::s3::{Put, S3, S3Config};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, PgParams};
+use else_api::backup::{self, BackupError, DatabaseParams};
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError,
     RuntimeState, Spec,
@@ -71,7 +71,13 @@ async fn bucket() -> S3 {
 fn compose(args: &[&str]) {
     // The native matrix owns a distinct stack per run; never stop a shared
     // developer service when this test exercises outages and recovery.
-    let env_file = std::env::var("ELSE_TEST_COMPOSE_ENV_FILE").unwrap_or(".env".into());
+    let env_file = std::env::var("ELSE_TEST_COMPOSE_ENV_FILE").unwrap_or_else(|_| {
+        if root().join(".env").exists() {
+            ".env".into()
+        } else {
+            ".env.example".into()
+        }
+    });
     let compose_file =
         std::env::var("ELSE_TEST_COMPOSE_FILE").unwrap_or("infra/compose.yaml".into());
     let status = std::process::Command::new("docker")
@@ -90,8 +96,6 @@ fn key() -> SecretKey {
 fn config(dir: &Path) -> BackupConfig {
     BackupConfig {
         dir: dir.join("backups"),
-        pg_dump: PathBuf::from("pg_dump"),
-        pg_restore: PathBuf::from("pg_restore"),
         keep: 7,
         max_bytes: 1 << 30,
         interval: Duration::from_secs(3600),
@@ -105,7 +109,7 @@ fn replicator(app: &TestApp, s3: &S3) -> Replicator {
 fn worker(app: &TestApp, dir: &Path, replicator: Replicator) -> BackupWorker {
     BackupWorker::new(
         app.db.pool.clone(),
-        PgParams::parse(app.db.url.expose()).unwrap(),
+        DatabaseParams::parse(app.db.url.expose()).unwrap(),
         Arc::new(key()),
         config(dir),
     )
@@ -124,7 +128,7 @@ async fn populated() -> TestApp {
 }
 
 async fn remote_state(app: &TestApp, set: &str) -> Option<(String, Option<String>)> {
-    sqlx::query_as("SELECT state, error FROM backup_remote WHERE set_id = $1")
+    sqlx::query_as("SELECT state, error FROM backup_remote WHERE set_id = ?1")
         .bind(set)
         .fetch_optional(&app.db.pool)
         .await
@@ -136,6 +140,7 @@ fn set_key(s3: &S3, set: &str, object: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn sets_are_verified_by_readback_and_published_create_only() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -151,7 +156,7 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
         "completed"
     );
     let run: Option<String> =
-        sqlx::query_scalar("SELECT remote_status FROM backup_runs WHERE set_id = $1")
+        sqlx::query_scalar("SELECT remote_status FROM backup_runs WHERE set_id = ?1")
             .bind(&summary.set_id)
             .fetch_one(&app.db.pool)
             .await
@@ -196,6 +201,7 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn an_object_altered_before_publication_is_detected() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -246,6 +252,7 @@ async fn an_object_altered_before_publication_is_detected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -257,14 +264,8 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO scratch SELECT (SELECT string_agg(md5(random()::text || g::text || i::text), '')
-                                     FROM generate_series(1, 2000) i)
-         FROM generate_series(1, 300) g",
-    )
-    .execute(&app.db.pool)
-    .await
-    .unwrap();
+    sqlx::query("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i < 300) INSERT INTO scratch SELECT hex(randomblob(32000)) FROM n")
+        .execute(&app.db.pool).await.unwrap();
     let mut small_parts = replicator(&app, &s3);
     small_parts.part_bytes = 5 * 1024 * 1024;
     let worker = worker(&app, dir.path(), small_parts.clone());
@@ -289,7 +290,7 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
     // The worker restarts: the same set completes.
     let restarted = BackupWorker::new(
         app.db.pool.clone(),
-        PgParams::parse(app.db.url.expose()).unwrap(),
+        DatabaseParams::parse(app.db.url.expose()).unwrap(),
         Arc::new(key()),
         config(dir.path()),
     )
@@ -309,7 +310,7 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
         .manifest
         .artifacts
         .iter()
-        .find(|a| a.kind == "postgres")
+        .find(|a| a.kind == "sqlite")
         .unwrap();
     let (_, sha) = s3
         .get_with(
@@ -323,6 +324,7 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
     let _emulator = EMULATOR.write().await;
     let app = populated().await;
@@ -371,6 +373,7 @@ async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn remote_retention_keeps_the_newest_complete_sets() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -471,6 +474,7 @@ impl ComputerRuntime for Fake {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_restart() {
     let _emulator = EMULATOR.write().await;
     let db = Arc::new(TestDb::migrated().await);
@@ -522,7 +526,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         "{:?}",
         summary.remote
     );
-    let source: Vec<String> = sqlx::query_scalar("SELECT t::text FROM items t ORDER BY 1")
+    let source: Vec<String> = sqlx::query_scalar("SELECT json_array(hex(id), hex(conversation_id), seq, hex(turn_id), kind, text, provider_id, created_at) FROM items ORDER BY 1")
         .fetch_all(&db.pool)
         .await
         .unwrap();
@@ -572,14 +576,13 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     let fresh = Arc::new(Fake::default());
     let new_dir = dir.path().join("installation");
     std::fs::create_dir(&new_dir).unwrap();
-    let params = PgParams::parse(db.url.expose()).unwrap();
+    let params = DatabaseParams::parse(db.url.expose()).unwrap();
     let target = format!("else_restore_{}", Uuid::new_v4().simple());
     let restored = restore(RestoreRequest {
         set_dir: &downloaded,
         key: &key(),
         server: &params,
         target_database: &target,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
@@ -591,11 +594,11 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     let target_options = params.with_database(&target).options;
     let rows: Option<Vec<String>> = match &restored {
         Ok(_) => {
-            let mut conn = sqlx::PgConnection::connect_with(&target_options)
+            let mut conn = sqlx::SqliteConnection::connect_with(&target_options)
                 .await
                 .unwrap();
             Some(
-                sqlx::query_scalar("SELECT t::text FROM items t ORDER BY 1")
+                sqlx::query_scalar("SELECT json_array(hex(id), hex(conversation_id), seq, hex(turn_id), kind, text, provider_id, created_at) FROM items ORDER BY 1")
                     .fetch_all(&mut conn)
                     .await
                     .unwrap(),
@@ -603,14 +606,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         }
         Err(_) => None,
     };
-    let mut admin = sqlx::PgConnection::connect_with(&params.with_database("postgres").options)
-        .await
-        .unwrap();
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS \"{target}\" WITH (FORCE)"
-    )))
-    .execute(&mut admin)
-    .await;
+    common::remove_database(&params.options, &target);
     restored.unwrap();
     assert_eq!(rows.unwrap(), source, "chats restored from the bucket");
     assert_eq!(
@@ -644,6 +640,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
 /// `_PREFIX` (an isolated prefix), `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`.
 /// Routine runs never contact a real bucket.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn a_real_bucket_round_trip_when_authorized() {
     if std::env::var("ELSE_LIVE_S3").as_deref() != Ok("1") {
         eprintln!("SKIPPED: set ELSE_LIVE_S3=1 and ELSE_LIVE_S3_* for a real bucket");
@@ -698,6 +695,7 @@ async fn a_real_bucket_round_trip_when_authorized() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn a_recorded_completion_is_not_trusted_without_its_payload() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -723,13 +721,14 @@ async fn a_recorded_completion_is_not_trusted_without_its_payload() {
         .manifest
         .artifacts
         .iter()
-        .find(|a| a.kind == "postgres")
+        .find(|a| a.kind == "sqlite")
         .unwrap();
     let (_, sha) = s3.get_with(&key, u64::MAX, |_| Ok(())).await.unwrap();
     assert_eq!(sha, dump.ciphertext_sha256);
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn another_destination_is_replicated_afresh() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -763,6 +762,7 @@ async fn another_destination_is_replicated_afresh() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
     let _emulator = EMULATOR.read().await;
     let db = Arc::new(TestDb::migrated().await);
@@ -833,6 +833,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_start() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -887,6 +888,7 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn restore_remote_works_without_the_source_database() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
@@ -898,20 +900,17 @@ async fn restore_remote_works_without_the_source_database() {
         .unwrap();
     assert!(matches!(summary.remote, Some(Ok(_))));
     // A replacement server: the configured database does not exist.
-    let params = PgParams::parse(app.db.url.expose()).unwrap();
-    let absent = format!(
-        "postgresql://{}:{}@{}:{}/else_absent_{}",
-        params.user(),
-        params.password().unwrap_or_default(),
-        params.host(),
-        params.port(),
-        Uuid::new_v4().simple()
-    );
+    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    let absent = format!("sqlite://{}", dir.path().join("absent.sqlite3").display());
     let data = dir.path().join("operator");
     std::fs::create_dir(&data).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let target = format!("else_restore_{}", Uuid::new_v4().simple());
+    let target = dir
+        .path()
+        .join(format!("restored-{}.sqlite3", Uuid::new_v4()))
+        .display()
+        .to_string();
     let config = s3.config().clone();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"))
         .current_dir(common::without_dotenv(dir.path()))
@@ -941,20 +940,12 @@ async fn restore_remote_works_without_the_source_database() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut admin = sqlx::PgConnection::connect_with(&params.with_database("postgres").options)
-        .await
-        .unwrap();
-    let restored: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(&target)
-            .fetch_one(&mut admin)
-            .await
-            .unwrap();
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS \"{target}\" WITH (FORCE)"
-    )))
-    .execute(&mut admin)
-    .await;
+    let restored = params
+        .with_database(&target)
+        .options
+        .get_filename()
+        .exists();
+    common::remove_database(&params.options, &target);
     assert!(out.status.success(), "{text}");
     assert!(restored);
     assert!(!text.contains(config.secret_access_key.as_str()));

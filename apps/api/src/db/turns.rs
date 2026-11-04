@@ -1,7 +1,7 @@
 //! Durable owner messages and turn attempts.
 //!
 //! Acceptance writes the owner item and its queued turn in one transaction
-//! under the bot row lock. The scheduler claims turns with short
+//! inside the immediate transaction. The scheduler claims turns with short
 //! transactions; provider progress is persisted through [`PgSink`], whose
 //! writes are fenced on the turn still being active and the bot still active.
 
@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::providers::{
@@ -119,13 +119,13 @@ pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, AcceptError> {
+pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted, AcceptError> {
     let hash = request_hash(&req);
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let bot: Option<(String, Uuid, i64, i64, bool)> = sqlx::query_as(
         "SELECT b.status, c.id, c.last_turn_no, c.last_item_seq, b.cancel_pending
          FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
-         WHERE b.id = $1 FOR UPDATE OF b, c",
+         WHERE b.id = ?1",
     )
     .bind(req.bot_id)
     .fetch_optional(&mut *tx)
@@ -137,7 +137,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
         return Err(AcceptError::Deleted);
     }
     let existing: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, request_hash FROM turns WHERE conversation_id = $1 AND request_id = $2",
+        "SELECT id, request_hash FROM turns WHERE conversation_id = ?1 AND request_id = ?2",
     )
     .bind(conversation_id)
     .bind(req.request_id)
@@ -160,7 +160,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
         return Err(AcceptError::CancellationPending);
     }
     let queued: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = $1 AND status = 'queued'")
+        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
             .bind(req.bot_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -185,7 +185,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
              owner_item_id, provider_id, profile_revision, profile)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(turn_id)
     .bind(req.bot_id)
@@ -201,7 +201,7 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     .await?;
     sqlx::query(
         "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES ($1, $2, $3, $4, 'user', $5)",
+         VALUES (?1, ?2, ?3, ?4, 'user', ?5)",
     )
     .bind(item_id)
     .bind(conversation_id)
@@ -210,13 +210,13 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     .bind(req.text)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE conversations SET last_turn_no = $2, last_item_seq = $3 WHERE id = $1")
+    sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
         .bind(conversation_id)
         .bind(turn_no)
         .bind(seq)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE bots SET selected_provider_id = $2 WHERE id = $1")
+    sqlx::query("UPDATE bots SET selected_provider_id = ?2 WHERE id = ?1")
         .bind(req.bot_id)
         .bind(req.provider_id)
         .execute(&mut *tx)
@@ -228,8 +228,8 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     // turn, in the usual order.
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
     let preempted: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = now()
-         WHERE bot_id = $1 AND conversation_id = $2 AND turn_no < $3 AND provider_id <> $4
+        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE bot_id = ?1 AND conversation_id = ?2 AND turn_no < ?3 AND provider_id <> ?4
            AND status IN ('preparing', 'sending', 'running')
          RETURNING id",
     )
@@ -254,18 +254,24 @@ pub async fn accept(pool: &PgPool, req: SendRequest<'_>) -> Result<Accepted, Acc
     })
 }
 
-pub async fn load_turn(conn: &mut PgConnection, turn_id: Uuid) -> Result<TurnRecord, sqlx::Error> {
+pub async fn load_turn(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+) -> Result<TurnRecord, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {TURN_COLUMNS} FROM turns t WHERE t.id = $1"
+        "SELECT {TURN_COLUMNS} FROM turns t WHERE t.id = ?1"
     )))
     .bind(turn_id)
     .fetch_one(conn)
     .await
 }
 
-pub async fn load_item(conn: &mut PgConnection, item_id: Uuid) -> Result<ItemRecord, sqlx::Error> {
+pub async fn load_item(
+    conn: &mut SqliteConnection,
+    item_id: Uuid,
+) -> Result<ItemRecord, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id WHERE i.id = $1"
+        "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id WHERE i.id = ?1"
     )))
     .bind(item_id)
     .fetch_one(conn)
@@ -273,7 +279,7 @@ pub async fn load_item(conn: &mut PgConnection, item_id: Uuid) -> Result<ItemRec
 }
 
 async fn load_turn_and_item(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     turn_id: Uuid,
 ) -> Result<(TurnRecord, ItemRecord), sqlx::Error> {
     let turn = load_turn(conn, turn_id).await?;
@@ -285,14 +291,14 @@ async fn load_turn_and_item(
 /// ID was used with a different payload. Lets a matching retry succeed even
 /// if its provider has since become unavailable.
 pub async fn existing_send(
-    pool: &PgPool,
+    pool: &SqlitePool,
     req: &SendRequest<'_>,
 ) -> Result<Option<Accepted>, AcceptError> {
     let hash = request_hash(req);
     let mut conn = pool.acquire().await?;
     let row: Option<(Uuid, Vec<u8>, String)> = sqlx::query_as(
         "SELECT t.id, t.request_hash, b.status FROM turns t JOIN bots b ON b.id = t.bot_id
-         WHERE t.bot_id = $1 AND t.request_id = $2",
+         WHERE t.bot_id = ?1 AND t.request_id = ?2",
     )
     .bind(req.bot_id)
     .bind(req.request_id)
@@ -316,13 +322,13 @@ pub async fn existing_send(
 
 /// Resolve a lost send response by its request ID.
 pub async fn find_by_request(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     request_id: Uuid,
 ) -> Result<Option<(TurnRecord, ItemRecord)>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let turn_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM turns WHERE bot_id = $1 AND request_id = $2")
+        sqlx::query_scalar("SELECT id FROM turns WHERE bot_id = ?1 AND request_id = ?2")
             .bind(bot_id)
             .bind(request_id)
             .fetch_optional(&mut *conn)
@@ -338,28 +344,28 @@ pub async fn find_by_request(
 /// has no turn in an active status. The claimed turn moves to `preparing`
 /// and is returned; the caller must start it before claiming again, so a
 /// later failure never strands an already committed claim.
-pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
+pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (
-            SELECT DISTINCT ON (t.bot_id) t.id, t.bot_id, t.created_at
+            SELECT t.id, t.bot_id, t.created_at,
+                   row_number() OVER (PARTITION BY t.bot_id ORDER BY t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
             WHERE t.status = 'queued' AND b.status = 'active' AND NOT b.cancel_pending
-              AND NOT (t.bot_id = ANY($1))
+              AND NOT (lower(hex(t.bot_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
               -- A root task waiting for delegated work holds the bot's queue.
               AND NOT EXISTS (SELECT 1 FROM turns w
                               WHERE w.bot_id = t.bot_id AND w.status = 'waiting')
-            ORDER BY t.bot_id, t.turn_no
-         ) oldest ORDER BY created_at, id LIMIT 8"
+         ) oldest WHERE queue_rank = 1 ORDER BY created_at, id LIMIT 8"
     )))
-    .bind(skip)
+    .bind(sqlx::types::Json(skip))
     .fetch_all(pool)
     .await?;
     for (turn_id, bot_id) in candidates {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let eligible: Option<bool> = sqlx::query_scalar(
-            "SELECT status = 'active' AND NOT cancel_pending FROM bots WHERE id = $1 FOR UPDATE",
+            "SELECT status = 'active' AND NOT cancel_pending FROM bots WHERE id = ?1",
         )
         .bind(bot_id)
         .fetch_optional(&mut *tx)
@@ -368,11 +374,11 @@ pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sq
             continue;
         }
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = 'preparing', started_at = now(), updated_at = now(),
+            "UPDATE turns SET status = 'preparing', started_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                  attempt = attempt + 1
-             WHERE id = $1 AND status = 'queued'
+             WHERE id = ?1 AND status = 'queued'
                AND NOT EXISTS (SELECT 1 FROM turns a
-                               WHERE a.bot_id = $2 AND a.status IN {ACTIVE_STATUSES})"
+                               WHERE a.bot_id = ?2 AND a.status IN {ACTIVE_STATUSES})"
         )))
         .bind(turn_id)
         .bind(bot_id)
@@ -391,13 +397,13 @@ pub async fn claim_next(pool: &PgPool, skip: &[Uuid]) -> Result<Option<Uuid>, sq
 /// Fail a claimed turn that could not be started (for example, its input
 /// could not be loaded). Nothing was sent to a provider.
 pub async fn fail_unstarted(
-    pool: &PgPool,
+    pool: &SqlitePool,
     turn_id: Uuid,
     message: &str,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let bot_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT b.id FROM bots b JOIN turns t ON t.bot_id = b.id WHERE t.id = $1 FOR UPDATE OF b",
+        "SELECT b.id FROM bots b JOIN turns t ON t.bot_id = b.id WHERE t.id = ?1",
     )
     .bind(turn_id)
     .fetch_optional(&mut *tx)
@@ -406,9 +412,9 @@ pub async fn fail_unstarted(
         return Ok(());
     };
     let updated = sqlx::query(
-        "UPDATE turns SET status = 'failed', error_code = 'start_failed', error_message = $2,
-             finished_at = now(), updated_at = now()
-         WHERE id = $1 AND status = 'preparing'",
+        "UPDATE turns SET status = 'failed', error_code = 'start_failed', error_message = ?2,
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND status = 'preparing'",
     )
     .bind(turn_id)
     .bind(message)
@@ -422,21 +428,21 @@ pub async fn fail_unstarted(
 }
 
 /// Build the adapter input for a claimed turn.
-pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
+pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let turn = load_turn(&mut conn, turn_id).await?;
     let (bot_name, bot_role): (String, String) =
-        sqlx::query_as("SELECT name, role FROM bots WHERE id = $1")
+        sqlx::query_as("SELECT name, role FROM bots WHERE id = ?1")
             .bind(turn.bot_id)
             .fetch_one(&mut *conn)
             .await?;
-    let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = $1")
+    let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
         .bind(turn.owner_item_id)
         .fetch_one(&mut *conn)
         .await?;
     let history = sqlx::query_as::<_, (i64, String, String, String)>(
         "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = $1 AND t.turn_no < $2 AND i.kind IN ('user', 'assistant')
+         WHERE i.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'assistant')
          ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)
@@ -454,7 +460,7 @@ pub async fn input(pool: &PgPool, turn_id: Uuid) -> Result<TurnInput, sqlx::Erro
     let session = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
         "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision
          FROM provider_sessions s
-         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'
+         WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
            -- A session that may hold an uncertain delivery is never resumed.
            AND NOT EXISTS (SELECT 1 FROM turns u
                            WHERE u.provider_session_id = s.id AND u.status = 'uncertain')",
@@ -503,7 +509,7 @@ struct Buffer {
 /// Persists one turn's progress. Writes succeed only while the turn is in
 /// an active status and its bot is active.
 struct SinkState {
-    pool: PgPool,
+    pool: SqlitePool,
     turn_id: Uuid,
     bot_id: Uuid,
     conversation_id: Uuid,
@@ -526,7 +532,7 @@ pub struct PgSink {
 }
 
 impl PgSink {
-    pub fn new(pool: PgPool, input: &TurnInput, provider_id: &str) -> Self {
+    pub fn new(pool: SqlitePool, input: &TurnInput, provider_id: &str) -> Self {
         let flush_wanted = Arc::new(tokio::sync::Notify::new());
         Self {
             state: Actor::new(SinkState {
@@ -575,12 +581,12 @@ impl SinkState {
     /// conversation's last item seq.
     async fn guard(
         &self,
-        conn: &mut PgConnection,
+        conn: &mut SqliteConnection,
         allowed: &str,
     ) -> Result<Option<i64>, sqlx::Error> {
         let row: Option<(String, i64)> = sqlx::query_as(
-            "SELECT b.status, c.last_item_seq FROM bots b JOIN conversations c ON c.id = $2
-             WHERE b.id = $1 AND c.bot_id = b.id FOR UPDATE OF b, c",
+            "SELECT b.status, c.last_item_seq FROM bots b JOIN conversations c ON c.id = ?2
+             WHERE b.id = ?1 AND c.bot_id = b.id",
         )
         .bind(self.bot_id)
         .bind(self.conversation_id)
@@ -591,7 +597,7 @@ impl SinkState {
         };
         let _ = status;
         let turn_ok: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1 AND status IN {allowed})"
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status IN {allowed})"
         )))
         .bind(self.turn_id)
         .fetch_one(&mut *conn)
@@ -604,12 +610,12 @@ impl SinkState {
             return Err(Fenced);
         }
         let result: Result<bool, sqlx::Error> = async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             if self.guard(&mut tx, &format!("('{from}')")).await?.is_none() {
                 return Ok(false);
             }
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "UPDATE turns SET status = '{to}', updated_at = now() WHERE id = $1"
+                "UPDATE turns SET status = '{to}', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1"
             )))
             .bind(self.turn_id)
             .execute(&mut *tx)
@@ -657,15 +663,15 @@ impl SinkState {
     /// on first use. Returns the item ID.
     async fn write_text(
         &self,
-        tx: &mut PgConnection,
+        tx: &mut SqliteConnection,
         assistant_item: Option<Uuid>,
         last_seq: i64,
         chunk: &str,
     ) -> Result<Uuid, sqlx::Error> {
         if let Some(item_id) = assistant_item {
             let offset: i64 = sqlx::query_scalar(
-                "UPDATE items SET text = text || $2::text WHERE id = $1
-                 RETURNING (octet_length(text) - octet_length($2::text))::bigint",
+                "UPDATE items SET text = text || ?2 WHERE id = ?1
+                 RETURNING (length(CAST(text AS BLOB)) - length(CAST(?2 AS BLOB)))",
             )
             .bind(item_id)
             .bind(chunk)
@@ -686,7 +692,7 @@ impl SinkState {
         let seq = last_seq + 1;
         sqlx::query(
             "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id)
-             VALUES ($1, $2, $3, $4, 'assistant', $5, $6)",
+             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5, ?6)",
         )
         .bind(item_id)
         .bind(self.conversation_id)
@@ -696,7 +702,7 @@ impl SinkState {
         .bind(&self.provider_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE conversations SET last_item_seq = $2 WHERE id = $1")
+        sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
             .bind(self.conversation_id)
             .bind(seq)
             .execute(&mut *tx)
@@ -718,7 +724,7 @@ impl SinkState {
             return Ok(());
         }
         let result: Result<Option<Uuid>, sqlx::Error> = async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             // Text may still arrive while a stop is being confirmed; it is
             // real output and is preserved.
             let Some(last_seq) = self
@@ -769,7 +775,7 @@ impl SinkState {
             ),
         };
         let chunk = self.pending.clone();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut wrote_item = None;
         if !chunk.is_empty() && !self.is_fenced() {
             if let Some(last_seq) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
@@ -779,7 +785,7 @@ impl SinkState {
                 );
             }
         } else {
-            sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+            sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
                 .bind(self.bot_id)
                 .execute(&mut *tx)
                 .await?;
@@ -787,7 +793,7 @@ impl SinkState {
         // Children's bots, then the root turn: a child settling meanwhile
         // takes the same root lock, so parking sees its outcome.
         crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
-        sqlx::query("SELECT 1 FROM turns WHERE id = $1 FOR UPDATE")
+        sqlx::query("SELECT 1 FROM turns WHERE id = ?1")
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
@@ -802,7 +808,7 @@ impl SinkState {
                     (SELECT count(*) FROM delegations d
                      WHERE d.root_turn_id = t.id AND d.delivered_attempt IS NULL
                        AND d.status IN ('completed', 'failed', 'cancelled'))
-             FROM turns t WHERE t.id = $1",
+             FROM turns t WHERE t.id = ?1",
         )
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
@@ -820,10 +826,10 @@ impl SinkState {
         };
         let finished = !matches!(status, "waiting" | "queued");
         let updated = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE turns SET status = $2, error_code = $3, error_message = $4,
-                 effect_uncertain = effect_uncertain OR $5,
-                 finished_at = CASE WHEN $6 THEN now() END, updated_at = now()
-             WHERE id = $1 AND status IN {ACTIVE_STATUSES}"
+            "UPDATE turns SET status = ?2, error_code = ?3, error_message = ?4,
+                 effect_uncertain = effect_uncertain OR ?5,
+                 finished_at = CASE WHEN ?6 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1 AND status IN {ACTIVE_STATUSES}"
         )))
         .bind(self.turn_id)
         .bind(status)
@@ -887,8 +893,8 @@ impl SinkState {
 
     async fn retire_session(&mut self) {
         if let Err(err) = sqlx::query(
-            "UPDATE provider_sessions SET status = 'retired', updated_at = now()
-             WHERE id = (SELECT provider_session_id FROM turns WHERE id = $1)
+            "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = (SELECT provider_session_id FROM turns WHERE id = ?1)
                AND status = 'active'",
         )
         .bind(self.turn_id)
@@ -912,7 +918,7 @@ impl SinkState {
                 // were delivered.
                 if !self.delivered.is_empty() {
                     let marked = async {
-                        let mut tx = self.pool.begin().await?;
+                        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
                         crate::db::delegations::mark_delivered(
                             &mut tx,
                             self.turn_id,
@@ -932,7 +938,7 @@ impl SinkState {
             Err(Fenced) => {
                 let cancelling: Result<bool, sqlx::Error> = sqlx::query_scalar(
                     "SELECT t.status = 'cancelling' AND b.status = 'active'
-                     FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = $1",
+                     FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
                 )
                 .bind(self.turn_id)
                 .fetch_one(&self.pool)
@@ -968,14 +974,14 @@ impl SinkState {
             return Err(Fenced);
         }
         let result: Result<bool, sqlx::Error> = async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             if self.guard(&mut tx, ACTIVE_STATUSES).await?.is_none() {
                 return Ok(false);
             }
             let existing: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM provider_sessions
-                 WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'
-                   AND native_session_id = $3 AND fingerprint = $4",
+                 WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
+                   AND native_session_id = ?3 AND fingerprint = ?4",
             )
             .bind(self.conversation_id)
             .bind(&self.provider_id)
@@ -986,9 +992,9 @@ impl SinkState {
             let session_id = match existing {
                 Some(id) => {
                     sqlx::query(
-                        "UPDATE provider_sessions SET considered_through_turn = $2,
-                             memory_revision = coalesce($3, memory_revision), updated_at = now()
-                         WHERE id = $1",
+                        "UPDATE provider_sessions SET considered_through_turn = ?2,
+                             memory_revision = coalesce(?3, memory_revision), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                         WHERE id = ?1",
                     )
                     .bind(id)
                     .bind(state.considered_through_turn)
@@ -1000,8 +1006,8 @@ impl SinkState {
                 None => {
                     // A replacement retires the previous native session.
                     sqlx::query(
-                        "UPDATE provider_sessions SET status = 'retired', updated_at = now()
-                         WHERE conversation_id = $1 AND provider_id = $2 AND status = 'active'",
+                        "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                         WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'",
                     )
                     .bind(self.conversation_id)
                     .bind(&self.provider_id)
@@ -1011,7 +1017,7 @@ impl SinkState {
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
                              native_session_id, fingerprint, considered_through_turn, memory_revision)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -1026,7 +1032,7 @@ impl SinkState {
                     id
                 }
             };
-            sqlx::query("UPDATE turns SET provider_session_id = $2 WHERE id = $1")
+            sqlx::query("UPDATE turns SET provider_session_id = ?2 WHERE id = ?1")
                 .bind(self.turn_id)
                 .bind(session_id)
                 .execute(&mut *tx)
@@ -1057,7 +1063,7 @@ impl SinkState {
         }
         // Bookkeeping: a database error is logged, never fences the output.
         if let Err(err) =
-            sqlx::query("UPDATE turns SET reported_profile = $2, native_turn_id = $3 WHERE id = $1")
+            sqlx::query("UPDATE turns SET reported_profile = ?2, native_turn_id = ?3 WHERE id = ?1")
                 .bind(self.turn_id)
                 .bind(Json(settings))
                 .bind(native_turn_id)
@@ -1167,10 +1173,10 @@ impl TurnSink for PgSink {
 /// claimed but never delivered returns to the queue. A turn that may have
 /// reached its provider is never replayed: it becomes `uncertain`, keeping
 /// any partial text. Returns (requeued, uncertain).
-pub async fn recover_after_restart(pool: &PgPool) -> Result<(u64, u64), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+pub async fn recover_after_restart(pool: &SqlitePool) -> Result<(u64, u64), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let requeued: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE turns SET status = 'queued', started_at = NULL, updated_at = now()
+        "UPDATE turns SET status = 'queued', started_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE status = 'preparing'
            AND bot_id IN (SELECT id FROM bots WHERE status = 'active' AND NOT cancel_pending)
          RETURNING id, bot_id",
@@ -1182,7 +1188,7 @@ pub async fn recover_after_restart(pool: &PgPool) -> Result<(u64, u64), sqlx::Er
              error_code = 'api_restarted',
              error_message = 'The API restarted while this message was being processed. \
 It was not resent; send a follow-up to continue.',
-             finished_at = now(), updated_at = now()
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE status IN ('sending', 'running', 'cancelling') RETURNING id, bot_id",
     )
     .fetch_all(&mut *tx)
@@ -1192,7 +1198,7 @@ It was not resent; send a follow-up to continue.',
     let mut uncertain = uncertain;
     let halted: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled',
-             error_message = 'Stopped before it was sent.', finished_at = now(), updated_at = now()
+             error_message = 'Stopped before it was sent.', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE status = 'preparing' RETURNING id, bot_id",
     )
     .fetch_all(&mut *tx)
@@ -1218,17 +1224,17 @@ It was not resent; send a follow-up to continue.',
 /// The singleton lock means no other process runs them, so they are settled:
 /// one never started fails, one that may have reached its provider becomes
 /// `uncertain` (never resent). Pending stops and deletions then complete.
-pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::Error> {
+pub async fn settle_orphans(pool: &SqlitePool, live: &[Uuid]) -> Result<u64, sqlx::Error> {
     let orphans: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT (id = ANY($1))"
+        "SELECT id, bot_id FROM turns WHERE status IN {ACTIVE_STATUSES} AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))"
     )))
-    .bind(live)
+    .bind(sqlx::types::Json(live))
     .fetch_all(pool)
     .await?;
     let mut settled = 0;
     for (turn_id, bot_id) in orphans {
-        let mut tx = pool.begin().await?;
-        sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
@@ -1242,8 +1248,8 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
                      THEN 'The message could not be started. Send it again.'
                      ELSE 'Processing stopped unexpectedly. It was not resent; send a follow-up to continue.'
                  END,
-                 finished_at = now(), updated_at = now()
-             WHERE id = $1 AND status IN ('preparing', 'sending', 'running', 'cancelling')",
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1 AND status IN ('preparing', 'sending', 'running', 'cancelling')",
         )
         .bind(turn_id)
         .execute(&mut *tx)
@@ -1263,7 +1269,7 @@ pub async fn settle_orphans(pool: &PgPool, live: &[Uuid]) -> Result<u64, sqlx::E
 }
 
 /// IDs of turns being stopped.
-pub async fn cancelling(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+pub async fn cancelling(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM turns WHERE status = 'cancelling'")
         .fetch_all(pool)
         .await

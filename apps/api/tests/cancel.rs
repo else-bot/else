@@ -1,5 +1,5 @@
 //! POC-007: Stop work, deletion during work, crash reconciliation, and the
-//! singleton guard, through the real routes, PostgreSQL, and API processes.
+//! singleton guard, through the real routes, SQLite, and API processes.
 
 mod common;
 
@@ -20,8 +20,8 @@ async fn stop(app: &TestApp, bot: &str, request: Uuid) -> common::Reply {
     .await
 }
 
-async fn status_of(pool: &sqlx::PgPool, turn: &str) -> (String, Option<String>, bool) {
-    sqlx::query_as("SELECT status, error_code, effect_uncertain FROM turns WHERE id = $1")
+async fn status_of(pool: &sqlx::SqlitePool, turn: &str) -> (String, Option<String>, bool) {
+    sqlx::query_as("SELECT status, error_code, effect_uncertain FROM turns WHERE id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(pool)
         .await
@@ -255,7 +255,7 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
     );
     let assistant: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id
-         WHERE c.bot_id = $1 AND i.kind = 'assistant'",
+         WHERE c.bot_id = ?1 AND i.kind = 'assistant'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -268,7 +268,7 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
     else_api::db::installation::setup(&app.db.pool)
         .await
         .unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -292,7 +292,7 @@ async fn late_output_after_deletion_is_fenced() {
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     let count = || async {
         sqlx::query_scalar::<_, String>(
-            "SELECT coalesce(string_agg(text, ''), '') FROM items WHERE kind = 'assistant'",
+            "SELECT coalesce(group_concat(text, ''), '') FROM items WHERE kind = 'assistant'",
         )
         .fetch_one(&app.db.pool)
         .await
@@ -305,7 +305,7 @@ async fn late_output_after_deletion_is_fenced() {
         at_delete,
         "nothing appended after the tombstone"
     );
-    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -313,7 +313,7 @@ async fn late_output_after_deletion_is_fenced() {
     assert_eq!(status, "deleted");
 }
 
-async fn wait_status(api: &ApiProcess, pool: &sqlx::PgPool, turn: &str, want: &str) {
+async fn wait_status(api: &ApiProcess, pool: &sqlx::SqlitePool, turn: &str, want: &str) {
     let _ = api;
     for _ in 0..200 {
         if status_of(pool, turn).await.0 == want {
@@ -397,12 +397,12 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         "no owner message replayed or duplicated"
     );
     let assistant_for_uncertain: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM items WHERE kind = 'assistant' AND turn_id = ANY($1)",
+        "SELECT count(*) FROM items WHERE kind = 'assistant' AND lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))",
     )
-    .bind(vec![
+    .bind(sqlx::types::Json(vec![
         sending.parse::<Uuid>().unwrap(),
         running.parse::<Uuid>().unwrap(),
-    ])
+    ]))
     .fetch_one(&db.pool)
     .await
     .unwrap();
@@ -472,8 +472,8 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     let bot = app.main_bot().await;
     let bot_id: Uuid = bot.parse().unwrap();
     // Hold the bot lock and commit a new queued turn while Stop waits.
-    let mut tx = app.db.pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
         .bind(bot_id)
         .execute(&mut *tx)
         .await
@@ -498,7 +498,7 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     let turn_id = Uuid::new_v4();
     let conversation: Uuid = sqlx::query_scalar(
         "UPDATE conversations SET last_turn_no = last_turn_no + 1, last_item_seq = last_item_seq + 1
-         WHERE bot_id = $1 RETURNING id",
+         WHERE bot_id = ?1 RETURNING id",
     )
     .bind(bot_id)
     .fetch_one(&mut *tx)
@@ -507,7 +507,7 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
              owner_item_id, provider_id)
-         VALUES ($1, $2, $3, $4, decode(repeat('00', 32), 'hex'), 1, $5, 'synthetic')",
+         VALUES (?1, ?2, ?3, ?4, zeroblob(32), 1, ?5, 'synthetic')",
     )
     .bind(turn_id)
     .bind(bot_id)
@@ -535,7 +535,7 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
     app.wait_turn(&turn_id(&hang), &["running"]).await;
-    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'cancelling' WHERE id = ?1")
         .bind(turn_id(&hang).parse::<Uuid>().unwrap())
         .execute(&app.db.pool)
         .await
@@ -560,7 +560,7 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         .interrupt(turn_id(&queued).parse().unwrap())
         .await;
     app.wait_turn(&turn_id(&queued), &["interrupted"]).await;
-    sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'running', finished_at = NULL WHERE id = ?1")
         .bind(turn_id(&queued).parse::<Uuid>().unwrap())
         .execute(&app.db.pool)
         .await
@@ -582,29 +582,20 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn losing_the_database_lock_stops_the_api() {
+async fn database_file_lock_survives_pool_connection_replacement() {
     let db = TestDb::migrated().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut api = ApiProcess::start(&db, dir.path()).await;
-    let terminated: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) FROM pg_locks
-         WHERE locktype = 'advisory' AND granted AND database =
-             (SELECT oid FROM pg_database WHERE datname = current_database())) t",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(terminated, 1);
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(status) = api.child.try_wait().unwrap() {
-            assert!(!status.success());
-            break;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "API kept running without its lock"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let held = else_api::runtime_lock::acquire(a.path(), &db.pool)
+        .await
+        .unwrap();
+    let second = else_api::db::connect(&db.url).await.unwrap();
+    assert!(matches!(
+        else_api::runtime_lock::acquire(b.path(), &second).await,
+        Err(else_api::runtime_lock::LockError::DatabaseInUse)
+    ));
+    drop(held);
+    else_api::runtime_lock::acquire(b.path(), &second)
+        .await
+        .unwrap();
 }

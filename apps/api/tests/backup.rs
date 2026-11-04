@@ -1,5 +1,5 @@
 //! POC-021: encrypted database backups and non-destructive restore, against
-//! the Compose PostgreSQL with the real `pg_dump` and `pg_restore`.
+//! private SQLite files, with encrypted snapshots and no external tools.
 
 mod common;
 
@@ -12,7 +12,7 @@ use common::TestApp;
 use else_api::backup::capture::BackupConfig;
 use else_api::backup::restore::{RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, PgParams};
+use else_api::backup::{self, BackupError, DatabaseParams};
 use else_api::credentials::SecretKey;
 use serde_json::json;
 use sqlx::Connection;
@@ -42,8 +42,6 @@ fn key(byte: u8) -> SecretKey {
 fn config(dir: &Path) -> BackupConfig {
     BackupConfig {
         dir: dir.join("backups"),
-        pg_dump: PathBuf::from("pg_dump"),
-        pg_restore: PathBuf::from("pg_restore"),
         keep: 7,
         max_bytes: 1 << 30,
         interval: Duration::from_secs(3600),
@@ -53,80 +51,42 @@ fn config(dir: &Path) -> BackupConfig {
 fn worker(app: &TestApp, key: SecretKey, config: BackupConfig) -> BackupWorker {
     BackupWorker::new(
         app.db.pool.clone(),
-        PgParams::parse(app.db.url.expose()).unwrap(),
+        DatabaseParams::parse(app.db.url.expose()).unwrap(),
         Arc::new(key),
         config,
     )
 }
 
-/// A database created by a restore, dropped when the test ends.
+/// A new SQLite file beside the test source database.
 struct Target {
     name: String,
-    admin: PgParams,
 }
-
 impl Target {
     fn new(app: &TestApp) -> Self {
-        let params = PgParams::parse(app.db.url.expose()).unwrap();
+        let p = DatabaseParams::parse(app.db.url.expose()).unwrap();
         Self {
-            name: format!("else_restore_{}", Uuid::new_v4().simple()),
-            admin: params.with_database("postgres"),
+            name: p
+                .options
+                .get_filename()
+                .parent()
+                .unwrap()
+                .join(format!("restore-{}.sqlite3", Uuid::new_v4()))
+                .display()
+                .to_string(),
         }
     }
-
     fn url(&self) -> String {
-        let p = &self.admin;
-        format!(
-            "postgresql://{}:{}@{}:{}/{}",
-            p.user(),
-            p.password().unwrap_or_default(),
-            p.host(),
-            p.port(),
-            self.name
-        )
+        format!("sqlite://{}", self.name)
     }
-
     async fn exists(&self) -> bool {
-        let mut conn = sqlx::PgConnection::connect(&self.admin_url())
-            .await
-            .unwrap();
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(&self.name)
-            .fetch_one(&mut conn)
-            .await
-            .unwrap()
-    }
-
-    fn admin_url(&self) -> String {
-        let p = &self.admin;
-        format!(
-            "postgresql://{}:{}@{}:{}/postgres",
-            p.user(),
-            p.password().unwrap_or_default(),
-            p.host(),
-            p.port()
-        )
+        Path::new(&self.name).exists()
     }
 }
-
 impl Drop for Target {
     fn drop(&mut self) {
-        let url = self.admin_url();
-        let name = self.name.clone();
-        let _ = std::thread::spawn(move || {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(async move {
-                    if let Ok(mut conn) = sqlx::PgConnection::connect(&url).await {
-                        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
-                        )))
-                        .execute(&mut conn)
-                        .await;
-                    }
-                })
-        })
-        .join();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.name));
+        }
     }
 }
 
@@ -137,13 +97,12 @@ async fn restore_into(
     target: &Target,
     staging: &Path,
 ) -> Result<else_api::backup::restore::RestoreReport, BackupError> {
-    let server = PgParams::parse(app.db.url.expose()).unwrap();
+    let server = DatabaseParams::parse(app.db.url.expose()).unwrap();
     restore(RestoreRequest {
         set_dir: set,
         key,
         server: &server,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: staging,
         max_bytes: 1 << 30,
         computers: None,
@@ -152,13 +111,8 @@ async fn restore_into(
 }
 
 async fn rows(url: &str, sql: &str) -> Vec<String> {
-    let mut conn = sqlx::PgConnection::connect(url).await.unwrap();
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT t::text FROM ({sql}) t ORDER BY 1"
-    )))
-    .fetch_all(&mut conn)
-    .await
-    .unwrap()
+    let mut conn = sqlx::SqliteConnection::connect(url).await.unwrap();
+    common::rows(&mut conn, sql).await
 }
 
 /// An installation with bots, a conversation, and a changed profile.
@@ -213,7 +167,7 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
             .all(|b| b.vm == "none" && b.computer.is_none())
     );
     assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
-    assert!(manifest.application.migration_version >= 18);
+    assert!(manifest.application.migration_version >= 1);
     // The set: three files, private, and nothing else.
     let mut names: Vec<String> = std::fs::read_dir(&summary.path)
         .unwrap()
@@ -246,7 +200,10 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
     let (_, _, identity) = else_api::backup::restore::open_set(&summary.path, &key(1)).unwrap();
     let dump = std::fs::read(summary.path.join(backup::DATABASE)).unwrap();
     let plain = backup::open_small(&dump, &identity, 1 << 30).unwrap();
-    assert!(plain.starts_with(b"PGDMP"), "a custom-format dump");
+    assert!(
+        plain.starts_with(b"SQLite format 3\0"),
+        "a SQLite database image"
+    );
     for bytes in names
         .iter()
         .map(|n| std::fs::read(summary.path.join(n)).unwrap())
@@ -285,7 +242,7 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         "SELECT reasoning_effort, service_tier, revision FROM provider_profiles WHERE provider_id = 'codex'",
     )
     .await;
-    assert_eq!(profile, ["(high,default,2)"]);
+    assert_eq!(profile, [r#"["high","default",2]"#]);
     assert_eq!(
         std::fs::read_to_string(staging.join("keep.txt")).unwrap(),
         "untouched"
@@ -382,17 +339,10 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
     // An existing database is refused and left exactly as it was.
     let existing = Target::new(&app);
     {
-        let mut conn = sqlx::PgConnection::connect(&existing.admin_url())
-            .await
-            .unwrap();
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE DATABASE \"{}\"",
-            existing.name
-        )))
-        .execute(&mut conn)
-        .await
-        .unwrap();
-        let mut db = sqlx::PgConnection::connect(&existing.url()).await.unwrap();
+        let mut db =
+            sqlx::SqliteConnection::connect_with(&else_api::db::options(&existing.url()).unwrap())
+                .await
+                .unwrap();
         for sql in [
             "CREATE TABLE precious (v text)",
             "INSERT INTO precious VALUES ('keep me')",
@@ -407,7 +357,7 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
     );
     assert_eq!(
         rows(&existing.url(), "SELECT v FROM precious").await,
-        ["(\"keep me\")"]
+        [r#"["keep me"]"#]
     );
 }
 
@@ -416,21 +366,10 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     let _serial = SERIAL.lock().await;
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
-    // A pg_dump that writes part of a dump and fails.
-    let fake = dir.path().join("pg_dump");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (fake) 0'; exit 0; fi\n\
-         printf 'PGDMP partial output'\necho 'connection lost' >&2\nexit 1\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut failing = config(dir.path());
-    failing.pg_dump = fake;
-    let result = worker(&app, key(1), failing.clone()).run_once().await;
+    else_api::faults::arm("backup.snapshot");
+    let result = worker(&app, key(1), config(dir.path())).run_once().await;
     assert!(
-        matches!(result, Err(BackupError::Producer(ref m)) if m.contains("connection lost")),
+        matches!(result, Err(BackupError::Producer(_))),
         "{result:?}"
     );
     let backups = dir.path().join("backups");
@@ -483,7 +422,7 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     assert!(matches!(result, Err(BackupError::Invalid(_))), "{result:?}");
     assert!(!target.exists().await);
     // A run left `running` by a crash is failed at the next start.
-    sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES ($1, 'crashed')")
+    sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES (?1, 'crashed')")
         .bind(Uuid::new_v4())
         .execute(&app.db.pool)
         .await
@@ -537,7 +476,7 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
     cfg.interval = Duration::from_secs(3600);
     let scheduled = Arc::new(BackupWorker::new(
         app.db.pool.clone(),
-        PgParams::parse(app.db.url.expose()).unwrap(),
+        DatabaseParams::parse(app.db.url.expose()).unwrap(),
         Arc::new(key(1)),
         cfg,
     ));
@@ -727,7 +666,7 @@ async fn cleanup_and_retention_touch_only_owned_real_set_directories() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn recovery_waits_for_a_running_backup_and_cancellation_kills_the_dump() {
+async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
     let _serial = SERIAL.lock().await;
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
@@ -748,33 +687,33 @@ async fn recovery_waits_for_a_running_backup_and_cancellation_kills_the_dump() {
     drop(held);
     assert_eq!(worker.recover().await.unwrap(), 1);
 
-    // A pg_dump that stalls forever: cancellation kills and reaps it.
-    let fake = dir.path().join("stalling-dump");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (fake) 0'; exit 0; fi\n\
-         printf 'PGDMP'\nexec sleep 3600\n",
+    // Cancel while encryption is actively consuming a sizeable snapshot.
+    sqlx::raw_sql(
+        "CREATE TABLE bulk (bytes BLOB); INSERT INTO bulk VALUES (randomblob(33554432));",
     )
+    .execute(&app.db.pool)
+    .await
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut cfg = config(dir.path());
-    cfg.pg_dump = fake;
-    let stalling = Arc::new(BackupWorker::new(
-        app.db.pool.clone(),
-        PgParams::parse(app.db.url.expose()).unwrap(),
-        Arc::new(key(1)),
-        cfg,
-    ));
     let cancel = tokio_util::sync::CancellationToken::new();
-    let run = {
-        let (w, c) = (stalling.clone(), cancel.clone());
-        tokio::spawn(async move { w.run_once_until(&c).await })
-    };
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let started = std::time::Instant::now();
+    let (w, c) = (worker.clone(), cancel.clone());
+    let run = tokio::spawn(async move { w.run_once_until(&c).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sealing = std::fs::read_dir(&backups)
+                .unwrap()
+                .flatten()
+                .any(|e| e.path().join(backup::DATABASE).exists());
+            if sealing {
+                break;
+            }
+            assert!(!run.is_finished(), "capture ended before cancellation");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
     cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(10), run)
+    let result = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
         .unwrap();
@@ -782,12 +721,6 @@ async fn recovery_waits_for_a_running_backup_and_cancellation_kills_the_dump() {
         matches!(result, Err(BackupError::Interrupted)),
         "{result:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(5));
-    let left = std::process::Command::new("pgrep")
-        .args(["-f", "stalling-dump"])
-        .output()
-        .unwrap();
-    assert!(left.stdout.is_empty(), "the dump was reaped");
     assert!(backup::completed_sets(&backups).unwrap().is_empty());
     // The lock was released: a normal run works.
     worker.run_once().await.unwrap();
@@ -810,14 +743,13 @@ async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
     std::fs::write(stale.join(backup::MARKER), "").unwrap();
     std::fs::write(stale.join("database.dump"), "PGDMP old plaintext").unwrap();
     std::fs::create_dir(staging.join(".restore-foreign")).unwrap();
-    let server = PgParams::parse(app.db.url.expose()).unwrap();
+    let server = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let target = Target::new(&app);
     let small = restore(RestoreRequest {
         set_dir: &summary.path,
         key: &key(1),
         server: &server,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &staging,
         max_bytes: 100,
         computers: None,

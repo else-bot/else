@@ -1,4 +1,4 @@
-//! POC-014: the summary tree and saved views, against real PostgreSQL with
+//! POC-014: the summary tree and saved views, against real SQLite with
 //! the application's own storage functions and compactor.
 
 mod common;
@@ -28,7 +28,7 @@ async fn small_recipe(app: &TestApp) {
 }
 
 async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) -> i64 {
-    let mut tx = app.db.pool.begin().await.unwrap();
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let seqs = memory::append(
         &mut tx,
         bot,
@@ -49,7 +49,7 @@ async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) -> i64 {
 /// The labeled leaf text of every entry, by sequence.
 async fn leaf_texts(app: &TestApp, bot: Uuid) -> HashMap<i64, String> {
     let rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT seq, body FROM memory_entry WHERE bot_id = $1")
+        sqlx::query_as("SELECT seq, body FROM memory_entry WHERE bot_id = ?1")
             .bind(bot)
             .fetch_all(&app.db.pool)
             .await
@@ -117,7 +117,7 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
     assert!(merged_once, "compaction merged exact parents");
     // Joins that no longer fit a node wait for a summary instead of being cut.
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM memory_job WHERE bot_id = $1 AND blocked_reason = 'summary_unavailable'",
+        "SELECT count(*) FROM memory_job WHERE bot_id = ?1 AND blocked_reason = 'summary_unavailable'",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -125,7 +125,7 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
     .unwrap();
     assert!(blocked > 0);
     let oversized: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM memory_node WHERE bot_id = $1 AND octet_length(body) > 64",
+        "SELECT count(*) FROM memory_node WHERE bot_id = ?1 AND length(CAST(body AS BLOB)) > 64",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -162,7 +162,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -224,7 +224,7 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
         .await
         .unwrap()
         .unwrap();
-    sqlx::query("UPDATE memory_job SET lease_until = now() - interval '1 second'")
+    sqlx::query("UPDATE memory_job SET lease_until = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds')")
         .execute(&app.db.pool)
         .await
         .unwrap();
@@ -320,7 +320,7 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
         .await
         .body;
     let originals: String = sqlx::query_scalar(
-        "SELECT string_agg(encode(body_sha256, 'hex'), ',' ORDER BY seq) FROM memory_entry WHERE bot_id = $1",
+        "SELECT group_concat(lower(hex(body_sha256)), ',' ORDER BY seq) FROM memory_entry WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_one(&app.db.pool)
@@ -374,8 +374,8 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     assert!(rebuilt["revision"].as_i64() > after["revision"].as_i64());
     assert_exact_coverage(&app, bot_id).await;
     let unchanged: String = sqlx::query_scalar(
-        "SELECT string_agg(encode(body_sha256, 'hex'), ',' ORDER BY seq) FROM memory_entry
-         WHERE bot_id = $1 AND seq < 40",
+        "SELECT group_concat(lower(hex(body_sha256)), ',' ORDER BY seq) FROM memory_entry
+         WHERE bot_id = ?1 AND seq < 40",
     )
     .bind(bot_id)
     .fetch_one(&app.db.pool)
@@ -383,14 +383,14 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     .unwrap();
     assert_eq!(unchanged, originals, "originals were not rewritten");
     let old_nodes: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM memory_node WHERE bot_id = $1 AND generation = 1")
+        sqlx::query_scalar("SELECT count(*) FROM memory_node WHERE bot_id = ?1 AND generation = 1")
             .bind(bot_id)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
     assert!(old_nodes > 0, "the old generation is kept");
     let recipe: Value = sqlx::query_scalar(
-        "SELECT recipe FROM memory_generation WHERE bot_id = $1 AND generation = 2",
+        "SELECT recipe FROM memory_generation WHERE bot_id = ?1 AND generation = 2",
     )
     .bind(bot_id)
     .fetch_one(&app.db.pool)
@@ -423,7 +423,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
         .await;
     let turn: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -463,28 +463,28 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
     let bot: Uuid = app.create_bot("Backlog", "backlog").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
     // Seed 10,050 built leaves behind a stalled first leaf.
-    sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO memory_node (bot_id, generation, start_seq, span, body, method, input_hash)
-         SELECT $1, 1, s, 1, 'Owner: x', 'verbatim', $2 FROM generate_series(1, 10049) s",
+         WITH RECURSIVE seqs(s) AS (VALUES (1) UNION ALL SELECT s+1 FROM seqs WHERE s < 10049) SELECT ?1, 1, s, 1, 'Owner: x', 'verbatim', ?2 FROM seqs",
     )
     .bind(bot)
     .bind(vec![0u8; 32])
     .execute(&app.db.pool)
     .await
     .unwrap();
-    sqlx::query("DELETE FROM memory_job WHERE bot_id = $1")
+    sqlx::query("DELETE FROM memory_job WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO memory_node (bot_id, generation, start_seq, span, body, method, input_hash)
-         VALUES ($1, 1, 0, 1, 'Owner: first', 'verbatim', $2)",
+         VALUES (?1, 1, 0, 1, 'Owner: first', 'verbatim', ?2)",
     )
     .bind(bot)
     .bind(vec![0u8; 32])
@@ -584,14 +584,14 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
 
     // A malformed element is reported and preserved, never normalized.
     sqlx::query(
-        "UPDATE memory_store SET view_nodes = view_nodes || '\"damaged\"' WHERE bot_id = $1",
+        "UPDATE memory_store SET view_nodes = json_insert(view_nodes, '$[#]', 'damaged') WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .execute(&app.db.pool)
     .await
     .unwrap();
     let damaged: Value =
-        sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = ?1")
             .bind(bot_id)
             .fetch_one(&app.db.pool)
             .await
@@ -604,7 +604,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
     );
     add(&app, bot_id, "after", "after").await;
     memory_worker::drain(&app.db.pool).await.unwrap();
-    let kept: Value = sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = $1")
+    let kept: Value = sqlx::query_scalar("SELECT view_nodes FROM memory_store WHERE bot_id = ?1")
         .bind(bot_id)
         .fetch_one(&app.db.pool)
         .await
@@ -614,11 +614,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
     // A view pointing at a generation that does not exist is invalid.
     let other: Uuid = app.create_bot("Gen", "gen").await.parse().unwrap();
     add(&app, other, "g", "g").await;
-    sqlx::query("ALTER TABLE memory_store DROP CONSTRAINT memory_store_building")
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE memory_store SET generation = 999 WHERE bot_id = $1")
+    sqlx::query("UPDATE memory_store SET generation = 999 WHERE bot_id = ?1")
         .bind(other)
         .execute(&app.db.pool)
         .await

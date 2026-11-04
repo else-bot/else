@@ -1,7 +1,7 @@
 //! Saved provider execution profiles.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 
 use crate::app::providers::Profile;
 
@@ -37,10 +37,13 @@ pub enum ProfileError {
     Db(#[from] sqlx::Error),
 }
 
-pub async fn get(pool: &PgPool, provider_id: &str) -> Result<Option<ProfileRecord>, sqlx::Error> {
+pub async fn get(
+    pool: &SqlitePool,
+    provider_id: &str,
+) -> Result<Option<ProfileRecord>, sqlx::Error> {
     sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier, revision, updated_at
-         FROM provider_profiles WHERE provider_id = $1",
+         FROM provider_profiles WHERE provider_id = ?1",
     )
     .bind(provider_id)
     .fetch_optional(pool)
@@ -55,22 +58,22 @@ pub struct ProfilePatch {
     pub service_tier: Option<String>,
 }
 
-/// Merge `patch` into the saved profile under its row lock, validate the
+/// Merge `patch` into the saved profile inside an immediate transaction, validate the
 /// result, and bump the revision. Concurrent partial updates therefore never
 /// overwrite each other's fields. Already accepted turns keep their
 /// snapshots; only later acceptances see the new revision. An unchanged
 /// profile keeps its revision.
 pub async fn update(
-    pool: &PgPool,
+    pool: &SqlitePool,
     provider_id: &str,
     patch: ProfilePatch,
     expected_revision: Option<i64>,
     validate: impl FnOnce(&Profile) -> Result<(), String>,
 ) -> Result<ProfileRecord, ProfileError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let current: Option<ProfileRecord> = sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier, revision, updated_at
-         FROM provider_profiles WHERE provider_id = $1 FOR UPDATE",
+         FROM provider_profiles WHERE provider_id = ?1",
     )
     .bind(provider_id)
     .fetch_optional(&mut *tx)
@@ -95,9 +98,9 @@ pub async fn update(
     }
     let updated = sqlx::query_as(
         "UPDATE provider_profiles
-         SET model = $2, reasoning_effort = $3, service_tier = $4,
-             revision = revision + 1, updated_at = now()
-         WHERE provider_id = $1
+         SET model = ?2, reasoning_effort = ?3, service_tier = ?4,
+             revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE provider_id = ?1
          RETURNING provider_id, model, reasoning_effort, service_tier, revision, updated_at",
     )
     .bind(provider_id)
@@ -114,7 +117,7 @@ pub async fn update(
 /// providers, so their profile must be configured explicitly). Returns
 /// `None` if one already exists.
 pub async fn create(
-    pool: &PgPool,
+    pool: &SqlitePool,
     provider_id: &str,
     profile: &Profile,
     validate: impl FnOnce(&Profile) -> Result<(), String>,
@@ -122,7 +125,7 @@ pub async fn create(
     validate(profile).map_err(ProfileError::Invalid)?;
     let record = sqlx::query_as(
         "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
-         VALUES ($1, $2, $3, $4) ON CONFLICT (provider_id) DO NOTHING
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (provider_id) DO NOTHING
          RETURNING provider_id, model, reasoning_effort, service_tier, revision, updated_at",
     )
     .bind(provider_id)

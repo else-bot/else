@@ -312,7 +312,7 @@ async fn guest_tools_desktop_and_isolation() {
         panic!("{started:?}")
     };
     let turn_lease: Uuid = sqlx::query_scalar(
-        "SELECT id FROM computer_leases WHERE bot_id = $1 AND holder = 'test:turn' AND released_at IS NULL",
+        "SELECT id FROM computer_leases WHERE bot_id = ?1 AND holder = 'test:turn' AND released_at IS NULL",
     )
     .bind(bot)
     .fetch_one(&app.db.pool)
@@ -635,7 +635,7 @@ impl ComputerRuntime for Gated {
 }
 
 /// POC-019: acquisition racing owner stop and deletion against the real
-/// runtime and PostgreSQL. The stop or deletion commits while the VM is
+/// runtime and SQLite. The stop or deletion commits while the VM is
 /// booting (held at the gate); the late start must not be granted, and the
 /// computer must already be stopped, before maintenance runs. Admission
 /// queues beyond the budget. Also reports VM worker memory.
@@ -687,7 +687,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         let pool = app.db.pool.clone();
         async move {
             sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM computer_leases WHERE bot_id = $1 AND released_at IS NULL",
+                "SELECT count(*) FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL",
             )
             .bind(bot)
             .fetch_one(&pool)
@@ -733,7 +733,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     let stopping = tokio::spawn(async move { m.owner_stop(a_id).await.unwrap() });
     loop {
         let desired: String =
-            sqlx::query_scalar("SELECT desired_state FROM bot_computers WHERE bot_id = $1")
+            sqlx::query_scalar("SELECT desired_state FROM bot_computers WHERE bot_id = ?1")
                 .bind(a_id)
                 .fetch_one(&app.db.pool)
                 .await
@@ -768,7 +768,7 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         .tick(&tokio_util::sync::CancellationToken::new())
         .await
         .unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(b_id)
         .fetch_one(&app.db.pool)
         .await
@@ -791,7 +791,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
         return;
     }
-    use else_api::backup::{self, PgParams};
+    use else_api::backup::{self, DatabaseParams};
     use sqlx::Connection;
     let dir = tempfile::tempdir().unwrap();
     let msb_bin = format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap());
@@ -938,7 +938,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .status
             .is_success()
     );
-    sqlx::query("UPDATE installation SET default_bot_id = $1")
+    sqlx::query("UPDATE installation SET default_bot_id = ?1")
         .bind(alpha)
         .execute(&db.pool)
         .await
@@ -967,7 +967,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         base64::engine::general_purpose::STANDARD.encode([3u8; 32])
     })
     .unwrap();
-    let params = PgParams::parse(db.url.expose()).unwrap();
+    let params = DatabaseParams::parse(db.url.expose()).unwrap();
     let worker = else_api::backup::worker::BackupWorker::new(
         db.pool.clone(),
         params.clone(),
@@ -980,8 +980,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         ),
         else_api::backup::capture::BackupConfig {
             dir: dir.path().join("backups"),
-            pg_dump: "pg_dump".into(),
-            pg_restore: "pg_restore".into(),
             keep: 7,
             max_bytes: 8 << 30,
             interval: Duration::from_secs(3600),
@@ -1023,7 +1021,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     );
     // What the restored installation must show.
     let saved = |url: String| async move {
-        let mut conn = sqlx::PgConnection::connect(&url).await.unwrap();
+        let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
         let mut out = Vec::new();
         for sql in [
             "SELECT id, name, role, status FROM bots",
@@ -1036,12 +1034,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             "SELECT * FROM memory_generation",
             "SELECT * FROM memory_node",
         ] {
-            let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT t::text FROM ({sql}) t ORDER BY 1"
-            )))
-            .fetch_all(&mut conn)
-            .await
-            .unwrap();
+            let rows = common::rows(&mut conn, sql).await;
             out.push(rows);
         }
         out
@@ -1072,7 +1065,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         key: &key,
         server: &params,
         target_database: &target,
-        pg_restore: std::path::Path::new("pg_restore"),
         staging_parent: &dir.path().join("staging"),
         max_bytes: 8 << 30,
         computers: Some(backup::restore::ComputerTarget {
@@ -1084,24 +1076,18 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     eprintln!("restore took {:?}", started.elapsed());
     let target_params = params.with_database(&target);
     let target_url = format!(
-        "postgresql://{}:{}@{}:{}/{target}",
-        target_params.user(),
-        target_params.password().unwrap_or_default(),
-        target_params.host(),
-        target_params.port()
+        "sqlite://{}",
+        target_params
+            .with_database(&format!("{target}"))
+            .options
+            .get_filename()
+            .display()
     );
     let drop_target = || {
-        let admin = params.with_database("postgres");
+        let options = params.options.clone();
         let target = target.clone();
         async move {
-            let mut conn = sqlx::PgConnection::connect_with(&admin.options)
-                .await
-                .unwrap();
-            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DROP DATABASE IF EXISTS \"{target}\" WITH (FORCE)"
-            )))
-            .execute(&mut conn)
-            .await;
+            common::remove_database(&options, &target);
         }
     };
     if let Err(err) = &report {
@@ -1116,7 +1102,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
 
     // The restored computers: files, browser storage, desktop password,
     // the owner's stop, and the network policy.
-    let pool = sqlx::PgPool::connect(&target_url).await.unwrap();
+    let pool = sqlx::SqlitePool::connect(&target_url).await.unwrap();
     let recovered = ComputerManager::new(pool.clone(), restored_runtime.clone(), config(&new_dir));
     recovered.reconcile_startup().await.unwrap();
     assert_eq!(
@@ -1215,7 +1201,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(sessions, 0, "context is rebuilt from PostgreSQL");
+    assert_eq!(sessions, 0, "context is rebuilt from SQLite");
 
     // Start the recovered API twice: nothing saved changes, nothing replays.
     else_api::credentials::write_secret_key(&new_dir.join("secret-key"), &key).unwrap();

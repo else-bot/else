@@ -271,7 +271,7 @@ async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
         )
         .await;
     let text: String = sqlx::query_scalar(
-        "SELECT coalesce(string_agg(text, ''), '') FROM items WHERE turn_id = $1 AND kind = 'assistant'",
+        "SELECT coalesce(group_concat(text, ''), '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
     )
     .bind(turn.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -287,7 +287,7 @@ async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
 async fn active_session(app: &TestApp, bot: &str) -> Option<(Uuid, String)> {
     sqlx::query_as(
         "SELECT s.id, s.native_session_id FROM provider_sessions s
-         WHERE s.bot_id = $1 AND s.status = 'active'",
+         WHERE s.bot_id = ?1 AND s.status = 'active'",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_optional(&app.db.pool)
@@ -359,7 +359,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     }
     // Requested settings are recorded as reported by Codex.
     let reported: Vec<(String,)> = sqlx::query_as(
-        "SELECT reported_profile::text FROM turns WHERE provider_id = 'codex' AND reported_profile IS NOT NULL",
+        "SELECT reported_profile FROM turns WHERE provider_id = 'codex' AND reported_profile IS NOT NULL",
     )
     .fetch_all(&app.db.pool)
     .await
@@ -388,9 +388,9 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         "resumed, not replaced"
     );
 
-    // A lost native session is rebuilt from PostgreSQL without duplicating
+    // A lost native session is rebuilt from SQLite without duplicating
     // the owner's request.
-    sqlx::query("UPDATE provider_sessions SET native_session_id = $2 WHERE id = $1")
+    sqlx::query("UPDATE provider_sessions SET native_session_id = ?2 WHERE id = ?1")
         .bind(b_session)
         .bind(Uuid::new_v4().to_string())
         .execute(&app.db.pool)
@@ -438,7 +438,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
     for _ in 0..600 {
         let n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM items WHERE turn_id = $1 AND kind = 'assistant'",
+            "SELECT count(*) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
         )
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
@@ -465,7 +465,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     eprintln!("interrupt -> {status}");
     assert_eq!(status, "interrupted");
     let partial: String =
-        sqlx::query_scalar("SELECT text FROM items WHERE turn_id = $1 AND kind = 'assistant'")
+        sqlx::query_scalar("SELECT text FROM items WHERE turn_id = ?1 AND kind = 'assistant'")
             .bind(turn.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
             .await
@@ -509,7 +509,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     .await;
     assert_eq!(status, "completed", "no policy violation occurred");
     let reported: String =
-        sqlx::query_scalar("SELECT reported_profile->>'reasoning_effort' FROM turns WHERE id = $1")
+        sqlx::query_scalar("SELECT reported_profile->>'reasoning_effort' FROM turns WHERE id = ?1")
             .bind(turn.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
             .await
@@ -590,7 +590,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
          in the Work bot's memory. Reply with the codename only.",
     )
     .await;
-    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -599,7 +599,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     assert!(text.contains("HARBORLIGHT"), "{text}");
     // The retrieval went through the API: Family's memory logs the tool calls.
     let calls: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
     .bind(family.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)
@@ -612,7 +612,7 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     );
     // The answer itself is now in Family's memory as assistant text.
     let answer: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM memory_entry WHERE bot_id = $1 AND kind = 'assistant_message'
+        "SELECT count(*) FROM memory_entry WHERE bot_id = ?1 AND kind = 'assistant_message'
            AND body LIKE '%HARBORLIGHT%'",
     )
     .bind(family.parse::<Uuid>().unwrap())
@@ -670,7 +670,7 @@ async fn code_mode_reaches_only_elsebot_tools() {
         ),
     )
     .await;
-    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -792,7 +792,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     ];
     for (n, (kind, body)) in corpus.iter().enumerate() {
         let key = format!("c{n}");
-        let mut tx = app.db.pool.begin().await.unwrap();
+        let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
         memory::append(
             &mut tx,
             bot_id,
@@ -827,7 +827,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     worker.drain().await.unwrap();
     eprintln!("compaction took {:?}", started.elapsed());
     let nodes: Vec<(i64, i64, String, String, Value)> = sqlx::query_as(
-        "SELECT start_seq, span, method, body, audit FROM memory_node WHERE bot_id = $1 ORDER BY span, start_seq",
+        "SELECT start_seq, span, method, body, audit FROM memory_node WHERE bot_id = ?1 ORDER BY span, start_seq",
     )
     .bind(bot_id)
     .fetch_all(&app.db.pool)
@@ -841,7 +841,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
         );
     }
     let blocked: Vec<(i64, i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT start_seq, span, blocked_reason, last_error FROM memory_job WHERE bot_id = $1",
+        "SELECT start_seq, span, blocked_reason, last_error FROM memory_job WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_all(&app.db.pool)
@@ -887,7 +887,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     assert!(!text.contains("90,000"), "{text}");
     let revision: Option<i64> = sqlx::query_scalar(
         "SELECT s.memory_revision FROM provider_sessions s JOIN turns t ON t.provider_session_id = s.id
-         WHERE t.id = $1",
+         WHERE t.id = ?1",
     )
     .bind(turn.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -942,7 +942,7 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
          plants during a heatwave, then give me its answer in one sentence.",
     )
     .await;
-    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -957,21 +957,21 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
         )
         .await;
     let delegations: Vec<(Uuid, String, Option<String>, Option<i32>)> = sqlx::query_as(
-        "SELECT target_bot_id, status, result, delivered_attempt FROM delegations WHERE root_turn_id = $1",
+        "SELECT target_bot_id, status, result, delivered_attempt FROM delegations WHERE root_turn_id = ?1",
     )
     .bind(turn.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)
     .await
     .unwrap();
     let answer: String = sqlx::query_scalar(
-        "SELECT string_agg(text, ' | ' ORDER BY seq) FROM items WHERE turn_id = $1 AND kind = 'assistant'",
+        "SELECT group_concat(text, ' | ' ORDER BY seq) FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
     )
     .bind(turn.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
     let (attempt, final_error): (i32, Option<String>) =
-        sqlx::query_as("SELECT attempt, error_message FROM turns WHERE id = $1")
+        sqlx::query_as("SELECT attempt, error_message FROM turns WHERE id = ?1")
             .bind(turn.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
             .await
@@ -1077,13 +1077,13 @@ async fn codex_uses_its_guest_computer_through_tools() {
          type 42 into #q, click #b, and tell me the visible page text. Reply briefly.",
     )
     .await;
-    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = $1")
+    let error: Option<String> = sqlx::query_scalar("SELECT error_message FROM turns WHERE id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     let activity: Vec<String> = sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity' ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
     .bind(bot_id)
     .fetch_all(&app.db.pool)
@@ -1091,7 +1091,7 @@ async fn codex_uses_its_guest_computer_through_tools() {
     .unwrap();
     eprintln!("status {status} {error:?}\nreply: {text}\ntool activity: {activity:#?}");
     let artifacts: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT guest_path, sha256 FROM artifacts WHERE bot_id = $1")
+        sqlx::query_as("SELECT guest_path, sha256 FROM artifacts WHERE bot_id = ?1")
             .bind(bot_id)
             .fetch_all(&app.db.pool)
             .await

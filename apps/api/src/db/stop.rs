@@ -1,6 +1,6 @@
 //! Bot-wide Stop work and deletion while work is in progress.
 //!
-//! Both halt everything accepted up to a boundary under the bot row lock:
+//! Both halt everything accepted up to a boundary inside the immediate transaction:
 //! queued turns end as interrupted without running, and the active turn moves
 //! to `cancelling` so the scheduler interrupts its provider. The bot stays
 //! blocked (`cancel_pending` or `deleting`) until the active turn records a
@@ -8,7 +8,7 @@
 //! same transaction. Nothing claims that a stopped action was undone.
 
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::bots::{BotError, lock_request};
@@ -50,9 +50,9 @@ fn stop_hash(bot_id: Uuid) -> Vec<u8> {
 
 /// End queued turns with `turn_no <= boundary` and move the active one to
 /// `cancelling`. Returns the active turn, if any. The caller holds the bot
-/// row lock.
+/// immediate transaction.
 pub async fn halt_accepted(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     boundary: i64,
     message: &str,
@@ -60,9 +60,9 @@ pub async fn halt_accepted(
     // Children's bots before any root or child turn (their order).
     crate::db::delegations::lock_targets_of_bot(conn, bot_id).await?;
     let queued: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = $3,
-             finished_at = now(), updated_at = now()
-         WHERE bot_id = $1 AND status IN ('queued', 'waiting') AND turn_no <= $2
+        "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = ?3,
+             finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE bot_id = ?1 AND status IN ('queued', 'waiting') AND turn_no <= ?2
          RETURNING id",
     )
     .bind(bot_id)
@@ -79,14 +79,14 @@ pub async fn halt_accepted(
     // them and completes the stop once none remains.
     sqlx::query(
         "UPDATE guest_jobs SET status = 'cancelling'
-         WHERE bot_id = $1 AND status IN ('starting', 'running')",
+         WHERE bot_id = ?1 AND status IN ('starting', 'running')",
     )
     .bind(bot_id)
     .execute(&mut *conn)
     .await?;
     let active: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE turns SET status = 'cancelling', updated_at = now()
-         WHERE bot_id = $1 AND turn_no <= $2 AND status IN ('preparing', 'sending', 'running')
+        "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE bot_id = ?1 AND turn_no <= ?2 AND status IN ('preparing', 'sending', 'running')
          RETURNING id",
     )
     .bind(bot_id)
@@ -98,7 +98,7 @@ pub async fn halt_accepted(
         return Ok(Some(turn_id));
     }
     // Already cancelling from an earlier stop.
-    sqlx::query_scalar("SELECT id FROM turns WHERE bot_id = $1 AND status = 'cancelling'")
+    sqlx::query_scalar("SELECT id FROM turns WHERE bot_id = ?1 AND status = 'cancelling'")
         .bind(bot_id)
         .fetch_optional(&mut *conn)
         .await
@@ -106,13 +106,13 @@ pub async fn halt_accepted(
 
 /// Complete pending stops and deletion once no turn, no cancelling guest
 /// job, and no foreground command (POC-026) remains (and, for deletion, the computer is shut down). Runs in the
-/// caller's transaction under the bot row lock. Returns true if it changed
+/// caller's transaction inside the immediate transaction. Returns true if it changed
 /// anything.
-pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn settle(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = $1 AND status IN {ACTIVE_STATUSES})
-             OR EXISTS (SELECT 1 FROM guest_jobs WHERE bot_id = $1 AND status = 'cancelling')
-             OR EXISTS (SELECT 1 FROM guest_runs WHERE bot_id = $1 AND ended_at IS NULL)"
+        "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1 AND status IN {ACTIVE_STATUSES})
+             OR EXISTS (SELECT 1 FROM guest_jobs WHERE bot_id = ?1 AND status = 'cancelling')
+             OR EXISTS (SELECT 1 FROM guest_runs WHERE bot_id = ?1 AND ended_at IS NULL)"
     )))
     .bind(bot_id)
     .fetch_one(&mut *conn)
@@ -121,8 +121,8 @@ pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
         return Ok(false);
     }
     let receipts = sqlx::query(
-        "UPDATE request_receipts SET state = 'done', completed_at = now()
-         WHERE bot_id = $1 AND operation = 'cancel' AND state = 'pending'",
+        "UPDATE request_receipts SET state = 'done', completed_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE bot_id = ?1 AND operation = 'cancel' AND state = 'pending'",
     )
     .bind(bot_id)
     .execute(&mut *conn)
@@ -132,12 +132,12 @@ pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
     // down; maintenance stops it and settles again.
     let bot = sqlx::query(
         "WITH down AS (SELECT NOT EXISTS (
-                 SELECT 1 FROM bot_computers WHERE bot_id = $1
+                 SELECT 1 FROM bot_computers WHERE bot_id = ?1
                    AND observed_state NOT IN ('absent', 'stopped', 'missing')) AS ok)
          UPDATE bots SET cancel_pending = false,
              status = CASE WHEN status = 'deleting' AND (SELECT ok FROM down)
                  THEN 'deleted' ELSE status END
-         WHERE id = $1 AND (cancel_pending OR (status = 'deleting' AND (SELECT ok FROM down)))",
+         WHERE id = ?1 AND (cancel_pending OR (status = 'deleting' AND (SELECT ok FROM down)))",
     )
     .bind(bot_id)
     .execute(&mut *conn)
@@ -153,33 +153,32 @@ pub async fn settle(conn: &mut PgConnection, bot_id: Uuid) -> Result<bool, sqlx:
 /// Stop all work accepted for this bot so far. A retry with the same request
 /// ID returns the original receipt and never affects later work.
 pub async fn stop_work(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     request_id: Uuid,
 ) -> Result<StopReceipt, StopError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     lock_request(&mut tx, request_id).await?;
     if crate::db::categories::used_by_category(&mut tx, request_id).await? {
         return Err(BotError::RequestConflict.into());
     }
     // Lock first, then read the boundary in a new statement: a send that
     // held the lock has committed by then, so its turn is inside the stop.
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
-            .bind(bot_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     let Some(status) = status else {
         return Err(BotError::NotFound.into());
     };
     let last_turn_no: i64 = sqlx::query_scalar(
-        "SELECT last_turn_no FROM conversations WHERE bot_id = $1 AND kind = 'owner'",
+        "SELECT last_turn_no FROM conversations WHERE bot_id = ?1 AND kind = 'owner'",
     )
     .bind(bot_id)
     .fetch_one(&mut *tx)
     .await?;
     let receipt: Option<(String, Uuid, Vec<u8>, Option<String>)> = sqlx::query_as(
-        "SELECT operation, bot_id, payload_hash, state FROM request_receipts WHERE request_id = $1",
+        "SELECT operation, bot_id, payload_hash, state FROM request_receipts WHERE request_id = ?1",
     )
     .bind(request_id)
     .fetch_optional(&mut *tx)
@@ -203,7 +202,7 @@ pub async fn stop_work(
     sqlx::query(
         "INSERT INTO request_receipts
              (request_id, operation, bot_id, payload_hash, state, boundary_turn_no)
-         VALUES ($1, 'cancel', $2, $3, 'pending', $4)",
+         VALUES (?1, 'cancel', ?2, ?3, 'pending', ?4)",
     )
     .bind(request_id)
     .bind(bot_id)
@@ -211,7 +210,7 @@ pub async fn stop_work(
     .bind(last_turn_no)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE bots SET cancel_pending = true WHERE id = $1")
+    sqlx::query("UPDATE bots SET cancel_pending = true WHERE id = ?1")
         .bind(bot_id)
         .execute(&mut *tx)
         .await?;
@@ -234,15 +233,15 @@ pub async fn stop_work(
 
 /// Settle every bot whose stop or deletion was waiting on work that is no
 /// longer active, e.g. after startup reconciliation.
-pub async fn settle_all(pool: &PgPool) -> Result<u64, sqlx::Error> {
+pub async fn settle_all(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
     let bots: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM bots WHERE cancel_pending OR status = 'deleting'")
             .fetch_all(pool)
             .await?;
     let mut settled = 0;
     for bot_id in bots {
-        let mut tx = pool.begin().await?;
-        sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR UPDATE")
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;

@@ -7,16 +7,16 @@
 # installation to it; running it again is how you update (`elsebot update`
 # does the same). Linux (Debian 12+, Ubuntu 24.04+, Arch Linux / Omarchy;
 # x86_64) and macOS (Apple silicon) get the API, the desktop, and everything
-# they need. macOS needs Xcode, a running Docker (OrbStack or Docker Desktop),
-# and Homebrew for the PostgreSQL client tools if they are missing.
+# they need. macOS needs Xcode, and a running Docker (OrbStack or Docker Desktop)
+# only when building the optional guest image. SQLite is bundled in the API.
 #
 # Everything it installs or keeps lives in ~/.else:
 #   src/        the release's source (a git checkout at the release tag)
 #   versions/   built releases, versions/<version>/bin/{else-api,else-desktop}
 #   current     -> versions/<version>, the release in use
 #   bin/        elsebot, and else-api / else-desktop through current
-#   config/     .env (settings and database password, 0600), compose.yaml
-#   data/       the installation: credentials, bot computers, artifacts, backups
+#   config/     .env (settings, 0600)
+#   data/       else.sqlite3, credentials, bot computers, artifacts, backups
 #   bots/       each bot's project directory (bots/<bot id>), where its provider
 #               CLI starts on the host; mounted as ~/work in its computer
 #   toolchain/  Rust (rustup and cargo), only for building else.bot
@@ -24,7 +24,7 @@
 #   build/      the build cache
 #   logs/       install and update logs; the API log without systemd
 # Outside it: system packages (with sudo, only when missing; Homebrew's
-# postgresql@18 on macOS), the Docker volume of the database, the guest image
+# SQLite CLI for inspection on Linux), the optional guest image
 # in Docker, the API's service (Linux: the systemd user unit
 # ~/.config/systemd/user/else-api.service, and lingering for your user when
 # it starts at boot; macOS: the launchd agent
@@ -44,7 +44,7 @@
 #
 # Settings (environment): ELSE_VERSION=0.0.2 installs that release instead
 # of the latest; ELSE_HOME, ELSE_REPO, ELSE_API_PORT, ELSE_SERVICE_NAME,
-# ELSE_DATABASE_URL (use an existing PostgreSQL instead of Docker), and
+# ELSE_DATABASE_URL (override the SQLite file location), and
 # ELSE_INSTALL_NO_SYSTEMD=1 (no systemd or launchd: elsebot runs the API as a
 # plain process) exist mostly for tests.
 set -euo pipefail
@@ -67,8 +67,6 @@ EOF
 
 MIN_RUST="1.94.0"
 MSB_VERSION="0.7.13"
-COMPOSE_VERSION="5.6.1"
-PG_MAJOR="18"
 GUEST_TAG="else-guest:2"
 
 ELSE_HOME="${ELSE_HOME:-$HOME/.else}"
@@ -254,7 +252,7 @@ ensure_bootstrap_tools() {
 }
 
 apt_packages() {
-	local list="build-essential pkg-config curl ca-certificates git jq tar gzip"
+	local list="build-essential pkg-config curl ca-certificates git jq tar gzip sqlite3"
 	if [ "$SERVER_ONLY" = 0 ]; then
 		list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
 	fi
@@ -262,115 +260,41 @@ apt_packages() {
 }
 
 pacman_packages() {
-	local list="base-devel pkgconf curl ca-certificates git jq tar gzip postgresql-libs"
+	local list="base-devel pkgconf curl ca-certificates git jq tar gzip sqlite"
 	if [ "$SERVER_ONLY" = 0 ]; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
 	echo "$list"
 }
 
-# Docker Engine with the Compose plugin; any existing Docker is kept. Not
-# needed with an external database and no guest image.
+# Docker is only used to build the optional guest image.
 docker_packages() {
-	if [ -n "${ELSE_DATABASE_URL:-}" ] && [ "$SKIP_GUEST" = 1 ]; then return 0; fi
-	if have docker; then
-		docker compose version >/dev/null 2>&1 && return 0
-		case "$DISTRO" in
-		ubuntu) echo "docker-compose-v2" ;;
-		arch) echo "docker-compose" ;;
-		esac
-		return 0
-	fi
-	case "$DISTRO" in
-	ubuntu) echo "docker.io docker-compose-v2" ;;
-	# Debian 12's docker-compose is the old v1 tool; see install_compose_plugin.
-	debian) if [ "${VERSION_ID%%.*}" -ge 13 ] 2>/dev/null; then echo "docker.io docker-compose"; else echo "docker.io"; fi ;;
-	arch) echo "docker docker-compose" ;;
-	esac
-}
-
-# Docker's own Compose plugin where none is packaged (Debian 12), system-wide.
-install_compose_plugin() {
-	have docker || return 0
-	docker compose version >/dev/null 2>&1 && return 0
-	local base="https://github.com/docker/compose/releases/download/v$COMPOSE_VERSION"
-	local asset="docker-compose-linux-$ARCH" tmp
-	info "Installing the Docker Compose plugin $COMPOSE_VERSION"
-	tmp="$(mktemp -d)"
-	curl -fsSL "$base/$asset" -o "$tmp/$asset"
-	curl -fsSL "$base/$asset.sha256" -o "$tmp/$asset.sha256"
-	(cd "$tmp" && sha256sum -c --quiet "$asset.sha256") || die "checksum verification of the Compose plugin failed"
-	sudo_ready
-	$SUDO install -D -m 755 "$tmp/$asset" /usr/local/lib/docker/cli-plugins/docker-compose
-	rm -rf "$tmp"
-	docker compose version >/dev/null 2>&1 || die "docker compose still does not work"
-}
-
-PG_DUMP=""
-PG_RESTORE=""
-PSQL=""
-pg_major() { "$1" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p' | head -1; }
-find_pg_tools() {
-	local dir major
-	local dirs="/usr/lib/postgresql/$PG_MAJOR/bin /usr/bin /usr/local/bin"
-	# macOS: Homebrew's keg-only postgresql@18 or libpq (Apple silicon, Intel).
-	[ "$DISTRO" = macos ] && dirs="/opt/homebrew/opt/postgresql@$PG_MAJOR/bin /usr/local/opt/postgresql@$PG_MAJOR/bin /opt/homebrew/opt/libpq/bin /usr/local/opt/libpq/bin /opt/homebrew/bin /usr/local/bin"
-	for dir in $dirs; do
-		if [ -x "$dir/pg_dump" ] && [ -x "$dir/pg_restore" ]; then
-			major="$(pg_major "$dir/pg_dump")"
-			if [ -n "$major" ] && [ "$major" -ge "$PG_MAJOR" ]; then
-				PG_DUMP="$dir/pg_dump"
-				PG_RESTORE="$dir/pg_restore"
-				PSQL="$dir/psql"
-				return 0
-			fi
-		fi
-	done
-	return 1
-}
-
-# Debian and Ubuntu ship older client tools: use the PostgreSQL apt repository.
-setup_pgdg() {
-	if [ -f /etc/apt/sources.list.d/pgdg.list ] || [ -f /etc/apt/sources.list.d/pgdg.sources ]; then return 0; fi
-	info "Adding the PostgreSQL apt repository (apt.postgresql.org) for postgresql-client-$PG_MAJOR"
-	install_packages postgresql-common
-	$SUDO /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+    [ "$SKIP_GUEST" = 1 ] && return 0
+    have docker && return 0
+    case "$DISTRO" in
+        debian | ubuntu) echo "docker.io" ;;
+        arch) echo "docker" ;;
+    esac
 }
 
 linux_packages() {
-	step "System packages"
-	local wanted="" missing need_pg=0
-	case "$DISTRO" in
-	debian | ubuntu) wanted="$(apt_packages) $(docker_packages)" ;;
-	arch) wanted="$(pacman_packages) $(docker_packages)" ;;
-	esac
-	# shellcheck disable=SC2086
-	missing="$(missing_packages $wanted)"
-	find_pg_tools || need_pg=1
-	if [ -z "$missing" ] && [ "$need_pg" = 0 ]; then
-		ok "all present"
-	else
-		[ -n "$missing" ] && info "Missing: $missing"
-		if [ "$need_pg" = 1 ] && [ "$DISTRO" != arch ]; then
-			info "Missing: postgresql-client-$PG_MAJOR (pg_dump and pg_restore for backups)"
-		fi
-		confirm "Install them with sudo?" || die "cannot continue without the system packages"
-		# shellcheck disable=SC2086
-		install_packages $missing
-		if [ "$need_pg" = 1 ] && [ "$DISTRO" != arch ]; then
-			setup_pgdg
-			APT_UPDATED=0
-			install_packages "postgresql-client-$PG_MAJOR"
-		fi
-		# Debian 13 and newer Ubuntus ship the Docker CLI separately.
-		if ! have docker && [ "$DISTRO" != arch ] && [ -n "$(docker_packages)" ]; then
-			install_packages docker-cli
-		fi
-		find_pg_tools || die "pg_dump $PG_MAJOR or newer is still missing"
-		ok "installed"
-	fi
-	install_compose_plugin
-	ok "pg_dump: $PG_DUMP ($("$PG_DUMP" --version | head -1))"
+    step "System packages"
+    local wanted="" missing
+    case "$DISTRO" in
+        debian | ubuntu) wanted="$(apt_packages) $(docker_packages)" ;;
+        arch) wanted="$(pacman_packages) $(docker_packages)" ;;
+    esac
+    # shellcheck disable=SC2086
+    missing="$(missing_packages $wanted)"
+    if [ -z "$missing" ]; then
+        ok "all present"
+    else
+        info "Missing: $missing"
+        confirm "Install them with sudo?" || die "cannot continue without the system packages"
+        # shellcheck disable=SC2086
+        install_packages $missing
+        ok "installed"
+    fi
 }
 
 # --- Docker, KVM, and the sandbox -------------------------------------------
@@ -393,7 +317,7 @@ docker_run() {
 
 linux_access() {
 	step "Docker, KVM, and the provider sandbox"
-	if have docker; then
+	if [ "$SKIP_GUEST" != 1 ] && have docker; then
 		if has_systemd && ! systemctl is-active --quiet docker 2>/dev/null; then
 			sudo_ready
 			if $SUDO systemctl enable --now docker >/dev/null 2>&1; then ok "Docker service started"; else warn "could not start the Docker service"; fi
@@ -620,8 +544,8 @@ install_commands() {
 			if ask_yes "Start the API by itself $when?"; then AUTOSTART=1; fi
 		fi
 	fi
-	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\nELSEBOT_PSQL=%s\n' \
-		"$SERVICE" "$manager" "$AUTOSTART" "$PSQL" >"$CONFIG/elsebot.env"
+	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\n' \
+		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env"
 	ln -sfn ../current/bin/else-api "$BIN/else-api"
 	[ "$SERVER_ONLY" = 1 ] || ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"
 	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
@@ -658,17 +582,12 @@ config_set() {
 	mv -f "$tmp" "$ENV_FILE"
 }
 
-free_port() {
-	local port
-	for port in 55432 55433 55434 55435 55436; do
-		if ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then echo "$port"; return; fi
-	done
-	die "no free local port for PostgreSQL (tried 55432-55436)"
-}
-
 write_config() {
 	step "Configuration ($ENV_FILE)"
 	if [ -f "$ENV_FILE" ]; then
+        case "$(env_value DATABASE_URL)" in
+            postgres://* | postgresql://*) die "this alpha installation uses PostgreSQL; stop the API and reset the alpha installation with a fresh SQLite database. The existing database was kept" ;;
+        esac
 		ok "kept"
 		return
 	fi
@@ -677,37 +596,19 @@ write_config() {
 	fi
 	mkdir -p "$CONFIG" "$DATA"
 	chmod 700 "$CONFIG" "$DATA"
-	local database_url password="" port=""
-	if [ -n "${ELSE_DATABASE_URL:-}" ]; then
-		database_url="$ELSE_DATABASE_URL"
-	else
-		password="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
-		port="$(free_port)"
-		database_url="postgresql://else:$password@127.0.0.1:$port/else"
-	fi
+    local database_url="${ELSE_DATABASE_URL:-sqlite://$DATA/else.sqlite3}"
+    case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
 	(
 		umask 077
 		cat >"$ENV_FILE" <<EOF
 # else.bot settings, written by the installer. The API reads this file from
-# its working directory ($CONFIG); Docker Compose reads it too.
+# its working directory ($CONFIG). SQLite needs no server.
 DATABASE_URL=$database_url
 ELSE_API_BIND=127.0.0.1:$API_PORT
 ELSE_DATA_DIR=$DATA
 ELSE_MSB_BIN=$MSB
-ELSE_PG_DUMP=$PG_DUMP
-ELSE_PG_RESTORE=$PG_RESTORE
 EOF
-		if [ -z "${ELSE_DATABASE_URL:-}" ]; then
-			cat >>"$ENV_FILE" <<EOF
 
-# PostgreSQL (Docker Compose project in this directory)
-COMPOSE_PROJECT_NAME=else-bot
-POSTGRES_DB=else
-POSTGRES_USER=else
-POSTGRES_PASSWORD=$password
-POSTGRES_PORT=$port
-EOF
-		fi
 	)
 	ok "written (mode 0600)"
 }
@@ -729,39 +630,6 @@ refresh_provider_paths() {
 	claude="$(command -v claude 2>/dev/null || true)"
 	if [ -n "$codex" ]; then config_set ELSE_CODEX_BIN "$codex"; fi
 	if [ -n "$claude" ]; then config_set ELSE_CLAUDE_BIN "$claude"; fi
-}
-
-start_database() {
-	[ -n "${ELSE_DATABASE_URL:-}" ] && return 0
-	step "PostgreSQL (Docker Compose project else-bot)"
-	cat >"$CONFIG/compose.yaml" <<'EOF'
-# PostgreSQL for this else.bot installation, written by the installer.
-services:
-  postgres:
-    image: postgres:18.6
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:?}
-      POSTGRES_USER: ${POSTGRES_USER:?}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:?}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    stop_grace_period: 30s
-
-volumes:
-  postgres_data:
-EOF
-	docker_run compose --project-directory "$CONFIG" up -d --wait >/dev/null 2>&1 ||
-		die "PostgreSQL did not start; see: docker compose --project-directory $CONFIG logs"
-	ok "running on 127.0.0.1:$(env_value POSTGRES_PORT)"
 }
 
 build_guest_image() {
@@ -901,68 +769,6 @@ backup_if_migrating() {
 	fi
 }
 
-# libpq settings (PGHOST… PGPASSWORD) from a postgresql:// URL, so no
-# password is ever on a command line. Fails on URLs it does not understand.
-pg_env_from_url() {
-	local url="$1" rest auth hostport
-	case "$url" in postgresql://* | postgres://*) ;; *) return 1 ;; esac
-	rest="${url#*://}"
-	case "$rest" in *@*) ;; *) return 1 ;; esac
-	auth="${rest%@*}"
-	rest="${rest##*@}"
-	hostport="${rest%%/*}"
-	PGUSER="${auth%%:*}"
-	PGPASSWORD="${auth#*:}"
-	PGHOST="${hostport%%:*}"
-	PGPORT="${hostport##*:}"
-	[ "$PGPORT" != "$hostport" ] || PGPORT=5432
-	PGDATABASE="${rest#*/}"
-	PGDATABASE="${PGDATABASE%%\?*}"
-	[ -n "$PGUSER" ] && [ -n "$PGHOST" ] && [ -n "$PGDATABASE" ] && [ "$PGDATABASE" != "$rest" ]
-}
-
-# A database role that can only read, for inspecting the installation
-# (`elsebot db`): it sees every table, current and future, and its sessions
-# are read-only. Refreshed on every run; its login is in readonly.env (0600).
-setup_readonly_access() {
-	step "Read-only database access (elsebot db)"
-	if [ -z "$PSQL" ] || [ ! -x "$PSQL" ]; then
-		warn "psql is missing; elsebot db is not available"
-		return 0
-	fi
-	local file="$CONFIG/readonly.env" password="" PGUSER PGPASSWORD PGHOST PGPORT PGDATABASE
-	if ! pg_env_from_url "$(env_value DATABASE_URL)"; then
-		warn "DATABASE_URL is not a postgresql://user:password@host:port/database URL; elsebot db is not available"
-		return 0
-	fi
-	[ -f "$file" ] && password="$(sed -n 's/^PGPASSWORD=//p' "$file")"
-	[ -n "$password" ] || password="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
-	local log="$LOGS/readonly-access.log"
-	if ! PGUSER="$PGUSER" PGPASSWORD="$PGPASSWORD" PGHOST="$PGHOST" PGPORT="$PGPORT" PGDATABASE="$PGDATABASE" \
-		ELSE_READONLY_PASSWORD="$password" "$PSQL" -X -q -v ON_ERROR_STOP=1 >"$log" 2>&1 <<'SQL'; then
-\getenv password ELSE_READONLY_PASSWORD
-SELECT format('CREATE ROLE else_readonly LOGIN PASSWORD %L', :'password')
- WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'else_readonly') \gexec
-ALTER ROLE else_readonly WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'password';
-ALTER ROLE else_readonly SET default_transaction_read_only = on;
-SELECT format('GRANT CONNECT ON DATABASE %I TO else_readonly', current_database()) \gexec
-GRANT USAGE ON SCHEMA public TO else_readonly;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO else_readonly;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO else_readonly;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO else_readonly;
-SQL
-		tail -5 "$log" >&2
-		warn "could not set up the read-only role; elsebot db is not available (log: $log)"
-		return 0
-	fi
-	(
-		umask 077
-		printf 'PGHOST=%s\nPGPORT=%s\nPGDATABASE=%s\nPGUSER=else_readonly\nPGPASSWORD=%s\n' \
-			"$PGHOST" "$PGPORT" "$PGDATABASE" "$password" >"$file"
-	)
-	ok "role else_readonly (read-only), login in $file"
-}
-
 check_providers() {
 	step "Provider CLIs"
 	if have codex; then
@@ -980,7 +786,7 @@ check_providers() {
 
 # --- Stage 2: install or update from the release's own source ---------------
 
-# macOS: Xcode, a running Docker, and the PostgreSQL client tools. Docker
+# macOS: Xcode and Docker for the optional guest image. Docker
 # Desktop and OrbStack are apps the owner installs; nothing here uses sudo.
 macos_prerequisites() {
 	step "Xcode"
@@ -997,26 +803,12 @@ macos_prerequisites() {
 		ok "command line tools"
 	fi
 
-	step "PostgreSQL client tools $PG_MAJOR"
-	if ! find_pg_tools; then
-		have brew || die "pg_dump $PG_MAJOR or newer is missing (backups need it): install Homebrew (https://brew.sh) and run 'brew install postgresql@$PG_MAJOR', then run the installer again"
-		confirm "Install postgresql@$PG_MAJOR (pg_dump, pg_restore, psql) with Homebrew?" ||
-			die "pg_dump $PG_MAJOR or newer is required for backups"
-		brew install "postgresql@$PG_MAJOR" >"$LOGS/brew-postgresql.log" 2>&1 || {
-			tail -20 "$LOGS/brew-postgresql.log" >&2
-			die "brew install postgresql@$PG_MAJOR failed (log: $LOGS/brew-postgresql.log)"
-		}
-		find_pg_tools || die "pg_dump $PG_MAJOR or newer is still missing"
-	fi
-	ok "pg_dump: $PG_DUMP ($("$PG_DUMP" --version | head -1))"
 
 	step "Docker"
-	if [ -n "${ELSE_DATABASE_URL:-}" ] && [ "$SKIP_GUEST" = 1 ]; then
-		ok "not needed (external database, no guest image)"
+	if [ "$SKIP_GUEST" = 1 ]; then
+		ok "not needed (no guest image)"
 	elif ! have docker; then
 		die "Docker is missing: install OrbStack (https://orbstack.dev) or Docker Desktop, start it, then run the installer again"
-	elif ! docker compose version >/dev/null 2>&1; then
-		die "docker compose does not work: update OrbStack or Docker Desktop, then run the installer again"
 	elif ! docker info >/dev/null 2>&1; then
 		die "Docker is not running: start OrbStack or Docker Desktop, then run the installer again"
 	else
@@ -1061,7 +853,6 @@ stage2() {
 	write_config
 	ensure_bots_dir
 	refresh_provider_paths
-	start_database
 	build_guest_image
 
 	if [ "$mode" = update ] && [ -n "$installed" ]; then
@@ -1090,7 +881,6 @@ stage2() {
 		fi
 		prune_versions "$target" "$installed"
 		ok "updated to $target (kept $installed in $VERSIONS)"
-		setup_readonly_access
 	else
 		switch_to "$target"
 		install_commands
@@ -1101,7 +891,6 @@ stage2() {
 		else
 			start_api || die "the API did not start; see: elsebot logs"
 		fi
-		setup_readonly_access
 	fi
 	check_providers
 	if [ "$SERVER_ONLY" = 0 ]; then

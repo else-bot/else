@@ -61,13 +61,13 @@ async fn complete(
     })?;
     super::settings::save_defaults(&state, provider_id, &profile).await?;
     crate::db::bot_profiles::put(&state.db, main, provider_id, &profile).await?;
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE bots SET name = $2 WHERE id = $1")
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("UPDATE bots SET name = ?2 WHERE id = ?1")
         .bind(main)
         .bind(name.as_str())
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE installation SET onboarded_at = coalesce(onboarded_at, now())")
+    sqlx::query("UPDATE installation SET onboarded_at = coalesce(onboarded_at, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))")
         .execute(&mut *tx)
         .await?;
     // The renamed bot reaches every client's list.

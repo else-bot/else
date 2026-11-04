@@ -1,5 +1,5 @@
 //! POC-005: durable messages, scheduling, the synthetic adapter, and saved
-//! provider profiles, through the real routes and PostgreSQL.
+//! provider profiles, through the real routes and SQLite.
 
 mod common;
 
@@ -14,7 +14,7 @@ use uuid::Uuid;
 async fn items(app: &TestApp, bot: &str) -> Vec<(i64, String, String)> {
     sqlx::query_as(
         "SELECT i.seq, i.kind, i.text FROM items i JOIN conversations c ON c.id = i.conversation_id
-         WHERE c.bot_id = $1 ORDER BY i.seq",
+         WHERE c.bot_id = ?1 ORDER BY i.seq",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_all(&app.db.pool)
@@ -344,10 +344,7 @@ async fn failed_acceptance_publishes_nothing() {
     let bot = app.main_bot().await;
     // Fail the owner-item insert after the turn row was written.
     sqlx::raw_sql(
-        "CREATE FUNCTION fail_item() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN IF NEW.text = 'trigger-failure' THEN RAISE EXCEPTION 'injected'; END IF;
-         RETURN NEW; END $$;
-         CREATE TRIGGER fail_item BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION fail_item();",
+        "CREATE TRIGGER fail_item BEFORE INSERT ON items WHEN NEW.text = 'trigger-failure' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
     )
     .execute(&app.db.pool)
     .await
@@ -362,7 +359,7 @@ async fn failed_acceptance_publishes_nothing() {
     assert!(items(&app, &bot).await.is_empty());
     let (last_turn, last_seq, selected): (i64, i64, Option<String>) = sqlx::query_as(
         "SELECT c.last_turn_no, c.last_item_seq, b.selected_provider_id
-         FROM conversations c JOIN bots b ON b.id = c.bot_id WHERE b.id = $1",
+         FROM conversations c JOIN bots b ON b.id = c.bot_id WHERE b.id = ?1",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -551,7 +548,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .await;
     let waiting_id = waiting.body["turn"]["id"].as_str().unwrap().to_owned();
     // Simulate a crash: the process vanishes without recording outcomes.
-    sqlx::query("UPDATE turns SET status = 'running' WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
         .bind(hang_id.parse::<Uuid>().unwrap())
         .execute(&app.db.pool)
         .await
@@ -564,7 +561,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
     // before simulating that the crash left the row running.
     let id = hang_id.parse::<Uuid>().unwrap();
     for _ in 0..200 {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(id)
             .fetch_one(&pool)
             .await
@@ -576,7 +573,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     sqlx::query(
-        "UPDATE turns SET status = 'running', finished_at = NULL, error_code = NULL WHERE id = $1",
+        "UPDATE turns SET status = 'running', finished_at = NULL, error_code = NULL WHERE id = ?1",
     )
     .bind(hang_id.parse::<Uuid>().unwrap())
     .execute(&pool)
@@ -601,23 +598,17 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
 async fn transient_text_write_failure_keeps_the_text() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
-    // Fail the first assistant insert once, as a transient database error.
-    sqlx::raw_sql(
-        "CREATE SEQUENCE fail_once;
-         CREATE FUNCTION fail_assistant_once() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-           -- Sequences are not rolled back, so this fails exactly once.
-           IF NEW.kind = 'assistant' AND nextval('fail_once') = 1 THEN
-             RAISE EXCEPTION 'transient';
-           END IF;
-           RETURN NEW;
-         END $$;
-         CREATE TRIGGER fail_assistant_once BEFORE INSERT ON items
-           FOR EACH ROW EXECUTE FUNCTION fail_assistant_once();",
-    )
-    .execute(&app.db.pool)
-    .await
-    .unwrap();
+    // Hold an injected write fault until the first assistant insert is attempted.
+    sqlx::raw_sql("CREATE TRIGGER fail_assistant_once BEFORE INSERT ON items WHEN NEW.kind = 'assistant' BEGIN SELECT RAISE(ABORT, 'transient'); END;")
+        .execute(&app.db.pool).await.unwrap();
+    let pool = app.db.pool.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sqlx::query("DROP TRIGGER fail_assistant_once")
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
     let sent = app
         .send(&bot, Uuid::new_v4(), "keep me", Some("synthetic"))
         .await;

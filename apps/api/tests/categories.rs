@@ -1,4 +1,4 @@
-//! POC-030: sidebar categories against PostgreSQL and the real router.
+//! POC-030: sidebar categories against SQLite and the real router.
 
 mod common;
 
@@ -257,7 +257,7 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["completed"]).await;
     let items_before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE c.bot_id = $1",
+        "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE c.bot_id = ?1",
     )
     .bind(a.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -278,7 +278,7 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     assert_eq!(category_of(&after, &a), Value::Null);
     assert_eq!(after["bots"].as_array().unwrap().len(), 3, "every bot kept");
     let items_after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE c.bot_id = $1",
+        "SELECT count(*) FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE c.bot_id = ?1",
     )
     .bind(a.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)
@@ -306,7 +306,7 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     );
     let gone = assign(&app, &b, home.clone()).await;
     assert_eq!(gone.status, StatusCode::GONE, "{:?}", gone.body);
-    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(b.parse::<Uuid>().unwrap())
         .fetch_one(&app.db.pool)
         .await
@@ -362,7 +362,7 @@ async fn task_grants_cannot_change_categories() {
         .await;
     let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&turn.to_string(), &["running"]).await;
-    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = $1")
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(turn)
         .fetch_one(&app.db.pool)
         .await
@@ -421,12 +421,12 @@ async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let bot = Uuid::new_v4();
     let conversation = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES ($1, 'Old', 'from before')")
+    sqlx::query("INSERT INTO bots (id, name, role) VALUES (?1, 'Old', 'from before')")
         .bind(bot)
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES ($1, $2, 'owner')")
+    sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES (?1, ?2, 'owner')")
         .bind(conversation)
         .bind(bot)
         .execute(&db.pool)

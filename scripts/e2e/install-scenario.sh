@@ -2,7 +2,7 @@
 # Shared assertions for the new native arm64 installer lanes.
 set -euo pipefail
 fail() { echo "CHECK FAILED: $*" >&2; exit 1; }
-export ELSE_REPO="${ELSE_REPO:-/repo.git}" ELSE_DATABASE_URL
+export ELSE_REPO="${ELSE_REPO:-/repo.git}"
 if [ "${ELSE_E2E_LAUNCHD:-0}" = 1 ]; then
     unset ELSE_INSTALL_NO_SYSTEMD
 else
@@ -44,6 +44,8 @@ for f in "$H/versions/0.0.1/bin/else-api" "$H/versions/0.0.1/bin/else-desktop" "
 done
 [ "$("$cache/microsandbox/bin/msb" --version)" = "msb 0.7.13" ] || fail "msb is not 0.7.13"
 [ "$(mode "$H/config/.env")" = 600 ] || fail ".env is not 0600"
+grep -Fx "DATABASE_URL=sqlite://$H/data/else.sqlite3" "$H/config/.env" >/dev/null || fail "database is outside the disposable installation"
+[ ! -e "$H/config/compose.yaml" ] || fail "the installer created database services"
 [ "$(readlink "$LINK_PREFIX/bin/elsebot")" = "$H/bin/elsebot" ] || fail "no elsebot link"
 if [ "$(uname -s)" != Darwin ]; then
     for outside in ~/.cargo ~/.rustup ~/.microsandbox ~/.config/else-bot ~/.local/share/else-bot; do
@@ -65,12 +67,11 @@ grep -q "running on" "$H-status" || fail "elsebot status"
 
 echo "--- elsebot db reads and cannot write"
 check_db() {
-	[ "$(mode "$H/config/readonly.env")" = 600 ] || fail "readonly.env is not 0600"
-	[ "$("$cli" db -Atc 'select current_user')" = else_readonly ] || fail "elsebot db is not the read-only role"
-	[ "$("$cli" db -Atc 'select count(*) >= 1 from bots')" = t ] || fail "elsebot db cannot read"
-	if "$cli" db -c 'delete from bots' >"$H-write.log" 2>&1; then fail "elsebot db could write"; fi
-	grep -qi "read-only" "$H-write.log" || { cat "$H-write.log"; fail "the write was not refused as read-only"; }
-	if "$cli" db -c 'set transaction read write; delete from bots' >"$H-write2.log" 2>&1; then fail "the role could switch to read-write"; fi
+    [ "$(mode "$H/data/else.sqlite3")" = 600 ] || fail "SQLite file is not 0600"
+    [ "$("$cli" db 'select count(*) >= 1 from bots')" = 1 ] || fail "elsebot db cannot read"
+    [ "$("$cli" db 'pragma integrity_check')" = ok ] || fail "SQLite integrity check failed"
+    if "$cli" db 'delete from bots' >"$H-write.log" 2>&1; then fail "elsebot db could write"; fi
+    grep -qi 'readonly\|read-only' "$H-write.log" || { cat "$H-write.log"; fail "write was not refused as read-only"; }
 }
 check_db
 
@@ -116,7 +117,7 @@ echo "--- running it again changes nothing"
 grep -q "0.0.2 is installed; checking" "$H-again.log" || fail "not detected as current"
 grep -q "already built" "$H-again.log" || fail "rebuilt"
 if [ "$(uname -s)" = Darwin ]; then
-    grep -q "pg_dump:" "$H-again.log" || fail "PostgreSQL tools were not checked"
+    grep -q "not needed (no guest image)" "$H-again.log" || fail "the installer required Docker without a guest image"
 else
     grep -q "all present" "$H-again.log" || fail "installed packages again"
 fi

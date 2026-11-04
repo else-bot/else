@@ -1,7 +1,7 @@
 //! Encrypted database backups and non-destructive restore (POC-021).
 //!
 //! A backup set is a directory `<backup dir>/<set id>/` holding separately
-//! age-encrypted objects (`database.dump.age`, a PostgreSQL custom dump, and
+//! age-encrypted objects (`database.dump.age`, a SQLite image, and
 //! `manifest.json.age`) and, published last, the unencrypted bootstrap
 //! `complete.json`. A set without `complete.json` is not a backup. Every set
 //! has a fresh public salt; its age identity is derived from `SECRET_KEY`
@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use crate::credentials::SecretKey;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const FORMAT: &str = "age-encryption.org/v1";
 pub const KDF: &str = "HKDF-SHA-256";
 pub const PURPOSE: &str = "else.bot/backups/v1";
@@ -53,7 +53,7 @@ pub enum BackupError {
     Db(#[from] sqlx::Error),
     #[error("encryption: {0}")]
     Crypto(String),
-    #[error("pg_dump failed: {0}")]
+    #[error("database snapshot failed: {0}")]
     Producer(String),
     #[error("the dump exceeded the {0}-byte limit")]
     TooLarge(u64),
@@ -121,7 +121,7 @@ pub struct Completion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    /// `postgres`, `vm` (one bot's standalone disk archive with image),
+    /// `sqlite`, `vm` (one bot's standalone disk archive with image),
     /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`), or
     /// `project` (a bot's project directory, `project-<bot>.tar.age`).
     pub kind: String,
@@ -144,7 +144,7 @@ pub struct Application {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Postgres {
+pub struct Sqlite {
     pub server_version: String,
     pub dump_version: String,
     pub format: String,
@@ -173,7 +173,7 @@ pub struct BotEntry {
     pub vm: String,
     pub computer: Option<ComputerEntry>,
     /// Native provider sessions are not in this set; conversation context
-    /// is rebuilt from PostgreSQL and providers need a fresh login check.
+    /// is rebuilt from SQLite and providers need a fresh login check.
     pub provider_state: String,
     /// The native sessions the bot had (not included), for the record.
     pub provider_sessions: Vec<SessionEntry>,
@@ -258,7 +258,7 @@ pub struct Manifest {
     pub capture_finished_at: String,
     pub encryption: Encryption,
     pub application: Application,
-    pub postgres: Postgres,
+    pub sqlite: Sqlite,
     pub artifacts: Vec<Artifact>,
     pub tables: Vec<TableDigest>,
     pub bots: Vec<BotEntry>,
@@ -727,7 +727,14 @@ pub fn apply_retention_protecting(
 /// An exclusive, non-blocking lock on `<dir>/.lock`, released when dropped
 /// or when the process dies (so neither a crash nor a cancelled future can
 /// leave it held). `None` when another holder has it.
-pub struct DirLock(#[allow(dead_code)] File);
+pub struct DirLock(File);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        // Process-spawn copies must not keep a completed backup locked.
+        let _ = self.0.unlock();
+    }
+}
 
 pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
     use std::os::fd::AsRawFd;
@@ -755,217 +762,52 @@ pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
     Ok(Some(DirLock(file)))
 }
 
-/// A bare tool name found on the API's own `PATH`. The tools run with a
-/// cleared environment, where a bare name would only be looked up in the
-/// libc default (`/bin:/usr/bin`), missing e.g. Homebrew's client tools.
-pub fn resolve_tool(tool: &Path) -> PathBuf {
-    if tool.components().count() != 1 {
-        return tool.to_owned();
-    }
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .map(|dir| dir.join(tool))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| tool.to_owned())
-}
-
-/// Run a tool with its output drained continuously and only bounded tails
-/// kept, so large diagnostics cannot exhaust memory.
-pub fn run_bounded(
-    mut command: std::process::Command,
-) -> Result<(std::process::ExitStatus, String, String), BackupError> {
-    use std::process::Stdio;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| BackupError::Producer(e.to_string()))?;
-    let out = drain_tail(child.stdout.take().expect("piped"));
-    let err = drain_tail(child.stderr.take().expect("piped"));
-    let status = child
-        .wait()
-        .map_err(|e| BackupError::Producer(e.to_string()))?;
-    Ok((
-        status,
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    ))
-}
-
-/// Read a stream to its end on a thread, keeping the last 8 KiB.
-pub fn drain_tail(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut tail = Vec::new();
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = stream.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            tail.extend_from_slice(&buf[..n]);
-            if tail.len() > 16 * 1024 {
-                tail.drain(..tail.len() - 8 * 1024);
-            }
-        }
-        String::from_utf8_lossy(&tail).trim().to_owned()
-    })
-}
-
 pub fn staging_path(dir: &Path, set_id: &str) -> PathBuf {
     dir.join(format!("{STAGING_PREFIX}{set_id}"))
 }
 
-/// Connection settings for the backup tools. The connection itself is
-/// SQLx's own parse of `DATABASE_URL` (host, port, user, database, query
-/// overrides, sockets, TLS mode and certificates), so backups reach exactly
-/// the database the API uses; libpq's environment for `pg_dump` and
-/// `pg_restore` is derived from it. The password goes only into that
-/// environment, never onto a command line.
-#[derive(Clone)]
-pub struct PgParams {
-    pub options: sqlx::postgres::PgConnectOptions,
-    password: Option<String>,
-    /// TLS files named in the URL (`sslrootcert`, `sslcert`, `sslkey`).
-    tls_files: Vec<(&'static str, String)>,
+/// SQLite target options shared by capture and non-destructive recovery.
+#[derive(Debug, Clone)]
+pub struct DatabaseParams {
+    pub options: sqlx::sqlite::SqliteConnectOptions,
 }
-
-impl std::fmt::Debug for PgParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "PgParams({}@{}:{}/{})",
-            self.user(),
-            self.host(),
-            self.port(),
-            self.database()
-        )
-    }
-}
-
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 3 <= bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-impl PgParams {
+impl DatabaseParams {
     pub fn parse(url: &str) -> Result<Self, BackupError> {
-        let options: sqlx::postgres::PgConnectOptions = url.parse().map_err(|_| {
-            BackupError::Invalid("DATABASE_URL is not a valid PostgreSQL URL".into())
-        })?;
-        let rest = url
-            .strip_prefix("postgresql://")
-            .or_else(|| url.strip_prefix("postgres://"))
-            .unwrap_or_default();
-        let (main, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let authority = main.split('/').next().unwrap_or_default();
-        let mut password = authority
-            .rsplit_once('@')
-            .and_then(|(userinfo, _)| userinfo.split_once(':'))
-            .map(|(_, p)| percent_decode(p));
-        let mut tls_files = Vec::new();
-        for pair in query.split('&').filter(|p| !p.is_empty()) {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let value = percent_decode(v);
-            match k {
-                "password" => password = Some(value),
-                "sslrootcert" => tls_files.push(("PGSSLROOTCERT", value)),
-                "sslcert" => tls_files.push(("PGSSLCERT", value)),
-                "sslkey" => tls_files.push(("PGSSLKEY", value)),
-                _ => {}
-            }
-        }
         Ok(Self {
-            options,
-            password,
-            tls_files,
+            options: crate::db::options(url).map_err(|e| BackupError::Invalid(e.to_string()))?,
         })
     }
-
-    pub fn host(&self) -> String {
-        match self.options.get_socket() {
-            Some(socket) => socket.display().to_string(),
-            // libpq takes an IPv6 address without the URL's brackets.
-            None => {
-                let host = self.options.get_host();
-                host.strip_prefix('[')
-                    .and_then(|h| h.strip_suffix(']'))
-                    .unwrap_or(host)
-                    .to_owned()
-            }
-        }
-    }
-
-    pub fn port(&self) -> u16 {
-        self.options.get_port()
-    }
-
-    pub fn user(&self) -> &str {
-        self.options.get_username()
-    }
-
-    pub fn database(&self) -> &str {
-        self.options.get_database().unwrap_or_default()
-    }
-
-    pub fn password(&self) -> Option<&str> {
-        self.password.as_deref()
-    }
-
+    /// Absolute targets are used verbatim; a plain name lives beside the source.
     pub fn with_database(&self, database: &str) -> Self {
+        let path = Path::new(database);
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.options
+                .get_filename()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{database}.sqlite3"))
+        };
         Self {
-            options: self.options.clone().database(database),
-            ..self.clone()
+            options: self.options.clone().filename(path),
         }
-    }
-
-    fn sslmode(&self) -> &'static str {
-        use sqlx::postgres::PgSslMode;
-        match self.options.get_ssl_mode() {
-            PgSslMode::Disable => "disable",
-            PgSslMode::Allow => "allow",
-            PgSslMode::Prefer => "prefer",
-            PgSslMode::Require => "require",
-            PgSslMode::VerifyCa => "verify-ca",
-            PgSslMode::VerifyFull => "verify-full",
-        }
-    }
-
-    /// Environment for libpq tools (the inherited environment is cleared).
-    pub fn env(&self) -> Vec<(&'static str, String)> {
-        let mut env = vec![
-            ("PGHOST", self.host()),
-            ("PGPORT", self.port().to_string()),
-            ("PGUSER", self.user().to_owned()),
-            ("PGDATABASE", self.database().to_owned()),
-            ("PGSSLMODE", self.sslmode().to_owned()),
-            ("PGCONNECT_TIMEOUT", "10".into()),
-        ];
-        if let Some(password) = &self.password {
-            env.push(("PGPASSWORD", password.clone()));
-        }
-        env.extend(self.tls_files.iter().cloned());
-        env
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_lock_release_does_not_wait_for_duplicated_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = try_lock(dir.path()).unwrap().unwrap();
+        let _inherited = guard.0.try_clone().unwrap();
+        assert!(try_lock(dir.path()).unwrap().is_none());
+        drop(guard);
+        assert!(try_lock(dir.path()).unwrap().is_some());
+    }
 
     fn key(byte: u8) -> SecretKey {
         use base64::Engine;
@@ -1018,45 +860,6 @@ mod tests {
             Err(BackupError::TooLarge(1000))
         ));
         assert!(!big.exists());
-    }
-
-    #[test]
-    fn urls_become_libpq_settings_without_the_password_on_argv() {
-        let env = |url: &str| -> std::collections::HashMap<&'static str, String> {
-            PgParams::parse(url).unwrap().env().into_iter().collect()
-        };
-        let e = env(
-            "postgresql://else:p%40ss@127.0.0.1:5433/else_db?sslmode=verify-full&sslrootcert=/ca.pem",
-        );
-        assert_eq!(e["PGUSER"], "else");
-        assert_eq!(e["PGPASSWORD"], "p@ss");
-        assert_eq!(e["PGHOST"], "127.0.0.1");
-        assert_eq!(e["PGPORT"], "5433");
-        assert_eq!(e["PGDATABASE"], "else_db");
-        assert_eq!(e["PGSSLMODE"], "verify-full");
-        assert_eq!(e["PGSSLROOTCERT"], "/ca.pem");
-        assert!(
-            !format!("{:?}", PgParams::parse("postgres://u:secret@h/db").unwrap())
-                .contains("secret")
-        );
-        let v6 = env("postgres://u@[::1]/db");
-        assert_eq!(
-            (v6["PGHOST"].as_str(), v6["PGPORT"].as_str()),
-            ("::1", "5432")
-        );
-        assert!(!v6.contains_key("PGPASSWORD"));
-        // Query overrides win, as they do for the API's own connection.
-        let q = env("postgres://u@h/db?host=other&port=6000&user=v&dbname=x&password=pw");
-        assert_eq!(
-            (
-                q["PGHOST"].as_str(),
-                q["PGPORT"].as_str(),
-                q["PGUSER"].as_str(),
-                q["PGDATABASE"].as_str()
-            ),
-            ("other", "6000", "v", "x")
-        );
-        assert_eq!(q["PGPASSWORD"], "pw");
     }
 
     #[test]

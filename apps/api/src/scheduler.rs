@@ -1,4 +1,4 @@
-//! The single in-process scheduler. PostgreSQL rows are the queue; this
+//! The single in-process scheduler. SQLite rows are the queue; this
 //! loop claims eligible turns, runs them through their adapters, and records
 //! outcomes. Handlers only write requests and call [`Scheduler::wake`].
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::actor::Actor;
 
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -27,7 +27,7 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const FINISH_ATTEMPTS: u32 = 20;
 
 pub struct Scheduler {
-    pool: PgPool,
+    pool: SqlitePool,
     registry: Registry,
     wake: Notify,
     /// Cancellation handles of turns running in this process, by turn ID.
@@ -64,12 +64,12 @@ impl Drop for SummaryPermit {
 pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 impl Scheduler {
-    pub fn new(pool: PgPool, registry: Registry, max_active: usize) -> Arc<Self> {
+    pub fn new(pool: SqlitePool, registry: Registry, max_active: usize) -> Arc<Self> {
         Self::with_cancel_grace(pool, registry, max_active, DEFAULT_CANCEL_GRACE)
     }
 
     pub fn with_cancel_grace(
-        pool: PgPool,
+        pool: SqlitePool,
         registry: Registry,
         max_active: usize,
         cancel_grace: Duration,
@@ -267,7 +267,7 @@ impl Scheduler {
         let loaded = async {
             let input = turns::input(&self.pool, turn_id).await?;
             let provider_id: String =
-                sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = $1")
+                sqlx::query_scalar("SELECT provider_id FROM turns WHERE id = ?1")
                     .bind(turn_id)
                     .fetch_one(&self.pool)
                     .await?;
@@ -419,7 +419,7 @@ impl Scheduler {
 /// The bots a delegated task may read: its own, plus those both the
 /// delegating bot and its own bot may read.
 pub async fn delegated_scope(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     parent: Uuid,
     target: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {

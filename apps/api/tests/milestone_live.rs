@@ -362,32 +362,11 @@ impl Cleanup {
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(async move {
-                    use sqlx::Connection;
-                    let connect = sqlx::PgConnection::connect(&admin);
-                    let mut conn = tokio::time::timeout(Duration::from_secs(30), connect)
-                        .await
-                        .map_err(|_| "connecting to drop databases timed out".to_owned())?
-                        .map_err(|e| format!("connecting to drop databases: {e}"))?;
+                    let options = else_api::db::options(&admin).map_err(|e| e.to_string())?;
                     for db in &databases {
-                        sqlx::query(sqlx::AssertSqlSafe(format!(
-                            "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"
-                        )))
-                        .execute(&mut conn)
-                        .await
-                        .map_err(|e| format!("dropping {db}: {e}"))?;
+                        common::remove_database(&options, db);
                     }
-                    let left: i64 = sqlx::query_scalar(
-                        "SELECT count(*) FROM pg_database WHERE datname = ANY($1)",
-                    )
-                    .bind(&databases)
-                    .fetch_one(&mut conn)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    if left == 0 {
-                        Ok(())
-                    } else {
-                        Err(format!("{left} databases remain"))
-                    }
+                    Ok::<(), String>(())
                 })
         })
         .join();
@@ -440,19 +419,19 @@ impl Drop for Cleanup {
 }
 
 /// Wait for a turn's final state; returns (status, assistant text).
-async fn finish(db: &sqlx::PgPool, turn: Uuid, timeout: Duration) -> (String, String) {
+async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
         let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = $1")
+            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
         if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
             let text: String = sqlx::query_scalar(
-                "SELECT coalesce(string_agg(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = $1 AND kind = 'assistant'",
+                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
             )
             .bind(turn)
             .fetch_one(db)
@@ -500,8 +479,8 @@ fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool)
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-async fn runtime_name(db: &sqlx::PgPool, bot: &str) -> String {
-    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = $1")
+async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
+    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(db)
         .await
@@ -535,10 +514,10 @@ fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
         .collect()
 }
 
-async fn turn_activity(db: &sqlx::PgPool, bot: &str, turn: Uuid) -> Vec<String> {
+async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<String> {
     sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'
-           AND source->>'turn_id' = $2 ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
+           AND source->>'turn_id' = ?2 ORDER BY seq",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .bind(turn.to_string())
@@ -569,7 +548,7 @@ fn dir_size(path: &Path) -> u64 {
 /// Send and wait; records the latency.
 async fn ask(
     api: &Api,
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     bot: &str,
     provider: &str,
     text: &str,
@@ -598,7 +577,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     let _ = std::fs::remove_file(&log);
     LOG.set(log.clone()).unwrap();
     let db = common::TestDb::empty().await;
-    let params = else_api::backup::PgParams::parse(db.url.expose()).unwrap();
+    let params = else_api::backup::DatabaseParams::parse(db.url.expose()).unwrap();
     let data = tmp.as_path().join("installation");
     let restored_dir = tmp.as_path().join("restored");
     std::fs::create_dir(&data).unwrap();
@@ -606,13 +585,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     let home = data.join("microsandbox");
     std::fs::create_dir_all(&home).unwrap();
     let target = format!("else_milestone_{}", Uuid::new_v4().simple());
-    let admin = format!(
-        "postgresql://{}:{}@{}:{}/postgres",
-        params.user(),
-        params.password().unwrap_or_default(),
-        params.host(),
-        params.port()
-    );
+    let admin = db.url.expose().to_owned();
     let cleanup = Cleanup {
         homes: vec![home.clone(), restored_dir.join("microsandbox")],
         databases: std::sync::Mutex::new(vec![target.clone()]),
@@ -723,7 +696,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
          an artifact. Reply with the artifact ID and the grand total.").await;
     assert_eq!(status, "completed", "{reply}");
     let artifact: (Uuid, String) = sqlx::query_as(
-        "SELECT id, guest_path FROM artifacts WHERE bot_id = $1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, guest_path FROM artifacts WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(scripter.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
@@ -1054,7 +1027,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     assert_eq!(status, "completed", "{reply}");
     let job: (Uuid, Uuid) = sqlx::query_as(
         "SELECT id, lease_id FROM guest_jobs
-         WHERE bot_id = $1 AND command LIKE 'sleep 60%' AND status = 'running'",
+         WHERE bot_id = ?1 AND command LIKE 'sleep 60%' AND status = 'running'",
     )
     .bind(scripter.parse::<Uuid>().unwrap())
     .fetch_one(&pool)
@@ -1105,7 +1078,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     let (status, lease, released): (String, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as(
             "SELECT j.status, j.lease_id, l.released_at
-             FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id WHERE j.id = $1",
+             FROM guest_jobs j JOIN computer_leases l ON l.id = j.lease_id WHERE j.id = ?1",
         )
         .bind(job.0)
         .fetch_one(&pool)
@@ -1153,7 +1126,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     note("== 9. browser state, then a coordinated backup (job finished, API stopped)");
     let started = Instant::now();
     loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
             .bind(job.0)
             .fetch_one(&pool)
             .await
@@ -1238,11 +1211,12 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
 
     note("== 10. restore into a new installation and check what came back");
     let restored_url = format!(
-        "postgresql://{}:{}@{}:{}/{target}",
-        params.user(),
-        params.password().unwrap_or_default(),
-        params.host(),
-        params.port()
+        "sqlite://{}",
+        params
+            .with_database(&format!("{target}"))
+            .options
+            .get_filename()
+            .display()
     );
     // The original computers stop for good (no ports or names collide).
     for name in [&sname, &hname] {
@@ -1257,7 +1231,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         log: log.clone(),
     };
     let mut api = restored.serve().await;
-    let rpool = sqlx::PgPool::connect(&restored_url).await.unwrap();
+    let rpool = sqlx::SqlitePool::connect(&restored_url).await.unwrap();
     let back = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
     assert_eq!(
         back["categories"], saved_categories["categories"],

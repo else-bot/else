@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 
 use super::s3::{Put, S3, S3Error};
 use super::{BackupError, COMPLETE, Completion, MANIFEST};
@@ -45,7 +45,7 @@ pub type BeforePublish =
 #[derive(Clone)]
 pub struct Replicator {
     pub s3: S3,
-    pool: PgPool,
+    pool: SqlitePool,
     /// Completed remote sets kept (at least one).
     pub keep: usize,
     /// Objects above this size are uploaded in parts of this size.
@@ -54,7 +54,7 @@ pub struct Replicator {
 }
 
 impl Replicator {
-    pub fn new(s3: S3, pool: PgPool, keep: usize) -> Self {
+    pub fn new(s3: S3, pool: SqlitePool, keep: usize) -> Self {
         Self {
             s3,
             pool,
@@ -79,10 +79,10 @@ impl Replicator {
         sqlx::query(
             "INSERT INTO backup_remote (destination, set_id, state, error, whole_assistant,
                  updated_at, verified_at)
-             VALUES ($1, $2, $3, $4, $5, now(), CASE WHEN $3 = 'completed' THEN now() END)
-             ON CONFLICT (destination, set_id) DO UPDATE SET state = $3, error = $4,
-                 whole_assistant = $5, updated_at = now(),
-                 verified_at = CASE WHEN $3 = 'completed' THEN now()
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), CASE WHEN ?3 = 'completed' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END)
+             ON CONFLICT (destination, set_id) DO UPDATE SET state = ?3, error = ?4,
+                 whole_assistant = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                 verified_at = CASE WHEN ?3 = 'completed' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                                     ELSE backup_remote.verified_at END",
         )
         .bind(self.s3.destination())
@@ -92,7 +92,7 @@ impl Replicator {
         .bind(whole_assistant)
         .execute(&self.pool)
         .await?;
-        sqlx::query("UPDATE backup_runs SET remote_status = $2 WHERE set_id = $1")
+        sqlx::query("UPDATE backup_runs SET remote_status = ?2 WHERE set_id = ?1")
             .bind(set_id)
             .bind(state)
             .execute(&self.pool)
@@ -104,7 +104,7 @@ impl Replicator {
     async fn verified(&self) -> Result<Vec<(String, bool)>, BackupError> {
         Ok(sqlx::query_as(
             "SELECT set_id, whole_assistant FROM backup_remote
-             WHERE destination = $1 AND state = 'completed' ORDER BY set_id",
+             WHERE destination = ?1 AND state = 'completed' ORDER BY set_id",
         )
         .bind(self.s3.destination())
         .fetch_all(&self.pool)
@@ -117,7 +117,7 @@ impl Replicator {
         // Completed here, or retired from here by remote retention.
         let done: Vec<String> = sqlx::query_scalar(
             "SELECT set_id FROM backup_remote
-             WHERE destination = $1 AND state IN ('completed', 'retired')",
+             WHERE destination = ?1 AND state IN ('completed', 'retired')",
         )
         .bind(self.s3.destination())
         .fetch_all(&self.pool)
@@ -406,8 +406,8 @@ impl Replicator {
             }
             if old {
                 sqlx::query(
-                    "UPDATE backup_remote SET state = 'retired', updated_at = now()
-                     WHERE destination = $1 AND set_id = $2",
+                    "UPDATE backup_remote SET state = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                     WHERE destination = ?1 AND set_id = ?2",
                 )
                 .bind(self.s3.destination())
                 .bind(id)

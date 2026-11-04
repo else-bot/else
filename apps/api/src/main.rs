@@ -13,8 +13,8 @@ use else_api::{credentials, db, http};
 use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version]\n       \
-else-api restore <set-dir> <new-database> [<new-data-dir>]\n       \
-else-api restore-remote <set-id> <new-database> [<new-data-dir>]\n       \
+else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
+else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
 else-api rollback-computer <bot-id>\n\n\
 commands:\n  \
@@ -23,8 +23,7 @@ setup    provision missing credentials, apply migrations, and create the main\n 
 bot and default provider profiles once; never replaces existing state\n  \
 migrate  apply pending versioned migrations only\n  \
 backup   capture one encrypted database backup set now\n  \
-restore  verify a backup set and restore it into a new database on the same\n           \
-server; never changes an existing database or file\n  \
+restore  verify a backup set and restore it into a new SQLite file; never changes an existing database or file\n  \
 restore-remote  download a completed set from the configured bucket, then restore it\n  \
 upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
 files, environments, browser profile, and network profile (--network picks\n           \
@@ -115,7 +114,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .context("starting async runtime")
 }
 
-async fn database(config: &Config) -> anyhow::Result<sqlx::PgPool> {
+async fn database(config: &Config) -> anyhow::Result<sqlx::SqlitePool> {
     let url = config.require_database().context("invalid configuration")?;
     let pool = db::connect(url).await?;
     db::migrate(&pool).await?;
@@ -124,9 +123,12 @@ async fn database(config: &Config) -> anyhow::Result<sqlx::PgPool> {
 
 fn backup_parts(
     config: &else_api::config::Config,
-) -> anyhow::Result<(else_api::backup::PgParams, Arc<credentials::SecretKey>)> {
+) -> anyhow::Result<(
+    else_api::backup::DatabaseParams,
+    Arc<credentials::SecretKey>,
+)> {
     let url = config.require_database().context("invalid configuration")?;
-    let params = else_api::backup::PgParams::parse(url.expose())?;
+    let params = else_api::backup::DatabaseParams::parse(url.expose())?;
     // A missing key is an error; backups never generate one.
     let key = credentials::load_secret_key(&config.secret_key)?;
     Ok((params, Arc::new(key)))
@@ -249,7 +251,7 @@ fn run_upgrade_computer(
 
 fn replicator(
     config: &else_api::config::Config,
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
 ) -> anyhow::Result<Option<else_api::backup::replicate::Replicator>> {
     let Some(s3) = config.s3.clone() else {
         return Ok(None);
@@ -344,7 +346,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
                 key: &key,
                 server: &params,
                 target_database: target,
-                pg_restore: &config.backup.pg_restore,
                 staging_parent: &config.data_dir.join("restore-staging"),
                 max_bytes: config.backup.max_bytes,
                 computers: match (&runtime, &new_dir) {
@@ -402,7 +403,7 @@ fn run_setup() -> anyhow::Result<()> {
     // Validate everything setup will need before writing any file.
     let url = config.require_database().context("invalid configuration")?;
     url.expose()
-        .parse::<sqlx::postgres::PgConnectOptions>()
+        .parse::<sqlx::sqlite::SqliteConnectOptions>()
         .map_err(|_| db::DbError::InvalidUrl)?;
     credentials::ensure_private_dir(&config.data_dir)?;
     let describe = |what: &str, result: Provisioned, location: String| {
@@ -455,9 +456,7 @@ fn run_serve() -> anyhow::Result<()> {
         db::installation::check_installed(&pool).await?;
         // Take the singleton locks and bind before touching runtime state: a
         // second instance must not reconcile or dispatch another's work.
-        let mut lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
-        let lock_lost = CancellationToken::new();
-        lock.watch(lock_lost.clone());
+        let lock = else_api::runtime_lock::acquire(&config.data_dir, &pool).await?;
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;
@@ -484,13 +483,6 @@ fn run_serve() -> anyhow::Result<()> {
                 .clone()
                 .run(stop_scheduler.clone(), config.shutdown_grace),
         );
-        // Losing the singleton lock stops dispatch at once.
-        let stop_on_loss = stop_scheduler.clone();
-        let lost = lock_lost.clone();
-        tokio::spawn(async move {
-            lost.cancelled().await;
-            stop_on_loss.cancel();
-        });
         // Builds memory tree nodes; stops with the scheduler.
         let compactor = match summarizer {
             Some(summarizer) => else_api::memory_worker::Compactor::with_summaries(
@@ -531,7 +523,7 @@ fn run_serve() -> anyhow::Result<()> {
         let backup_task = match config
             .database_url
             .as_ref()
-            .map(|url| else_api::backup::PgParams::parse(url.expose()))
+            .map(|url| else_api::backup::DatabaseParams::parse(url.expose()))
         {
             Some(Ok(params)) if !config.backup.interval.is_zero() => {
                 let mut worker = else_api::backup::worker::BackupWorker::new(
@@ -562,7 +554,7 @@ fn run_serve() -> anyhow::Result<()> {
             _ => None,
         };
         let state = Arc::new(state);
-        let result = serve(&config, listener, state, lock_lost.clone()).await;
+        let result = serve(&config, listener, state).await;
         // Stop provider work after HTTP so no new message is accepted. The
         // singleton lock is held until every worker that changes runtime
         // state has stopped, so a successor never overlaps with them.
@@ -585,7 +577,6 @@ async fn serve(
     config: &Config,
     listener: TcpListener,
     state: Arc<http::AppState>,
-    lock_lost: CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
@@ -605,11 +596,7 @@ async fn serve(
             return result.context("server task")?.context("serving HTTP");
         }
         signal = shutdown_signal() => signal?,
-        _ = lock_lost.cancelled() => {
-            let _ = stop_tx.send(true);
-            server.abort();
-            anyhow::bail!("lost the database singleton lock; another API may start, so this one stopped");
-        }
+
     }
     tracing::info!("shutdown requested; draining connections");
     let _ = stop_tx.send(true);

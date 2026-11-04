@@ -4,7 +4,7 @@
 mod common;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +15,7 @@ use common::{TestApp, TestDb};
 use else_api::backup::capture::{BackupConfig, Coordinator};
 use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
 use else_api::backup::worker::BackupWorker;
-use else_api::backup::{self, BackupError, PgParams};
+use else_api::backup::{self, BackupError, DatabaseParams};
 use else_api::computers::{
     Acquire, ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, Mount, RuntimeError,
     RuntimeState, Spec,
@@ -228,12 +228,10 @@ async fn setup_with(projects: bool) -> Setup {
 fn worker(s: &Setup, drain: Duration) -> BackupWorker {
     BackupWorker::new(
         s.app.db.pool.clone(),
-        PgParams::parse(s.app.db.url.expose()).unwrap(),
+        DatabaseParams::parse(s.app.db.url.expose()).unwrap(),
         Arc::new(key()),
         BackupConfig {
             dir: s.dir.path().join("backups"),
-            pg_dump: PathBuf::from("pg_dump"),
-            pg_restore: PathBuf::from("pg_restore"),
             keep: 7,
             max_bytes: 1 << 30,
             interval: Duration::from_secs(3600),
@@ -258,46 +256,39 @@ async fn chat(app: &TestApp, bot: &str, text: &str) {
 /// A database dropped when the test ends.
 struct Target {
     name: String,
-    params: PgParams,
+    params: DatabaseParams,
 }
 
 impl Target {
     fn new(app: &TestApp) -> Self {
         Self {
             name: format!("else_restore_{}", Uuid::new_v4().simple()),
-            params: PgParams::parse(app.db.url.expose()).unwrap(),
+            params: DatabaseParams::parse(app.db.url.expose()).unwrap(),
         }
     }
     fn url(&self, database: &str) -> String {
         let p = &self.params;
         format!(
-            "postgresql://{}:{}@{}:{}/{database}",
-            p.user(),
-            p.password().unwrap_or_default(),
-            p.host(),
-            p.port()
+            "sqlite://{}",
+            p.with_database(&format!("{database}"))
+                .options
+                .get_filename()
+                .display()
         )
     }
 }
 
 impl Drop for Target {
     fn drop(&mut self) {
-        let url = self.url("postgres");
-        let name = self.name.clone();
-        let _ = std::thread::spawn(move || {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(async move {
-                    if let Ok(mut conn) = sqlx::PgConnection::connect(&url).await {
-                        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
-                        )))
-                        .execute(&mut conn)
-                        .await;
-                    }
-                })
-        })
-        .join();
+        let path = self
+            .params
+            .with_database(&self.name)
+            .options
+            .get_filename()
+            .to_owned();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 }
 
@@ -398,7 +389,6 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         key: &key(),
         server: &target.params,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
@@ -425,7 +415,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let password =
         std::fs::read_to_string(new_dir.join(format!("computers/{a_id}/vnc.pass"))).unwrap();
     assert_eq!(password.trim(), ca.desktop_password.unwrap());
-    let mut conn = sqlx::PgConnection::connect(&target.url(&target.name))
+    let mut conn = sqlx::SqliteConnection::connect(&target.url(&target.name))
         .await
         .unwrap();
     let computers: Vec<(Uuid, String, String)> = sqlx::query_as(
@@ -445,7 +435,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
             .unwrap();
     assert_eq!(
         active, 0,
-        "native sessions retired: context is rebuilt from PostgreSQL"
+        "native sessions retired: context is rebuilt from SQLite"
     );
     let chats: Vec<String> =
         sqlx::query_scalar("SELECT text FROM items WHERE kind = 'user' ORDER BY text")
@@ -586,7 +576,6 @@ async fn a_set_with_computers_needs_a_new_installation_to_restore() {
         key: &key(),
         server: &target.params,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: None,
@@ -660,7 +649,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
     s.fake.checkpoint_fails.store(false, SeqCst);
     // A paused desktop is resumed for its checkpoint, then captured.
     s.fake.set(&name, RuntimeState::Paused).unwrap();
-    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = $1")
+    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
         .bind(a)
         .execute(&s.app.db.pool)
         .await
@@ -709,7 +698,7 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
     std::fs::write(store.join(id.to_string()), b"REPORT-BYTES").unwrap();
     use sha2::Digest;
     sqlx::query(
-        "INSERT INTO artifacts (id, bot_id, guest_path, size_bytes, sha256) VALUES ($1, $2, '/r.txt', 12, $3)",
+        "INSERT INTO artifacts (id, bot_id, guest_path, size_bytes, sha256) VALUES (?1, ?2, '/r.txt', 12, ?3)",
     )
     .bind(id)
     .bind(a)
@@ -738,7 +727,6 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
         key: &key(),
         server: &target.params,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {
@@ -787,7 +775,6 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
             key: &key(),
             server: &target.params,
             target_database: &target.name,
-            pg_restore: Path::new("pg_restore"),
             staging_parent: &s.dir.path().join("staging"),
             max_bytes: 1 << 30,
             computers: Some(ComputerTarget {
@@ -813,15 +800,12 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
                 "what it started was stopped"
             );
         }
-        let mut conn = sqlx::PgConnection::connect(&target.url("postgres"))
-            .await
-            .unwrap();
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-                .bind(&target.name)
-                .fetch_one(&mut conn)
-                .await
-                .unwrap();
+        let exists = target
+            .params
+            .with_database(&target.name)
+            .options
+            .get_filename()
+            .exists();
         assert!(!exists, "the new database was dropped");
     }
 }
@@ -903,7 +887,6 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
         key: &key(),
         server: &target.params,
         target_database: &target.name,
-        pg_restore: Path::new("pg_restore"),
         staging_parent: &s.dir.path().join("staging"),
         max_bytes: 1 << 30,
         computers: Some(ComputerTarget {

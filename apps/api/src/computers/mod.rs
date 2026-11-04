@@ -1,13 +1,13 @@
 //! Bot computers: one persistent micro-VM per bot, started on demand
 //! (POC-017).
 //!
-//! PostgreSQL holds each computer's identity, configuration, owner intent
+//! SQLite holds each computer's identity, configuration, owner intent
 //! (`desired_state`), what the API last established (`observed_state`), a
 //! transition generation, and renewable leases. Runtime operations for one
 //! bot (create, start, resume, stop, pause, exec) are serialized by an
 //! in-process lock (the API is a singleton), so a slow or failed operation
 //! can never act on a newer one; each decision is also taken under the
-//! computer's row lock and re-checked when the runtime call returns. A
+//! immediate write transaction and re-checked when the runtime call returns. A
 //! failed transition is followed by inspecting the runtime and recording
 //! what it actually reports; when that is unknown the computer is `error`,
 //! keeps its reservation, and maintenance inspects it again. Admission
@@ -30,7 +30,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::actor::Actor;
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -232,7 +232,7 @@ pub struct Desktop {
 }
 
 pub struct ComputerManager {
-    pool: PgPool,
+    pool: SqlitePool,
     runtime: Arc<dyn ComputerRuntime>,
     config: ComputerConfig,
     /// One runtime operation at a time per bot.
@@ -251,7 +251,11 @@ pub struct ComputerManager {
 }
 
 impl ComputerManager {
-    pub fn new(pool: PgPool, runtime: Arc<dyn ComputerRuntime>, config: ComputerConfig) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        runtime: Arc<dyn ComputerRuntime>,
+        config: ComputerConfig,
+    ) -> Self {
         Self {
             pool,
             runtime,
@@ -322,9 +326,9 @@ impl ComputerManager {
             .expect("computer operation semaphore stays open")
     }
 
-    async fn row(conn: &mut PgConnection, bot_id: Uuid) -> Result<Option<Row>, sqlx::Error> {
+    async fn row(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<Row>, sqlx::Error> {
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT {ROW} FROM bot_computers WHERE bot_id = $1 FOR UPDATE"
+            "SELECT {ROW} FROM bot_computers WHERE bot_id = ?1"
         )))
         .bind(bot_id)
         .fetch_optional(&mut *conn)
@@ -343,9 +347,9 @@ impl ComputerManager {
         let _op = self.op(bot_id).await;
         // At most one inspection of an uncertain state, then decide again.
         for _ in 0..2 {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let active: Option<bool> =
-                sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+                sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
                     .bind(bot_id)
                     .fetch_optional(&mut *tx)
                     .await?;
@@ -354,7 +358,7 @@ impl ComputerManager {
             }
             sqlx::query(
                 "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
-                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
             )
             .bind(bot_id)
             .bind(Self::runtime_name(bot_id))
@@ -408,7 +412,7 @@ impl ComputerManager {
     /// Start, create, or resume under the bot's operation lock.
     async fn wake(
         &self,
-        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
         bot_id: Uuid,
         holder: &str,
         row: Row,
@@ -485,9 +489,9 @@ impl ComputerManager {
                 reason: err.to_string(),
             });
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: Option<bool> =
-            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
                 .bind(bot_id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -495,7 +499,7 @@ impl ComputerManager {
         self.set_state(&mut tx, bot_id, "running", None, None)
             .await?;
         // Running again: the last checkpoint no longer describes its disk.
-        sqlx::query("UPDATE bot_computers SET browser_checkpoint = NULL WHERE bot_id = $1")
+        sqlx::query("UPDATE bot_computers SET browser_checkpoint = NULL WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
@@ -510,7 +514,7 @@ impl ComputerManager {
                 Acquire::OwnerStopped
             });
         }
-        sqlx::query("UPDATE bot_computers SET last_error = NULL WHERE bot_id = $1")
+        sqlx::query("UPDATE bot_computers SET last_error = NULL WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
@@ -539,7 +543,7 @@ impl ComputerManager {
             .and_then(|l| l.local_addr())
             .map_err(|e| unavailable(e.to_string()))?
             .port();
-        sqlx::query("UPDATE bot_computers SET desktop_port = $2 WHERE bot_id = $1")
+        sqlx::query("UPDATE bot_computers SET desktop_port = ?2 WHERE bot_id = ?1")
             .bind(bot_id)
             .bind(port as i32)
             .execute(&self.pool)
@@ -653,7 +657,7 @@ impl ComputerManager {
             .into_iter()
             .find(|m| m.guest == GUEST_PROJECT || m.guest == ROOT_PROJECT);
         let (port, browser_checkpoint): (Option<i32>, Option<String>) = sqlx::query_as(
-            "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = $1",
+            "SELECT desktop_port, browser_checkpoint FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .fetch_one(&self.pool)
@@ -689,7 +693,7 @@ impl ComputerManager {
                 // other holder (a desktop session) still counts.
                 let leases: Vec<(Uuid, String)> = sqlx::query_as(
                     "SELECT id, holder FROM computer_leases
-                     WHERE bot_id = $1 AND released_at IS NULL",
+                     WHERE bot_id = ?1 AND released_at IS NULL",
                 )
                 .bind(bot_id)
                 .fetch_all(&self.pool)
@@ -705,8 +709,8 @@ impl ComputerManager {
                         continue;
                     }
                     sqlx::query(
-                        "UPDATE computer_leases SET released_at = now(), end_reason = 'expired'
-                         WHERE id = $1 AND released_at IS NULL",
+                        "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'expired'
+                         WHERE id = ?1 AND released_at IS NULL",
                     )
                     .bind(lease)
                     .execute(&self.pool)
@@ -770,7 +774,7 @@ impl ComputerManager {
         };
         let (port, ready): (Option<i32>, bool) = sqlx::query_as(
             "SELECT desktop_port, services_generation IS NOT DISTINCT FROM generation
-             FROM bot_computers WHERE bot_id = $1",
+             FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .fetch_one(&self.pool)
@@ -803,7 +807,7 @@ impl ComputerManager {
     /// End the owner's desktop session.
     pub async fn close_desktop(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let lease: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM computer_leases WHERE bot_id = $1 AND holder = $2 AND released_at IS NULL",
+            "SELECT id FROM computer_leases WHERE bot_id = ?1 AND holder = ?2 AND released_at IS NULL",
         )
         .bind(bot_id)
         .bind(format!("desktop:{bot_id}"))
@@ -823,7 +827,7 @@ impl ComputerManager {
             return Ok(());
         }
         let (generation, done): (i64, Option<i64>) = sqlx::query_as(
-            "SELECT generation, services_generation FROM bot_computers WHERE bot_id = $1",
+            "SELECT generation, services_generation FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .fetch_one(&self.pool)
@@ -838,7 +842,7 @@ impl ComputerManager {
         match result {
             Ok(out) if out.status == Some(0) => {
                 sqlx::query(
-                    "UPDATE bot_computers SET services_generation = $2 WHERE bot_id = $1 AND generation = $2",
+                    "UPDATE bot_computers SET services_generation = ?2 WHERE bot_id = ?1 AND generation = ?2",
                 )
                 .bind(bot_id)
                 .bind(generation)
@@ -851,7 +855,7 @@ impl ComputerManager {
                     Err(err) => format!("guest services did not start: {err}"),
                 };
                 tracing::warn!(bot = %bot_id, %error, "desktop services");
-                sqlx::query("UPDATE bot_computers SET last_error = $2 WHERE bot_id = $1")
+                sqlx::query("UPDATE bot_computers SET last_error = ?2 WHERE bot_id = ?1")
                     .bind(bot_id)
                     .bind(bounded(&error, 2000))
                     .execute(&self.pool)
@@ -863,16 +867,16 @@ impl ComputerManager {
 
     async fn set_state(
         &self,
-        conn: &mut PgConnection,
+        conn: &mut SqliteConnection,
         bot_id: Uuid,
         state: &str,
         generation: Option<i64>,
         error: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE bot_computers SET observed_state = $2, generation = coalesce($3, generation),
-                 last_error = coalesce($4, last_error), updated_at = now()
-             WHERE bot_id = $1",
+            "UPDATE bot_computers SET observed_state = ?2, generation = coalesce(?3, generation),
+                 last_error = coalesce(?4, last_error), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .bind(state)
@@ -887,7 +891,7 @@ impl ComputerManager {
     /// holds the bot's operation lock.
     async fn observe(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = $1",
+            "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .fetch_optional(&self.pool)
@@ -914,10 +918,10 @@ impl ComputerManager {
         // Keep a create that may not have happened distinguishable from a
         // lost computer: `creating` stays until observed.
         sqlx::query(
-            "UPDATE bot_computers SET last_error = $2,
+            "UPDATE bot_computers SET last_error = ?2,
                  observed_state = CASE WHEN observed_state = 'creating' THEN 'creating' ELSE 'error' END,
-                 updated_at = now()
-             WHERE bot_id = $1",
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .bind(bounded(error, 2000))
@@ -930,17 +934,14 @@ impl ComputerManager {
     /// Whether starting this computer stays within the global budget.
     async fn admits(
         &self,
-        tx: &mut PgConnection,
+        tx: &mut SqliteConnection,
         bot_id: Uuid,
         row: &Row,
     ) -> Result<bool, sqlx::Error> {
         // Serialize admission across computers.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('else_computer_admission'))")
-            .execute(&mut *tx)
-            .await?;
         let (cpus, memory): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT coalesce(sum(cpus), 0)::bigint, coalesce(sum(memory_mib + $2), 0)::bigint
-             FROM bot_computers WHERE bot_id <> $1 AND observed_state IN {RESERVING}"
+            "SELECT coalesce(sum(cpus), 0), coalesce(sum(memory_mib + ?2), 0)
+             FROM bot_computers WHERE bot_id <> ?1 AND observed_state IN {RESERVING}"
         )))
         .bind(bot_id)
         .bind(self.config.overhead_mib as i64)
@@ -954,15 +955,15 @@ impl ComputerManager {
 
     async fn lease(
         &self,
-        tx: &mut PgConnection,
+        tx: &mut SqliteConnection,
         bot_id: Uuid,
         holder: &str,
         generation: i64,
     ) -> Result<Uuid, sqlx::Error> {
         let existing: Option<Uuid> = sqlx::query_scalar(
-            "UPDATE computer_leases SET expires_at = now() + make_interval(secs => $3),
-                 generation = $4
-             WHERE bot_id = $1 AND holder = $2 AND released_at IS NULL RETURNING id",
+            "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?3)),
+                 generation = ?4
+             WHERE bot_id = ?1 AND holder = ?2 AND released_at IS NULL RETURNING id",
         )
         .bind(bot_id)
         .bind(holder)
@@ -976,7 +977,7 @@ impl ComputerManager {
                 let id = Uuid::new_v4();
                 sqlx::query(
                     "INSERT INTO computer_leases (id, bot_id, holder, generation, expires_at)
-                     VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))",
+                     VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)))",
                 )
                 .bind(id)
                 .bind(bot_id)
@@ -988,7 +989,7 @@ impl ComputerManager {
                 id
             }
         };
-        sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
+        sqlx::query("UPDATE bot_computers SET last_used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
@@ -998,8 +999,8 @@ impl ComputerManager {
     /// Extend a live lease. False if it already ended.
     pub async fn renew(&self, lease_id: Uuid) -> Result<bool, ComputerError> {
         let renewed = sqlx::query(
-            "UPDATE computer_leases SET expires_at = now() + make_interval(secs => $2)
-             WHERE id = $1 AND released_at IS NULL",
+            "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?2))
+             WHERE id = ?1 AND released_at IS NULL",
         )
         .bind(lease_id)
         .bind(self.config.lease_ttl.as_secs_f64())
@@ -1015,27 +1016,27 @@ impl ComputerManager {
     /// End a lease. Repeating it is harmless. Locks the computer, then the
     /// lease, like every other path.
     pub async fn release(&self, lease_id: Uuid) -> Result<(), ComputerError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let bot: Option<Uuid> =
-            sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = $1")
+            sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = ?1")
                 .bind(lease_id)
                 .fetch_optional(&mut *tx)
                 .await?;
         let Some(bot) = bot else { return Ok(()) };
-        sqlx::query("SELECT 1 FROM bot_computers WHERE bot_id = $1 FOR UPDATE")
+        sqlx::query("SELECT 1 FROM bot_computers WHERE bot_id = ?1")
             .bind(bot)
             .execute(&mut *tx)
             .await?;
         let ended = sqlx::query(
-            "UPDATE computer_leases SET released_at = now(), end_reason = 'released'
-             WHERE id = $1 AND released_at IS NULL",
+            "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'released'
+             WHERE id = ?1 AND released_at IS NULL",
         )
         .bind(lease_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
         if ended == 1 {
-            sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
+            sqlx::query("UPDATE bot_computers SET last_used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
                 .bind(bot)
                 .execute(&mut *tx)
                 .await?;
@@ -1056,7 +1057,7 @@ impl ComputerManager {
     ) -> Result<ExecOutput, ComputerError> {
         let (bot, name, _op) = self.checked(lease_id).await?;
         let out = self.runtime.exec(&name, program, args, timeout).await?;
-        sqlx::query("UPDATE bot_computers SET last_used_at = now() WHERE bot_id = $1")
+        sqlx::query("UPDATE bot_computers SET last_used_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
             .bind(bot)
             .execute(&self.pool)
             .await?;
@@ -1072,7 +1073,7 @@ impl ComputerManager {
         lease_id: Uuid,
     ) -> Result<(Uuid, String, OwnedSemaphorePermit), ComputerError> {
         let bot: Option<Uuid> =
-            sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = $1")
+            sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = ?1")
                 .bind(lease_id)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -1086,7 +1087,7 @@ impl ComputerManager {
                         AND l.generation = c.generation,
                     l.released_at IS NULL AND b.status = 'active'
              FROM computer_leases l JOIN bot_computers c ON c.bot_id = l.bot_id
-             JOIN bots b ON b.id = l.bot_id WHERE l.id = $1",
+             JOIN bots b ON b.id = l.bot_id WHERE l.id = ?1",
         )
         .bind(lease_id)
         .fetch_optional(&self.pool)
@@ -1101,17 +1102,17 @@ impl ComputerManager {
     /// Owner stop: no implicit wake until resumed. Active leases are
     /// revoked and the computer stops; its disk is kept.
     pub async fn owner_stop(&self, bot_id: Uuid) -> Result<(), ComputerError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // The bot row serializes this with a first acquisition creating
         // the computer row; the upsert records the intent either way.
-        sqlx::query("SELECT 1 FROM bots WHERE id = $1 FOR SHARE")
+        sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
             "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, desired_state, network)
-             VALUES ($1, $2, $3, $4, $5, 'stopped', $6)
-             ON CONFLICT (bot_id) DO UPDATE SET desired_state = 'stopped', updated_at = now()",
+             VALUES (?1, ?2, ?3, ?4, ?5, 'stopped', ?6)
+             ON CONFLICT (bot_id) DO UPDATE SET desired_state = 'stopped', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
         )
         .bind(bot_id)
         .bind(Self::runtime_name(bot_id))
@@ -1122,8 +1123,8 @@ impl ComputerManager {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE computer_leases SET released_at = now(), end_reason = 'owner_stop'
-             WHERE bot_id = $1 AND released_at IS NULL",
+            "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'owner_stop'
+             WHERE bot_id = ?1 AND released_at IS NULL",
         )
         .bind(bot_id)
         .execute(&mut *tx)
@@ -1141,7 +1142,7 @@ impl ComputerManager {
     /// Clear an owner stop. The computer starts again only on next use.
     pub async fn owner_resume(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         sqlx::query(
-            "UPDATE bot_computers SET desired_state = 'auto', updated_at = now() WHERE bot_id = $1",
+            "UPDATE bot_computers SET desired_state = 'auto', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1",
         )
         .bind(bot_id)
         .execute(&self.pool)
@@ -1149,13 +1150,13 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Stop or pause if `reason` still holds, re-checked under the row lock
+    /// Stop or pause if `reason` still holds, re-checked inside an immediate transaction
     /// together with any lease revocation. The caller holds the bot's
     /// operation lock. Returns whether it acted.
     async fn stop_held(&self, bot_id: Uuid, reason: Reason) -> Result<bool, ComputerError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: Option<bool> =
-            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = $1 FOR SHARE")
+            sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
                 .bind(bot_id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -1168,8 +1169,8 @@ impl ComputerManager {
                     return Ok(false);
                 }
                 sqlx::query(
-                    "UPDATE computer_leases SET released_at = now(), end_reason = 'revoked'
-                     WHERE bot_id = $1 AND released_at IS NULL",
+                    "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'revoked'
+                     WHERE bot_id = ?1 AND released_at IS NULL",
                 )
                 .bind(bot_id)
                 .execute(&mut *tx)
@@ -1179,7 +1180,7 @@ impl ComputerManager {
             Reason::Backup => {
                 let held: bool = sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM computer_leases
-                                    WHERE bot_id = $1 AND released_at IS NULL)",
+                                    WHERE bot_id = ?1 AND released_at IS NULL)",
                 )
                 .bind(bot_id)
                 .fetch_one(&mut *tx)
@@ -1198,9 +1199,9 @@ impl ComputerManager {
             Reason::Idle(action) => {
                 let idle: bool = sqlx::query_scalar(
                     "SELECT NOT EXISTS (SELECT 1 FROM computer_leases
-                                        WHERE bot_id = $1 AND released_at IS NULL)
-                        AND coalesce(last_used_at, updated_at) < now() - make_interval(secs => $2)
-                     FROM bot_computers WHERE bot_id = $1",
+                                        WHERE bot_id = ?1 AND released_at IS NULL)
+                        AND coalesce(last_used_at, updated_at) <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
+                     FROM bot_computers WHERE bot_id = ?1",
                 )
                 .bind(bot_id)
                 .bind(self.config.idle_after.as_secs_f64())
@@ -1248,7 +1249,7 @@ impl ComputerManager {
                 .is_ok_and(|out| out.status == Some(0));
             // Recorded so a backup of the stopped computer knows whether
             // its browser profile was left consistent.
-            sqlx::query("UPDATE bot_computers SET browser_checkpoint = $2 WHERE bot_id = $1")
+            sqlx::query("UPDATE bot_computers SET browser_checkpoint = ?2 WHERE bot_id = ?1")
                 .bind(bot_id)
                 .bind(if checkpointed { "ok" } else { "failed" })
                 .execute(&self.pool)
@@ -1287,7 +1288,7 @@ impl ComputerManager {
         }
         let expired: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
             "SELECT id, bot_id, holder FROM computer_leases
-             WHERE released_at IS NULL AND expires_at < now()",
+             WHERE released_at IS NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1299,15 +1300,15 @@ impl ComputerManager {
                 self.renew(lease).await?;
                 continue;
             }
-            let mut tx = self.pool.begin().await?;
-            sqlx::query("SELECT 1 FROM bot_computers WHERE bot_id = $1 FOR UPDATE")
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("SELECT 1 FROM bot_computers WHERE bot_id = ?1")
                 .bind(bot)
                 .execute(&mut *tx)
                 .await?;
             // Only if it is still expired: a renewal meanwhile wins.
             sqlx::query(
-                "UPDATE computer_leases SET released_at = now(), end_reason = 'expired'
-                 WHERE id = $1 AND released_at IS NULL AND expires_at < now()",
+                "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'expired'
+                 WHERE id = ?1 AND released_at IS NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
             )
             .bind(lease)
             .execute(&mut *tx)
@@ -1351,12 +1352,12 @@ impl ComputerManager {
         };
         let idle: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.bot_id FROM bot_computers c
-             WHERE c.observed_state = ANY($1)
-               AND coalesce(c.last_used_at, c.updated_at) < now() - make_interval(secs => $2)
+             WHERE c.observed_state IN (SELECT value FROM json_each(?1))
+               AND coalesce(c.last_used_at, c.updated_at) <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
                AND NOT EXISTS (SELECT 1 FROM computer_leases l
                                WHERE l.bot_id = c.bot_id AND l.released_at IS NULL)",
         )
-        .bind(&idle_states)
+        .bind(sqlx::types::Json(&idle_states))
         .bind(self.config.idle_after.as_secs_f64())
         .fetch_all(&self.pool)
         .await?;
@@ -1386,7 +1387,7 @@ impl ComputerManager {
         match kind {
             "turn" => {
                 sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM turns WHERE id = $1
+                    "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1
                                 AND status IN ('preparing', 'sending', 'running', 'cancelling'))",
                 )
                 .bind(id)
@@ -1395,7 +1396,7 @@ impl ComputerManager {
             }
             "job" => {
                 sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM guest_jobs WHERE id = $1
+                    "SELECT EXISTS (SELECT 1 FROM guest_jobs WHERE id = ?1
                                     AND status IN ('starting', 'running', 'cancelling'))",
                 )
                 .bind(id)
@@ -1436,9 +1437,9 @@ impl ComputerManager {
                 tracing::info!(bot = %bot, from = %observed, to = state, "computer state reconciled");
             }
             sqlx::query(
-                "UPDATE bot_computers SET observed_state = $2, generation = generation + 1,
-                     updated_at = now()
-                 WHERE bot_id = $1",
+                "UPDATE bot_computers SET observed_state = ?2, generation = generation + 1,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE bot_id = ?1",
             )
             .bind(bot)
             .bind(state)
@@ -1452,7 +1453,7 @@ impl ComputerManager {
         // Work that survived (jobs in a still-running computer) keeps its
         // leases on the new generation; maintenance probes it from there.
         sqlx::query(
-            "UPDATE computer_leases l SET generation = c.generation
+            "UPDATE computer_leases AS l SET generation = c.generation
              FROM bot_computers c
              WHERE c.bot_id = l.bot_id AND l.released_at IS NULL
                AND c.observed_state IN ('running', 'paused')",

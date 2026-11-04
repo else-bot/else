@@ -55,7 +55,9 @@ struct Handoff {
     kind: String,
     reason: Option<String>,
     checkpoint: Option<String>,
+    #[sqlx(json)]
     selected_turns: Vec<i64>,
+    #[sqlx(json)]
     omitted_turns: Vec<i64>,
     boundary_turn_no: i64,
     state: String,
@@ -67,7 +69,7 @@ async fn handoff(app: &TestApp, turn: Uuid) -> Option<Handoff> {
     sqlx::query_as(
         "SELECT source_provider_id, target_provider_id, kind, reason, checkpoint, selected_turns,
                 omitted_turns, boundary_turn_no, state, payload_sha256, target_session_id
-         FROM handoffs WHERE turn_id = $1",
+         FROM handoffs WHERE turn_id = ?1",
     )
     .bind(turn)
     .fetch_optional(&app.db.pool)
@@ -148,7 +150,7 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     assert_eq!(h.selected_turns, vec![3, 4]);
     // Both native sessions are the same ones as before the switches.
     let sessions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM provider_sessions WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM provider_sessions WHERE bot_id = ?1")
             .bind(bot.parse::<Uuid>().unwrap())
             .fetch_one(&app.db.pool)
             .await
@@ -209,7 +211,7 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     say(&app, &bot, A, "Then A.").await;
     // B's native session disappears (its files were removed).
     let natives: Vec<String> = sqlx::query_scalar(
-        "SELECT native_session_id FROM provider_sessions WHERE provider_id = $1",
+        "SELECT native_session_id FROM provider_sessions WHERE provider_id = ?1",
     )
     .bind(B)
     .fetch_all(&app.db.pool)
@@ -227,7 +229,7 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     let h = handoff(&app, t3).await.unwrap();
     assert_eq!(h.selected_turns, vec![1, 2]);
     let active: Vec<String> = sqlx::query_scalar(
-        "SELECT native_session_id FROM provider_sessions WHERE provider_id = $1 AND status = 'active'",
+        "SELECT native_session_id FROM provider_sessions WHERE provider_id = ?1 AND status = 'active'",
     )
     .bind(B)
     .fetch_all(&app.db.pool)
@@ -423,7 +425,7 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     let job = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
-         VALUES ($1, 'elsebot-x', 'img', 1, 2048)",
+         VALUES (?1, 'elsebot-x', 'img', 1, 2048)",
     )
     .bind(bot_id)
     .execute(&app.db.pool)
@@ -431,7 +433,7 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     .unwrap();
     sqlx::query(
         "INSERT INTO guest_jobs (id, bot_id, command, status, deadline)
-         VALUES ($1, $2, 'make release', 'running', now() + interval '1 hour')",
+         VALUES (?1, ?2, 'make release', 'running', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '+1 hours'))",
     )
     .bind(job)
     .bind(bot_id)
@@ -458,7 +460,7 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
         "the job record is carried: {packet}"
     );
     // The job itself is untouched.
-    let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = $1")
+    let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
         .bind(job)
         .fetch_one(&app.db.pool)
         .await
@@ -487,7 +489,7 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
     drop(app);
     let id: Uuid = turn.parse().unwrap();
     for _ in 0..100 {
-        let s: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let s: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(id)
             .fetch_one(&db.pool)
             .await
@@ -497,12 +499,12 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = $1")
+    sqlx::query("UPDATE turns SET status = 'sending', finished_at = NULL WHERE id = ?1")
         .bind(id)
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE handoffs SET state = 'sending' WHERE turn_id = $1")
+    sqlx::query("UPDATE handoffs SET state = 'sending' WHERE turn_id = ?1")
         .bind(id)
         .execute(&db.pool)
         .await
@@ -510,7 +512,7 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
     else_api::db::turns::recover_after_restart(&db.pool)
         .await
         .unwrap();
-    let state: String = sqlx::query_scalar("SELECT state FROM handoffs WHERE turn_id = $1")
+    let state: String = sqlx::query_scalar("SELECT state FROM handoffs WHERE turn_id = ?1")
         .bind(turn.parse::<Uuid>().unwrap())
         .fetch_one(&db.pool)
         .await

@@ -2,7 +2,7 @@
 //! default provider, and which profile a new turn uses.
 
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::app::providers::Profile;
@@ -22,15 +22,15 @@ pub enum BotProfileError {
     Db(#[from] sqlx::Error),
 }
 
-pub async fn get(pool: &PgPool, bot_id: Uuid) -> Result<Option<BotProfile>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<BotProfile>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     own(&mut conn, bot_id).await
 }
 
-async fn own(conn: &mut PgConnection, bot_id: Uuid) -> Result<Option<BotProfile>, sqlx::Error> {
+async fn own(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<BotProfile>, sqlx::Error> {
     let row: Option<(String, String, String, String, i64)> = sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier, revision
-         FROM bot_profiles WHERE bot_id = $1",
+         FROM bot_profiles WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_optional(&mut *conn)
@@ -51,17 +51,16 @@ async fn own(conn: &mut PgConnection, bot_id: Uuid) -> Result<Option<BotProfile>
 /// Set an active bot's own profile (already validated by its provider's
 /// adapter). An unchanged profile keeps its revision.
 pub async fn put(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     provider_id: &str,
     profile: &Profile,
 ) -> Result<BotProfile, BotProfileError> {
-    let mut tx = pool.begin().await?;
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR SHARE")
-            .bind(bot_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     if status.as_deref() != Some("active") {
         return Err(BotProfileError::NotFound);
     }
@@ -74,11 +73,11 @@ pub async fn put(
     }
     let revision: i64 = sqlx::query_scalar(
         "INSERT INTO bot_profiles (bot_id, provider_id, model, reasoning_effort, service_tier)
-         VALUES ($1, $2, $3, $4, $5)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (bot_id) DO UPDATE SET
              provider_id = EXCLUDED.provider_id, model = EXCLUDED.model,
              reasoning_effort = EXCLUDED.reasoning_effort, service_tier = EXCLUDED.service_tier,
-             revision = bot_profiles.revision + 1, updated_at = now()
+             revision = bot_profiles.revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          RETURNING revision",
     )
     .bind(bot_id)
@@ -98,7 +97,7 @@ pub async fn put(
 }
 
 /// The installation's default provider, if the owner chose one.
-pub async fn default_provider(conn: &mut PgConnection) -> Result<Option<String>, sqlx::Error> {
+pub async fn default_provider(conn: &mut SqliteConnection) -> Result<Option<String>, sqlx::Error> {
     Ok(
         sqlx::query_scalar("SELECT default_provider_id FROM installation")
             .fetch_optional(&mut *conn)
@@ -108,10 +107,10 @@ pub async fn default_provider(conn: &mut PgConnection) -> Result<Option<String>,
 }
 
 pub async fn set_default_provider(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     provider_id: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE installation SET default_provider_id = $1")
+    sqlx::query("UPDATE installation SET default_provider_id = ?1")
         .bind(provider_id)
         .execute(&mut *conn)
         .await?;
@@ -120,7 +119,7 @@ pub async fn set_default_provider(
 
 /// The provider a message to this bot uses when none is named: the bot's
 /// own, else the installation's default (`None`: the caller's fallback).
-pub async fn provider_for(pool: &PgPool, bot_id: Uuid) -> Result<Option<String>, sqlx::Error> {
+pub async fn provider_for(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<String>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     if let Some(own) = own(&mut conn, bot_id).await? {
         return Ok(Some(own.provider_id));
@@ -132,7 +131,7 @@ pub async fn provider_for(pool: &PgPool, bot_id: Uuid) -> Result<Option<String>,
 /// bot's own when it is for that provider, else the provider's saved one
 /// (locked for share, as before). `None` if neither exists.
 pub async fn effective(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     provider_id: &str,
 ) -> Result<Option<(i64, Json<Profile>)>, sqlx::Error> {
@@ -144,7 +143,7 @@ pub async fn effective(
     }
     let row: Option<(i64, String, String, String)> = sqlx::query_as(
         "SELECT revision, model, reasoning_effort, service_tier
-         FROM provider_profiles WHERE provider_id = $1 FOR SHARE",
+         FROM provider_profiles WHERE provider_id = ?1",
     )
     .bind(provider_id)
     .fetch_optional(&mut *conn)

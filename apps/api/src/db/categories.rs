@@ -16,7 +16,7 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::events;
@@ -74,7 +74,9 @@ pub fn normalize(name: &str) -> Result<String, CategoryError> {
 
 fn duplicate(err: sqlx::Error) -> CategoryError {
     match &err {
-        sqlx::Error::Database(db) if db.constraint() == Some("bot_categories_name_key") => {
+        sqlx::Error::Database(db)
+            if db.is_unique_violation() && db.message().contains("bot_categories.name_key") =>
+        {
             CategoryError::Duplicate
         }
         _ => CategoryError::Db(err),
@@ -83,27 +85,31 @@ fn duplicate(err: sqlx::Error) -> CategoryError {
 
 /// Wake `bots` subscribers once the transaction commits, for a change no
 /// single bot carries.
-async fn wake(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+async fn wake(conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
     events::notify(conn, Uuid::nil()).await
 }
 
 /// The visible categories (not those being deleted), in the portable order.
 pub const LIST: &str = "SELECT id, name, created_at, updated_at FROM bot_categories
-     WHERE NOT deleting ORDER BY name_key COLLATE \"C\", id";
+     WHERE NOT deleting ORDER BY name_key COLLATE BINARY, id";
 
-pub async fn list(pool: &PgPool) -> Result<Vec<Category>, sqlx::Error> {
+pub async fn list(pool: &SqlitePool) -> Result<Vec<Category>, sqlx::Error> {
     sqlx::query_as(LIST).fetch_all(pool).await
 }
 
 /// Create a category once per request ID: a matching retry returns it, a
 /// different payload under the same ID is a conflict.
-pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Created, CategoryError> {
+pub async fn create(
+    pool: &SqlitePool,
+    request_id: Uuid,
+    name: &str,
+) -> Result<Created, CategoryError> {
     let name = normalize(name)?;
     let hash = Sha256::digest(format!("create_category\0{name}").as_bytes()).to_vec();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     super::bots::lock_request(&mut tx, request_id).await?;
     let other: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM request_receipts WHERE request_id = $1)")
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM request_receipts WHERE request_id = ?1)")
             .bind(request_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -111,7 +117,7 @@ pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Creat
         return Err(CategoryError::RequestConflict);
     }
     let receipt: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT category_id, payload_hash FROM category_requests WHERE request_id = $1",
+        "SELECT category_id, payload_hash FROM category_requests WHERE request_id = ?1",
     )
     .bind(request_id)
     .fetch_optional(&mut *tx)
@@ -122,7 +128,7 @@ pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Creat
         }
         let found: Option<Category> = sqlx::query_as(
             "SELECT id, name, created_at, updated_at FROM bot_categories
-             WHERE id = $1 AND NOT deleting",
+             WHERE id = ?1 AND NOT deleting",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -132,7 +138,7 @@ pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Creat
     }
     let id = Uuid::new_v4();
     let category: Category = sqlx::query_as(
-        "INSERT INTO bot_categories (id, name, name_key) VALUES ($1, $2, $3)
+        "INSERT INTO bot_categories (id, name, name_key) VALUES (?1, ?2, ?3)
          RETURNING id, name, created_at, updated_at",
     )
     .bind(id)
@@ -142,7 +148,7 @@ pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Creat
     .await
     .map_err(duplicate)?;
     sqlx::query(
-        "INSERT INTO category_requests (request_id, category_id, payload_hash) VALUES ($1, $2, $3)",
+        "INSERT INTO category_requests (request_id, category_id, payload_hash) VALUES (?1, ?2, ?3)",
     )
     .bind(request_id)
     .bind(id)
@@ -154,12 +160,12 @@ pub async fn create(pool: &PgPool, request_id: Uuid, name: &str) -> Result<Creat
     Ok(Created::New(category))
 }
 
-pub async fn rename(pool: &PgPool, id: Uuid, name: &str) -> Result<Category, CategoryError> {
+pub async fn rename(pool: &SqlitePool, id: Uuid, name: &str) -> Result<Category, CategoryError> {
     let name = normalize(name)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let category: Option<Category> = sqlx::query_as(
-        "UPDATE bot_categories SET name = $2, name_key = $3, updated_at = now()
-         WHERE id = $1 AND NOT deleting
+        "UPDATE bot_categories SET name = ?2, name_key = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND NOT deleting
          RETURNING id, name, created_at, updated_at",
     )
     .bind(id)
@@ -181,8 +187,8 @@ pub async fn rename(pool: &PgPool, id: Uuid, name: &str) -> Result<Category, Cat
 /// transaction (holding one bot lock at a time, so this cannot deadlock
 /// with bot deletion or Stop work, which lock several bots); then the row
 /// goes. Returns the bots it unassigned.
-pub async fn delete(pool: &PgPool, id: Uuid) -> Result<Vec<Uuid>, CategoryError> {
-    let marked = sqlx::query("UPDATE bot_categories SET deleting = true WHERE id = $1")
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<Vec<Uuid>, CategoryError> {
+    let marked = sqlx::query("UPDATE bot_categories SET deleting = true WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?
@@ -191,20 +197,20 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<Vec<Uuid>, CategoryError>
         return Err(CategoryError::NotFound);
     }
     {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         wake(&mut tx).await?;
         tx.commit().await?;
     }
     let mut unassigned = Vec::new();
     let bots: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM bots WHERE category_id = $1 ORDER BY id")
+        sqlx::query_scalar("SELECT id FROM bots WHERE category_id = ?1 ORDER BY id")
             .bind(id)
             .fetch_all(pool)
             .await?;
     for bot in bots {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed =
-            sqlx::query("UPDATE bots SET category_id = NULL WHERE id = $1 AND category_id = $2")
+            sqlx::query("UPDATE bots SET category_id = NULL WHERE id = ?1 AND category_id = ?2")
                 .bind(bot)
                 .bind(id)
                 .execute(&mut *tx)
@@ -216,8 +222,8 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<Vec<Uuid>, CategoryError>
         }
         tx.commit().await?;
     }
-    let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM bot_categories WHERE id = $1 AND deleting")
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("DELETE FROM bot_categories WHERE id = ?1 AND deleting")
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -230,15 +236,15 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<Vec<Uuid>, CategoryError>
 /// active (a deleted bot is never revived by an assignment) and the
 /// category must exist (it is locked against a concurrent delete).
 pub async fn assign(
-    pool: &PgPool,
+    pool: &SqlitePool,
     bot_id: Uuid,
     category: Option<Uuid>,
 ) -> Result<(), CategoryError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     // The category first (the lock order), then the bot.
     if let Some(id) = category {
         let usable: Option<bool> =
-            sqlx::query_scalar("SELECT NOT deleting FROM bot_categories WHERE id = $1 FOR SHARE")
+            sqlx::query_scalar("SELECT NOT deleting FROM bot_categories WHERE id = ?1")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -246,18 +252,17 @@ pub async fn assign(
             return Err(CategoryError::NotFound);
         }
     }
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM bots WHERE id = $1 FOR UPDATE")
-            .bind(bot_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
     match status.as_deref() {
         None => return Err(CategoryError::BotNotFound),
         Some("active") => {}
         Some(_) => return Err(CategoryError::BotDeleted),
     }
     let changed = sqlx::query(
-        "UPDATE bots SET category_id = $2 WHERE id = $1 AND category_id IS DISTINCT FROM $2",
+        "UPDATE bots SET category_id = ?2 WHERE id = ?1 AND category_id IS DISTINCT FROM ?2",
     )
     .bind(bot_id)
     .bind(category)
@@ -274,10 +279,10 @@ pub async fn assign(
 /// Whether a request ID was already used to create a category (request IDs
 /// share one namespace across operations).
 pub async fn used_by_category(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut sqlx::SqliteConnection,
     request_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM category_requests WHERE request_id = $1)")
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM category_requests WHERE request_id = ?1)")
         .bind(request_id)
         .fetch_one(conn)
         .await

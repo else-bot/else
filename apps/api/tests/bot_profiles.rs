@@ -15,7 +15,7 @@ fn choice(effort: &str, tier: &str) -> serde_json::Value {
 /// The profile snapshot a turn was accepted with.
 async fn turn_profile(app: &TestApp, turn: &str) -> serde_json::Value {
     sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
-        "SELECT profile FROM turns WHERE id = $1",
+        "SELECT profile FROM turns WHERE id = ?1",
     )
     .bind(turn.parse::<Uuid>().unwrap())
     .fetch_one(&app.db.pool)

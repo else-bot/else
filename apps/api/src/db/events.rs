@@ -1,34 +1,29 @@
 //! The per-bot event journal.
 //!
-//! Every mutation of visible history or turn state appends events inside its
-//! own transaction: it increments `bots.last_event_seq` (which row-locks the
-//! bot, so cursors follow commit order per bot) and inserts the event rows.
-//! `pg_notify` is delivered only after commit, so it is a safe wake hint for
-//! streams; rows remain authoritative.
+//! Mutations append events inside their own immediate transaction, so event
+//! sequences follow commit order. EventHub observes committed data versions;
+//! rows remain authoritative and streams also poll as a fallback.
 
 use serde_json::{Value, json};
-use sqlx::PgConnection;
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::db::{bots, turns};
 use crate::views::{bot_json, item_json, turn_json};
 
-/// Notification channel carrying a bot ID after each committed change.
-pub const CHANNEL: &str = "else_bot_events";
-
 async fn append(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     kind: &str,
     data: Value,
 ) -> Result<i64, sqlx::Error> {
     let seq: i64 = sqlx::query_scalar(
-        "UPDATE bots SET last_event_seq = last_event_seq + 1 WHERE id = $1 RETURNING last_event_seq",
+        "UPDATE bots SET last_event_seq = last_event_seq + 1 WHERE id = ?1 RETURNING last_event_seq",
     )
     .bind(bot_id)
     .fetch_one(&mut *conn)
     .await?;
-    sqlx::query("INSERT INTO bot_events (bot_id, seq, kind, data) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO bot_events (bot_id, seq, kind, data) VALUES (?1, ?2, ?3, ?4)")
         .bind(bot_id)
         .bind(seq)
         .bind(kind)
@@ -40,16 +35,12 @@ async fn append(
 }
 
 /// Wake streams for this bot once the transaction commits.
-pub async fn notify(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_notify($1, $2::text)")
-        .bind(CHANNEL)
-        .bind(bot_id)
-        .execute(conn)
-        .await?;
+pub async fn notify(_conn: &mut SqliteConnection, _bot_id: Uuid) -> Result<(), sqlx::Error> {
+    // EventHub observes committed database versions. Never wake on uncommitted state.
     Ok(())
 }
 
-pub async fn bot_updated(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     if let Some(bot) = bots::find_in(conn, bot_id).await? {
         append(
             conn,
@@ -63,7 +54,7 @@ pub async fn bot_updated(conn: &mut PgConnection, bot_id: Uuid) -> Result<(), sq
 }
 
 pub async fn item_upsert(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     item_id: Uuid,
 ) -> Result<(), sqlx::Error> {
@@ -81,7 +72,7 @@ pub async fn item_upsert(
 }
 
 pub async fn item_delta(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     conversation_id: Uuid,
     item_id: Uuid,
@@ -103,8 +94,8 @@ pub async fn item_delta(
 }
 
 /// Whether a conversation holds delegated task work.
-async fn is_task(conn: &mut PgConnection, conversation_id: Uuid) -> Result<bool, sqlx::Error> {
-    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = $1")
+async fn is_task(conn: &mut SqliteConnection, conversation_id: Uuid) -> Result<bool, sqlx::Error> {
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = ?1")
         .bind(conversation_id)
         .fetch_optional(&mut *conn)
         .await?;
@@ -113,7 +104,7 @@ async fn is_task(conn: &mut PgConnection, conversation_id: Uuid) -> Result<bool,
 
 /// A turn's status or outcome changed; the bot's activity changes with it.
 pub async fn turn_changed(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
@@ -134,7 +125,7 @@ pub async fn turn_changed(
 /// A new owner message: its item, its queued turn, and the bot's activity
 /// and provider selection.
 pub async fn turn_accepted(
-    conn: &mut PgConnection,
+    conn: &mut SqliteConnection,
     bot_id: Uuid,
     turn_id: Uuid,
 ) -> Result<(), sqlx::Error> {
@@ -145,14 +136,14 @@ pub async fn turn_accepted(
 
 /// Committed events after `after`, oldest first.
 pub async fn after(
-    pool: &sqlx::PgPool,
+    pool: &sqlx::SqlitePool,
     bot_id: Uuid,
     after: i64,
     limit: i64,
 ) -> Result<Vec<(i64, String, Value)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT seq, kind, data FROM bot_events WHERE bot_id = $1 AND seq > $2
-         ORDER BY seq LIMIT $3",
+        "SELECT seq, kind, data FROM bot_events WHERE bot_id = ?1 AND seq > ?2
+         ORDER BY seq LIMIT ?3",
     )
     .bind(bot_id)
     .bind(after)

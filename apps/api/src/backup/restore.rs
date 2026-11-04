@@ -5,7 +5,7 @@
 //! manifest (lengths and SHA-256 of ciphertext and plaintext, read through
 //! the authenticated final chunk) before any SQL runs, and the dump is
 //! decrypted into a private staging directory that is removed afterwards.
-//! `pg_restore` runs in one transaction; after it, every table's row count
+//! The image passes integrity and foreign-key checks; every table's row count
 //! and digest must equal the manifest's, migrations are applied, and the
 //! restored provider profiles must still pass the adapters' rules (so a
 //! restored setting cannot enable native sub-agents). On any failure the
@@ -15,12 +15,11 @@
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sqlx::Connection;
-use sqlx::postgres::{PgConnectOptions, PgConnection};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 
-use super::{BackupError, COMPLETE, Completion, DATABASE, MANIFEST, Manifest, PgParams};
+use super::{BackupError, COMPLETE, Completion, DATABASE, DatabaseParams, MANIFEST, Manifest};
 use crate::credentials::SecretKey;
 
 #[derive(Debug)]
@@ -29,9 +28,8 @@ pub struct RestoreRequest<'a> {
     pub key: &'a SecretKey,
     /// Credentials for the server; the target database name replaces its
     /// database.
-    pub server: &'a PgParams,
+    pub server: &'a DatabaseParams,
     pub target_database: &'a str,
-    pub pg_restore: &'a Path,
     /// A private directory for decrypted staging files.
     pub staging_parent: &'a Path,
     /// Largest decrypted artifact accepted (bounds staging space).
@@ -72,16 +70,7 @@ pub struct RestoreReport {
     pub migration_version: i64,
 }
 
-fn valid_database_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 63
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        && !name.as_bytes()[0].is_ascii_digit()
-}
-
-fn options(params: &PgParams) -> PgConnectOptions {
+fn options(params: &DatabaseParams) -> SqliteConnectOptions {
     // SQLx's own parse of the URL: TLS mode, certificates, and overrides
     // apply to every connection the restore makes.
     params.options.clone()
@@ -173,7 +162,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let Some((first, rest)) = manifest.artifacts.split_first() else {
         return invalid("none");
     };
-    if first.kind != "postgres" || first.object != DATABASE || first.bot_id.is_some() {
+    if first.kind != "sqlite" || first.object != DATABASE || first.bot_id.is_some() {
         return invalid("the database dump must come first");
     }
     let mut seen = std::collections::HashSet::new();
@@ -316,9 +305,9 @@ impl Drop for Staging {
 }
 
 pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, BackupError> {
-    if !valid_database_name(request.target_database) {
+    if request.target_database.is_empty() || request.target_database.contains('\0') {
         return Err(BackupError::Refused(
-            "the target database name must be lowercase letters, digits, and underscores".into(),
+            "a new SQLite file path is required".into(),
         ));
     }
     let (_, manifest, identity) = open_set(request.set_dir, request.key)?;
@@ -374,25 +363,26 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     }
 
     // The target must be new; an existing database is never touched.
-    let admin = request.server.with_database("postgres");
-    let mut conn = PgConnection::connect_with(&options(&admin)).await?;
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(request.target_database)
-            .fetch_one(&mut conn)
-            .await?;
-    if exists {
-        return Err(BackupError::Refused(format!(
-            "database {} already exists; nothing was changed",
-            request.target_database
-        )));
+    let target = request.server.with_database(request.target_database);
+    let path = target.options.get_filename();
+    // Reserve exclusively: a competing restore cannot overwrite an existing file.
+    let reserved = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            BackupError::Refused(format!(
+                "{} cannot be created as new; nothing was changed: {e}",
+                path.display()
+            ))
+        })?;
+    drop(reserved);
+    if let Err(e) = std::fs::copy(&dump, path) {
+        let _ = std::fs::remove_file(path);
+        return Err(BackupError::io(path.display(), e));
     }
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE DATABASE \"{}\" TEMPLATE template0 ENCODING 'UTF8'",
-        request.target_database
-    )))
-    .execute(&mut conn)
-    .await?;
     let mut restored = load_and_check(&request, &manifest, &dump).await;
     let _ = std::fs::remove_file(&dump);
     if restored.is_ok()
@@ -401,13 +391,10 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         restored = Err(err);
     }
     if restored.is_err() {
-        // Only the database created above is dropped.
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-            request.target_database
-        )))
-        .execute(&mut conn)
-        .await;
+        // Only files belonging to the database exclusively created above.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
     let migration_version = restored?;
     Ok(RestoreReport {
@@ -420,38 +407,23 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
 async fn load_and_check(
     request: &RestoreRequest<'_>,
     manifest: &Manifest,
-    dump: &Path,
+    _dump: &Path,
 ) -> Result<i64, BackupError> {
     let target = request.server.with_database(request.target_database);
-    let pg_restore = request.pg_restore.to_owned();
-    let env = target.env();
-    let dump = dump.to_owned();
-    let database = request.target_database.to_owned();
-    let (status, _, stderr) = tokio::task::spawn_blocking(move || {
-        let mut command = Command::new(super::resolve_tool(&pg_restore));
-        command
-            .args([
-                "--single-transaction",
-                "--exit-on-error",
-                "--no-owner",
-                "--no-acl",
-            ])
-            // A database name only; the password stays in the environment.
-            .arg(format!("--dbname={database}"))
-            .arg(&dump)
-            .env_clear()
-            .envs(env);
-        super::run_bounded(command)
-    })
-    .await
-    .map_err(|e| BackupError::Io(e.to_string()))??;
-    if !status.success() {
-        return Err(BackupError::Producer(format!(
-            "pg_restore exited with {status}: {}",
-            stderr.lines().last().unwrap_or_default()
-        )));
+    let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut conn)
+        .await?;
+    if integrity != "ok" {
+        return Err(BackupError::Invalid(integrity));
     }
-    let mut conn = PgConnection::connect_with(&options(&target)).await?;
+    if !sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut conn)
+        .await?
+        .is_empty()
+    {
+        return Err(BackupError::Invalid("foreign key check failed".into()));
+    }
     // Exactly the captured rows, before migrations may change any.
     let digests = super::capture::table_digests(&mut conn).await?;
     if digests != manifest.tables {
@@ -515,7 +487,7 @@ async fn load_and_check(
 /// restored database what the new installation actually has: restored
 /// computers stopped, computers not in the set `missing` (never recreated),
 /// every native provider session retired (not included, so context is
-/// rebuilt from PostgreSQL), and the run that made this set completed.
+/// rebuilt from SQLite), and the run that made this set completed.
 async fn restore_computers(
     request: &RestoreRequest<'_>,
     manifest: &Manifest,
@@ -702,25 +674,25 @@ async fn reconcile(
     restored: &[uuid::Uuid],
 ) -> Result<(), BackupError> {
     let target = request.server.with_database(request.target_database);
-    let mut conn = PgConnection::connect_with(&options(&target)).await?;
-    let mut tx = conn.begin().await?;
+    let mut conn = SqliteConnection::connect_with(&options(&target)).await?;
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
-        "UPDATE bot_computers SET observed_state = 'stopped', updated_at = now()
-         WHERE bot_id = ANY($1)",
+        "UPDATE bot_computers SET observed_state = 'stopped', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE lower(hex(bot_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))",
     )
-    .bind(restored)
+    .bind(sqlx::types::Json(restored))
     .execute(&mut *tx)
     .await?;
     sqlx::query(
         "UPDATE bot_computers SET observed_state = 'missing',
-             last_error = 'not included in the restored backup', updated_at = now()
-         WHERE observed_state <> 'absent' AND NOT (bot_id = ANY($1))",
+             last_error = 'not included in the restored backup', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE observed_state <> 'absent' AND NOT (lower(hex(bot_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))",
     )
-    .bind(restored)
+    .bind(sqlx::types::Json(restored))
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE computer_leases SET released_at = now(), end_reason = 'restored'
+        "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'restored'
          WHERE released_at IS NULL",
     )
     .execute(&mut *tx)
@@ -733,15 +705,15 @@ async fn reconcile(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE provider_sessions SET status = 'retired', updated_at = now()
+        "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE status = 'active'",
     )
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE backup_runs SET local_status = 'completed', finished_at = coalesce(finished_at, now()),
+        "UPDATE backup_runs SET local_status = 'completed', finished_at = coalesce(finished_at, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
              error = NULL
-         WHERE set_id = $1",
+         WHERE set_id = ?1",
     )
     .bind(&manifest.set_id)
     .execute(&mut *tx)

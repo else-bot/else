@@ -1,4 +1,4 @@
-//! The WebSocket channel API over a real TCP listener against PostgreSQL:
+//! The WebSocket channel API over a real TCP listener against SQLite:
 //! snapshots plus `bot:<id>` replay, the `bots` channel, reconnects, cursor
 //! errors, deletion, and authentication.
 

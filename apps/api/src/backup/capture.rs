@@ -1,30 +1,22 @@
 //! Capture one database backup set and publish it locally.
 //!
-//! The table digests and `pg_dump` share one exported snapshot, so the rows
-//! the manifest describes are exactly the rows in the dump. The dump streams
-//! from `pg_dump`'s stdout through age into a private staging directory; it
-//! is never written in plaintext. The set becomes visible under its final
-//! name only after every object and the encrypted manifest are synced, and
-//! counts as a backup only once `complete.json` is linked in (never
-//! replacing one). A failed producer, encryption error, size overrun, or
-//! interruption leaves no completed set.
+//! Table digests and the database image share one SQLite snapshot. The image
+//! is size-checked before allocation and encrypted from memory, never staged
+//! as plaintext. Completion is published only after every object is synced.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 
 use super::{
-    Application, Artifact, BackupError, BotEntry, COMPLETE, Completion, DATABASE, MANIFEST,
-    Manifest, ObjectRef, PgParams, Postgres, SCHEMA_VERSION, TableDigest,
+    Application, Artifact, BackupError, BotEntry, COMPLETE, Completion, DATABASE, DatabaseParams,
+    MANIFEST, Manifest, ObjectRef, SCHEMA_VERSION, Sqlite, TableDigest,
 };
 use crate::credentials::SecretKey;
 
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
     pub dir: PathBuf,
-    pub pg_dump: PathBuf,
-    pub pg_restore: PathBuf,
     /// Completed local sets kept (at least one).
     pub keep: usize,
     /// Largest dump accepted, in plaintext bytes; bounds temporary storage.
@@ -50,122 +42,56 @@ fn now() -> String {
 /// Row counts and content digests of every application table, in the
 /// connection's current snapshot. Row hashes are streamed in sorted order
 /// into one incremental SHA-256, so no table is aggregated in memory.
-pub async fn table_digests(conn: &mut sqlx::PgConnection) -> Result<Vec<TableDigest>, sqlx::Error> {
+pub async fn table_digests(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<TableDigest>, sqlx::Error> {
     use futures_util::TryStreamExt;
     use sha2::Digest;
+    use sqlx::{Row, ValueRef};
     let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT tablename::text FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         AND name NOT LIKE 'memory_search%' ORDER BY name",
     )
     .fetch_all(&mut *conn)
     .await?;
     let mut digests = Vec::new();
     for table in tables {
-        // The name comes from the catalog; quote it as an identifier.
         let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let sql = format!("SELECT md5(t::text) AS h FROM public.{quoted} t ORDER BY 1");
-        let mut rows = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
-        let mut hasher = sha2::Sha256::new();
-        let mut count = 0i64;
-        while let Some(hash) = rows.try_next().await? {
-            hasher.update(hash.as_bytes());
-            count += 1;
+        let sql = format!("SELECT * FROM {quoted}");
+        let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+        let mut hashes = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            let mut hash = sha2::Sha256::new();
+            for i in 0..row.len() {
+                use sqlx::TypeInfo;
+                let raw = row.try_get_raw(i)?;
+                if raw.is_null() {
+                    hash.update([0]);
+                    continue;
+                }
+                let bytes = match raw.type_info().name() {
+                    "INTEGER" => row.try_get::<i64, _>(i)?.to_le_bytes().to_vec(),
+                    "REAL" => row.try_get::<f64, _>(i)?.to_le_bytes().to_vec(),
+                    _ => row.try_get::<Vec<u8>, _>(i)?,
+                };
+                hash.update([1]);
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
+            hashes.push(hex::encode(hash.finalize()));
         }
-        drop(rows);
+        hashes.sort_unstable();
+        let mut hash = sha2::Sha256::new();
+        for row in &hashes {
+            hash.update(row.as_bytes());
+        }
         digests.push(TableDigest {
             table,
-            rows: count,
-            sha256: hex::encode(hasher.finalize()),
+            rows: hashes.len() as i64,
+            sha256: hex::encode(hash.finalize()),
         });
     }
     Ok(digests)
-}
-
-fn dump_version(pg_dump: &Path) -> Result<String, BackupError> {
-    let mut command = Command::new(super::resolve_tool(pg_dump));
-    command.arg("--version").env_clear();
-    let (_, out, _) = super::run_bounded(command)
-        .map_err(|e| BackupError::Producer(format!("{}: {e}", pg_dump.display())))?;
-    Ok(out
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect())
-}
-
-/// The running `pg_dump`, so a cancelled capture can kill it.
-#[derive(Default)]
-struct Producer {
-    pid: std::sync::atomic::AtomicI32,
-    cancelled: std::sync::atomic::AtomicBool,
-}
-
-impl Producer {
-    fn kill(&self) {
-        use std::sync::atomic::Ordering::SeqCst;
-        self.cancelled.store(true, SeqCst);
-        let pid = self.pid.load(SeqCst);
-        if pid > 0 {
-            // SAFETY: signals our own child, which is reaped by its thread.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-    }
-}
-
-/// Run `pg_dump` in the exported snapshot and seal its output. The child is
-/// killed and reaped if encryption fails; its exit status must be success.
-fn dump_and_seal(
-    pg_dump: &Path,
-    params: &PgParams,
-    snapshot: &str,
-    target: &Path,
-    identity: &age::x25519::Identity,
-    limit: u64,
-    producer: &Producer,
-) -> Result<super::Sealed, BackupError> {
-    use std::sync::atomic::Ordering::SeqCst;
-    let mut child = Command::new(super::resolve_tool(pg_dump))
-        .args(["--format=custom", "--no-owner", "--no-acl"])
-        .arg(format!("--snapshot={snapshot}"))
-        .env_clear()
-        .envs(params.env())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| BackupError::Producer(format!("{}: {e}", pg_dump.display())))?;
-    producer.pid.store(child.id() as i32, SeqCst);
-    if producer.cancelled.load(SeqCst) {
-        let _ = child.kill();
-    }
-    let mut stdout = child.stdout.take().expect("piped");
-    let errors = super::drain_tail(child.stderr.take().expect("piped"));
-    let sealed = super::seal(target, identity, &mut stdout, limit);
-    if sealed.is_err() {
-        let _ = child.kill();
-    }
-    drop(stdout);
-    let status = child
-        .wait()
-        .map_err(|e| BackupError::Producer(e.to_string()))?;
-    producer.pid.store(0, SeqCst);
-    let errors = errors.join().unwrap_or_default();
-    if producer.cancelled.load(SeqCst) {
-        let _ = std::fs::remove_file(target);
-        return Err(BackupError::Interrupted);
-    }
-    match sealed {
-        Err(err) => Err(err),
-        Ok(_) if !status.success() => {
-            let _ = std::fs::remove_file(target);
-            Err(BackupError::Producer(format!(
-                "exited with {status}: {}",
-                errors.lines().last().unwrap_or_default()
-            )))
-        }
-        Ok(sealed) => Ok(sealed),
-    }
 }
 
 /// Write `complete.json` without replacing an existing one: a synced
@@ -193,8 +119,8 @@ fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), Bac
 
 /// Capture, encrypt, and publish one database-only set.
 pub async fn create_set(
-    pool: &PgPool,
-    params: &PgParams,
+    pool: &SqlitePool,
+    params: &DatabaseParams,
     key: &SecretKey,
     config: &BackupConfig,
     set_id: &str,
@@ -407,7 +333,7 @@ async fn capture_computers(
 /// file matches its recorded size and hash. Returns the artifacts and the
 /// IDs that could not be included.
 async fn capture_files(
-    pool: &PgPool,
+    pool: &SqlitePool,
     state_dir: &Path,
     staging: &Path,
     identity: &age::x25519::Identity,
@@ -517,8 +443,8 @@ async fn capture_projects(
 
 #[allow(clippy::too_many_arguments)]
 async fn capture_into(
-    pool: &PgPool,
-    params: &PgParams,
+    pool: &SqlitePool,
+    _params: &DatabaseParams,
     key: &SecretKey,
     config: &BackupConfig,
     set_id: &str,
@@ -617,25 +543,14 @@ async fn capture_into(
     // One snapshot for the digests and the dump; held open until the dump
     // has finished. Computers are already stopped and recorded so.
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let snapshot: String = sqlx::query_scalar("SELECT pg_export_snapshot()")
-        .fetch_one(&mut *tx)
-        .await?;
     let tables = table_digests(&mut tx).await?;
     let migration_version: i64 =
         sqlx::query_scalar("SELECT coalesce(max(version), 0) FROM _sqlx_migrations WHERE success")
             .fetch_one(&mut *tx)
             .await?;
-    let server_version: String = sqlx::query_scalar("SHOW server_version")
+    let server_version: String = sqlx::query_scalar("SELECT sqlite_version()")
         .fetch_one(&mut *tx)
         .await?;
-    let extensions: Vec<(String, String)> = sqlx::query_as(
-        "SELECT extname::text, extversion FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY 1",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
     let bots: Vec<(uuid::Uuid, String, String)> =
         sqlx::query_as("SELECT id, name, status FROM bots ORDER BY created_at, id")
             .fetch_all(&mut *tx)
@@ -651,37 +566,57 @@ async fn capture_into(
             .fetch_all(&mut *tx)
             .await?;
 
-    let pg_dump = config.pg_dump.clone();
-    let dump_params = params.clone();
+    // Serialize the same read snapshot used by the digests. Plaintext stays
+    // in memory and is bounded before SQLite allocates the image.
+    let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+        .fetch_one(&mut *tx)
+        .await?;
+    let page_size: i64 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&mut *tx)
+        .await?;
+    if (pages as u64).saturating_mul(page_size as u64) > config.max_bytes {
+        return Err(BackupError::TooLarge(config.max_bytes));
+    }
+    if cancel.is_cancelled() {
+        return Err(BackupError::Interrupted);
+    }
+    if crate::faults::hit("backup.snapshot") {
+        return Err(BackupError::Producer("snapshot failed".into()));
+    }
+    let snapshot = tx.serialize(None).await?;
+    tx.commit().await?;
     let target = staging.join(DATABASE);
     let limit = config.max_bytes;
     let dump_identity = identity.clone();
-    let producer = std::sync::Arc::new(Producer::default());
-    let running = producer.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        let version = dump_version(&pg_dump)?;
-        dump_and_seal(
-            &pg_dump,
-            &dump_params,
-            &snapshot,
-            &target,
-            &dump_identity,
-            limit,
-            &running,
-        )
-        .map(|sealed| (sealed, version))
-    });
-    // A shutdown kills and reaps the dump rather than abandoning it.
-    let joined = tokio::select! {
-        joined = &mut handle => joined,
-        _ = cancel.cancelled() => {
-            producer.kill();
-            (&mut handle).await
+    let capture_cancel = cancel.clone();
+    let sealed = tokio::task::spawn_blocking(move || {
+        struct Input<'a> {
+            bytes: &'a [u8],
+            cancel: &'a tokio_util::sync::CancellationToken,
         }
-    };
-    let sealed = joined.map_err(|e| BackupError::Producer(e.to_string()))?;
-    tx.commit().await?;
-    let (sealed, dump_version) = sealed?;
+        impl std::io::Read for Input<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.cancel.is_cancelled() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "backup cancelled",
+                    ));
+                }
+                std::io::Read::read(&mut self.bytes, buf)
+            }
+        }
+        let mut input = Input {
+            bytes: snapshot.as_ref(),
+            cancel: &capture_cancel,
+        };
+        super::seal(&target, &dump_identity, &mut input, limit)
+    })
+    .await
+    .map_err(|e| BackupError::Producer(e.to_string()))?;
+    if cancel.is_cancelled() {
+        return Err(BackupError::Interrupted);
+    }
+    let sealed = sealed?;
     // The sources are fixed: work may resume while the set is published.
     drop(gate);
 
@@ -735,7 +670,7 @@ async fn capture_into(
         })
         .collect();
     let mut artifacts = vec![Artifact {
-        kind: "postgres".into(),
+        kind: "sqlite".into(),
         object: DATABASE.into(),
         bot_id: None,
         ciphertext_bytes: sealed.ciphertext_bytes,
@@ -774,7 +709,7 @@ async fn capture_into(
             note: if complete {
                 "Whole assistant: the database, every active bot's computer (standalone disk \
                  archives with their images), and every bot's project directory. Native provider \
-                 sessions are not included: conversations are rebuilt from PostgreSQL and \
+                 sessions are not included: conversations are rebuilt from SQLite and \
                  providers may need a fresh login."
                     .into()
             } else {
@@ -810,11 +745,11 @@ async fn capture_into(
             version: env!("CARGO_PKG_VERSION").to_owned(),
             migration_version,
         },
-        postgres: Postgres {
-            server_version,
-            dump_version,
-            format: "custom".into(),
-            extensions,
+        sqlite: Sqlite {
+            server_version: server_version.clone(),
+            dump_version: server_version.clone(),
+            format: "sqlite3".into(),
+            extensions: Vec::new(),
         },
         artifacts,
         tables,

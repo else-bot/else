@@ -73,6 +73,6 @@ Bots should have Node.js/npm, Python/pip/venv, Rust/Cargo, and common build and 
 
 Bots should receive screenshots of the same desktop visible through VNC and use scoped mouse and keyboard operations to work in it. This includes visually browsing a site and finding information. Guest scripts should also connect to the existing Chromium CDP endpoint for structured browser work, with the debugger kept inside that bot's VM.
 
-The owner should be able to create flat sidebar categories, assign or move bots, rename groups, and remove a group without deleting its bots. Store category definitions and assignments in PostgreSQL. Grouping does not change permissions, roles, memories, or computers.
+The owner should be able to create flat sidebar categories, assign or move bots, rename groups, and remove a group without deleting its bots. Store category definitions and assignments in SQLite. Grouping does not change permissions, roles, memories, or computers.
 
 [POC-025 through POC-032](implementation/05-vm-automation-and-categories.md) define the implementation and acceptance tasks.

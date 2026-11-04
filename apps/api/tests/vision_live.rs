@@ -201,19 +201,19 @@ impl Drop for Cleanup {
 }
 
 /// Wait for a turn's final state; returns (status, assistant text).
-async fn finish(db: &sqlx::PgPool, turn: Uuid, timeout: Duration) -> (String, String) {
+async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
         let (status, error): (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = $1")
+            sqlx::query_as("SELECT status, error_message FROM turns WHERE id = ?1")
                 .bind(turn)
                 .fetch_one(db)
                 .await
                 .unwrap();
         if ["completed", "failed", "interrupted", "uncertain"].contains(&status.as_str()) {
             let text: String = sqlx::query_scalar(
-                "SELECT coalesce(string_agg(text, ' | ' ORDER BY seq), '') FROM items
-                 WHERE turn_id = $1 AND kind = 'assistant'",
+                "SELECT coalesce(group_concat(text, ' | ' ORDER BY seq), '') FROM items
+                 WHERE turn_id = ?1 AND kind = 'assistant'",
             )
             .bind(turn)
             .fetch_one(db)
@@ -278,8 +278,8 @@ fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool)
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-async fn runtime_name(db: &sqlx::PgPool, bot: &str) -> String {
-    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = $1")
+async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
+    sqlx::query_scalar("SELECT runtime_name FROM bot_computers WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_one(db)
         .await
@@ -287,10 +287,10 @@ async fn runtime_name(db: &sqlx::PgPool, bot: &str) -> String {
 }
 
 /// Tool activity bodies of one turn.
-async fn turn_activity(db: &sqlx::PgPool, bot: &str, turn: Uuid) -> Vec<String> {
+async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<String> {
     sqlx::query_scalar(
-        "SELECT body FROM memory_entry WHERE bot_id = $1 AND kind = 'tool_activity'
-           AND source->>'turn_id' = $2 ORDER BY seq",
+        "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
+           AND source->>'turn_id' = ?2 ORDER BY seq",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .bind(turn.to_string())
@@ -490,7 +490,7 @@ async fn both_providers_read_pixels_from_their_desktop() {
         // The same native session answered (resumed, not rebuilt).
         let sessions: Vec<(String, String)> = sqlx::query_as(
             "SELECT native_session_id, status FROM provider_sessions
-             WHERE bot_id = $1 AND provider_id = $2 ORDER BY created_at",
+             WHERE bot_id = ?1 AND provider_id = ?2 ORDER BY created_at",
         )
         .bind(bot.parse::<Uuid>().unwrap())
         .bind(provider)
@@ -597,7 +597,7 @@ async fn both_providers_read_pixels_from_their_desktop() {
         .await;
     let started_turn = Instant::now();
     loop {
-        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = $1")
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
             .bind(turn)
             .fetch_one(&pool)
             .await
@@ -621,7 +621,7 @@ async fn both_providers_read_pixels_from_their_desktop() {
     assert_eq!(status, "completed", "{reply}");
 
     let violations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM turns WHERE bot_id = $1 AND error_code IN ('policy_violation', 'profile_mismatch')",
+        "SELECT count(*) FROM turns WHERE bot_id = ?1 AND error_code IN ('policy_violation', 'profile_mismatch')",
     )
     .bind(bot.parse::<Uuid>().unwrap())
     .fetch_one(&pool)

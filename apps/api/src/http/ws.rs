@@ -19,8 +19,8 @@
 //! ```
 //!
 //! The upgrade is authenticated like every `/v1` route (bearer header, no
-//! browser `Origin`). Events are read from the same PostgreSQL journal as
-//! snapshots, woken by `pg_notify` with a one-second polling fallback. A
+//! browser `Origin`). Events are read from the same SQLite journal as
+//! snapshots, woken by committed database-version changes with a one-second polling fallback. A
 //! deleted bot's channel ends with a `bot_deleted` error and nothing already
 //! queued for it is sent. The server pings every 15 seconds and closes a
 //! connection that is silent for 60 seconds or cannot accept a write within

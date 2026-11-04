@@ -132,7 +132,7 @@ async fn run(manager: &ComputerManager, bot: Uuid, command: &str, secs: u64) -> 
 /// Release every lease (the computer is idle but still running).
 async fn release_all(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
     let leases: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM computer_leases WHERE bot_id = $1 AND released_at IS NULL",
+        "SELECT id FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL",
     )
     .bind(bot)
     .fetch_all(&app.db.pool)
@@ -151,7 +151,7 @@ async fn stop(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
         .await
         .unwrap();
     let state: String =
-        sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = $1")
+        sqlx::query_scalar("SELECT observed_state FROM bot_computers WHERE bot_id = ?1")
             .bind(bot)
             .fetch_one(&app.db.pool)
             .await
@@ -160,7 +160,7 @@ async fn stop(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
 }
 
 async fn runtime_name(app: &TestApp, bot: Uuid) -> (String, String) {
-    sqlx::query_as("SELECT runtime_name, image FROM bot_computers WHERE bot_id = $1")
+    sqlx::query_as("SELECT runtime_name, image FROM bot_computers WHERE bot_id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)
         .await
@@ -672,7 +672,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         Some(RuntimeState::Stopped)
     );
     let state: (String, String) =
-        sqlx::query_as("SELECT state, data_sha256 FROM computer_upgrades WHERE id = $1")
+        sqlx::query_as("SELECT state, data_sha256 FROM computer_upgrades WHERE id = ?1")
             .bind(report.id)
             .fetch_one(&app.db.pool)
             .await

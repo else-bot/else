@@ -23,13 +23,13 @@ The initial Codex development profile is GPT 6.1 Sol Medium Fast:
 | Reasoning effort | `medium` | `model_reasoning_effort` in Codex configuration and `effort` on turn start. |
 | Service tier | `priority` | `serviceTier` in app-server requests. The displayed name is Fast. |
 
-Persist one default profile per provider in PostgreSQL, with a revision. Seed the Codex profile only during explicit installation setup or a versioned migration that adds missing settings. Ordinary startup must preserve saved values. Initially all bots use these provider defaults. Per-bot overrides and a desktop model-settings screen can wait.
+Persist one default profile per provider in SQLite, with a revision. Seed the Codex profile only during explicit installation setup or a versioned migration that adds missing settings. Ordinary startup must preserve saved values. Initially all bots use these provider defaults. Per-bot overrides and a desktop model-settings screen can wait.
 
 Expose owner-authenticated `GET` and `PATCH /v1/settings/providers/{provider_id}` for reading and updating the profile. Validate the exact model ID and its supported effort and tier against the selected adapter's capabilities. Runtime task grants and prompt text cannot update settings. Reject unsupported or unavailable profiles clearly. Do not silently select another model, effort, or speed tier.
 
 Snapshot the effective profile and revision when accepting a turn. Queued and running attempts retain their snapshots. A settings change applies to subsequently accepted work, including new summary and delegated tasks. Record requested and provider-reported settings with each attempt when available. Configuration acceptance is not proof of backend scheduling speed.
 
-Apply explicit values when creating or resuming native sessions and starting turns. Include the profile in session compatibility checks. If a session cannot adopt the requested profile safely, replace that native session and rebuild context from PostgreSQL. Preserve the visible conversation and guest computer.
+Apply explicit values when creating or resuming native sessions and starting turns. Include the profile in session compatibility checks. If a session cannot adopt the requested profile safely, replace that native session and rebuild context from SQLite. Preserve the visible conversation and guest computer.
 
 OpenAI documents the reasoning setting and maps the Codex `fast` tier alias to the request value `priority`. Use the canonical saved value above. The local model metadata advertises `medium` and `priority` for `gpt-6.1-sol`. [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference), [recorded model metadata](experiments/prompts/model-probe.json).
 
@@ -54,9 +54,9 @@ This policy concerns agents spawned inside a bot's CLI. Planned delegation betwe
 
 ## First-version continuity
 
-Start with one conversation per bot and one active provider turn per bot. PostgreSQL owns the ordered conversation. Each provider has a replaceable native session with its own delivered-history cursor. Host adapters handle create, resume, start, interrupt, and normalized events.
+Start with one conversation per bot and one active provider turn per bot. SQLite owns the ordered conversation. Each provider has a replaceable native session with its own delivered-history cursor. Host adapters handle create, resume, start, interrupt, and normalized events.
 
-Keep one durable turn queue in PostgreSQL and one worker inside the Rust API. A unique client request ID prevents duplicate owner messages. Persist pending handoff state before sending. A lost acknowledgment requires reconciliation rather than a blind replay. Preserve action receipts and guest job IDs across provider changes.
+Keep one durable turn queue in SQLite and one worker inside the Rust API. A unique client request ID prevents duplicate owner messages. Persist pending handoff state before sending. A lost acknowledgment requires reconciliation rather than a blind replay. Preserve action receipts and guest job IDs across provider changes.
 
 For the first version, deliver checkpoint text and bounded selected history inline before the owner's follow-up. Use an outgoing LLM checkpoint only when the adapter can enforce a no-tool summary attempt. Otherwise use the deterministic history fallback. Native history injection, forks, worktrees, and distributed orchestration can wait.
 
@@ -83,7 +83,7 @@ Delivery uses native history injection when available. Otherwise, T3 Code places
 
 ## Simplified direction for else.bot
 
-Use one PostgreSQL conversation per ongoing exchange with a bot. Use each CLI's native threads or sessions to retain provider context, and resume them when compatible. Scope those sessions to the bot, conversation, provider account, and host runtime environment. Keep bot session files and working directories separate on the host, even when bots use the same provider account. A provider switch keeps the same bot, memory, conversation, and computer.
+Use one SQLite conversation per ongoing exchange with a bot. Use each CLI's native threads or sessions to retain provider context, and resume them when compatible. Scope those sessions to the bot, conversation, provider account, and host runtime environment. Keep bot session files and working directories separate on the host, even when bots use the same provider account. A provider switch keeps the same bot, memory, conversation, and computer.
 
 The Rust API should own conversation state and provider selection. Each provider adapter should handle process communication, session creation and resume, streamed responses, tool approvals, interruption, and errors. Start with Codex's app-server protocol. For Claude, the proposed Rust integration is the CLI's structured input and output, using `-p --input-format stream-json --output-format stream-json --verbose` and an explicit `--resume <session-id>` when reopening a session. This adapts T3 Code's approach without requiring its TypeScript SDK inside the Rust API. Verify the complete control exchange against pinned CLI versions during the integration experiment. [Claude CLI formats and resume flags](https://code.claude.com/docs/en/cli-reference), [streaming session behavior](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode).
 
@@ -103,7 +103,7 @@ On a provider switch:
 
 1. Save the owner's follow-up and target provider. Serialize execution within the conversation. Finish or confirm interruption of the active provider turn before handing it over. Retain completed action results and the IDs of any guest jobs that continue under their own leases.
 2. Ask the outgoing provider for a bounded task summary with tool execution disabled. Save the result as an internal handoff record. This summary step is specific to else.bot.
-3. Reuse or resume the target provider's native session. Select the history it missed. For a fresh session, select context from the whole conversation. If native resume fails because the session is unavailable or incompatible, create a replacement and rebuild context from PostgreSQL.
+3. Reuse or resume the target provider's native session. Select the history it missed. For a fresh session, select context from the whole conversation. If native resume fails because the session is unavailable or incompatible, create a replacement and rebuild context from SQLite.
 4. Assemble the summary, selected history, artifact references, and the owner's follow-up. Apply configurable size limits and reserve room for the new message and response. Record omitted history so the bot can retrieve it through else.bot's API or a skill.
 5. Persist delivery as pending before sending. Mark the accepted handoff and its history coverage only after provider confirmation. Track selected and omitted items separately so skipped content is still retrievable.
 6. Save the receiving provider's output and action results into the same conversation. Release each VM activity lock when the associated guest work finishes. Background guest jobs retain their own leases. A provider turn does not require a VM lock for its full duration.

@@ -46,7 +46,7 @@ pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result
     }
     let live: Option<bool> = sqlx::query_scalar(
         "SELECT b.status = 'active' AND t.status IN ('sending', 'running')
-         FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = $1 AND t.bot_id = $2",
+         FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1 AND t.bot_id = ?2",
     )
     .bind(grant.turn_id)
     .bind(grant.bot_id)
@@ -84,8 +84,8 @@ async fn history(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = $1 AND ($2::bigint IS NULL OR i.seq < $2)
-         ORDER BY i.seq DESC LIMIT $3"
+         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2)
+         ORDER BY i.seq DESC LIMIT ?3"
     )))
     .bind(grant.conversation_id)
     .bind(query.before_seq)
@@ -106,7 +106,7 @@ async fn item(
     // A foreign object is indistinguishable from a missing one.
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.id = $1 AND i.conversation_id = $2"
+         WHERE i.id = ?1 AND i.conversation_id = ?2"
     )))
     .bind(item_id)
     .bind(grant.conversation_id)

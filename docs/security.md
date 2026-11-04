@@ -98,11 +98,11 @@ The initial deployment should read an installation master key from the Rust API'
 SECRET_KEY=<base64-encoded 32 cryptographically random bytes>
 ```
 
-Provision this key once and preserve it across restarts and migrations. Keep it outside PostgreSQL, source control, and ordinary application configuration exports. Supply it only to the trusted API and its backup worker. Provider CLIs and bot VMs do not inherit it, but provider CLIs run as the same user on the host and can read a key kept in the data directory (see [host provider processes](#host-provider-processes)).
+Provision this key once and preserve it across restarts and migrations. Keep it outside SQLite, source control, and ordinary application configuration exports. Supply it only to the trusted API and its backup worker. Provider CLIs and bot VMs do not inherit it, but provider CLIs run as the same user on the host and can read a key kept in the data directory (see [host provider processes](#host-provider-processes)).
 
 Derive separate keys for recoverable database secrets and backup encryption using HKDF-SHA-256 with distinct purpose labels, such as `else.bot/secrets/v1` and `else.bot/backups/v1`. Use Rust `age` streaming encryption for backup artifacts, initially pinned to the tested `0.12.1`. Derive its per-set identity with a fresh public salt and the backup purpose label. Preserve salts, format versions, and key identifiers with encrypted data. The [backup research](research/backup-and-recovery.md#encryption-and-key-separation) specifies that format. Selection of the database-secret encryption library remains open. [HKDF purpose separation](https://www.rfc-editor.org/rfc/rfc5869.html#section-3.2), [authenticated encryption and key separation](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html).
 
-The backup encryption covers PostgreSQL exports, VM archives, and recovery manifests before upload. Include the encryption format and key identifier in the outer backup metadata so recovery can select the key before decrypting the manifest.
+The backup encryption covers SQLite exports, VM archives, and recovery manifests before upload. Include the encryption format and key identifier in the outer backup metadata so recovery can select the key before decrypting the manifest.
 
 Startup must reject a missing or invalid key. A key that cannot decrypt existing state must produce an error without replacing the key or resetting that state.
 
