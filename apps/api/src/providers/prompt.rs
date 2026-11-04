@@ -299,6 +299,7 @@ fn render(entry: &HistoryEntry) -> String {
     let who = match entry.kind.as_str() {
         "user" => "Owner",
         "routine" => "Routine (a saved scheduled task, not an owner message)",
+        "status" => "Delegated task (another bot's request, not an owner message)",
         _ => "Assistant",
     };
     // A turn that did not complete is marked on its request and its reply

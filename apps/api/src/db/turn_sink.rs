@@ -17,13 +17,18 @@ use crate::app::providers::{Fenced, SessionState, TurnInput, TurnOutcome, TurnSi
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 pub const FLUSH_BYTES: usize = 2048;
 
+struct OwnerTranscript {
+    conversation_id: Uuid,
+    last_seq: i64,
+}
+
 /// Persists one turn's progress. Writes succeed only while the turn is in
 /// an active status and its bot is active.
 struct SinkState {
     pool: SqlitePool,
     turn_id: Uuid,
     bot_id: Uuid,
-    conversation_id: Uuid,
+    execution_conversation_id: Uuid,
     provider_id: String,
     /// Only the actor touches text and serializes writes with `finish`.
     assistant_item: Option<Uuid>,
@@ -52,7 +57,7 @@ impl SqliteSink {
                 pool,
                 turn_id: input.turn_id,
                 bot_id: input.bot_id,
-                conversation_id: input.conversation_id,
+                execution_conversation_id: input.conversation_id,
                 provider_id: provider_id.to_owned(),
                 assistant_item: None,
                 pending: String::new(),
@@ -86,32 +91,34 @@ impl SinkState {
         Fenced
     }
 
-    /// Lock the bot row and check the turn may still write. Returns the
-    /// conversation's last item seq.
+    /// Lock the bot row and check the turn may still write.
     async fn guard(
         &self,
         conn: &mut SqliteConnection,
         allowed: &str,
-    ) -> Result<Option<i64>, sqlx::Error> {
-        let row: Option<(String, i64)> = sqlx::query_as(
-            "SELECT b.status, c.last_item_seq FROM bots b JOIN conversations c ON c.id = ?2
-             WHERE b.id = ?1 AND c.bot_id = b.id",
+    ) -> Result<Option<OwnerTranscript>, sqlx::Error> {
+        let row: Option<(String, Uuid, i64)> = sqlx::query_as(
+            "SELECT b.status, c.id, c.last_item_seq
+             FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
+             WHERE b.id = ?1",
         )
         .bind(self.bot_id)
-        .bind(self.conversation_id)
         .fetch_optional(&mut *conn)
         .await?;
-        let Some((status, last_seq)) = row.filter(|(status, _)| status == "active") else {
+        let Some((_, conversation_id, last_seq)) = row.filter(|(status, ..)| status == "active")
+        else {
             return Ok(None);
         };
-        let _ = status;
         let turn_ok: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE id = ?1 AND status IN {allowed})"
         )))
         .bind(self.turn_id)
         .fetch_one(&mut *conn)
         .await?;
-        Ok(turn_ok.then_some(last_seq))
+        Ok(turn_ok.then_some(OwnerTranscript {
+            conversation_id,
+            last_seq,
+        }))
     }
 
     async fn transition(&mut self, from: &str, to: &str) -> Result<(), Fenced> {
@@ -174,7 +181,7 @@ impl SinkState {
         &self,
         tx: &mut SqliteConnection,
         assistant_item: Option<Uuid>,
-        last_seq: i64,
+        transcript: &OwnerTranscript,
         chunk: &str,
     ) -> Result<Uuid, sqlx::Error> {
         if let Some(item_id) = assistant_item {
@@ -189,7 +196,7 @@ impl SinkState {
             crate::db::events::item_delta(
                 tx,
                 self.bot_id,
-                self.conversation_id,
+                transcript.conversation_id,
                 item_id,
                 offset,
                 chunk,
@@ -198,13 +205,13 @@ impl SinkState {
             return Ok(item_id);
         }
         let item_id = Uuid::new_v4();
-        let seq = last_seq + 1;
+        let seq = transcript.last_seq + 1;
         sqlx::query(
             "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, provider_id)
              VALUES (?1, ?2, ?3, ?4, 'assistant', ?5, ?6)",
         )
         .bind(item_id)
-        .bind(self.conversation_id)
+        .bind(transcript.conversation_id)
         .bind(seq)
         .bind(self.turn_id)
         .bind(chunk)
@@ -212,7 +219,7 @@ impl SinkState {
         .execute(&mut *tx)
         .await?;
         sqlx::query("UPDATE conversations SET last_item_seq = ?2 WHERE id = ?1")
-            .bind(self.conversation_id)
+            .bind(transcript.conversation_id)
             .bind(seq)
             .execute(&mut *tx)
             .await?;
@@ -236,14 +243,14 @@ impl SinkState {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             // Text may still arrive while a stop is being confirmed; it is
             // real output and is preserved.
-            let Some(last_seq) = self
+            let Some(transcript) = self
                 .guard(&mut tx, "('sending', 'running', 'cancelling')")
                 .await?
             else {
                 return Ok(None);
             };
             let item = self
-                .write_text(&mut tx, self.assistant_item, last_seq, &chunk)
+                .write_text(&mut tx, self.assistant_item, &transcript, &chunk)
                 .await?;
             tx.commit().await?;
             Ok(Some(item))
@@ -287,9 +294,9 @@ impl SinkState {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut wrote_item = None;
         if !chunk.is_empty() && !self.fenced {
-            if let Some(last_seq) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
+            if let Some(transcript) = self.guard(&mut tx, ACTIVE_STATUSES).await? {
                 wrote_item = Some(
-                    self.write_text(&mut tx, self.assistant_item, last_seq, &chunk)
+                    self.write_text(&mut tx, self.assistant_item, &transcript, &chunk)
                         .await?,
                 );
             }
@@ -505,7 +512,7 @@ impl SinkState {
                  WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
                    AND native_session_id = ?3 AND fingerprint = ?4",
             )
-            .bind(self.conversation_id)
+            .bind(self.execution_conversation_id)
             .bind(&self.provider_id)
             .bind(&state.native_id)
             .bind(&state.fingerprint)
@@ -531,7 +538,7 @@ impl SinkState {
                         "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'",
                     )
-                    .bind(self.conversation_id)
+                    .bind(self.execution_conversation_id)
                     .bind(&self.provider_id)
                     .execute(&mut *tx)
                     .await?;
@@ -543,7 +550,7 @@ impl SinkState {
                     )
                     .bind(id)
                     .bind(self.bot_id)
-                    .bind(self.conversation_id)
+                    .bind(self.execution_conversation_id)
                     .bind(&self.provider_id)
                     .bind(&state.native_id)
                     .bind(&state.fingerprint)

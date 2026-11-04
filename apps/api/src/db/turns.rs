@@ -484,7 +484,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             .await?;
     let history = sqlx::query_as::<_, (i64, String, String, String)>(
         "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'routine', 'assistant')
+         WHERE i.conversation_id = ?1 AND t.turn_no < ?2
+           AND i.kind IN ('user', 'routine', 'status', 'assistant')
          ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)
