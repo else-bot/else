@@ -71,6 +71,8 @@ pub enum BotError {
     CategoryNotFound,
     #[error("the main bot cannot be deleted")]
     MainBot,
+    #[error("the bot was deleted")]
+    Deleted,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -218,6 +220,42 @@ pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, 
         categories,
         bots,
     })
+}
+
+/// Replace an active bot's name and role. Repeating the same values changes
+/// nothing and journals nothing; a change journals one `bot.updated` in the
+/// same transaction. A deleted bot is refused and never revived.
+pub async fn update_metadata(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    name: &BotName,
+    role: &BotRole,
+) -> Result<BotRecord, BotError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let status: Option<BotStatus> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    match status {
+        None => return Err(BotError::NotFound),
+        Some(BotStatus::Active) => {}
+        Some(BotStatus::Deleting | BotStatus::Deleted) => return Err(BotError::Deleted),
+    }
+    let changed = sqlx::query(
+        "UPDATE bots SET name = ?2, role = ?3 WHERE id = ?1 AND (name IS NOT ?2 OR role IS NOT ?3)",
+    )
+    .bind(bot_id)
+    .bind(name.as_str())
+    .bind(role.as_str())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed > 0 {
+        super::events::bot_updated(&mut tx, bot_id).await?;
+    }
+    let bot = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
+    tx.commit().await?;
+    Ok(bot)
 }
 
 /// Result of a delete request.

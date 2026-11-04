@@ -1,7 +1,8 @@
 //! Choosing a bot's provider and model: a button per provider, then the
 //! model and reasoning level from that provider's catalog, and a Fast
-//! switch when the provider offers it. Used by the welcome screen and the
-//! create-bot dialog. Only exact values the API reported are offered.
+//! switch when the provider offers it. Used by the welcome screen, the
+//! create-bot dialog, and the bot settings panel. Only exact values the API
+//! reported are offered.
 
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -43,6 +44,9 @@ pub struct ProfilePicker {
     model: Choices,
     effort: Choices,
     fast: bool,
+    stacked: bool,
+    disabled: bool,
+    _selects: [Subscription; 2],
 }
 
 impl ProfilePicker {
@@ -81,8 +85,23 @@ impl ProfilePicker {
             fast: start.as_ref().is_some_and(|c| c.service_tier == FAST),
             provider: start.map(|c| c.provider_id),
             providers,
+            _selects: observe(&model, &effort, cx),
             model,
             effort,
+            stacked: false,
+            disabled: false,
+        }
+    }
+
+    pub fn stacked(mut self) -> Self {
+        self.stacked = true;
+        self
+    }
+
+    pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            cx.notify();
         }
     }
 
@@ -123,6 +142,7 @@ impl ProfilePicker {
         };
         let start = first_choice(&info);
         let (model, effort) = selects(Some(&info), Some(&start), window, cx);
+        self._selects = observe(&model, &effort, cx);
         self.model = model;
         self.effort = effort;
         self.fast = false;
@@ -146,6 +166,17 @@ fn first_choice(provider: &ProviderInfo) -> ProfileChoice {
             .unwrap_or_default(),
         service_tier: "default".to_owned(),
     }
+}
+
+fn observe(
+    model: &Choices,
+    effort: &Choices,
+    cx: &mut Context<ProfilePicker>,
+) -> [Subscription; 2] {
+    [
+        cx.observe(model, |_, _, cx| cx.notify()),
+        cx.observe(effort, |_, _, cx| cx.notify()),
+    ]
 }
 
 type Selects = (Choices, Choices);
@@ -217,7 +248,7 @@ pub fn model_label(id: &str) -> String {
     words.join(" ")
 }
 
-fn effort_label(id: &str) -> &str {
+pub fn effort_label(id: &str) -> &str {
     match id {
         "low" => "Low",
         "medium" => "Medium",
@@ -237,13 +268,13 @@ impl Render for ProfilePicker {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let mut buttons = h_flex().gap_2();
+        let mut buttons = h_flex().flex_wrap().gap_2();
         for info in &self.providers {
             let id = info.id.clone();
             let mut button = Button::new(SharedString::from(format!("pick-{}", info.id)))
                 .label(info.label.clone())
                 .small()
-                .disabled(!info.cli_available);
+                .disabled(self.disabled || !info.cli_available);
             button = if self.provider.as_deref() == Some(info.id.as_str()) {
                 button.primary()
             } else {
@@ -268,23 +299,24 @@ impl Render for ProfilePicker {
             );
         };
         let fast_offered = provider.catalog.tiers.iter().any(|t| t == FAST);
+        let selects = if self.stacked { v_flex() } else { h_flex() };
         body = body
             .child(
-                h_flex()
+                selects
                     .gap_3()
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(label("Model"))
-                            .child(Select::new(&self.model).accessibility_label("Model")),
+                        v_flex().flex_1().gap_1().child(label("Model")).child(
+                            Select::new(&self.model)
+                                .accessibility_label("Model")
+                                .disabled(self.disabled),
+                        ),
                     )
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(label("Reasoning"))
-                            .child(Select::new(&self.effort).accessibility_label("Reasoning")),
+                        v_flex().flex_1().gap_1().child(label("Reasoning")).child(
+                            Select::new(&self.effort)
+                                .accessibility_label("Reasoning")
+                                .disabled(self.disabled),
+                        ),
                     ),
             )
             .child(
@@ -295,7 +327,7 @@ impl Render for ProfilePicker {
                     } else {
                         "Fast mode (not offered by this provider)"
                     })
-                    .disabled(!fast_offered)
+                    .disabled(self.disabled || !fast_offered)
                     .on_click(cx.listener(|picker, checked: &bool, _, cx| {
                         picker.fast = *checked;
                         cx.notify();

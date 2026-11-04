@@ -3,12 +3,14 @@
 use super::{
     APP_CONTEXT, COMPOSER_CONTEXT, Connection, DeleteBot, ElseApp, FocusComposer, FocusSidebar,
     LoadOlder, MoveBot, NewBot, NewCategory, RowKey, SIDEBAR_CONTEXT, SelectNext, SelectPrev,
-    StopWork,
+    StopWork, ToggleSettings,
 };
 use crate::api::Bot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 
 impl ElseApp {
@@ -23,7 +25,7 @@ impl ElseApp {
         }
     }
 
-    fn provider_label(&self, id: &str) -> String {
+    pub(super) fn provider_label(&self, id: &str) -> String {
         self.caps
             .as_ref()
             .and_then(|caps| caps.providers.iter().find(|p| p.id == id))
@@ -222,7 +224,7 @@ impl ElseApp {
         row
     }
 
-    fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, bot: &Bot, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let activity = self
             .view
@@ -243,23 +245,26 @@ impl ElseApp {
                     .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
             );
         }
-        let category = bot
-            .category_id
-            .and_then(|id| self.categories.iter().find(|c| c.id == id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "Unassigned".to_owned());
-        actions = actions.child(
-            Button::new("move-bot")
-                .label(if self.moving.contains(&bot.id) {
-                    "Moving…".to_owned()
+        let open = self.settings_open;
+        let mut settings = Button::new("toggle-settings")
+            .icon(IconName::Settings)
+            .small()
+            .ghost()
+            .selected(open)
+            .tooltip_with_action(
+                if open {
+                    "Hide bot settings"
                 } else {
-                    format!("Category: {category}")
-                })
-                .small()
-                .ghost()
-                .disabled(self.connection != Connection::Connected || self.moving.contains(&bot.id))
-                .on_click(cx.listener(|app, _, window, cx| app.open_move_dialog(window, cx))),
-        );
+                    "Show bot settings"
+                },
+                &ToggleSettings,
+                Some(APP_CONTEXT),
+            )
+            .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)));
+        if !compact {
+            settings = settings.label("Settings");
+        }
+        actions = actions.child(settings);
         if self.default_bot_id != Some(bot.id) {
             actions = actions.child(
                 Button::new("delete-bot")
@@ -467,7 +472,12 @@ impl ElseApp {
         }
     }
 
-    fn render_conversation(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_conversation(
+        &self,
+        bot: &Bot,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
         let transcript: AnyElement = match view {
@@ -570,12 +580,12 @@ impl ElseApp {
         v_flex()
             .size_full()
             .min_w_0()
-            .child(self.render_header(bot, cx))
+            .child(self.render_header(bot, compact, cx))
             .child(transcript)
             .child(footer)
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() {
             return v_flex()
@@ -584,7 +594,7 @@ impl ElseApp {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                .child(self.render_conversation(&bot, cx))
+                .child(self.render_conversation(&bot, compact, cx))
                 .into_any_element();
         }
         let message = match self.connection {
@@ -657,8 +667,11 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     }
 }
 
+const NARROW: Pixels = px(1000.);
+const COMPACT: Pixels = px(1200.);
+
 impl Render for ElseApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(welcome) = &self.welcome {
             let theme = cx.theme().foreground;
             return div()
@@ -667,6 +680,13 @@ impl Render for ElseApp {
                 .child(self.render_welcome(welcome, cx))
                 .into_any_element();
         }
+        let settings = self
+            .settings_shown()
+            .then(|| self.selected_bot().cloned())
+            .flatten();
+        let width = window.viewport_size().width;
+        let crowded = settings.is_some() && width < NARROW;
+        let compact = settings.is_some() && width < COMPACT;
         let theme = cx.theme();
         h_flex()
             .key_context(APP_CONTEXT)
@@ -702,10 +722,14 @@ impl Render for ElseApp {
                     app.open_move_dialog(window, cx);
                 }
             }))
+            .on_action(
+                cx.listener(|app, _: &ToggleSettings, window, cx| app.toggle_settings(window, cx)),
+            )
             .size_full()
             .text_color(theme.foreground)
-            .child(self.render_sidebar(cx))
-            .child(self.render_main(cx))
+            .children((!crowded).then(|| self.render_sidebar(cx)))
+            .child(self.render_main(compact, cx))
+            .children(settings.map(|bot| self.render_settings(&bot, cx)))
             .into_any_element()
     }
 }
