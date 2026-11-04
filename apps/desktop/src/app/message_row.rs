@@ -9,6 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::*;
+use std::time::Duration;
 
 impl ElseApp {
     pub(super) fn render_row(
@@ -218,7 +219,12 @@ impl ElseApp {
                                             .working()
                                         }),
                                 )
-                                .child(note(label, error));
+                                .child(
+                                    h_flex()
+                                        .text_color(theme.muted_foreground)
+                                        .child(note(label, error))
+                                        .children(active.then(|| working_dots(turn.id))),
+                                );
                             column = column.child(status);
                         }
                     }
@@ -318,7 +324,8 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         .unwrap_or_default();
     match turn.status.as_str() {
         "queued" => ("Queued".into(), false),
-        "preparing" | "sending" | "running" => ("Working…".into(), false),
+        // The status row animates the trailing dots.
+        "preparing" | "sending" | "running" => ("Working".into(), false),
         "cancelling" => ("Stopping…".into(), false),
         "waiting" if turn.secret_requests.iter().any(|r| r.is_pending()) => (
             "Waiting for you to answer the secret request…".into(),
@@ -351,6 +358,30 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     }
 }
 
+/// Three dots that brighten in a left-to-right wave after "Working".
+fn working_dots(turn: impl std::fmt::Display) -> impl IntoElement {
+    h_flex().text_xs().children((0..3).map(move |ix| {
+        div().child(".").with_animation(
+            SharedString::from(format!("working-dot-{turn}-{ix}")),
+            Animation::new(Duration::from_millis(1200))
+                .repeat_synced()
+                .with_max_fps(30.),
+            move |dot, t| dot.opacity(dot_opacity(t, ix)),
+        )
+    }))
+}
+
+/// Opacity of dot `ix` at normalized loop time `t`: dim, with one pulse each loop.
+fn dot_opacity(t: f32, ix: usize) -> f32 {
+    let phase = (t - ix as f32 * 0.2).rem_euclid(1.);
+    let pulse = if phase < 0.6 {
+        (phase / 0.6 * std::f32::consts::PI).sin()
+    } else {
+        0.
+    };
+    0.25 + 0.75 * pulse
+}
+
 fn beside(user: bool, note: Div) -> Div {
     let row = h_flex().w_full().child(note);
     if user { row.justify_end() } else { row }
@@ -374,8 +405,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::stamp_in;
+    use super::{dot_opacity, stamp_in};
     use chrono::{DateTime, FixedOffset, Utc};
+
+    #[test]
+    fn working_dots_pulse_left_to_right() {
+        assert!(dot_opacity(0.3, 0) > 0.99);
+        assert!(dot_opacity(0.3, 2) < dot_opacity(0.3, 1));
+        assert!(dot_opacity(0.55, 2) > dot_opacity(0.55, 0));
+        assert!((0..3).all(|ix| (0..100).all(|t| {
+            let o = dot_opacity(t as f32 / 100., ix);
+            (0.25..=1.).contains(&o)
+        })));
+    }
 
     #[test]
     fn stamps_use_the_viewer_zone_and_name_another_year() {
