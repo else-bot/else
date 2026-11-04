@@ -1082,7 +1082,7 @@ impl ElseApp {
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_delete_dialog(bot, id, window, cx)
             }));
-        let schedule = format!("{} · {}", routine.cron, routine.timezone);
+        let schedule = format!("{} · {}", describe_cron(&routine.cron), routine.timezone);
         let last = routine
             .last_run
             .as_ref()
@@ -1202,6 +1202,92 @@ fn local_time(at: DateTime<Utc>, timezone: &str) -> String {
     match timezone.parse::<chrono_tz::Tz>() {
         Ok(tz) => at.with_timezone(&tz).format("%a %-d %b, %H:%M").to_string(),
         Err(_) => at.format("%a %-d %b, %H:%M UTC").to_string(),
+    }
+}
+
+const MONTHS: [(&str, u8); 12] = [
+    ("January", 31),
+    ("February", 29),
+    ("March", 31),
+    ("April", 30),
+    ("May", 31),
+    ("June", 30),
+    ("July", 31),
+    ("August", 31),
+    ("September", 30),
+    ("October", 31),
+    ("November", 30),
+    ("December", 31),
+];
+
+const WEEKDAYS: [&str; 7] = [
+    "Sundays",
+    "Mondays",
+    "Tuesdays",
+    "Wednesdays",
+    "Thursdays",
+    "Fridays",
+    "Saturdays",
+];
+
+fn describe_cron(expr: &str) -> String {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    fields
+        .try_into()
+        .ok()
+        .and_then(describe_cron_fields)
+        .unwrap_or_else(|| expr.to_owned())
+}
+
+fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Option<String> {
+    let number = |field: &str, min: u8, max: u8| {
+        field
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| field.parse::<u8>().ok())
+            .flatten()
+            .filter(|n| (min..=max).contains(n))
+    };
+    let step = |field: &str, cycle: u8| match field {
+        "*" => Some(1),
+        _ => number(field.strip_prefix("*/")?, 1, cycle - 1).filter(|n| cycle % n == 0),
+    };
+    let every = |n: u8, unit: &str| match n {
+        1 => format!("Every {unit}"),
+        _ => format!("Every {n} {unit}s"),
+    };
+    let unrestricted = (day, month, weekday) == ("*", "*", "*");
+    if unrestricted
+        && hour == "*"
+        && let Some(n) = step(minute, 60)
+    {
+        return Some(every(n, "minute"));
+    }
+    let minute = number(minute, 0, 59)?;
+    if unrestricted && let Some(n) = step(hour, 24) {
+        let at = match minute {
+            0 => String::new(),
+            _ => format!(" at :{minute:02}"),
+        };
+        return Some(format!("{}{at}", every(n, "hour")));
+    }
+    let at = format!("{:02}:{minute:02}", number(hour, 0, 23)?);
+    match (day, month, weekday) {
+        ("*", "*", "*") => Some(format!("Daily at {at}")),
+        ("*", "*", "1-5") => Some(format!("Weekdays at {at}")),
+        ("*", "*", weekday) => {
+            let weekday = WEEKDAYS[usize::from(number(weekday, 0, 7)? % 7)];
+            Some(format!("{weekday} at {at}"))
+        }
+        (day, "*", "*") => Some(format!("Monthly on day {} at {at}", number(day, 1, 31)?)),
+        (day, month, "*") => {
+            let (name, days) = MONTHS[usize::from(number(month, 1, 12)? - 1)];
+            Some(format!(
+                "Yearly on {} {name} at {at}",
+                number(day, 1, days)?
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -1399,7 +1485,7 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metadata, MetadataChange, MetadataSync, parse_name};
+    use super::{Metadata, MetadataChange, MetadataSync, describe_cron, parse_name};
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
@@ -1536,5 +1622,63 @@ mod tests {
             })
         );
         assert_eq!(sync.error, None);
+    }
+
+    #[test]
+    fn common_cron_schedules_read_as_prose() {
+        for (cron, readable) in [
+            ("0 */6 * * *", "Every 6 hours"),
+            ("* * * * *", "Every minute"),
+            ("*/1 * * * *", "Every minute"),
+            ("*/15 * * * *", "Every 15 minutes"),
+            ("0 * * * *", "Every hour"),
+            ("0 */1 * * *", "Every hour"),
+            ("30 * * * *", "Every hour at :30"),
+            ("5 */2 * * *", "Every 2 hours at :05"),
+            ("0 0 * * *", "Daily at 00:00"),
+            ("59 23 * * *", "Daily at 23:59"),
+            ("0 9 * * 1-5", "Weekdays at 09:00"),
+            ("0 9 * * 1", "Mondays at 09:00"),
+            ("0 9 * * 0", "Sundays at 09:00"),
+            ("0 9 * * 7", "Sundays at 09:00"),
+            ("0 9 15 * *", "Monthly on day 15 at 09:00"),
+            ("0 9 1 1 *", "Yearly on 1 January at 09:00"),
+            ("0 9 29 2 *", "Yearly on 29 February at 09:00"),
+            ("  0\t*/6  * *   * ", "Every 6 hours"),
+        ] {
+            assert_eq!(describe_cron(cron), readable, "{cron}");
+        }
+    }
+
+    #[test]
+    fn schedules_without_a_faithful_description_keep_their_cron() {
+        for cron in [
+            "*/7 * * * *",
+            "0 */5 * * *",
+            "*/0 * * * *",
+            "*/60 * * * *",
+            "0 9 1 * 1",
+            "0,30 * * * *",
+            "0 9-17 * * *",
+            "0 9 * * 1-3",
+            "0 9 * * 1,3",
+            "*/5 9 * * *",
+            "0 */6 * * 1",
+            "60 9 * * *",
+            "0 24 * * *",
+            "0 9 0 * *",
+            "0 9 32 * *",
+            "0 9 30 2 *",
+            "0 9 31 4 *",
+            "0 9 1 13 *",
+            "0 9 * * 8",
+            "+5 9 * * *",
+            "0 9 * *",
+            "0 9 * * * *",
+            "",
+            "@daily",
+        ] {
+            assert_eq!(describe_cron(cron), cron);
+        }
     }
 }
