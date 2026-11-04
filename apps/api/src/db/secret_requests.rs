@@ -190,7 +190,6 @@ pub async fn create(
     {
         return Err(RequestError::NotRunning);
     }
-    // Task conversations are invisible to the owner, so nobody could answer.
     if kind != "owner" {
         return Err(RequestError::NotAllowed);
     }
@@ -298,7 +297,6 @@ async fn load(
     bot_id: Uuid,
     request_id: Uuid,
 ) -> Result<RequestInfo, SettleError> {
-    // A request of another bot is indistinguishable from a missing one.
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.{} FROM secret_requests r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.bot_id = ?2 AND b.status = 'active'",

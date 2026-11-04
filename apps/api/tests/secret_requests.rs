@@ -179,11 +179,9 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     let main = app.main_bot().await;
     let (turn, token) = running(&app, &main, owner_tools()).await;
     let request = request_id(&app, &token).await;
-    // The attempt is parked: further calls, a retry included, are refused.
     let again = ask(&app, &token, deploy_args()).await;
     assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
 
-    // The attempt ends and the turn waits for the owner, holding no slot.
     wait(&app, turn, "waiting").await;
     let snapshot = app
         .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
@@ -217,8 +215,6 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
         ("stored".into(), Some(2))
     );
 
-    // The value is exact (newlines and tabs kept) and only in the
-    // encrypted task secret.
     let mut env = resolved(&app, &main, "deploy").await;
     env.sort();
     assert_eq!(
@@ -234,7 +230,6 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     assert_eq!(listed.body["secrets"][0]["name"], "deploy");
     assert!(!listed.body.to_string().contains(CANARY));
 
-    // A repeated answer changes nothing and never overwrites the value.
     let replay = fulfill(
         &app,
         &main,
@@ -250,7 +245,6 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
             .await
             .contains(&("DEPLOY_KEY".to_owned(), PEM.to_owned()))
     );
-    // Declining after it was stored is refused.
     assert_eq!(
         cancel(&app, &main, request).await.status,
         StatusCode::CONFLICT
@@ -315,7 +309,6 @@ async fn a_declined_request_continues_the_turn_without_a_secret() {
         .await;
     assert_eq!(listed.body["secrets"], json!([]));
 
-    // A new owner request may ask again.
     let (next, token) = running(&app, &main, owner_tools()).await;
     assert_ne!(next, turn);
     let fresh = tool_text(&ask(&app, &token, deploy_args()).await);
@@ -323,11 +316,54 @@ async fn a_declined_request_continues_the_turn_without_a_secret() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stop_withdraws_the_request_before_the_provider_finishes_draining() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let sent = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "[synthetic:ignore-cancel] wait for deployment credentials",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    wait(&app, turn.parse().unwrap(), "running").await;
+    let token = grant(&app, turn.parse().unwrap(), owner_tools()).await;
+    let request = request_id(&app, &token).await;
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success());
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(turn.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelling", "exercise the provider drain interval");
+    assert_eq!(
+        fulfill(&app, &main, request, values()).await.status,
+        StatusCode::CONFLICT,
+        "Stop must withdraw the form before the provider acknowledges it"
+    );
+    let listed = app
+        .owner("GET", &format!("/v1/bots/{main}/task-secrets"), None)
+        .await;
+    assert_eq!(listed.body["secrets"], json!([]));
+    app.wait_turn_for(turn, &["interrupted", "uncertain"], Duration::from_secs(5))
+        .await;
+    assert_canary_absent_from_database(&app).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stop_delete_and_restart_settle_waiting_requests() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
 
-    // Stop work ends the waiting turn and withdraws its request.
     let (turn, token) = running(&app, &main, owner_tools()).await;
     let request = request_id(&app, &token).await;
     wait(&app, turn, "waiting").await;
@@ -346,7 +382,6 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
         StatusCode::CONFLICT
     );
 
-    // Stop while the attempt still runs withdraws it as the turn ends.
     let (turn, token) = running(&app, &main, owner_tools()).await;
     let request = request_id(&app, &token).await;
     app.owner(
@@ -358,7 +393,6 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
     wait(&app, turn, "interrupted").await;
     assert_eq!(request_status(&app, request).await.0, "cancelled");
 
-    // A restart keeps a waiting request answerable; the answer continues it.
     let (turn, token) = running(&app, &main, owner_tools()).await;
     let request = request_id(&app, &token).await;
     wait(&app, turn, "waiting").await;
@@ -377,7 +411,6 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
         "stored after restart"
     );
 
-    // Deleting the bot withdraws its request; the request is then unknown.
     let other = app.create_bot("Ops", "Servers").await;
     let (turn, token) = running(&app, &other, owner_tools()).await;
     let request = request_id(&app, &token).await;
@@ -404,7 +437,6 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
     let request = request_id(&app, &token).await;
     let path = format!("/v1/bots/{main}/secret-requests/{request}/fulfill");
 
-    // A task grant never authenticates owner routes, and no token fails.
     for bearer in [Some(token.as_str()), None, Some("wrong")] {
         let reply = app.call("POST", &path, Some(values()), bearer).await;
         assert!(
@@ -417,7 +449,6 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
         );
         assert!(!reply.body.to_string().contains(CANARY));
     }
-    // Another bot's path cannot see or answer the request.
     for reply in [
         fulfill(&app, &other, request, values()).await,
         cancel(&app, &other, request).await,
@@ -426,8 +457,6 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
     }
 
-    // Bodies that are not exactly the requested variables are refused
-    // without echoing anything sent.
     let bad_bodies = [
         json!({ "env": { "DEPLOY_USER": "u" , "DEPLOY_KEY": PEM, "EXTRA": CANARY } }),
         json!({ "env": { "DEPLOY_KEY": PEM } }),
@@ -441,7 +470,6 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
         assert!(!reply.body.to_string().contains(CANARY), "{}", reply.body);
     }
-    // Malformed JSON text is refused generically too.
     let raw = raw_post(
         &app,
         &path,
@@ -452,7 +480,6 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
     assert!(!raw.1.contains(CANARY), "{}", raw.1);
     assert_eq!(request_status(&app, request).await.0, "pending");
 
-    // A grant without the tool is refused before anything is recorded.
     let bare = grant(&app, turn, vec![Tool::ReadMemory]).await;
     let refused = ask(&app, &bare, deploy_args()).await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
@@ -473,7 +500,6 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
         assert_eq!(reply.body["result"]["isError"], true, "{}", reply.body);
         assert!(!reply.body.to_string().contains(CANARY));
     }
-    // Nothing of a refused call is recorded, not even in tool activity.
     assert_canary_absent_from_database(&app).await;
     let none: i64 = sqlx::query_scalar("SELECT count(*) FROM secret_requests")
         .fetch_one(&app.db.pool)
@@ -481,7 +507,6 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
         .unwrap();
     assert_eq!(none, 0);
 
-    // A delegated task runs in a task conversation nobody sees: refused.
     let leaf = app.create_bot("Ops", "Servers").await;
     let warm = app
         .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))

@@ -267,6 +267,8 @@ impl ElseApp {
             Err(ClientError::Unauthorized) => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+                self.clear_secret_forms(window, cx);
+                self.sync_secret_forms(window, cx);
             }
             Err(_) => {}
         }

@@ -237,6 +237,13 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(&result, Err(ClientError::Unauthorized)) {
+            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+            self.clear_secret_forms(window, cx);
+            self.sync_secret_forms(window, cx);
+            cx.notify();
+            return;
+        }
         let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
             return;
         };
@@ -245,7 +252,6 @@ impl ElseApp {
                 if let Some(mut form) = view.secret_forms.remove(&request) {
                     form.clear(window, cx);
                 }
-                // Until the request's event arrives, show it as sent.
                 view.answered.insert(request);
             }
             Err(err) => {
@@ -352,7 +358,7 @@ impl ElseApp {
             )
             .child(div().text_sm().child(request.reason.clone()))
             .child(note(format!(
-                "Saved encrypted as the task secret {}. {bot_name} never sees the values, \
+                "Stored encrypted as the task secret {} when you save. {bot_name} never sees the values, \
                  and they are not added to the conversation. A multi-line value such as a \
                  private key can be pasted whole.",
                 request.name
@@ -385,7 +391,7 @@ impl ElseApp {
                         .label(if form.submitting {
                             "Saving…"
                         } else {
-                            "Save secret"
+                            "Save and continue"
                         })
                         .small()
                         .primary()

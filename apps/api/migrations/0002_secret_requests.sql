@@ -17,11 +17,12 @@ CREATE TABLE secret_requests (
 ) STRICT;
 
 CREATE INDEX secret_requests_turn ON secret_requests (turn_id);
+CREATE UNIQUE INDEX secret_requests_pending ON secret_requests (turn_id) WHERE status = 'pending';
 
 -- A request outlives no turn: whatever ends the turn (Stop, deletion,
 -- failure, restart reconciliation) withdraws what is still pending.
 CREATE TRIGGER turns_end_secret_requests AFTER UPDATE OF status ON turns
-WHEN OLD.status <> NEW.status AND NEW.status IN ('completed', 'interrupted', 'failed', 'uncertain') BEGIN
+WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'interrupted', 'failed', 'uncertain') BEGIN
     UPDATE secret_requests SET status = 'cancelled',
         settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
     WHERE turn_id = NEW.id AND status = 'pending';
