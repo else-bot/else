@@ -10,7 +10,7 @@ use crate::api::Bot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
 use uuid::Uuid;
@@ -282,7 +282,7 @@ impl ElseApp {
         row
     }
 
-    fn render_header(&self, bot: &Bot, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let activity = self
             .view
@@ -303,26 +303,16 @@ impl ElseApp {
                     .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
             );
         }
-        let open = self.settings_open;
-        let mut settings = Button::new("toggle-settings")
-            .icon(IconName::Settings)
-            .small()
-            .ghost()
-            .selected(open)
-            .tooltip_with_action(
-                if open {
-                    "Hide bot settings"
-                } else {
-                    "Show bot settings"
-                },
-                &ToggleSettings,
-                Some(APP_CONTEXT),
-            )
-            .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx)));
-        if !compact {
-            settings = settings.label("Settings");
+        if !self.settings_open {
+            actions = actions.child(
+                Button::new("toggle-settings")
+                    .icon(IconName::Settings)
+                    .small()
+                    .ghost()
+                    .tooltip_with_action("Show bot settings", &ToggleSettings, Some(APP_CONTEXT))
+                    .on_click(cx.listener(|app, _, window, cx| app.toggle_settings(window, cx))),
+            );
         }
-        actions = actions.child(settings);
         if self.default_bot_id != Some(bot.id) {
             actions = actions.child(
                 Button::new("delete-bot")
@@ -528,12 +518,7 @@ impl ElseApp {
         }
     }
 
-    fn render_conversation(
-        &self,
-        bot: &Bot,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_conversation(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
         let transcript: AnyElement = match view {
@@ -636,12 +621,12 @@ impl ElseApp {
         v_flex()
             .size_full()
             .min_w_0()
-            .child(self.render_header(bot, compact, cx))
+            .child(self.render_header(bot, cx))
             .child(transcript)
             .child(footer)
     }
 
-    fn render_main(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() {
             return v_flex()
@@ -650,7 +635,7 @@ impl ElseApp {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                .child(self.render_conversation(&bot, compact, cx))
+                .child(self.render_conversation(&bot, cx))
                 .into_any_element();
         }
         let message = match self.connection {
@@ -724,7 +709,6 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
 }
 
 const NARROW: Pixels = px(1000.);
-const COMPACT: Pixels = px(1200.);
 
 impl Render for ElseApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -742,7 +726,6 @@ impl Render for ElseApp {
             .flatten();
         let width = window.viewport_size().width;
         let crowded = settings.is_some() && width < NARROW;
-        let compact = settings.is_some() && width < COMPACT;
         let theme = cx.theme();
         h_flex()
             .key_context(APP_CONTEXT)
@@ -784,7 +767,7 @@ impl Render for ElseApp {
             .size_full()
             .text_color(theme.foreground)
             .children((!crowded).then(|| self.render_sidebar(cx)))
-            .child(self.render_main(compact, cx))
+            .child(self.render_main(cx))
             .children(settings.map(|bot| self.render_settings(&bot, cx)))
             .into_any_element()
     }
