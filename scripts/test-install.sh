@@ -18,11 +18,20 @@
 # have no systemd, Docker daemon, or KVM, so the API runs as a managed
 # process and there is no guest image or bot computer.
 #
-# The Rust toolchain and build caches stay in Docker volumes
-# (else-install-*); remove them with:
+# The Rust toolchain and build caches stay in Docker volumes owned by this
+# checkout (else-install-<checkout>-*), and one run at a time uses them.
+# Other checkouts have their own. Remove them all with:
 #   docker volume rm $(docker volume ls -q -f name=else-install-)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+checkout="$(git rev-parse --show-toplevel | sha256sum | cut -c1-12)"
+run_id="$(date +%Y%m%d-%H%M%S)-$$"
+logs="target/install-tests/$run_id"
+mkdir -p "$logs"
+mkdir -p .else-dev
+exec 9>.else-dev/install-cache.lock
+flock -n 9 || { echo "another run in this checkout owns its install caches" >&2; exit 1; }
 
 DISTROS=("$@")
 [ ${#DISTROS[@]} -gt 0 ] || DISTROS=(debian-12 debian-13 ubuntu-24.04 ubuntu-26.04 arch)
@@ -39,7 +48,7 @@ image_for() {
 }
 
 work="$(mktemp -d)"
-network="else-install-net-$$"
+network="else-install-net-$run_id"
 containers=()
 cleanup() {
 	local c
@@ -54,7 +63,11 @@ trap 'exit 130' INT TERM
 
 echo "== releases v0.0.1 and v0.0.2 from the working tree"
 mkdir -p "$work/tree"
-tar --exclude=./target --exclude=./.git -cf - . | tar -C "$work/tree" -xf -
+# Tracked and unignored files as they are in the working tree: no .env,
+# credentials, build output, or git metadata.
+git ls-files -z -c -o --exclude-standard |
+	while IFS= read -r -d '' f; do if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi; done |
+	tar --null -T - -cf - | tar -C "$work/tree" -xf -
 (
 	cd "$work/tree"
 	commit() { git -c user.name=test -c user.email=test@example.invalid commit -q -m "$1"; }
@@ -194,21 +207,20 @@ chmod 644 "$work"/*.sh
 # --- Run ---------------------------------------------------------------------
 
 docker network create "$network" >/dev/null
-mkdir -p target/install-tests
 results=()
 for distro in "${DISTROS[@]}"; do
 	image="$(image_for "$distro")"
-	log="target/install-tests/$distro.log"
-    box="else-install-test-$distro-$$"
+	log="$logs/$distro.log"
+    box="else-install-test-$distro-$run_id"
     containers+=("$box")
     echo "== $distro ($image) -> $log"
     started=$(date +%s)
 	# In the background and waited for: an interrupt then reaches the trap
 	# at once, which removes the containers.
 	timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
-		-v "$PWD:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
-		-v "else-install-toolchain:/home/tester/.else/toolchain" \
-		-v "else-install-build-$distro:/home/tester/.else/build" \
+		-v "$work/tree:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
+		-v "else-install-$checkout-toolchain:/home/tester/.else/toolchain" \
+		-v "else-install-$checkout-build-$distro:/home/tester/.else/build" \
         "$image" bash -c "bash /harness/prepare.sh && su - tester -c 'bash /harness/scenario.sh'" \
 		>"$log" 2>&1 &
 	if wait $!; then

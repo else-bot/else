@@ -26,10 +26,12 @@ SQLite is bundled; no database server, Docker, account, or VM is needed.
 .agents/skills/verify-else/verify.py
 ```
 
-This builds `else-api` with the existing Cargo dev cache, creates a new
+This builds `else-api` with this checkout's `.else-dev/.build` Cargo cache, creates a new
 network-isolated omabox, and runs three public HTTP journeys concurrently.
-Each journey owns its own API, ephemeral loopback port, database, project
-directory, generated credentials, and logs. Setup runs on an empty directory
+Each journey owns its own API, database, project directory, generated
+credentials, and logs. The API binds `127.0.0.1:0` and publishes its PID and
+actual URL in `data/api.json`; the runner uses that URL only when the PID is
+its own child. Setup runs on an empty directory
 before readiness. No checkout `.env` is loaded at runtime. The Synthetic
 provider echoes real messages without a model subscription. Codex, Claude,
 and Microsandbox paths are explicitly unavailable in those API instances.
@@ -48,7 +50,8 @@ VMs, installer/update containers, doctests, and native desktop interaction
 remain separate checks. Some existing tests internally skip when a provider
 or executable is unavailable; read their logs before claiming those paths.
 
-Builds run sequentially in one Cargo cache. After compilation, the runner
+Builds run sequentially in the checkout's private Cargo cache. A shared
+`CARGO_TARGET_DIR` cannot replace another checkout's executables. After compilation, the runner
 uses Cargo's emitted executable paths and runs the test binaries directly in
 the box. No Cargo process competes for the build lock during driving. Up to
 four independent lanes run at once with two test threads per binary and two
@@ -62,6 +65,11 @@ boxes/data/evidence; their Cargo builds may still wait on Cargo's cache lock.
 The box mounts age's translation files read-only from the resolved Cargo
 dependency source. Dev builds load those error messages from disk; the mount
 does not expose provider logins or the rest of the Cargo home.
+
+For an interactive GUI session without these verification probes,
+`scripts/dev.py run` starts the API and desktop in a new isolated box and
+prints the exact box, window address, and commands; Ctrl-C saves its evidence
+and removes the box. See [the development guide](../../../docs/development.md#test-the-desktop-in-a-private-box).
 
 For native desktop verification, build once on the host, then start a private
 session. The following uses the default Cargo target directory; if
@@ -99,12 +107,13 @@ to `--session` for another target directory. The session expires after an hour.
 ## Doctor
 
 The automated runner performs a read-only doctor before each journey and
-after a restart. `doctor.json` proves the owned process is alive, the running
+after a restart. `doctor.json` proves the owned process is alive and published `api.json`, the running
 version matches the built binary, `/readyz` reaches SQLite, the generated
 owner token authenticates, the database's main-bot UUID matches `/v1/bots`,
 and Synthetic is available. A health response alone is insufficient.
 
-For a native session, run the default probe above and inspect
+Each probe also checks that the session's PID still owns its `api.json` and
+data lock. For a native session, run the default probe above and inspect
 `~/else-verification/native/doctor.json` inside that box. If a probe fails,
 read its API log and `omabox jobs -b BOX`; do not retry input into an unknown
 window. Doctor and probes never contact the installed API on 7878 or 7879.
@@ -181,7 +190,7 @@ omabox down -b BOX
 ```
 
 That removes the session helper, API, desktop, and disposable data together.
-Never kill by executable name, reuse `/tmp/else-demo`, or stop an installed
+Never kill by executable name, reuse a `scripts/dev.py` session, or stop an installed
 service. After an uncatchable runner termination, identify its box from the
 logs and remove that exact box; never use `omabox down --all`.
 

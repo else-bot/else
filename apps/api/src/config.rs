@@ -107,7 +107,7 @@ impl Config {
         };
         let bots_dir = match source.get("ELSE_BOTS_DIR") {
             Some(dir) => absolute_path("ELSE_BOTS_DIR", dir)?,
-            None => default_bots_dir(source, &data_dir)?,
+            None => data_dir.join("projects"),
         };
         let owner_token_file = match source.get("OWNER_TOKEN_FILE") {
             Some(path) => absolute_path("OWNER_TOKEN_FILE", path)?,
@@ -315,20 +315,6 @@ fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
     }
 }
 
-/// A development checkout's bots live under `~/.else-dev/bots`, apart from
-/// an installation's (`~/.else/bots`, which the installer configures);
-/// without a home, `<data dir>/projects` (not `bots/`, which holds the
-/// private provider homes; a restore uses the same place).
-fn default_bots_dir(
-    source: &dyn Source,
-    data_dir: &std::path::Path,
-) -> Result<PathBuf, ConfigError> {
-    match source.get("HOME").filter(|v| !v.is_empty()) {
-        Some(home) => Ok(absolute_path("HOME", home)?.join(".else-dev/bots")),
-        None => Ok(data_dir.join("projects")),
-    }
-}
-
 /// The API serves plaintext HTTP, so it may only listen on loopback. Remote
 /// access goes through an SSH tunnel or a TLS reverse proxy bound privately.
 fn parse_bind(value: Option<&str>) -> Result<SocketAddr, ConfigError> {
@@ -409,10 +395,10 @@ pub mod tests {
         assert_eq!(config.bind.to_string(), DEFAULT_BIND);
         assert_eq!(config.data_dir, PathBuf::from("/home/x/.else"));
         assert_eq!(config.owner_token_file, config.data_dir.join("owner-token"));
-        assert_eq!(config.bots_dir, PathBuf::from("/home/x/.else-dev/bots"));
+        assert_eq!(config.bots_dir, PathBuf::from("/home/x/.else/projects"));
         assert_eq!(
             config.computers.projects_dir,
-            Some(PathBuf::from("/home/x/.else-dev/bots"))
+            Some(PathBuf::from("/home/x/.else/projects"))
         );
     }
 
@@ -442,6 +428,30 @@ pub mod tests {
     }
 
     #[test]
+    fn separate_data_directories_share_no_default_paths() {
+        let load =
+            |dir| Config::load(&MapSource::new(&[("HOME", "/h"), ("ELSE_DATA_DIR", dir)])).unwrap();
+        let (a, b) = (load("/a"), load("/b"));
+        let paths = |c: &Config| {
+            let crate::credentials::SecretKeySource::File(key) = &c.secret_key else {
+                unreachable!()
+            };
+            vec![
+                PathBuf::from(c.require_database().unwrap().expose()),
+                c.bots_dir.clone(),
+                c.owner_token_file.clone(),
+                key.clone(),
+                c.backup.dir.clone(),
+                c.computers.state_dir.clone(),
+            ]
+        };
+        assert_eq!(a.bots_dir, PathBuf::from("/a/projects"));
+        for (x, y) in paths(&a).iter().zip(paths(&b).iter()) {
+            assert_ne!(x, y);
+        }
+    }
+
+    #[test]
     fn empty_overrides_are_not_ignored() {
         let config = Config::load(&MapSource::new(&[("HOME", "/h"), ("SECRET_KEY", "")])).unwrap();
         let err = crate::credentials::load_secret_key(&config.secret_key).unwrap_err();
@@ -465,8 +475,6 @@ pub mod tests {
         .unwrap();
         assert!(matches!(config.secret_key, SecretKeySource::Env(_)));
         assert!(!format!("{:?}", config).contains("canary-value"));
-        // Without a home, apart from the provider homes under `bots/`.
-        assert_eq!(config.bots_dir, PathBuf::from("/srv/else/projects"));
     }
 
     #[test]

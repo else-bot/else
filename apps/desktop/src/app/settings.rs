@@ -183,9 +183,7 @@ impl ElseApp {
     }
 
     fn save_details(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) else {
             return;
         };
@@ -245,7 +243,8 @@ impl ElseApp {
     }
 
     fn load_profile(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(entry)) = (self.client.clone(), self.settings.get_mut(&bot)) else {
+        let client = self.client.clone();
+        let Some(entry) = self.settings.get_mut(&bot) else {
             return;
         };
         let attempt = Uuid::new_v4();
@@ -289,9 +288,7 @@ impl ElseApp {
     }
 
     fn apply_model(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
+        let client = self.client.clone();
         let Some(ModelState::Ready(model)) = self.settings.get_mut(&bot).map(|s| &mut s.model)
         else {
             return;

@@ -1,26 +1,35 @@
+# S3 emulator for the optional replication tests (POC-023), owned by one
+# scripts/test-replication.py run: its project name, credentials, volume and
+# host port are private to that run. Synthetic keys only; never a real bucket.
 services:
-  # S3 emulator for the backup replication tests (POC-023). Synthetic keys
-  # only; never a real bucket.
+  # Owns the network namespace and the kernel-assigned host port, so the
+  # endpoint survives the outage tests stopping and restarting seaweedfs.
+  s3:
+    image: chrislusf/seaweedfs:4.50
+    entrypoint: ["sleep", "2147483647"]
+    init: true
+    ports:
+      - "127.0.0.1::8333"
   seaweedfs:
     image: chrislusf/seaweedfs:4.50
-    restart: unless-stopped
+    network_mode: service:s3
     # Small volumes, their count sized from free disk: every test bucket is
     # its own collection, and the default limit of 8 volumes fills up after
     # a few test runs ("Not enough data nodes found").
     command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-volume.max=0", "-master.volumeSizeLimitMB=64"]
     environment:
-      AWS_ACCESS_KEY_ID: ${ELSE_TEST_S3_ACCESS_KEY_ID:?Set ELSE_TEST_S3_ACCESS_KEY_ID in .env}
-      AWS_SECRET_ACCESS_KEY: ${ELSE_TEST_S3_SECRET_ACCESS_KEY:?Set ELSE_TEST_S3_SECRET_ACCESS_KEY in .env}
-    ports:
-      - "127.0.0.1:${ELSE_TEST_S3_PORT:-8333}:8333"
+      AWS_ACCESS_KEY_ID: ${ELSE_TEST_S3_ACCESS_KEY_ID:?run the replication tests through scripts/test-replication.py}
+      AWS_SECRET_ACCESS_KEY: ${ELSE_TEST_S3_SECRET_ACCESS_KEY:?run the replication tests through scripts/test-replication.py}
     volumes:
       - seaweedfs_data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || wget -q -S -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -q 'HTTP/'"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
+      interval: 250ms
+      start_interval: 250ms
+      timeout: 2s
+      retries: 120
+      start_period: 3s
+    stop_grace_period: 1s
 
 volumes:
   seaweedfs_data:

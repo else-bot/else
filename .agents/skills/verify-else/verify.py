@@ -2,6 +2,7 @@
 """Fast native Linux amd64 verification. Build on host, drive in a private omabox."""
 
 import argparse
+import importlib.util
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
@@ -10,7 +11,6 @@ import platform
 import re
 import shutil
 import signal
-import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -21,6 +21,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = Path(__file__).resolve()
+_spec = importlib.util.spec_from_file_location("else_dev", ROOT / "scripts/dev.py")
+dev = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dev)
 SEPARATE_CHECKS = "Native desktop input, doctests, provider subscriptions, real VMs, S3 replication, installer updates, arm64 and macOS"
 
 
@@ -56,7 +59,7 @@ def command(argv, *, timeout=600, **kwargs):
 
 
 def capture(argv):
-    return subprocess.check_output(argv, cwd=ROOT, text=True, timeout=60).strip()
+    return subprocess.check_output(argv, cwd=ROOT, env=dev.cargo_env(), text=True, timeout=60).strip()
 
 
 def until(probe, check, description, timeout=15):
@@ -102,14 +105,19 @@ class Instance:
             raise
 
     def start(self):
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-        self.url = f"http://127.0.0.1:{port}"
-        self.env["ELSE_API_BIND"] = f"127.0.0.1:{port}"
+        require(self.child is None, "the owned API is already running")
+        # The previous child of this instance is reaped, so a leftover manifest is ours and stale.
+        (self.data / "api.json").unlink(missing_ok=True)
+        self.env["ELSE_API_BIND"] = "127.0.0.1:0"
         self.log = (self.evidence / "api.log").open("a")
         self.child = subprocess.Popen([self.binary, "serve"], cwd=self.work, env=self.env,
                                       stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+
+        def published():
+            require(self.child.poll() is None, "API exited before publishing api.json; see api.log")
+            return dev.published_url(self.data, self.child.pid)
+
+        self.url = until(published, bool, f"api.json from pid {self.child.pid}")
 
         def ready():
             require(self.child.poll() is None, "API exited before readiness; see api.log")
@@ -332,7 +340,9 @@ def native_session(name, binary):
 def native_probe(name, args):
     evidence = Path.home() / "else-verification" / name
     state = json.loads((evidence / "session.json").read_text())
-    os.kill(state["pid"], 0)
+    require(dev.published_url(state["data"], state["pid"]) == state["url"] and
+            dev.holds(state["pid"], Path(state["data"]) / "api.lock"),
+            f"session {name}'s API (pid {state['pid']}) no longer owns {state['data']}")
     api = object.__new__(Instance)
     api.evidence = evidence
     api.url = state["url"]
@@ -397,11 +407,11 @@ def main():
         with (output / "build.jsonl").open("w") as artifacts, (output / "build.log").open("w") as log:
             package = ["--workspace"] if args.full else ["-p", "else-api"]
             command(["cargo", "build", *package, "--locked", "--bins", "--message-format=json"],
-                    cwd=ROOT, stdout=artifacts, stderr=log, timeout=1800)
+                    cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
             if args.full or selected:
                 command(["cargo", "test", *package, "--locked", "--no-run", "--message-format=json", "--lib", "--bins",
                          *[flag for name in selected for flag in ["--test", name]]],
-                        cwd=ROOT, stdout=artifacts, stderr=log, timeout=1800)
+                        cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
         report["build_seconds"] = round(time.monotonic() - build_start, 3)
         frames = [json.loads(line) for line in (output / "build.jsonl").read_text().splitlines()]
         built = [f for f in frames if f.get("reason") == "compiler-artifact" and f.get("executable")]
