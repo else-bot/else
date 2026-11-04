@@ -48,14 +48,14 @@ pub(super) fn choice_schema() -> Value {
             "type": "object",
             "properties": {
                 "question": { "type": "string", "minLength": 1,
-                              "maxLength": crate::db::owner_questions::MAX_TITLE,
+                              "maxLength": crate::app::questions::MAX_TITLE,
                               "description": "One short question." },
                 "choices": { "type": "array", "minItems": 0,
-                             "maxItems": crate::db::owner_questions::MAX_CHOICES, "uniqueItems": true,
+                             "maxItems": crate::app::questions::MAX_CHOICES, "uniqueItems": true,
                              "items": { "type": "string", "minLength": 1,
-                                        "maxLength": crate::db::owner_questions::MAX_CHOICE_LABEL },
+                                        "maxLength": crate::app::questions::MAX_CHOICE_LABEL },
                              "description": "2 to 4 short labels, in the order shown. Omit or leave empty for a chat answer." },
-                "context": { "type": "string", "maxLength": crate::db::owner_questions::MAX_CONTEXT,
+                "context": { "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
                              "description": "Optional: what the choice is about, such as a draft." },
             },
             "required": ["question"],
@@ -85,9 +85,9 @@ pub(super) fn permission_schema() -> Value {
             "properties": {
                 "kind": { "type": "string", "enum": ["destructive", "external"] },
                 "action": { "type": "string", "minLength": 1,
-                            "maxLength": crate::db::owner_questions::MAX_CONTEXT,
+                            "maxLength": crate::app::questions::MAX_CONTEXT,
                             "description": "Exactly what will be done: the command, or the message and its recipients." },
-                "reason": { "type": "string", "maxLength": crate::db::owner_questions::MAX_TITLE,
+                "reason": { "type": "string", "maxLength": crate::app::questions::MAX_TITLE,
                             "description": "Shown as the card's title: what it is for." },
             },
             "required": ["kind", "action"],
@@ -171,7 +171,8 @@ pub(super) fn question_refused(err: crate::db::owner_questions::RequestError) ->
 }
 
 pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::db::owner_questions::{self, Spec, Status};
+    use crate::app::questions::{Spec, Status};
+    use crate::db::owner_questions;
     let spec = match Spec::choice(args) {
         Ok(spec) => spec,
         Err(message) => return (tool_error(&format!("INVALID_QUESTION: {message}")), None),
@@ -210,7 +211,8 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
 }
 
 pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::db::owner_questions::{self, Gate, Spec};
+    use crate::app::questions::Spec;
+    use crate::db::owner_questions::{self, Gate};
     let spec = match Spec::permission(args) {
         Ok(spec) => spec,
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),

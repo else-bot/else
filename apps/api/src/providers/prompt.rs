@@ -16,6 +16,7 @@ pub const CHECKPOINT_SYSTEM: &str = "You write faithful, compact task checkpoint
 
 pub use crate::app::providers::Selection;
 use crate::app::providers::{HistoryEntry, JobReceipt, MemoryContext, SessionState, TurnInput};
+use crate::app::questions::{APPROVE, APPROVE_FOREVER, Action, DENY};
 
 /// Byte budget for rebuilt history in one packet.
 pub const HISTORY_BUDGET: usize = 32 * 1024;
@@ -367,33 +368,23 @@ fn questions_block(input: &TurnInput) -> String {
                 },
             ),
             (Some(action), kind) => {
-                let body = match (action.get("tool"), action.get("host")) {
-                    (Some(tool), _) => format!(
-                        "{}\nTool: {}\nArguments: {}",
-                        question.title,
-                        tool.as_str().unwrap_or_default(),
-                        action["args"]
-                    ),
-                    (_, Some(host)) => format!(
-                        "{}\nHost action: {}",
-                        question.title,
-                        host.as_str().unwrap_or_default()
-                    ),
-                    _ => question.title.clone(),
+                let body = match action {
+                    Action::Tool { tool, args } => {
+                        format!("{}\nTool: {tool}\nArguments: {args}", question.title)
+                    }
+                    Action::Host { host } => format!("{}\nHost action: {host}", question.title),
                 };
-                let next = match answer {
-                    "approve" | "approve_forever" if action.get("tool").is_some() => format!(
-                        "Approved: call {} again with the original tool call arguments, once. \
+                let next = match (answer, action) {
+                    (APPROVE | APPROVE_FOREVER, Action::Tool { tool, .. }) => format!(
+                        "Approved: call {tool} again with the original tool call arguments, once. \
                          Typed text is redacted here; never substitute the summary into the call. \
-                         A different call needs a new card.",
-                        action["tool"].as_str().unwrap_or_default()
+                         A different call needs a new card."
                     ),
-                    "approve" | "approve_forever" => {
+                    (APPROVE | APPROVE_FOREVER, Action::Host { .. }) => {
                         "Approved: do exactly this host action, once, then report.".to_owned()
                     }
-                    "deny" => format!(
-                        "Denied: do not do this {kind} action or an equivalent; continue without \
-                         it or ask what the owner wants."
+                    (DENY, _) => format!(
+                        "Denied: do not do this {kind} action or an equivalent; continue without it or ask what the owner wants."
                     ),
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),
                 };
@@ -402,7 +393,12 @@ fn questions_block(input: &TurnInput) -> String {
         };
         text.push_str(&format!(
             "<{tag} id=\"{}\" kind=\"{}\" status=\"{}\" answer=\"{}\">\n{}\n{}\n</{tag}>\n",
-            question.id, question.kind, question.status, answer, body, next
+            question.id,
+            question.kind.as_str(),
+            question.status.as_str(),
+            answer,
+            body,
+            next
         ));
     }
     text.push('\n');

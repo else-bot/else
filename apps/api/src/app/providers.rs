@@ -173,28 +173,7 @@ pub struct SecretOutcome {
     pub stored: bool,
 }
 
-/// One option of an owner question, by its stable id and shown label.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuestionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-/// The owner's answer to a question or approval request: which question
-/// (its kind, title, and bound action) and the choice the owner made, or
-/// that it ended unanswered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuestionOutcome {
-    pub id: Uuid,
-    /// `choice`, `destructive`, or `external`.
-    pub kind: String,
-    pub title: String,
-    /// For an approval: the tool call or described host action.
-    pub action: Option<serde_json::Value>,
-    /// `answered`, `skipped`, or `cancelled`.
-    pub status: String,
-    pub answer: Option<QuestionChoice>,
-}
+pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome};
 
 /// What a turn's work traces back to, derived by the server from stored
 /// rows: a delegated task inherits the origin of the request that

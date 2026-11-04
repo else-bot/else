@@ -1,7 +1,7 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
-use crate::db::owner_questions::Kind;
+use crate::app::questions::Kind;
 
 /// Bytes of a `purpose` argument (an approval card's title).
 pub(super) const MAX_PURPOSE: usize = 300;
@@ -80,7 +80,7 @@ fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
     match args.get("context") {
         None | Some(Value::Null) => {}
         Some(Value::String(text))
-            if text.len() <= crate::db::owner_questions::MAX_CONTEXT && !text.contains('\0') => {}
+            if text.len() <= crate::app::questions::MAX_CONTEXT && !text.contains('\0') => {}
         Some(_) => return Err("context is at most 4000 bytes of text.".into()),
     }
     Ok(Some(effect))
@@ -160,7 +160,8 @@ async fn approve(
     args: &Value,
     kind: Kind,
 ) -> Result<Option<&'static str>, Outcome> {
-    use crate::db::owner_questions::{self, Gate, Spec};
+    use crate::app::questions::Spec;
+    use crate::db::owner_questions::{self, Gate};
     let (title, context) = approval_card(name, args);
     let spec = Spec::tool_approval(kind, name, args, title, context);
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
@@ -224,6 +225,7 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn acting_tools_must_declare_an_effect_and_reads_need_none() {

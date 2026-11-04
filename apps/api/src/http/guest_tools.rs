@@ -67,7 +67,7 @@ pub fn tool_list() -> Vec<Value> {
     let purpose = json!({ "type": "string", "maxLength": MAX_PURPOSE,
         "description": "Shown as the approval card's title when the effect is destructive or \
             external: what this is for, in the owner's words." });
-    let context = json!({ "type": "string", "maxLength": crate::db::owner_questions::MAX_CONTEXT,
+    let context = json!({ "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
         "description": "Approval details shown to the owner, including recipient, destination, \
             and complete drafted message or proposed change. Never include credentials." });
     vec![
