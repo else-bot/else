@@ -5,6 +5,10 @@ This repository's role choices override pstack's defaults and any user-level
 `setup-pstack` in this repository. The budget is custom, with the effort set
 per preset below. Keep the configured effort and speed when delegating.
 
+Opus 5.5 medium is the default for coding, explanations, and synthesis.
+Use Sol xhigh fast and Fable high for independent reviews, second opinions,
+and design before implementation. Reserve Opus high for the hardest tasks.
+
 Role values are preset names, not API model IDs. Resolve each name through
 this table before spawning an agent. Panel lists run one agent per entry.
 The arena cross-judge pool selects one judge from another model family.
@@ -43,23 +47,23 @@ Recheck provider capabilities before using a model in a new environment.
 }
 ```
 
-feature, refactoring: sol-xhigh-fast
-bug-fix: sol-xhigh-fast
-perf-issue: sol-xhigh-fast
-hillclimb: sol-xhigh-fast
+feature, refactoring: opus-medium
+bug-fix: opus-medium
+perf-issue: opus-medium
+hillclimb: opus-medium
 judgment and prose: opus-medium
 hardest tasks: opus-high
 how explorer: sol-xhigh-fast
-how explainer: fable-medium
+how explainer: opus-medium
 why investigators: sol-xhigh-fast
-why synthesizer: fable-high
+why synthesizer: opus-medium
 reflect tooling: sol-xhigh-fast
-reflect judgment, divergent, synthesizer: fable-high
-arena runners: sol-xhigh-fast, opus-medium, opus-high, fable-medium, fable-high
-arena cross-judge pool: sol-xhigh-fast, opus-medium, opus-high, fable-medium, fable-high
-swarm workers: sol-xhigh-fast
-architect runners: sol-xhigh-fast, opus-medium, opus-high, fable-medium, fable-high
-interrogate reviewers: sol-xhigh-fast, opus-medium, opus-high, fable-medium, fable-high
+reflect judgment, divergent, synthesizer: opus-medium
+arena runners: sol-xhigh-fast, fable-high
+arena cross-judge pool: sol-xhigh-fast, fable-high
+swarm workers: opus-medium
+architect runners: sol-xhigh-fast, fable-high
+interrogate reviewers: sol-xhigh-fast, fable-high
 
 Within T3, use its delegation tools for presets that need a different provider
 or explicit options. Follow the session's orchestration instructions for

@@ -56,8 +56,6 @@ def verify():
     for role, choices in roles.items():
         names = choices.split(", ")
         assert all(name in presets for name in names), f"Unknown preset for {role}"
-        if role in {"arena runners", "arena cross-judge pool", "architect runners", "interrogate reviewers"}:
-            assert len(names) == 5 and set(names) == set(presets), f"Incomplete panel: {role}"
     for preset in presets.values():
         assert set(preset) == {"providerInstanceId", "model", "options"}, "Invalid T3 target"
     for rule in ("no-inline-imports", "typescript-exhaustive-switch", "plugin-compatibility", "pstack-models"):

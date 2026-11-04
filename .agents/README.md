@@ -13,7 +13,9 @@ The CI watcher is a local copy with compatible Claude agent frontmatter.
 Edit [rules/pstack-models.md](rules/pstack-models.md) to change the five model
 presets or their role assignments. Sol uses xhigh reasoning and fast service.
 Opus 5.5 and Fable 5.1 each have medium and high presets. Each review panel
-uses all five presets. Cross-provider panels require T3 delegation support.
+uses Sol xhigh fast and Fable high. Opus medium handles most coding,
+explanations, and synthesis. Opus high handles the hardest tasks.
+Cross-provider panels require T3 delegation support.
 
 Codex reads the shared rules through the root `AGENTS.md`. Claude Code loads
 them through `.claude/rules/`. The compatibility rule maps Cursor-specific
