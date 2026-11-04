@@ -1642,6 +1642,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffdd80ce8ce993de27e9f063a444a4d53ce8e8db4c1f00cc03af5ad5a9867a1e"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1829,6 +1838,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "des",
  "dotenvy",
  "futures-util",
  "getrandom 0.4.3",
@@ -1837,6 +1847,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "libc",
+ "png 0.18.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -1868,6 +1879,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "gpui-kit",
+ "image",
  "libc",
  "notify",
  "rand 0.10.3",

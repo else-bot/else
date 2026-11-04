@@ -736,6 +736,9 @@ impl Render for ElseApp {
                 .child(self.render_welcome(welcome, cx))
                 .into_any_element();
         }
+        if let Some(computer) = self.computer.as_ref().filter(|view| view.read(cx).expanded) {
+            return div().size_full().child(computer.clone()).into_any_element();
+        }
         let settings = self
             .settings_shown()
             .then(|| self.selected_bot().cloned())

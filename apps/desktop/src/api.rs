@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
+mod desktop;
+pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode};
 use serde_json::json;
 
 use crate::avatar::Avatar;

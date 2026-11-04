@@ -1,0 +1,19 @@
+
+running 15 tests
+test a_failed_stop_keeps_its_reservation_and_is_retried ... ok
+test a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer ... ok
+test acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer ... ok
+test admission_queues_beyond_the_budget_and_paused_computers_keep_their_reservation ... ok
+test an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works ... ok
+test computers_are_created_on_first_use_reused_and_kept_apart ... ok
+test computers_mount_their_bots_project_directory ... ok
+test a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped ... ok
+test deleting_a_bot_stops_its_computer_and_keeps_it ... ok
+test disk_operations_end_the_leases_of_finished_turns_and_jobs_only ... ok
+test idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept ... ok
+test image_upgrades_fail_cleanly_and_keep_the_old_computer ... ok
+test image_upgrades_keep_network_respect_budget_and_settle_offline ... ok
+test nothing_is_used_until_the_runtime_has_been_inspected ... ok
+test startup_inspects_without_waking_recreating_or_removing ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s

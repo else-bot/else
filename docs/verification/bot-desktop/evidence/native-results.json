@@ -1,0 +1,26 @@
+{
+  "platform": "Linux x86_64",
+  "display": "private omabox, 1432x992 app window",
+  "guest": "Microsandbox 0.7.13, else-guest:3, Chromium 156",
+  "native_input": {
+    "asleep_card": "asleep.png",
+    "wake_by_card_click": "passed",
+    "live_thumbnail_and_expansion": "passed",
+    "watch_ignores_click_and_typing": "passed",
+    "take_over_username_and_password_entry": "passed",
+    "tab_reaches_guest_password_field": "passed",
+    "login_button_pointer_click": "passed",
+    "cdp_after_hand_back": {
+      "user": "amd64-final",
+      "result": "Signed in as amd64-final",
+      "cookie": "session=amd64-final",
+      "session": "amd64-final"
+    },
+    "scroll_y_after_native_wheel": 960,
+    "mouse_button_mask_after_letterbox_drag_and_hand_back": 0,
+    "active_viewer_leases_after_sidebar_close": 0,
+    "refused_takeover_keeps_live_preview": "busy.png",
+    "details_tab_active_viewer_leases": 0
+  },
+  "macos_arm64": "not run, handoff required"
+}

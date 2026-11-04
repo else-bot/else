@@ -78,7 +78,7 @@ EOF
 
 MIN_RUST="1.94.0"
 MSB_VERSION="0.7.13"
-GUEST_TAG="else-guest:2"
+GUEST_TAG="else-guest:3"
 
 ELSE_HOME="${ELSE_HOME:-$HOME/.else}"
 REPO_URL="${ELSE_REPO:-https://github.com/else-bot/else.git}"

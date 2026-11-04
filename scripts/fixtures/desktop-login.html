@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Desktop login verification</title>
+<style>
+body { font: 24px sans-serif; background: #e9eef5; color: #182233; padding: 60px; }
+input, button { font: inherit; padding: 14px; margin: 12px 0; display: block; }
+#result { color: #14683c; }
+</style>
+<h1>Bot computer</h1>
+<p>Sign in to the local test site.</p>
+<input id="user" placeholder="Username" autofocus>
+<input id="pass" type="password" placeholder="Password">
+<button id="login">Sign in</button>
+<p id="result"></p>
+<div style="height: 2000px">Scroll check</div>
+<script>
+login.onclick = () => {
+  localStorage.setItem('session', user.value);
+  document.cookie = 'session=' + encodeURIComponent(user.value) + '; SameSite=Strict';
+  result.innerText = 'Signed in as ' + user.value;
+};
+</script>

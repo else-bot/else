@@ -16,7 +16,8 @@ The whole batch is checked before anything happens (every key name resolved,
 every point inside the screen), the desktop lock that browser scripts and
 computer_browser take is acquired, and then the display must still be
 WIDTH x HEIGHT (else SCREEN_CHANGED: take a new screenshot) and no VNC viewer
-may be connected (OWNER_USING_DESKTOP). Only then does it print
+may be connected to the controlling VNC server on 5900 (OWNER_USING_DESKTOP;
+the view-only server on 5901 that the in-app viewer watches is ignored). Only then does it print
 {"started": true}; a failure before that did nothing. After it, one line per
 completed action; a failure prints an error and the done lines tell what
 happened. The screen size and VNC connections are checked again before each

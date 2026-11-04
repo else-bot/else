@@ -20,9 +20,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bots/{bot_id}/computer/stop", post(stop))
         .route("/bots/{bot_id}/computer/resume", post(resume))
         .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
+        .route(
+            "/bots/{bot_id}/desktop/stream",
+            get(super::desktop_stream::stream),
+        )
 }
 
-fn manager(state: &AppState) -> Result<&Arc<crate::computers::ComputerManager>, ApiError> {
+pub(super) fn manager(
+    state: &AppState,
+) -> Result<&Arc<crate::computers::ComputerManager>, ApiError> {
     state.computers.as_ref().ok_or_else(|| {
         ApiError::unavailable(
             "computers_unavailable",
@@ -31,7 +37,11 @@ fn manager(state: &AppState) -> Result<&Arc<crate::computers::ComputerManager>, 
     })
 }
 
-async fn require_bot(state: &AppState, bot_id: Uuid, active: bool) -> Result<(), ApiError> {
+pub(super) async fn require_bot(
+    state: &AppState,
+    bot_id: Uuid,
+    active: bool,
+) -> Result<(), ApiError> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
         .fetch_optional(&state.db)
@@ -59,20 +69,31 @@ async fn show(
         Option<chrono::DateTime<chrono::Utc>>,
         Option<String>,
         i64,
+        bool,
     )> = sqlx::query_as(
         "SELECT runtime_name, image, cpus, memory_mib, desired_state, observed_state,
                     last_used_at, last_error,
                     (SELECT count(*) FROM computer_leases l
-                     WHERE l.bot_id = c.bot_id AND l.released_at IS NULL)
+                     WHERE l.bot_id = c.bot_id AND l.released_at IS NULL),
+                    desktop_port IS NOT NULL OR observed_state IN ('absent', 'creating')
              FROM bot_computers c WHERE bot_id = ?1",
     )
     .bind(bot_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some((name, image, cpus, memory, desired, observed, last_used, error, leases)) = row else {
-        return Ok(Json(
-            json!({ "bot_id": bot_id, "state": "absent", "desired_state": "auto" }),
-        ));
+    let desktop = state
+        .computers
+        .as_ref()
+        .is_some_and(|computers| computers.config().desktop);
+    let Some((name, image, cpus, memory, desired, observed, last_used, error, leases, has_desktop)) =
+        row
+    else {
+        return Ok(Json(json!({
+            "bot_id": bot_id,
+            "state": "absent",
+            "desired_state": "auto",
+            "desktop_available": desktop,
+        })));
     };
     Ok(Json(json!({
         "bot_id": bot_id,
@@ -85,6 +106,7 @@ async fn show(
         "active_leases": leases,
         "last_used_at": last_used,
         "last_error": error,
+        "desktop_available": desktop && has_desktop,
     })))
 }
 

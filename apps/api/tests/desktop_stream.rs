@@ -1,0 +1,660 @@
+//! The in-app desktop viewer stream over a real TCP listener: a fake guest
+//! noVNC (WebSocket, Host routing, VNC password auth, RFB) stands in for
+//! the guest, so the tests see exactly what reaches each VNC server.
+
+mod common;
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use common::{TOKEN, TestApp};
+use else_api::computers::{
+    ComputerConfig, ComputerManager, ComputerRuntime, ExecOutput, RuntimeError, RuntimeState, Spec,
+    viewer,
+};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use uuid::Uuid;
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Default)]
+struct Runtime {
+    computers: Mutex<HashMap<String, RuntimeState>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Runtime {
+    fn set(&self, name: &str, state: RuntimeState) -> Result<(), RuntimeError> {
+        self.calls.lock().unwrap().push(format!("{state:?} {name}"));
+        self.computers.lock().unwrap().insert(name.into(), state);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ComputerRuntime for Runtime {
+    async fn list(&self) -> Result<Vec<(String, RuntimeState)>, RuntimeError> {
+        Ok(self
+            .computers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, s)| (n.clone(), *s))
+            .collect())
+    }
+    async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
+        self.set(&spec.name, RuntimeState::Running)
+    }
+    async fn start(&self, name: &str) -> Result<(), RuntimeError> {
+        self.set(name, RuntimeState::Running)
+    }
+    async fn stop(&self, name: &str) -> Result<(), RuntimeError> {
+        self.set(name, RuntimeState::Stopped)
+    }
+    async fn pause(&self, name: &str) -> Result<(), RuntimeError> {
+        self.set(name, RuntimeState::Paused)
+    }
+    async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
+        self.set(name, RuntimeState::Running)
+    }
+    async fn exec(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[&str],
+        _: Duration,
+    ) -> Result<ExecOutput, RuntimeError> {
+        Ok(ExecOutput {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
+    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+/// What each fake VNC server received: `watch` or `control`, then the event.
+#[derive(Default)]
+struct Log(Mutex<Vec<String>>);
+
+impl Log {
+    fn push(&self, line: String) {
+        self.0.lock().unwrap().push(line);
+    }
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+    fn input(&self, server: &str) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|l| l.starts_with(server) && (l.contains(" key ") || l.contains(" pointer ")))
+            .collect()
+    }
+}
+
+/// The guest's noVNC on `port`: Host `else-watch` reaches the view-only
+/// server unless `old_image`, which routes everything to the controlling one.
+#[allow(clippy::result_large_err)] // the handshake callback's signature is tungstenite's
+async fn fake_guest(port: u16, password: String, old_image: bool, log: Arc<Log>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let password = password.clone();
+            let log = log.clone();
+            tokio::spawn(async move {
+                let host = Arc::new(Mutex::new(String::new()));
+                let seen = host.clone();
+                let ws = tokio_tungstenite::accept_hdr_async(
+                    tcp,
+                    move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        *seen.lock().unwrap() = request
+                            .headers()
+                            .get("host")
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        // websockify answers noVNC's binary subprotocol.
+                        response
+                            .headers_mut()
+                            .insert("sec-websocket-protocol", "binary".parse().unwrap());
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                let watch = !old_image && host.lock().unwrap().as_str() == "else-watch";
+                let server = if watch { "watch" } else { "control" };
+                log.push(format!("{server} open"));
+                let _ = rfb_server(ws, &password, watch, server, &log).await;
+                log.push(format!("{server} closed"));
+            });
+        }
+    });
+}
+
+struct Io {
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    buffer: VecDeque<u8>,
+}
+
+impl Io {
+    async fn take(&mut self, n: usize) -> Option<Vec<u8>> {
+        while self.buffer.len() < n {
+            match self.ws.next().await? {
+                Ok(Message::Binary(data)) => self.buffer.extend(data.iter()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+        Some(self.buffer.drain(..n).collect())
+    }
+    async fn send(&mut self, bytes: &[u8]) -> Option<()> {
+        self.ws
+            .send(Message::Binary(bytes.to_vec().into()))
+            .await
+            .ok()
+    }
+}
+
+const W: u16 = 64;
+const H: u16 = 48;
+
+async fn rfb_server(
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    password: &str,
+    watch: bool,
+    server: &str,
+    log: &Log,
+) -> Option<()> {
+    let mut io = Io {
+        ws,
+        buffer: VecDeque::new(),
+    };
+    io.send(b"RFB 003.008\n").await?;
+    io.take(12).await?;
+    io.send(&[1, 2]).await?;
+    assert_eq!(io.take(1).await?, vec![2]);
+    let challenge = *b"fedcba9876543210";
+    io.send(&challenge).await?;
+    let response = io.take(16).await?;
+    let ok = response == viewer::vnc_auth_response(password, challenge);
+    io.send(&(!ok as u32).to_be_bytes()).await?;
+    assert!(ok, "the viewer authenticates with the computer's password");
+    io.take(1).await?;
+    let name: &[u8] = if watch { b"else-watch" } else { b"x11vnc" };
+    let mut init = Vec::new();
+    init.extend_from_slice(&W.to_be_bytes());
+    init.extend_from_slice(&H.to_be_bytes());
+    init.extend_from_slice(&[32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]);
+    init.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    init.extend_from_slice(name);
+    io.send(&init).await?;
+    let mut shade = 0u8;
+    loop {
+        let kind = io.take(1).await?[0];
+        match kind {
+            0 => {
+                io.take(19).await?;
+            }
+            2 => {
+                let head = io.take(3).await?;
+                let n = u16::from_be_bytes([head[1], head[2]]) as usize;
+                io.take(n * 4).await?;
+            }
+            3 => {
+                io.take(9).await?;
+                shade = shade.wrapping_add(40);
+                let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0];
+                update.extend_from_slice(&W.to_be_bytes());
+                update.extend_from_slice(&H.to_be_bytes());
+                update.extend_from_slice(&0i32.to_be_bytes());
+                update.extend(
+                    std::iter::repeat_n([shade, 0, 0, 0], W as usize * H as usize).flatten(),
+                );
+                io.send(&update).await?;
+            }
+            4 => {
+                let m = io.take(7).await?;
+                let key = u32::from_be_bytes([m[3], m[4], m[5], m[6]]);
+                log.push(format!("{server} key {key} {}", m[0]));
+            }
+            5 => {
+                let m = io.take(5).await?;
+                let x = u16::from_be_bytes([m[1], m[2]]);
+                let y = u16::from_be_bytes([m[3], m[4]]);
+                log.push(format!("{server} pointer {} {x} {y}", m[0]));
+            }
+            other => panic!("unexpected client message {other}"),
+        }
+    }
+}
+
+struct Setup {
+    app: Arc<TestApp>,
+    runtime: Arc<Runtime>,
+    manager: Arc<ComputerManager>,
+    addr: String,
+    log: Arc<Log>,
+    bot: String,
+    _dir: tempfile::TempDir,
+}
+
+async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
+    let db = Arc::new(common::TestDb::migrated().await);
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(Runtime::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        runtime.clone(),
+        ComputerConfig {
+            desktop: true,
+            idle_after: Duration::from_secs(3600),
+            lease_ttl,
+            state_dir: dir.path().to_owned(),
+            ..ComputerConfig::default()
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(5)),
+    )]);
+    let app = Arc::new(TestApp::with_parts(db, 4, registry, Some(manager.clone())));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let router = app.router.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let bot = app.create_bot("Viewer").await;
+    let bot_id: Uuid = bot.parse().unwrap();
+    // First use creates the computer and its desktop port and password.
+    let else_api::computers::Acquire::Ready { lease_id, .. } =
+        manager.acquire(bot_id, "test:setup").await.unwrap()
+    else {
+        panic!("not ready");
+    };
+    manager.release(lease_id).await.unwrap();
+    let port: i64 = sqlx::query_scalar("SELECT desktop_port FROM bot_computers WHERE bot_id = ?1")
+        .bind(bot_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let password = std::fs::read_to_string(manager.desktop_password_file(bot_id))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let log = Arc::new(Log::default());
+    fake_guest(port as u16, password, old_image, log.clone()).await;
+    Setup {
+        app,
+        runtime,
+        manager,
+        addr,
+        log,
+        bot,
+        _dir: dir,
+    }
+}
+
+impl Setup {
+    async fn connect(&self, query: &str, token: Option<&str>) -> Result<Socket, u16> {
+        let mut request = format!(
+            "ws://{}/v1/bots/{}/desktop/stream?{query}",
+            self.addr, self.bot
+        )
+        .into_client_request()
+        .unwrap();
+        if let Some(token) = token {
+            request
+                .headers_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        }
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((socket, _)) => Ok(socket),
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Err(response.status().as_u16())
+            }
+            Err(err) => panic!("connect failed: {err}"),
+        }
+    }
+
+    async fn open(&self, query: &str) -> Socket {
+        self.connect(query, Some(TOKEN)).await.unwrap()
+    }
+
+    async fn live_viewer_leases(&self) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM computer_leases WHERE holder LIKE 'desktop-stream:%'
+             AND released_at IS NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
+        )
+        .fetch_one(&self.app.db.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn leases(&self, holder: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM computer_leases WHERE holder LIKE ?1 AND released_at IS NULL",
+        )
+        .bind(holder)
+        .fetch_one(&self.app.db.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn wait_log(&self, line: &str) {
+        for _ in 0..200 {
+            if self.log.lines().iter().any(|l| l == line) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("never logged {line:?}: {:?}", self.log.lines());
+    }
+}
+
+/// The next JSON message, skipping frames and pings.
+async fn next_json(socket: &mut Socket) -> Value {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a message in time")
+        {
+            Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+            Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {}
+            other => panic!("stream ended: {other:?}"),
+        }
+    }
+}
+
+async fn next_frame(socket: &mut Socket) -> Vec<u8> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a frame in time")
+        {
+            Some(Ok(Message::Binary(png))) => return png.to_vec(),
+            Some(Ok(_)) => {}
+            other => panic!("stream ended: {other:?}"),
+        }
+    }
+}
+
+async fn send(socket: &mut Socket, body: Value) {
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+}
+
+async fn ends_with(socket: &mut Socket, code: &str) {
+    let message = next_json(socket).await;
+    assert_eq!(message["type"], "error", "{message}");
+    assert_eq!(message["code"], code, "{message}");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("closed in time")
+        {
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return,
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_authenticates_and_never_wakes_unless_asked() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    assert_eq!(s.connect("mode=watch", None).await.err(), Some(401));
+    assert_eq!(
+        s.connect("mode=watch", Some("wrong")).await.err(),
+        Some(401)
+    );
+    assert_eq!(s.connect("mode=look", Some(TOKEN)).await.err(), Some(400));
+
+    let reply = s
+        .app
+        .owner("GET", &format!("/v1/bots/{}/computer", s.bot), None)
+        .await;
+    assert_eq!(reply.body["desktop_available"], true, "{:?}", reply.body);
+
+    let bot_id: Uuid = s.bot.parse().unwrap();
+    s.manager.owner_stop(bot_id).await.unwrap();
+    s.manager.owner_resume(bot_id).await.unwrap();
+    let calls = s.runtime.calls.lock().unwrap().len();
+    let mut socket = s.open("mode=watch").await;
+    ends_with(&mut socket, "computer_not_running").await;
+    assert_eq!(s.runtime.calls.lock().unwrap().len(), calls, "nothing woke");
+
+    // An owner stop is never undone by connecting, even with wake.
+    s.manager.owner_stop(bot_id).await.unwrap();
+    let calls = s.runtime.calls.lock().unwrap().len();
+    let mut socket = s.open("mode=watch&wake=true").await;
+    ends_with(&mut socket, "computer_stopped").await;
+    assert_eq!(s.runtime.calls.lock().unwrap().len(), calls, "nothing woke");
+
+    s.manager.owner_resume(bot_id).await.unwrap();
+    let mut socket = s.open("mode=watch&wake=true").await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"size","width":64,"height":48})
+    );
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+    assert!(
+        s.runtime
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("Running")),
+        "an explicit wake starts the computer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_sends_frames_and_no_input_reaches_the_desktop() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=watch").await;
+    assert_eq!(next_json(&mut socket).await["type"], "size");
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+    let png = next_frame(&mut socket).await;
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "a PNG frame");
+    send(
+        &mut socket,
+        json!({"type":"pointer","x":5,"y":6,"buttons":1}),
+    )
+    .await;
+    send(&mut socket, json!({"type":"key","key":0x61,"down":true})).await;
+    send(&mut socket, json!({"type":"release"})).await;
+    // A second frame proves the session processed those messages.
+    next_frame(&mut socket).await;
+    next_frame(&mut socket).await;
+    assert!(s.log.input("watch").is_empty(), "{:?}", s.log.lines());
+    assert!(
+        !s.log.lines().iter().any(|l| l.starts_with("control")),
+        "watching never connects to the controlling server: {:?}",
+        s.log.lines()
+    );
+    assert_eq!(s.live_viewer_leases().await, 1);
+    drop(socket);
+    s.wait_log("watch closed").await;
+    for _ in 0..100 {
+        if s.live_viewer_leases().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        s.live_viewer_leases().await,
+        0,
+        "the lease ends with the stream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_sends_input_releases_it_and_excludes_other_controllers() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=watch").await;
+    next_json(&mut socket).await;
+    next_json(&mut socket).await;
+    send(&mut socket, json!({"type":"mode","mode":"control"})).await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    s.wait_log("control open").await;
+    assert_eq!(
+        s.leases("desktop-control:%").await,
+        1,
+        "bot input batches and browser actions defer to this lease"
+    );
+
+    let mut other = s.open("mode=control").await;
+    next_json(&mut other).await;
+    assert_eq!(next_json(&mut other).await["code"], "control_in_use");
+    assert_eq!(
+        next_json(&mut other).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+
+    send(
+        &mut socket,
+        json!({"type":"pointer","x":500,"y":7,"buttons":1}),
+    )
+    .await;
+    send(&mut socket, json!({"type":"key","key":0x61,"down":true})).await;
+    send(&mut socket, json!({"type":"release"})).await;
+    s.wait_log("control key 97 0").await;
+    assert_eq!(
+        s.log.input("control"),
+        [
+            "control pointer 1 63 7",
+            "control key 97 1",
+            "control key 97 0",
+            "control pointer 0 63 7"
+        ],
+        "input clamped to the screen, then released"
+    );
+
+    send(&mut socket, json!({"type":"key","key":0xffe3,"down":true})).await;
+    send(&mut socket, json!({"type":"mode","mode":"watch"})).await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+    let lines = s.log.lines();
+    let closed = lines.iter().position(|l| l == "control closed");
+    let released = lines.iter().position(|l| l == "control key 65507 0");
+    assert!(
+        released.is_some() && closed.is_some() && released < closed,
+        "leaving control releases held keys, then closes before the ack: {lines:?}"
+    );
+    send(&mut socket, json!({"type":"key","key":0x62,"down":true})).await;
+    assert_eq!(
+        s.leases("desktop-control:%").await,
+        0,
+        "control handed back"
+    );
+
+    // Control is free again: the other stream takes it; its disconnect
+    // releases what it held.
+    send(&mut other, json!({"type":"mode","mode":"control"})).await;
+    assert_eq!(
+        next_json(&mut other).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    send(
+        &mut other,
+        json!({"type":"pointer","x":1,"y":2,"buttons":4}),
+    )
+    .await;
+    send(&mut other, json!({"type":"key","key":0x63,"down":true})).await;
+    s.wait_log("control key 99 1").await;
+    drop(other);
+    s.wait_log("control key 99 0").await;
+    s.wait_log("control pointer 0 1 2").await;
+    assert!(
+        !s.log.lines().iter().any(|l| l.contains("key 98")),
+        "input after leaving control is dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_renew_their_lease_and_end_on_owner_stop_or_delete() {
+    let s = setup(false, Duration::from_secs(3)).await;
+    let mut socket = s.open("mode=control").await;
+    next_json(&mut socket).await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(s.live_viewer_leases().await, 1, "renewed past its TTL");
+
+    send(&mut socket, json!({"type":"key","key":0x61,"down":true})).await;
+    s.wait_log("control key 97 1").await;
+    let stopped = s
+        .app
+        .owner("POST", &format!("/v1/bots/{}/computer/stop", s.bot), None)
+        .await;
+    assert_eq!(stopped.status, axum::http::StatusCode::NO_CONTENT);
+    ends_with(&mut socket, "computer_stopped").await;
+    s.wait_log("control key 97 0").await;
+
+    s.app
+        .owner("POST", &format!("/v1/bots/{}/computer/resume", s.bot), None)
+        .await;
+    let mut socket = s.open("mode=watch&wake=true").await;
+    next_json(&mut socket).await;
+    next_json(&mut socket).await;
+    s.app
+        .owner("DELETE", &format!("/v1/bots/{}", s.bot), None)
+        .await;
+    ends_with(&mut socket, "bot_deleted").await;
+    assert_eq!(s.live_viewer_leases().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_image_can_be_taken_over_but_not_watched() {
+    let s = setup(true, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=watch").await;
+    ends_with(&mut socket, "desktop_watch_unsupported").await;
+    s.wait_log("control closed").await;
+
+    let mut socket = s.open("mode=control").await;
+    assert_eq!(next_json(&mut socket).await["type"], "size");
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    assert!(next_frame(&mut socket).await.starts_with(b"\x89PNG"));
+    send(&mut socket, json!({"type":"mode","mode":"watch"})).await;
+    assert_eq!(
+        next_json(&mut socket).await["code"],
+        "desktop_watch_unsupported"
+    );
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+}

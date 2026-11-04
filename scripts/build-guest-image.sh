@@ -5,7 +5,7 @@
 # built is exported by ID, so concurrent builds never trade a shared tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-TAG="${ELSE_GUEST_TAG:-else-guest:2}"
+TAG="${ELSE_GUEST_TAG:-else-guest:3}"
 DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.else}}"
 MSB="${ELSE_MSB_BIN:-$(command -v msb || echo "$HOME/.microsandbox/bin/msb")}"
 work="$(mktemp -d)"
