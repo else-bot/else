@@ -727,7 +727,14 @@ pub fn apply_retention_protecting(
 /// An exclusive, non-blocking lock on `<dir>/.lock`, released when dropped
 /// or when the process dies (so neither a crash nor a cancelled future can
 /// leave it held). `None` when another holder has it.
-pub struct DirLock(#[allow(dead_code)] File);
+pub struct DirLock(File);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        // Process-spawn copies must not keep a completed backup locked.
+        let _ = self.0.unlock();
+    }
+}
 
 pub fn try_lock(dir: &Path) -> Result<Option<DirLock>, BackupError> {
     use std::os::fd::AsRawFd;
@@ -791,6 +798,16 @@ impl DatabaseParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_lock_release_does_not_wait_for_duplicated_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = try_lock(dir.path()).unwrap().unwrap();
+        let _inherited = guard.0.try_clone().unwrap();
+        assert!(try_lock(dir.path()).unwrap().is_none());
+        drop(guard);
+        assert!(try_lock(dir.path()).unwrap().is_some());
+    }
 
     fn key(byte: u8) -> SecretKey {
         use base64::Engine;
