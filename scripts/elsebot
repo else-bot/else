@@ -35,8 +35,6 @@ ELSEBOT_APP=""
 [ -f "$CONFIG/elsebot.env" ] && . "$CONFIG/elsebot.env"
 
 die() { echo "elsebot: $1" >&2; exit 1; }
-# A dotenv value as the API reads it (quotes and escapes, no substitution);
-# install.sh has the same reader.
 dotenv_value() {
 	local in="$1" out="" quote="" c i
 	for ((i = 0; i < ${#in}; i++)); do

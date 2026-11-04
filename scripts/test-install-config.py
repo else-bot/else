@@ -615,7 +615,6 @@ class DesktopCommandTests(unittest.TestCase):
         self.assertEqual(record, f"desktop pwd=/ home={self.home.resolve()} url=none data=none args=--flag")
 
 
-# write_config, config_set, and env_value as the installer runs them.
 CONFIG_HARNESS = DEFINITIONS + r'''
 API_PORT=7878
 step() { :; }
@@ -631,8 +630,6 @@ TRICKY = "custom install it's \"x\" $HOME \\ #1"
 
 
 class DotenvConfigTests(unittest.TestCase):
-    """Settings under an installation root with spaces, quotes, and other dotenv syntax."""
-
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

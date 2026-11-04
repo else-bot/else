@@ -684,9 +684,6 @@ publish_app() {
 
 # --- Configuration and services ---------------------------------------------
 
-# A value written so the API's dotenv reads it back verbatim: as is when it
-# holds nothing dotenv treats specially, otherwise double-quoted with \, "
-# and $ escaped (dotenv splits lines on a backslash even in single quotes).
 dotenv_quote() {
 	local v="$1"
 	case "$v" in
@@ -700,8 +697,6 @@ dotenv_quote() {
 	*) printf '%s' "$v" ;;
 	esac
 }
-# A dotenv value as the API reads it (quotes and escapes, no substitution);
-# scripts/elsebot has the same reader.
 dotenv_value() {
 	local in="$1" out="" quote="" c i
 	for ((i = 0; i < ${#in}; i++)); do
