@@ -1,4 +1,7 @@
 mod motion;
+mod picker;
+
+pub use picker::AvatarPicker;
 
 use std::cell::Cell;
 use std::f32::consts::{PI, TAU};

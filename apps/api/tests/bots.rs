@@ -55,6 +55,127 @@ async fn create_retry_and_conflict() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn avatar_is_saved_with_creation_and_kept_on_retry() {
+    let app = TestApp::installed().await;
+    let category = app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Work" })),
+        )
+        .await
+        .body["category"]["id"]
+        .clone();
+    let request_id = Uuid::new_v4();
+    let avatar = json!({ "shape": "cloud", "color": "pink" });
+    let payload = json!({
+        "request_id": request_id,
+        "name": "Research",
+        "category_id": category,
+        "avatar": avatar,
+    });
+    let created = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(created.body["bot"]["avatar"], avatar);
+    assert_eq!(created.body["bot"]["category_id"], category);
+    let id = created.body["bot"]["id"].as_str().unwrap();
+    let path = format!("/v1/bots/{id}");
+    let (shown, listing) = tokio::join!(
+        app.owner("GET", &path, None),
+        app.owner("GET", "/v1/bots", None),
+    );
+    assert_eq!(shown.body["bot"]["avatar"], avatar);
+    assert_eq!(listed(&listing, id)["avatar"], avatar);
+    assert!(updated_events(&app, id).await.is_empty());
+
+    let retry = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body, created.body);
+    let before = row_counts(&app).await;
+    for replacement in [
+        Some(json!({ "shape": "gem", "color": "pink" })),
+        Some(json!({ "shape": "cloud", "color": "teal" })),
+        None,
+    ] {
+        let mut changed = payload.clone();
+        match replacement {
+            Some(avatar) => changed["avatar"] = avatar,
+            None => {
+                changed.as_object_mut().unwrap().remove("avatar");
+            }
+        }
+        let conflict = app.owner("POST", "/v1/bots", Some(changed)).await;
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.body["error"]["code"], "request_conflict");
+    }
+    assert_eq!(row_counts(&app).await, before);
+
+    let later = json!({ "shape": "gem", "color": "teal" });
+    update(&app, id, json!({ "avatar": later })).await;
+    let retry = app.owner("POST", "/v1/bots", Some(payload)).await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body["bot"]["avatar"], later);
+    let id = id.to_owned();
+    let app = app.restart().await;
+    let listing = app.owner("GET", "/v1/bots", None).await;
+    assert_eq!(listed(&listing, &id)["avatar"], later);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn creation_without_avatar_replays_legacy_receipts() {
+    let app = TestApp::installed().await;
+    let request_id = Uuid::new_v4();
+    let created = create(&app, request_id, "Work").await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let legacy_hash: &[u8] = &[
+        179, 184, 144, 166, 100, 102, 252, 163, 106, 38, 150, 227, 229, 119, 21, 82, 157, 228, 90,
+        56, 165, 15, 56, 135, 41, 43, 232, 115, 5, 209, 129, 198,
+    ];
+    sqlx::query("UPDATE request_receipts SET payload_hash = ?2 WHERE request_id = ?1")
+        .bind(request_id)
+        .bind(legacy_hash)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let retry = create(&app, request_id, "Work").await;
+    assert_eq!(retry.status, StatusCode::OK);
+    assert_eq!(retry.body, created.body);
+    let null_avatar = app
+        .owner(
+            "POST",
+            "/v1/bots",
+            Some(json!({ "request_id": request_id, "name": "Work", "avatar": null })),
+        )
+        .await;
+    assert_eq!(null_avatar.status, StatusCode::OK);
+    assert_eq!(null_avatar.body, created.body);
+    assert_eq!(row_counts(&app).await, (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_avatar_on_create_leaves_no_bot() {
+    let app = TestApp::installed().await;
+    let before = row_counts(&app).await;
+    for avatar in [
+        json!({ "shape": "dragon", "color": "blue" }),
+        json!({ "shape": "star", "color": "#3b82f6" }),
+        json!({ "shape": "star" }),
+        json!({ "shape": "star", "color": "blue", "image_url": "x" }),
+        json!("star"),
+    ] {
+        let reply = app
+            .owner(
+                "POST",
+                "/v1/bots",
+                Some(json!({ "request_id": Uuid::new_v4(), "name": "Work", "avatar": avatar })),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{avatar}");
+    }
+    assert_eq!(row_counts(&app).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_retries_create_one_bot() {
     let app = Arc::new(TestApp::installed().await);
     let request = Uuid::new_v4();

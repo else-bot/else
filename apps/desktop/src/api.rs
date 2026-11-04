@@ -31,6 +31,8 @@ pub struct CreateBotRequest {
     pub name: String,
     pub profile: Option<ProfileChoice>,
     pub category_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<Avatar>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +103,8 @@ pub struct Capabilities {
     /// The welcome screen is still to be completed.
     #[serde(default)]
     pub onboarding_required: bool,
+    #[serde(default)]
+    pub bot_avatar_on_create: bool,
 }
 
 #[derive(Deserialize)]
@@ -706,6 +710,38 @@ pub(crate) mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn create_sends_avatar_only_when_supported() {
+        let capabilities: Capabilities = serde_json::from_value(json!({
+            "providers": [], "limits": { "max_text_bytes": 1024 }
+        }))
+        .unwrap();
+        assert!(!capabilities.bot_avatar_on_create);
+        for avatar in [None, Some(Avatar::default())] {
+            let (origin, server) = serve_once(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await;
+            let _ = client(origin)
+                .create_bot(CreateBotRequest {
+                    request_id: Uuid::new_v4(),
+                    name: "Research".into(),
+                    profile: None,
+                    category_id: None,
+                    avatar,
+                })
+                .await;
+            let request = server.await.unwrap();
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            if avatar.is_some() {
+                assert_eq!(body["avatar"], json!({ "shape": "star", "color": "blue" }));
+            } else {
+                assert!(body.get("avatar").is_none());
+            }
+        }
     }
 
     #[tokio::test]
