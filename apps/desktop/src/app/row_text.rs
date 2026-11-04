@@ -1,11 +1,14 @@
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
+use crate::attachments::{Attachment, MessagePart, file_size, input_content};
 use gpui_kit::base::text::TextView;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RowFormat {
@@ -16,6 +19,9 @@ pub(super) enum RowFormat {
 pub(super) struct RowText {
     source: String,
     widget: Widget,
+    files: HashMap<Uuid, Attachment>,
+    owner: WeakEntity<ElseApp>,
+    bot: Uuid,
 }
 
 enum Widget {
@@ -31,15 +37,18 @@ impl RowText {
         key: RowKey,
         source: String,
         format: RowFormat,
+        parts: Vec<MessagePart>,
+        bot: Uuid,
         window: &mut Window,
         cx: &mut Context<ElseApp>,
     ) -> Self {
         let widget = match format {
             RowFormat::Plain => Widget::Plain(cx.new(|cx| {
-                TextareaState::new(window, cx)
+                let mut state = TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
-                    .default_value(source.clone())
-                    .context_menu(!matches!(key, RowKey::Item(_)))
+                    .context_menu(!matches!(key, RowKey::Item(_)));
+                state.set_value(input_content(&source, &parts), window, cx);
+                state
             })),
             RowFormat::Markdown => {
                 let state = cx.new(|cx| TextViewState::markdown(&source, cx));
@@ -65,7 +74,20 @@ impl RowText {
                 Widget::Markdown { state, _observe }
             }
         };
-        Self { source, widget }
+        let files = parts
+            .into_iter()
+            .filter_map(|p| match p {
+                MessagePart::File { file } => Some((file.id, file)),
+                _ => None,
+            })
+            .collect();
+        Self {
+            source,
+            widget,
+            files,
+            owner: cx.entity().downgrade(),
+            bot,
+        }
     }
 
     pub(super) fn format(&self) -> RowFormat {
@@ -99,28 +121,74 @@ impl RowText {
         }
     }
 
-    pub(super) fn sync(&mut self, source: String, window: &mut Window, cx: &mut App) -> bool {
-        if self.source == source {
+    pub(super) fn sync(
+        &mut self,
+        source: String,
+        parts: Vec<MessagePart>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let files: HashMap<_, _> = parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::File { file } => Some((file.id, file.clone())),
+                _ => None,
+            })
+            .collect();
+        if self.source == source && self.files == files {
             return false;
         }
         match &self.widget {
-            Widget::Plain(state) => {
-                state.update(cx, |state, cx| state.set_value(source.clone(), window, cx))
-            }
+            Widget::Plain(state) => state.update(cx, |state, cx| {
+                state.set_value(input_content(&source, &parts), window, cx)
+            }),
             Widget::Markdown { state, .. } => {
                 state.update(cx, |state, cx| state.set_text(&source, cx))
             }
         }
         self.source = source;
+        self.files = files;
         true
     }
 
     pub(super) fn render(&self) -> AnyElement {
+        let files = self.files.clone();
+        let preview_files = files.clone();
+        let owner = self.owner.clone();
+        let bot = self.bot;
         match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
                 .readonly(true)
                 .appearance(false)
                 .bordered(false)
+                .token(move |token, _, cx| {
+                    match Uuid::parse_str(token.token().id())
+                        .ok()
+                        .and_then(|id| files.get(&id))
+                    {
+                        Some(file) => super::attachments::chip(
+                            token,
+                            file,
+                            None,
+                            file_size(file.size),
+                            None,
+                            cx,
+                        ),
+                        None => div()
+                            .child(token.token().label().clone())
+                            .into_any_element(),
+                    }
+                })
+                .on_token_click(move |event, window, cx| {
+                    if let Some(file) = Uuid::parse_str(event.token().id())
+                        .ok()
+                        .and_then(|id| preview_files.get(&id))
+                    {
+                        let _ = owner.update(cx, |app, cx| {
+                            app.preview_attachment(bot, file.clone(), window, cx)
+                        });
+                    }
+                })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
                 .w_full()

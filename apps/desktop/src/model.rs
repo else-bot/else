@@ -27,6 +27,8 @@ pub struct Item {
     pub request_id: Option<Uuid>,
     pub kind: String,
     pub text: String,
+    #[serde(default)]
+    pub parts: Vec<crate::attachments::MessagePart>,
     pub provider_id: Option<String>,
     /// Absent from older servers.
     #[serde(default)]

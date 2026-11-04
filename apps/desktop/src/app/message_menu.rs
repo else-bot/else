@@ -119,7 +119,14 @@ impl ElseApp {
             item_id: reference.item,
             kind,
         };
-        self.enqueue(bot, kind.message(&reference), Some(reaction), window, cx);
+        self.enqueue(
+            bot,
+            kind.message(&reference),
+            Vec::new(),
+            Some(reaction),
+            window,
+            cx,
+        );
     }
 
     fn copy_message(&mut self, bot: Uuid, item: Uuid, _: &mut Window, cx: &mut Context<Self>) {

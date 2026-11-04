@@ -1,4 +1,7 @@
+use super::attachments::DraftFile;
 use crate::model::ReactionKind;
+use gpui_kit::component::input::InputContent;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,24 +51,35 @@ impl MessageReference {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct Draft {
-    pub(super) text: String,
+    pub(super) content: InputContent,
+    pub(super) files: HashMap<Uuid, DraftFile>,
     pub(super) reply_to: Option<MessageReference>,
+}
+
+impl Default for Draft {
+    fn default() -> Self {
+        Self {
+            content: InputContent::new(""),
+            files: HashMap::new(),
+            reply_to: None,
+        }
+    }
 }
 
 impl Draft {
     pub(super) fn message(&self) -> Option<String> {
-        if self.text.trim().is_empty() {
+        if self.content.text().trim().is_empty() {
             return None;
         }
         Some(match &self.reply_to {
-            None => self.text.clone(),
+            None => self.content.text().to_string(),
             Some(reference) => format!(
                 "Replying to {}:\n{}\n\n{}",
                 reference.subject(),
                 reference.quote(),
-                self.text
+                self.content.text()
             ),
         })
     }
@@ -123,7 +137,8 @@ mod tests {
 
     fn draft(text: &str, reply_to: Option<MessageReference>) -> Draft {
         Draft {
-            text: text.to_owned(),
+            content: InputContent::new(text.to_owned()),
+            files: HashMap::new(),
             reply_to,
         }
     }

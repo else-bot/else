@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+mod attachments;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 use serde_json::json;
@@ -348,6 +349,7 @@ impl Client {
     pub(crate) fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.origin.as_str()))
+            .timeout(Duration::from_secs(15))
             .header(AUTHORIZATION, self.auth.clone())
     }
 
@@ -355,20 +357,16 @@ impl Client {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<(StatusCode, T), ClientError> {
-        let response = request
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_connect() || err.is_timeout() || err.is_request() {
-                    ClientError::Unreachable {
-                        origin: self.origin.as_str().to_owned(),
-                        cause: root_cause(&err),
-                    }
-                } else {
-                    ClientError::Protocol(err.without_url().to_string())
+        let response = request.send().await.map_err(|err| {
+            if err.is_connect() || err.is_timeout() || err.is_request() {
+                ClientError::Unreachable {
+                    origin: self.origin.as_str().to_owned(),
+                    cause: root_cause(&err),
                 }
-            })?;
+            } else {
+                ClientError::Protocol(err.without_url().to_string())
+            }
+        })?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientError::Unauthorized);
@@ -443,11 +441,15 @@ impl Client {
         text: String,
         provider_id: Option<String>,
         reaction: Option<Reaction>,
+        parts: Vec<crate::attachments::MessagePart>,
     ) -> Result<Sent, ClientError> {
         let mut body =
             json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
         if let Some(reaction) = reaction {
             body["reaction"] = json!(reaction);
+        }
+        if !parts.is_empty() {
+            body["parts"] = json!(parts);
         }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await

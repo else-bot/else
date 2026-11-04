@@ -528,11 +528,35 @@ impl ElseApp {
                     .child(notice.clone()),
             );
         }
+        let owner = cx.entity().downgrade();
+        let preview_owner = owner.clone();
+        let files = self
+            .drafts
+            .get(&bot.id)
+            .map(|d| d.files.clone())
+            .unwrap_or_default();
+        let preview_files = files.clone();
+        let bot_id = bot.id;
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let can_send = self.connection == Connection::Connected
-            && !self.composer.read(cx).value().trim().is_empty();
+            && !self.composer.read(cx).value().trim().is_empty()
+            && self.composer.read(cx).tokens().iter().all(|span| {
+                Uuid::parse_str(span.token().id())
+                    .ok()
+                    .and_then(|id| files.get(&id))
+                    .is_some_and(|file| {
+                        matches!(file.state, super::attachments::UploadState::Ready)
+                    })
+            });
         let mut frame = v_flex()
             .key_context(COMPOSER_CONTEXT)
+            .capture_action(
+                cx.listener(|app, _: &gpui_kit::base::input::Paste, window, cx| {
+                    if app.paste_clipboard(window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .w_full()
             .gap_1()
             .px_2()
@@ -553,6 +577,19 @@ impl ElseApp {
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
+                    .token(move |token, _, cx| {
+                        super::attachments::draft_chip(token, &files, owner.clone(), cx)
+                    })
+                    .on_token_click(move |event, window, cx| {
+                        if let Some(file) = Uuid::parse_str(event.token().id())
+                            .ok()
+                            .and_then(|id| preview_files.get(&id))
+                        {
+                            let _ = preview_owner.update(cx, |app, cx| {
+                                app.preview_attachment(bot_id, file.file.clone(), window, cx)
+                            });
+                        }
+                    })
                     .aria_label(format!("Message {}", bot.name)),
             )
             .child(
