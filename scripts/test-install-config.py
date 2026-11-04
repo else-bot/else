@@ -455,7 +455,7 @@ class MacAppTests(unittest.TestCase):
         self.assertEqual(info["CFBundleShortVersionString"], "0.0.5")
         self.assertNotIn("LSEnvironment", info)
         self.assertEqual(json.loads((parts / "Resources/installation.json").read_text()),
-                         {"home": str(self.else_home)})
+                         {"home": str(self.else_home.resolve())})
         self.assertFalse(self.executable().is_symlink())
         self.assertIn("0.0.5", self.executable().read_text())
         self.assertIn(f"ELSEBOT_APP={self.app}\n", (self.else_home / "config/elsebot.env").read_text())
@@ -541,7 +541,7 @@ class MacAppTests(unittest.TestCase):
         self.install("0.0.5", else_home=default)
         app = self.home / "Applications/else.bot.app"
         self.assertEqual(json.loads((app / "Contents/Resources/installation.json").read_text()),
-                         {"home": str(default)})
+                         {"home": str(default.resolve())})
 
     def test_an_update_through_a_home_alias_refreshes_the_same_public_app(self):
         default = self.home / ".else"
@@ -612,7 +612,7 @@ class DesktopCommandTests(unittest.TestCase):
     def test_linux_runs_the_binary_with_only_this_installation(self):
         result, record = self.desktop("Linux", "--flag")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(record, f"desktop pwd=/ home={self.home} url=none data=none args=--flag")
+        self.assertEqual(record, f"desktop pwd=/ home={self.home.resolve()} url=none data=none args=--flag")
 
 
 if __name__ == "__main__":
