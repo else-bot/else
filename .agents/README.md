@@ -11,7 +11,7 @@ relative symlinks to the pinned runtime sources in `plugins/`.
 `sources.json` records the upstream revision, retained file hashes, and excluded
 development paths. Test suites, fixtures, saved test output, and compiler-only
 files are omitted. Package manifests and the watcher lockfile contain only runtime
-dependencies. Marketplace metadata remains as provenance, not active instructions.
+dependencies. Licenses and source attribution are retained.
 
 Edit [rules/pstack-models.md](rules/pstack-models.md) to change the five model
 presets or their role assignments. Sol uses xhigh reasoning and fast service.

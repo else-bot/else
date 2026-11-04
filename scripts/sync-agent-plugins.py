@@ -148,10 +148,6 @@ def adapt(relative, text):
         text = text.replace("`/loop` is Cursor's built-in wake mechanism, not a pstack skill.",
             "Continuation depends on the runtime's supported event or scheduling tools.")
         text = text.replace("restart Cursor", "restart the agent runtime")
-        text = replace_paragraph(text, "pstack ships this as a dormant [automation pack]",
-            "Hosted automation packs are not activated by this local installation. "
-            "Use only an integration exposed by the current runtime, and configure "
-            "recurring or external actions only when the user requests them.")
         text = text.replace("- Drag related chats into the Project, finished ones included. They become context for every agent in it.",
             "- Put the relevant prior reports and artifact paths in each agent's brief.")
     if path == "skills/poteto-mode/playbooks/autonomous-run.md":

@@ -4,8 +4,6 @@ One attempt at a hard design locks in the first shape the model thought of. `/ar
 
 The two most common design mistakes are taking the agent's first design and polishing a plan that no code has tested. This page fixes both. You plan through code. Prototypes answer the open questions, a README or tutorial sets the target, and the written plan comes last.
 
-![Three robots draft competing bridge models at their own tables under /architect, /arena, and /interrogate panels, while a judge robot with a clipboard inspects skeptically.](./images/design.jpg)
-
 ## Settle the shape with `/architect`
 
 ```text
