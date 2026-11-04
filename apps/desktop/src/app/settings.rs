@@ -3,7 +3,7 @@ use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
 
 use crate::api::{Bot, BotProfile, ProfileChoice};
-use crate::avatar::{Avatar, AvatarColor, AvatarShape, bot_avatar};
+use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
 use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
@@ -920,7 +920,11 @@ impl ElseApp {
                             .map(|s| s.details.sync.desired.avatar)
                     })
                     .unwrap_or_default();
-                avatar_picker(app.clone(), bot, current, cx)
+                let app = app.clone();
+                AvatarPicker::new(current, move |avatar, _, cx| {
+                    let _ = app.update(cx, |app, cx| app.pick_avatar(bot, avatar, cx));
+                })
+                .into_any_element()
             })
             .into_any_element()
     }
@@ -1398,120 +1402,6 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
         problem: None,
         picking: false,
     }
-}
-
-fn avatar_picker(app: WeakEntity<ElseApp>, bot: Uuid, current: Avatar, cx: &App) -> AnyElement {
-    let theme = cx.theme().clone();
-    let pick = move |avatar: Avatar| {
-        let app = app.clone();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            let _ = app.update(cx, |app, cx| app.pick_avatar(bot, avatar, cx));
-        }
-    };
-    let shapes = AvatarShape::ALL.map(|shape| {
-        let picked = current.shape == shape;
-        let avatar = Avatar { shape, ..current };
-        Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
-            .cursor_pointer()
-            .ghost()
-            .w(px(44.))
-            .h(px(44.))
-            .p_0()
-            .rounded(px(12.))
-            .toggled(picked)
-            .accessibility_label(format!("{} shape", shape.label()))
-            .child(ring(
-                px(44.),
-                px(12.),
-                picked,
-                cx,
-                bot_avatar(
-                    ElementId::Name(format!("avatar-shape-art-{shape:?}").into()),
-                    avatar,
-                    px(32.),
-                )
-                .still(),
-            ))
-            .on_click(pick(avatar))
-    });
-    let colors = AvatarColor::ALL.map(|color| {
-        let picked = current.color == color;
-        let avatar = Avatar { color, ..current };
-        let swatch = div()
-            .size(px(20.))
-            .rounded_full()
-            .p(px(1.))
-            .bg(theme.border)
-            .child(div().size_full().rounded_full().bg(color.fill()));
-        Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
-            .cursor_pointer()
-            .ghost()
-            .w(px(30.))
-            .h(px(30.))
-            .p_0()
-            .rounded_full()
-            .toggled(picked)
-            .accessibility_label(format!("{} color", color.label()))
-            .child(ring(px(30.), px(15.), picked, cx, swatch))
-            .on_click(pick(avatar))
-    });
-    let header = h_flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .child("AVATAR"),
-        )
-        .child(
-            Button::new("reset-avatar")
-                .cursor_pointer()
-                .label("Reset")
-                .xsmall()
-                .ghost()
-                .disabled(current == Avatar::default())
-                .on_click(pick(Avatar::default())),
-        );
-    v_flex()
-        .w(px(288.))
-        .gap_3()
-        .child(header)
-        .child(
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .justify_center()
-                .children(shapes),
-        )
-        .child(
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .justify_center()
-                .children(colors),
-        )
-        .into_any_element()
-}
-
-fn ring(size: Pixels, radius: Pixels, picked: bool, cx: &App, content: impl IntoElement) -> Div {
-    let theme = cx.theme();
-    let (ring, gap) = if picked {
-        (theme.ring, theme.popover)
-    } else {
-        (transparent_black(), transparent_black())
-    };
-    let layer = |size: Pixels, radius: Pixels, fill: Hsla| {
-        div()
-            .size(size)
-            .rounded(radius)
-            .bg(fill)
-            .flex()
-            .items_center()
-            .justify_center()
-    };
-    layer(size, radius, ring).child(layer(size - px(4.), radius - px(2.), gap).child(content))
 }
 
 fn section(title: &'static str, cx: &App) -> Div {

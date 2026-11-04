@@ -123,6 +123,7 @@ pub struct NewBot<'a> {
     pub name: &'a BotName,
     pub profile: Option<(&'a str, &'a Profile)>,
     pub category_id: Option<Uuid>,
+    pub avatar: Option<Avatar>,
 }
 
 fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
@@ -134,6 +135,10 @@ fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
         hasher.update(
             serde_json::to_vec(&(bot.profile, bot.category_id)).expect("serializable options"),
         );
+    }
+    if let Some(avatar) = bot.avatar {
+        hasher.update(b"\0avatar\0");
+        hasher.update(serde_json::to_vec(&avatar).expect("serializable avatar"));
     }
     hasher.finalize().to_vec()
 }
@@ -165,6 +170,7 @@ pub async fn create_for_turn(
         name,
         profile: None,
         category_id: None,
+        avatar: None,
     };
     create_as(pool, request_id, bot, Some(turn_id)).await
 }
@@ -224,7 +230,13 @@ async fn create_as(
             return Err(BotError::CategoryNotFound);
         }
     }
-    insert_bot(&mut tx, bot_id, bot.name, Avatar::derived(bot_id)).await?;
+    insert_bot(
+        &mut tx,
+        bot_id,
+        bot.name,
+        bot.avatar.unwrap_or_else(|| Avatar::derived(bot_id)),
+    )
+    .await?;
     if let Some((provider, profile)) = bot.profile {
         super::bot_profiles::put_in(&mut tx, bot_id, provider, profile)
             .await

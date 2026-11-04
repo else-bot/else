@@ -7,6 +7,7 @@
 mod bot_menu;
 mod categories;
 mod conversation;
+mod create_bot;
 mod dialogs;
 mod layout;
 mod link_target;
@@ -22,7 +23,8 @@ mod view;
 
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
-use dialogs::{CreateFormHolder, Welcome};
+use create_bot::CreateFormHolder;
+use dialogs::Welcome;
 use reply::Draft;
 use settings::{BotSettings, ModelDialog};
 

@@ -168,7 +168,8 @@ async fn creation_is_atomic_and_retries_never_overwrite_later_choices() {
     let request_id = Uuid::new_v4();
     let payload = json!({
         "request_id": request_id, "name": "Created",
-        "profile": choice("high", "priority"), "category_id": category
+        "profile": choice("high", "priority"), "category_id": category,
+        "avatar": { "shape": "cloud", "color": "pink" }
     });
     // A failure after inserting the bot must roll back its receipt, profile,
     // category, conversation, and notification along with it.
@@ -201,6 +202,7 @@ async fn creation_is_atomic_and_retries_never_overwrite_later_choices() {
     let created = app.owner("POST", "/v1/bots", Some(payload.clone())).await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     assert_eq!(created.body["bot"]["category_id"], category);
+    assert_eq!(created.body["bot"]["avatar"], payload["avatar"]);
     let bot = created.body["bot"]["id"].as_str().unwrap();
     let path = format!("/v1/bots/{bot}/profile");
     assert_eq!(
