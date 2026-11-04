@@ -17,6 +17,17 @@ pub enum LockError {
 pub struct RuntimeLock {
     _files: Vec<File>,
 }
+
+impl Drop for RuntimeLock {
+    fn drop(&mut self) {
+        // A concurrent process spawn may briefly inherit these descriptors.
+        // Unlock explicitly so their copies cannot delay a normal handoff.
+        for file in &self._files {
+            let _ = file.unlock();
+        }
+    }
+}
+
 fn lock(path: &Path, in_use: LockError) -> Result<File, LockError> {
     let file = OpenOptions::new()
         .create(true)
@@ -54,4 +65,21 @@ pub async fn acquire(data_dir: &Path, pool: &SqlitePool) -> Result<RuntimeLock, 
         files.push(lock(&db_lock, LockError::DatabaseInUse)?);
     }
     Ok(RuntimeLock { _files: files })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_the_guard_releases_locks_even_with_duplicated_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.lock");
+        let guard = RuntimeLock {
+            _files: vec![lock(&path, LockError::DatabaseInUse).unwrap()],
+        };
+        let _inherited = guard._files[0].try_clone().unwrap();
+        drop(guard);
+        lock(&path, LockError::DatabaseInUse).unwrap();
+    }
 }
