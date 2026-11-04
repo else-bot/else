@@ -1200,7 +1200,7 @@ impl ComputerManager {
                 let idle: bool = sqlx::query_scalar(
                     "SELECT NOT EXISTS (SELECT 1 FROM computer_leases
                                         WHERE bot_id = ?1 AND released_at IS NULL)
-                        AND coalesce(last_used_at, updated_at) < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
+                        AND coalesce(last_used_at, updated_at) <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
                      FROM bot_computers WHERE bot_id = ?1",
                 )
                 .bind(bot_id)
@@ -1353,7 +1353,7 @@ impl ComputerManager {
         let idle: Vec<Uuid> = sqlx::query_scalar(
             "SELECT c.bot_id FROM bot_computers c
              WHERE c.observed_state IN (SELECT value FROM json_each(?1))
-               AND coalesce(c.last_used_at, c.updated_at) < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
+               AND coalesce(c.last_used_at, c.updated_at) <= strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', -?2))
                AND NOT EXISTS (SELECT 1 FROM computer_leases l
                                WHERE l.bot_id = c.bot_id AND l.released_at IS NULL)",
         )
