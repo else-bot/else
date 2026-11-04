@@ -154,9 +154,8 @@ impl Tracker {
                     let id = block["tool_use_id"].as_str().unwrap_or_default();
                     let prefix = format!("mcp__{}__", crate::app::tools::SERVER_NAME);
                     let parks = self.tools_by_id.get(id).is_some_and(|name| {
-                        name.strip_prefix(&prefix).is_some_and(|t| {
-                            crate::app::tools::parks(t, &block["content"].to_string())
-                        })
+                        name.strip_prefix(&prefix)
+                            .is_some_and(|t| crate::app::tools::parks(t, &block["content"]))
                     });
                     if parks {
                         steps.push(Step::Parked);

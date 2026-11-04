@@ -665,7 +665,7 @@ impl Codex {
                     if params["item"]["type"] == "mcpToolCall"
                         && park_at.is_none()
                         && params["item"]["tool"].as_str().is_some_and(|t| {
-                            crate::app::tools::parks(t, &params["item"]["result"].to_string())
+                            crate::app::tools::parks(t, &params["item"]["result"])
                         }) =>
                 {
                     park_at = Some(tokio::time::Instant::now() + PARK_GRACE);
