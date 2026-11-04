@@ -122,9 +122,9 @@ omabox wait -b BOX window else-bot
 ```
 
 Replace `/absolute/checkout` with this checkout's absolute path. The desktop
-opens on its connection editor, seeded with the session's address and token,
-and keeps its profile in the session's evidence directory: press Check
-connection, then Continue. The session
+opens on its welcome screen with the session's address and key loaded.
+Choose **Connect locally** to verify and save the connection in the session's
+evidence directory. The session
 helper creates a fresh usable installation and completes onboarding through
 `POST /v1/onboarding`. It saves a supported Codex profile but starts no Codex
 turn. `--probe` defaults to a read-only bot listing; `--path`, `--method`, and

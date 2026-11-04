@@ -33,9 +33,9 @@ which macOS can write outside the private HOME. It never installs the app or
 a service.
 
 Select that exact app bundle when manually operating the host session.
-Check connection, then Continue. With `--welcome`, complete onboarding through
+Choose **Connect locally**. With `--welcome`, complete onboarding through
 the actual screen. Without it, the helper seeds onboarding as a fixture.
-The generated server address and token are already filled in.
+The generated server address and key are already loaded in the local card.
 
 `--fixture-provider` supplies [fake-codex.py](fake-codex.py) through the real
 Codex adapter. Its private auth file contains only `{}`. No provider account
