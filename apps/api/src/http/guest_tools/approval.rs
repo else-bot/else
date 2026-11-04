@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error, tool_result};
+use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
 use crate::db::owner_questions::Kind;
 
 /// Bytes of a `purpose` argument (an approval card's title).
@@ -166,30 +166,19 @@ async fn approve(
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Run { standing: true }) => Ok(Some("standing destructive permission")),
         Ok(Gate::Run { standing: false }) => Ok(Some("approved by the owner")),
-        Ok(Gate::Pending(question)) => {
-            // This attempt must now end; the API refuses its further calls.
-            state.scheduler.grants().park(grant.turn_id).await;
-            let log = format!(
-                "awaiting approval {} for {} {}",
-                question.id,
-                kind.as_str(),
-                slice(question.context.as_deref().unwrap_or_default(), 0, 200).1
-            );
-            let result = json!({
-                "status": "pending",
-                "parked": true,
-                "question_id": question.id,
-                "kind": question.kind,
-                "next": format!(
-                    "Nothing was done. The owner sees an approval card for exactly this call. \
-                     Tell them briefly what it will do and why, then end this attempt now; do \
-                     not wait, poll, or call more tools. If they approve, you continue \
-                     automatically: call {name} again with exactly the same arguments, once. \
-                     If they decline, do not do it or an equivalent."
-                ),
-            });
-            Err((tool_result(result), Some(log)))
-        }
+        Ok(Gate::Pending(question)) => Err(crate::http::owner_tools::pending_approval(
+            state,
+            grant,
+            &question,
+            &format!(
+                "Nothing was done. The owner sees an approval card for exactly this call. \
+                 Tell them briefly what it will do and why, then end this attempt now; do \
+                 not wait, poll, or call more tools. If they approve, you continue \
+                 automatically: call {name} again with exactly the same arguments, once. \
+                 If they decline, do not do it or an equivalent."
+            ),
+        )
+        .await),
         Ok(Gate::Denied(question)) => Err((
             tool_error(&format!(
                 "DENIED: the owner declined this {} action for this request. Nothing was done. \

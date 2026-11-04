@@ -499,20 +499,7 @@ pub async fn create(
         {
             return Err(RequestError::Conflict);
         }
-        let consumed_host_approval = found.approved()
-            && found
-                .action
-                .as_ref()
-                .is_some_and(|a| a.get("host").is_some())
-            && sqlx::query_scalar::<_, bool>(
-                "SELECT consumed_attempt IS NOT NULL FROM owner_questions WHERE id = ?1",
-            )
-            .bind(found.id)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !consumed_host_approval {
-            return Ok(found);
-        }
+        return Ok(found);
     }
     let question = insert(&mut tx, turn_id, &caller, spec).await?;
     tx.commit().await?;
@@ -546,11 +533,9 @@ pub enum Gate {
     Denied(QuestionInfo),
 }
 
-/// Decide a destructive or external computer tool call, atomically: a
+/// Decide a destructive or external action, atomically: a
 /// standing grant runs a destructive call; an approval for exactly these
 /// arguments is consumed by this one call; otherwise the owner is asked.
-/// A permission request from `ask_permission` is never consumed here: its
-/// hash binds a described host action, not a tool call.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
@@ -577,7 +562,6 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
                     tx.commit().await?;
                     return Ok(Gate::Run { standing: false });
                 }
-                // Already used once: the same action again needs its own approval.
             }
             Status::Answered => return Ok(Gate::Denied(found)),
             Status::Skipped | Status::Cancelled => {}
@@ -682,8 +666,7 @@ pub async fn answer(
     .bind(choice)
     .fetch_one(&mut *tx)
     .await?;
-    if choice == APPROVE_FOREVER {
-        // The choice exists only on destructive cards (approval_choices).
+    if question.kind == Kind::Destructive && choice == APPROVE_FOREVER {
         sqlx::query(
             "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
              ON CONFLICT (bot_id, scope) DO NOTHING",

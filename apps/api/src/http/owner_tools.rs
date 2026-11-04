@@ -210,73 +210,49 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
 }
 
 pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::db::owner_questions::{self, DESTRUCTIVE_SCOPE, Kind, Spec, Status};
+    use crate::db::owner_questions::{self, Gate, Spec};
     let spec = match Spec::permission(args) {
         Ok(spec) => spec,
         Err(message) => return (tool_error(&format!("INVALID_REQUEST: {message}")), None),
     };
-    if spec.kind == Kind::Destructive {
-        let standing = async {
-            let mut conn = state.db.acquire().await?;
-            owner_questions::has_permission(&mut conn, grant.bot_id, DESTRUCTIVE_SCOPE).await
+    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
+        Ok(Gate::Run { standing }) => (
+            tool_result(json!({ "status": "approved", "standing": standing,
+                "next": "Do exactly this host action now, once, then report what you did." })),
+            Some(format!("approved host action: {:?}", spec.context)),
+        ),
+        Ok(Gate::Pending(question)) => {
+            pending_approval(
+                state,
+                grant,
+                &question,
+                "Tell the owner briefly what this will do and why, then end this attempt now. \
+             Do not act, wait, poll, or call more tools. The decision arrives in a continuation: \
+             approved means exactly this action, once; otherwise do not do it.",
+            )
+            .await
         }
-        .await;
-        match standing {
-            Ok(true) => {
-                let log = format!("standing destructive permission for {:?}", spec.context);
-                let result = json!({
-                    "status": "approved",
-                    "standing": true,
-                    "next": "The owner allowed destructive actions for you in advance. Do exactly \
-                             this action now, and report what you did.",
-                });
-                return (tool_result(result), Some(log));
-            }
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(error = %err, "reading standing permissions failed");
-                return (
-                    tool_error("UNAVAILABLE: permissions could not be read."),
-                    None,
-                );
-            }
-        }
-    }
-    match owner_questions::create(&state.db, grant.turn_id, &spec).await {
-        Ok(question) if question.status != Status::Pending => {
-            let approved = question.approved();
-            let log = format!("already {} {}", question.status.as_str(), question.id);
-            let result = json!({
-                "status": if approved { "approved" } else if question.status == Status::Answered { "denied" } else { question.status.as_str() },
-                "question_id": question.id,
-                "next": if approved {
-                    "The owner approved exactly this action for this request; do it once, then report."
-                } else {
-                    "The owner did not approve this. Do not do it or an equivalent; continue without it or ask what they want."
-                },
-            });
-            (tool_result(result), Some(log))
-        }
-        Ok(question) => {
-            state.scheduler.grants().park(grant.turn_id).await;
-            let log = format!(
-                "pending {} {} {:?}",
-                question.id,
-                spec.kind.as_str(),
-                spec.context
-            );
-            let result = json!({
-                "status": "pending",
-                "parked": true,
-                "question_id": question.id,
-                "kind": question.kind,
-                "next": "Tell the owner briefly what this will do and why, then end this attempt \
-                         now. Do not act, wait, poll, or call more tools. The decision arrives in \
-                         a continuation: approved means exactly this action, once; otherwise do \
-                         not do it.",
-            });
-            (tool_result(result), Some(log))
-        }
+        Ok(Gate::Denied(question)) => (
+            tool_result(json!({ "status": "denied", "question_id": question.id,
+                "next": "The owner denied this action. Do not do it or an equivalent." })),
+            Some(format!("denied {} by the owner", question.id)),
+        ),
         Err(err) => question_refused(err),
     }
+}
+
+pub(super) async fn pending_approval(
+    state: &AppState,
+    grant: &Grant,
+    question: &crate::db::owner_questions::QuestionInfo,
+    next: &str,
+) -> Outcome {
+    state.scheduler.grants().park(grant.turn_id).await;
+    (
+        tool_result(
+            json!({ "status": "pending", "parked": true, "question_id": question.id,
+        "kind": question.kind, "next": next }),
+        ),
+        Some(format!("awaiting approval {}", question.id)),
+    )
 }
