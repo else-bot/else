@@ -53,13 +53,15 @@ if [ "$yes" = 0 ]; then
 	case "$answer" in y | Y | yes) ;; *) echo "Nothing changed."; exit 1 ;; esac
 fi
 
+trap 'git restore --staged --worktree -- Cargo.toml Cargo.lock; rm -f Cargo.toml.bak' EXIT
 sed -i.bak "/^\[workspace.package\]/,/^\[/s/^version = \".*\"/version = \"$version\"/" Cargo.toml
 rm -f Cargo.toml.bak
-cargo update --workspace --offline -q
+cargo update --workspace -q
 [ "$(git diff --name-only | sort | tr '\n' ' ')" = "Cargo.lock Cargo.toml " ] ||
 	die "unexpected changes after the bump: $(git diff --name-only | tr '\n' ' ')"
 git add Cargo.toml Cargo.lock
 git commit -q -m "chore(release): $tag"
+trap - EXIT
 git tag -a "$tag" -m "else.bot $version"
 if ! git push -q --atomic "$remote" "$branch" "$tag"; then
 	echo "release: the push failed; the commit and tag are local. Push them with: git push --atomic $remote $branch $tag" >&2
