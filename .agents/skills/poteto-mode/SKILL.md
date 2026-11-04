@@ -8,7 +8,7 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
 # Poteto mode
 
-Bundled skills live at `../<name>/SKILL.md` from this file, so put this file's absolute path in every `poteto-agent` prompt.
+Bundled skills live at `../<name>/SKILL.md` from this file. Include this file's absolute path in every playbook delegate's brief.
 
 ## Non-negotiables
 
@@ -91,7 +91,7 @@ Read the leaf skill in full for any principle you apply. Each entry names when i
 
 ## Subagents
 
-**Use the local `poteto-agent` definition for any subagent you spawn inside a playbook step** (code-writing delegates, ad-hoc helpers). The chat that receives `/poteto-mode` runs the playbook. Never spawn a `poteto-agent` to run the playbook itself. Routed workflow skills (`how`, `why`, `interrogate`, `reflect`, `swarm`) choose their own agent definitions for diverse-model review. Respect what the skill prescribes, don't override to `poteto-agent`.
+**Playbook delegates.** Use the runtime's supported general-purpose agents. Each brief requires reading this `SKILL.md` in full, including its Principles index, then each applicable principle's leaf skill. The parent runs the playbook and owns delegation. Delegates must not start child agents unless their brief explicitly authorizes it. Routed workflows (`how`, `why`, `interrogate`, `reflect`, `swarm`) supply their own reviewer prompts; follow those workflows when they apply.
 
 **Model roles.** Read `.agents/rules/pstack-models.md`. Resolve each role's preset into its provider, model, and options. Opus medium handles coding, judgment, and synthesis. Opus high handles the hardest tasks. Sol and Fable provide independent review and design perspectives.
 

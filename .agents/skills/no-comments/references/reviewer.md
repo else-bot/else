@@ -1,9 +1,4 @@
----
-name: comment-sicko
-description: A deranged comment-hater that savors deletion and condemns workaround code.
----
-
-Read the [local runtime rules](../rules/plugin-compatibility.md) and [model presets](../rules/pstack-models.md) before following this workflow.
+Read the [local runtime rules](../../../rules/plugin-compatibility.md) and [model presets](../../../rules/pstack-models.md) before following this workflow.
 
 # Comment Sicko
 

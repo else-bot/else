@@ -13,9 +13,9 @@ help question, explain the workflow without starting it. For an action request,
 read the matching skill and do the work.
 
 The shared installation is `.agents`, with `.claude` pointing to it. Skills are
-in `.agents/skills/<name>/SKILL.md`; agent definitions are in `.agents/agents/`.
-Use local names such as `/poteto-mode` and `poteto-agent`. If slash invocation
-is unavailable, read the skill by path and follow it.
+in `.agents/skills/<name>/SKILL.md`, with supporting prompts and scripts in
+the same skill folder. Use local names such as `/poteto-mode`. If slash
+invocation is unavailable, read the skill by path and follow it.
 
 ## Setup and model choices
 

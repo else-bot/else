@@ -10,6 +10,9 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
 Use this skill for an unusually strict review focused on implementation quality, maintainability, abstraction quality, and codebase health.
 
+When delegated, review the supplied scope and report findings in the order below.
+Do not edit files or start child agents unless the parent's brief explicitly authorizes it.
+
 Above all, this skill should push the reviewer to be **ambitious** about code structure. Do not merely identify local cleanup opportunities. Actively search for "code judo" moves: restructurings that preserve behavior while making the implementation dramatically simpler, smaller, more direct, and more elegant.
 
 ## Core Prompt

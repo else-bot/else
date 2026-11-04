@@ -18,7 +18,7 @@ Use `gh pr checks` as the source of truth. It includes all PR-attached checks, w
 1. Resolve the PR for the current branch.
 2. Inspect current PR checks before waiting.
 3. If checks already failed, diagnose those failures first.
-4. If checks are pending, watch with `gh pr checks --watch --fail-fast`.
+4. If checks are pending, use the runtime's completion events. In T3, the parent follows the session's PR-subscription rules and ends its turn after starting a watch. Delegated children report pending checks to the parent without starting watchers. If no monitoring facility exists, report the pending state instead of starting an unbounded polling loop.
 5. After each push, re-check the full PR check set and repeat until green.
 
 ## Commands
@@ -29,9 +29,6 @@ gh pr view --json number,url,headRefName
 
 # Inspect all attached checks
 gh pr checks --json name,bucket,state,workflow,link
-
-# Watch pending checks and fail fast
-gh pr checks --watch --fail-fast
 
 # GitHub Actions logs, when the failing check links to a GHA run
 gh run view <run-id> --log-failed
@@ -49,4 +46,4 @@ gh run view <run-id> --log-failed
 
 - Current CI status
 - Failure summary and fixes applied
-- PR URL once checks are green
+- PR URL, head SHA, and attached-check state
