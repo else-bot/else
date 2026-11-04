@@ -32,6 +32,7 @@ impl ElseApp {
                             [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown].map(|reaction| {
                                 let owner = owner.clone();
                                 Button::new(reaction.mark())
+                                    .cursor_pointer()
                                     .ghost()
                                     .label(reaction.mark())
                                     .disabled(!connected)

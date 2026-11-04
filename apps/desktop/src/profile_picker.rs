@@ -272,6 +272,7 @@ impl Render for ProfilePicker {
         for info in &self.providers {
             let id = info.id.clone();
             let mut button = Button::new(SharedString::from(format!("pick-{}", info.id)))
+                .cursor_pointer()
                 .label(info.label.clone())
                 .small()
                 .disabled(self.disabled || !info.cli_available);
@@ -307,6 +308,7 @@ impl Render for ProfilePicker {
                     .child(
                         v_flex().flex_1().gap_1().child(label("Model")).child(
                             Select::new(&self.model)
+                                .cursor_pointer()
                                 .accessibility_label("Model")
                                 .disabled(self.disabled),
                         ),
@@ -314,6 +316,7 @@ impl Render for ProfilePicker {
                     .child(
                         v_flex().flex_1().gap_1().child(label("Reasoning")).child(
                             Select::new(&self.effort)
+                                .cursor_pointer()
                                 .accessibility_label("Reasoning")
                                 .disabled(self.disabled),
                         ),
@@ -321,6 +324,7 @@ impl Render for ProfilePicker {
             )
             .child(
                 Switch::new("pick-fast")
+                    .cursor_pointer()
                     .checked(self.fast && fast_offered)
                     .label(if fast_offered {
                         "Fast mode"

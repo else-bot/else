@@ -8,6 +8,7 @@ mod bot_menu;
 mod categories;
 mod conversation;
 mod dialogs;
+mod layout;
 mod link_target;
 mod message_menu;
 mod message_row;
@@ -200,6 +201,8 @@ pub struct ElseApp {
     moving: HashSet<Uuid>,
     /// The last category operation's failure, shown in the sidebar.
     category_notice: Option<String>,
+    preferences: crate::preferences::Preferences,
+    _save_preferences: Option<Task<()>>,
     settings_open: bool,
     settings: HashMap<Uuid, BotSettings>,
     sidebar_focus: FocusHandle,
@@ -261,6 +264,8 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
+            preferences: crate::preferences::Preferences::load(),
+            _save_preferences: None,
             settings_open: false,
             settings: HashMap::new(),
             sidebar_focus,
@@ -467,8 +472,9 @@ impl ElseApp {
 
     fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         // The order the sidebar shows.
-        let ids =
-            crate::sidebar::Layout::new(&self.categories, &self.bots, self.default_bot_id).order();
+        let ids = self
+            .sidebar_layout()
+            .visible_order(&self.preferences.collapsed);
         if ids.is_empty() {
             return;
         }

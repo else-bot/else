@@ -296,7 +296,13 @@ impl ElseApp {
             } else {
                 RowFormat::Plain
             };
-            texts.push((RowKey::Item(item.id), item.text.clone(), format));
+            texts.push((
+                RowKey::Item(item.id),
+                item.bot_task
+                    .as_ref()
+                    .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
+                format,
+            ));
             requests.retain(|(key, anchor)| {
                 let here = *anchor == Some(item.id);
                 if here {

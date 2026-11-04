@@ -174,6 +174,10 @@ impl ProfileStore {
         Ok(Self { path })
     }
 
+    pub(crate) fn preferences_path(&self) -> PathBuf {
+        self.path.with_extension("layout.json")
+    }
+
     /// `Ok(None)` when nothing was saved yet.
     pub fn load(&self) -> Result<Option<Profile>, String> {
         let shown = self.path.display();

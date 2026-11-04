@@ -8,6 +8,7 @@ mod config;
 mod connection;
 mod inbox;
 mod model;
+mod preferences;
 mod profile_picker;
 mod sidebar;
 
@@ -25,12 +26,12 @@ gpui_kit::assets::icon_assets!(
         TriangleAlert,
         Check,
         ChevronRight,
+        ChevronDown,
         Reply,
         Copy,
         Close,
         ArrowUp,
         ArrowDown,
-        Ellipsis,
         SquarePen,
         FolderPlus
     ]

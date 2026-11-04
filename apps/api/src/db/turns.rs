@@ -49,6 +49,13 @@ pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id,
     t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
     t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.finished_at, t.attempt";
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BotTask {
+    pub sender_bot_id: Uuid,
+    pub sender_name: String,
+    pub prompt: String,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ItemRecord {
     pub id: Uuid,
@@ -63,11 +70,16 @@ pub struct ItemRecord {
     pub request_id: Option<Uuid>,
     /// Set for an owner's message sent as a reaction to an assistant message.
     pub reaction: Option<Json<Reaction>>,
+    pub bot_task: Option<Json<BotTask>>,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
     i.provider_id, i.created_at,
-    CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction";
+    CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction,
+    CASE WHEN i.kind = 'status' AND i.conversation_id <> t.conversation_id THEN
+        (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name, 'prompt', d.task)
+         FROM delegations d JOIN bots b ON b.id = d.parent_bot_id WHERE d.child_turn_id = i.turn_id)
+    END AS bot_task";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {

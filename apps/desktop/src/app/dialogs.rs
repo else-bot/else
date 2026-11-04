@@ -169,6 +169,7 @@ impl ElseApp {
         card = card.child(
             h_flex().justify_end().child(
                 Button::new("welcome-start")
+                    .cursor_pointer()
                     .label("Get started")
                     .primary()
                     .loading(welcome.busy)
@@ -247,6 +248,7 @@ impl ElseApp {
                         )
                         .child(
                             RadioGroup::horizontal("create-category")
+                                .cursor_pointer()
                                 .children(options.into_iter().map(|(_, label)| label))
                                 .selected_index(selected)
                                 .on_change(move |ix, window, cx| {
@@ -295,12 +297,14 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("create-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("create-submit")
+                                .cursor_pointer()
                                 .label("Create")
                                 .primary()
                                 .loading(busy)
@@ -455,6 +459,7 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("delete-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .outline()
                                 .track_focus(&cancel)
@@ -462,6 +467,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("delete-confirm")
+                                .cursor_pointer()
                                 .label("Delete bot")
                                 .danger()
                                 .track_focus(&confirm)

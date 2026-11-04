@@ -84,8 +84,7 @@ impl ElseApp {
         .detach();
     }
 
-    /// Rename and Delete for a category, from its header's menu button or a
-    /// right click.
+    /// Rename and Delete for a category's right-click menu.
     pub(super) fn category_menu(
         owner: WeakEntity<Self>,
         category: &Category,
@@ -213,12 +212,14 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("category-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("category-submit")
+                                .cursor_pointer()
                                 .label(action)
                                 .primary()
                                 .loading(busy)
@@ -340,12 +341,14 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("category-delete-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("category-delete-confirm")
+                                .cursor_pointer()
                                 .label("Delete category")
                                 .danger()
                                 .on_click(move |_, window, cx| {
@@ -402,6 +405,7 @@ impl ElseApp {
             let ids: Vec<Option<Uuid>> = options.iter().map(|(id, _)| *id).collect();
             let choose = holder.clone();
             let group = RadioGroup::vertical("move-choice")
+                .cursor_pointer()
                 .children(options.iter().map(|(id, label)| {
                     if *id == state.current {
                         format!("{label} (current)")
@@ -460,12 +464,14 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("move-cancel")
+                                .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("move-apply")
+                                .cursor_pointer()
                                 .label("Move")
                                 .primary()
                                 .disabled(unchanged)

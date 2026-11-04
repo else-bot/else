@@ -1,0 +1,92 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preferences {
+    pub sidebar_width: f32,
+    pub details_width: f32,
+    pub category_order: Vec<Uuid>,
+    pub collapsed: HashSet<Option<Uuid>>,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            sidebar_width: 240.,
+            details_width: 336.,
+            category_order: Vec::new(),
+            collapsed: HashSet::new(),
+        }
+    }
+}
+
+impl Preferences {
+    fn path() -> Result<PathBuf, String> {
+        crate::config::ProfileStore::from_env(|key| std::env::var(key).ok())
+            .map(|store| store.preferences_path())
+    }
+
+    pub fn load() -> Self {
+        let mut saved: Self = Self::path()
+            .ok()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        saved.sidebar_width = saved.sidebar_width.clamp(180., 420.);
+        saved.details_width = saved.details_width.clamp(280., 560.);
+        saved
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let path = Self::path()?;
+        let staged = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+        let bytes =
+            serde_json::to_vec(self).map_err(|err| format!("Could not serialize layout: {err}"))?;
+        let result = std::fs::write(&staged, bytes)
+            .and_then(|_| std::fs::rename(&staged, &path))
+            .map_err(|err| format!("Could not save layout: {err}"));
+        if result.is_err() {
+            let _ = std::fs::remove_file(staged);
+        }
+        result
+    }
+
+    pub fn reorder(&mut self, ids: Vec<Uuid>, dragged: Uuid, target: Uuid) {
+        let (Some(from), Some(to)) = (
+            ids.iter().position(|id| *id == dragged),
+            ids.iter().position(|id| *id == target),
+        ) else {
+            return;
+        };
+        self.category_order = ids;
+        self.category_order.remove(from);
+        self.category_order.insert(to, dragged);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_moves_reach_both_ends_and_preferences_round_trip() {
+        let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
+        let mut prefs = Preferences::default();
+        prefs.reorder(ids.clone(), ids[0], ids[2]);
+        assert_eq!(prefs.category_order, vec![ids[1], ids[2], ids[0]]);
+        prefs.reorder(prefs.category_order.clone(), ids[0], ids[1]);
+        assert_eq!(prefs.category_order, ids);
+        prefs.collapsed.extend([None, Some(ids[1])]);
+        prefs.sidebar_width = 315.;
+        prefs.details_width = 410.;
+        let loaded: Preferences =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(loaded.category_order, prefs.category_order);
+        assert_eq!(loaded.collapsed, prefs.collapsed);
+        assert_eq!((loaded.sidebar_width, loaded.details_width), (315., 410.));
+    }
+}

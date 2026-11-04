@@ -304,6 +304,7 @@ impl ElseApp {
                     )))
                     .child(
                         Button::new(SharedString::from(format!("secret-replace-{id}-{ix}")))
+                            .cursor_pointer()
                             .label("Replace")
                             .xsmall()
                             .ghost()
@@ -365,6 +366,7 @@ impl ElseApp {
                 .gap_2()
                 .child(
                     Button::new(SharedString::from(format!("secret-decline-{id}")))
+                        .cursor_pointer()
                         .label("Decline")
                         .small()
                         .ghost()
@@ -375,6 +377,7 @@ impl ElseApp {
                 )
                 .child(
                     Button::new(SharedString::from(format!("secret-save-{id}")))
+                        .cursor_pointer()
                         .label(if form.submitting {
                             "Saving…"
                         } else {
