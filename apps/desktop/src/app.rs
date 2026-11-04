@@ -233,10 +233,10 @@ impl ElseApp {
         let subscription = cx.subscribe_in(
             &composer,
             window,
-            |app, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    app.send(window, cx);
-                }
+            |app, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => app.send(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
             },
         );
         let activation =
