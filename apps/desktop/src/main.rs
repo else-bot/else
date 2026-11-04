@@ -72,6 +72,7 @@ fn main() {
     let store = config::ProfileStore::from_env(env);
     let seed = config::Seed::from_env(env);
     let handle = runtime.handle().clone();
+    let title = env("ELSE_DESKTOP_TITLE").unwrap_or_else(|| "else.bot".into());
 
     gpui_kit::application()
         .with_assets(AppAssets)
@@ -88,7 +89,7 @@ fn main() {
             .detach();
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("else.bot".into()),
+                    title: Some(title.into()),
                     ..Default::default()
                 }),
                 app_id: Some("else-bot".into()),

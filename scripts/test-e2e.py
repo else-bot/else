@@ -177,6 +177,7 @@ def worker(args):
               "rustc": capture(["rustc", "-V"]), "phases": {}, "status": "failed"}
     env = dict(os.environ)
     cache = Path(env["ELSE_E2E_CACHE"])
+    evidence = Path(env["ELSE_E2E_OUTPUT"])
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="else-e2e-worker-") as directory:
         work = Path(directory)
@@ -196,6 +197,15 @@ def worker(args):
                 result["phases"][name] = round(time.perf_counter() - start, 3)
 
         try:
+            if args.suite in ["verification", "all"]:
+                phase("runner_checks", [sys.executable, str(ROOT / ".agents/skills/verify-else/test_verify.py")])
+                phase("development_checks", [sys.executable, str(ROOT / "scripts/test-dev.py")])
+                phase("installer_checks", [sys.executable, str(ROOT / "scripts/test-install-config.py")])
+                phase("e2e_checks", [sys.executable, "-m", "unittest", "discover", "-s", "scripts/e2e", "-p", "test_*.py"])
+                phase("verification", [sys.executable, str(ROOT / ".agents/skills/verify-else/verify.py"),
+                                       "--backend", "process", "--build-dir", str(cache / "build"),
+                                       "--jobs", str(args.test_jobs), "--test-threads", str(args.test_threads),
+                                       "--output", str(evidence / "verification")])
             if args.suite in ["application", "all"]:
                 cargo = ["cargo", "test", "--workspace", "--locked", "--profile", args.profile]
                 flags, selected, excluded = application_targets(args.compile_live)
@@ -229,6 +239,20 @@ def worker(args):
                     subprocess.run([str(cli), "stop"], env=env, timeout=20, check=False)
                 except subprocess.TimeoutExpired:
                     print("Timed out stopping the isolated E2E service", file=sys.stderr)
+            try:
+                for source in work.glob("test-*.log"):
+                    shutil.copy2(source, evidence / source.name)
+                if installation.exists():
+                    for source in installation.parent.glob("installation*.log"):
+                        shutil.copy2(source, evidence / source.name)
+                    if (installation / "logs").exists():
+                        shutil.copytree(installation / "logs", evidence / "installation-logs", dirs_exist_ok=True)
+                for parent, _, _ in os.walk(evidence):
+                    path = Path(parent)
+                    path.chmod(path.stat().st_mode | 0o2070)
+            except Exception as error:
+                result.update(status="failed", evidence_error=str(error))
+                print(f"Could not preserve evidence: {error}", file=sys.stderr, flush=True)
             result["seconds"] = round(time.perf_counter() - started, 3)
     print(MARKER + json.dumps(result), flush=True)
     return result["status"] == "passed"
@@ -304,10 +328,10 @@ def ubuntu_cache_volume(cache_dir, sdk_key):
 def clean_environment():
     env = dict(os.environ)
     for key in list(env):
-        if key.startswith(("ELSE_", "CARGO_PROFILE_", "PG")) or key in {
+        if key.startswith(("ELSE_", "CARGO_PROFILE_", "PG", "AWS_")) or key in {
             "DATABASE_URL", "TEST_DATABASE_URL", "SECRET_KEY", "SECRET_KEY_FILE",
             "OWNER_TOKEN_FILE", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
-            "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_INCREMENTAL",
+            "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_INCREMENTAL", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
         }:
             env.pop(key)
     return env
@@ -335,6 +359,9 @@ def lane(args, variant, output, image, volume, cancel):
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="else-e2e-") as directory, (output / f"{variant}.log").open("w") as log:
         work = Path(directory)
+        evidence = output / variant
+        evidence.mkdir(mode=0o770)
+        evidence.chmod(0o2770)
         config = work / "compose.env"
         config.write_text("")
         compose = ["docker", "compose", "--project-name", project, "--env-file", str(config),
@@ -346,6 +373,9 @@ def lane(args, variant, output, image, volume, cancel):
             # Neither native lane reads the owner's ignored checkout .env.
             source = work / "source"
             snapshot(source)
+            (source / ".else-source.json").write_text(json.dumps({
+                "revision": capture(["git", "rev-parse", "HEAD"], cwd=ROOT),
+                "working_tree": capture(["git", "status", "--porcelain"], cwd=ROOT)}))
             worker_args = ["--worker", "--suite", args.suite, "--profile", args.profile,
                            "--test-threads", str(args.test_threads), "--test-jobs", str(args.test_jobs)]
             if args.compile_live:
@@ -355,8 +385,13 @@ def lane(args, variant, output, image, volume, cancel):
                 native_cache(cache)
                 env.update(CARGO_HOME=str(cache / "toolchain/cargo"), RUSTUP_HOME=str(cache / "toolchain/rustup"),
                            CARGO_TARGET_DIR=str(cache / "build"), ELSE_E2E_CACHE=str(cache),
+                           DOCKER_CONFIG=os.environ.get("DOCKER_CONFIG", str(Path.home() / ".docker")),
+                           ELSE_E2E_OUTPUT=str(evidence), HOME=str(work / "home"),
+                           XDG_CONFIG_HOME=str(work / "home/.config"), XDG_DATA_HOME=str(work / "home/.local/share"),
+                           XDG_STATE_HOME=str(work / "home/.local/state"), XDG_CACHE_HOME=str(work / "home/.cache"),
                            RUSTUP_TOOLCHAIN="e2e-host",
                            PATH=str(cache / "toolchain/cargo/bin") + os.pathsep + env["PATH"])
+                Path(env["HOME"]).mkdir()
                 s3 = capture(compose + ["port", "s3", "8333"], env=env).rsplit(":", 1)[1]
                 env["ELSE_TEST_S3_ENDPOINT"] = f"http://127.0.0.1:{s3}"
                 command = [sys.executable, str(source / "scripts/test-e2e.py"), *worker_args]
@@ -373,6 +408,7 @@ def lane(args, variant, output, image, volume, cancel):
                                         "stat", "-c", "%g", "/var/run/docker.sock"])
                 command = ["docker", "run", "--rm", "--init", "--platform", "linux/arm64", "--name", container,
                            "--network", project + "_default", "--group-add", socket_group, "--cpus", str(args.build_jobs),
+                           "--group-add", str(os.getgid()), "-v", str(evidence) + ":/evidence", "-e", "ELSE_E2E_OUTPUT=/evidence",
                            "-v", str(source) + ":/src:ro", "-v", "/var/run/docker.sock:/var/run/docker.sock",
                            "-v", f"{volume}:/cache", "-e", "ELSE_E2E_CACHE=/cache",
                            "-e", "CARGO_TARGET_DIR=/cache/build",
@@ -394,9 +430,12 @@ def lane(args, variant, output, image, volume, cancel):
                 result["status"] = "failed"
             elif not frames:
                 result["error"] = "worker produced no result record"
-            for cleanup in [["docker", "rm", "-f", container], compose + ["down", "--volumes", "--remove-orphans"]]:
+            for cleanup, required in [(["docker", "rm", "-f", container], False),
+                                      (compose + ["down", "--volumes", "--remove-orphans"], True)]:
                 try:
-                    subprocess.run(cleanup, env=env, stdout=log, stderr=subprocess.STDOUT, check=False, timeout=45)
+                    done = subprocess.run(cleanup, env=env, stdout=log, stderr=subprocess.STDOUT, check=False, timeout=45)
+                    if required and done.returncode:
+                        result.update(status="failed", cleanup_error=f"isolated services cleanup exited {done.returncode}")
                 except subprocess.TimeoutExpired:
                     result.update(status="failed", error="timed out cleaning up isolated services")
             if host_guard() != before:
@@ -415,7 +454,7 @@ def positive(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("variants", nargs="*", choices=VARIANTS)
-    parser.add_argument("--suite", choices=["all", "application", "installer"], default="all")
+    parser.add_argument("--suite", choices=["all", "verification", "application", "installer"], default="all")
     parser.add_argument("--profile", choices=["dev", "release"], default="dev")
     parser.add_argument("--repeat", type=positive, default=1)
     parser.add_argument("--parallel", type=int, choices=[1, 2], default=2)

@@ -60,7 +60,13 @@ impl ComputerRuntime for Local {
     async fn resume(&self, _: &str) -> Result<(), RuntimeError> {
         Ok(())
     }
-    async fn copy_out(&self, _: &str, _: &str, _: &std::path::Path) -> Result<(), RuntimeError> {
+    async fn copy_out(
+        &self,
+        _: &str,
+        guest: &str,
+        host: &std::path::Path,
+    ) -> Result<(), RuntimeError> {
+        std::fs::copy(guest, host).unwrap();
         Ok(())
     }
     async fn exec(
@@ -153,6 +159,53 @@ async fn setup() -> Setup {
         root,
         bot,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_file_arguments_survive_shell_quoting_and_exact_byte_reads() {
+    let setup = setup().await;
+    let Acquire::Ready { lease_id, .. } = setup
+        .manager
+        .acquire(setup.bot, "test:files")
+        .await
+        .unwrap()
+    else {
+        panic!("local computer unavailable")
+    };
+    let path = "nested/file with ' quotes.txt";
+    let written = setup
+        .manager
+        .write_file(lease_id, path, "éABC")
+        .await
+        .unwrap();
+    assert_eq!(written.status, Some(0), "{}", written.stderr);
+    let (size, bytes) = setup
+        .manager
+        .read_file(lease_id, path, 1, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((size, bytes), (5, vec![0xA9, b'A', b'B']));
+    let absolute = setup.root.path().join("home/work").join(path);
+    let (artifact, size, _, preview) = setup
+        .manager
+        .fetch_artifact(lease_id, setup.bot, None, absolute.to_str().unwrap(), 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((size, preview.as_str()), (5, "éABC"));
+    assert_eq!(
+        std::fs::read(
+            setup
+                .root
+                .path()
+                .join("state/artifacts")
+                .join(setup.bot.to_string())
+                .join(artifact.to_string())
+        )
+        .unwrap(),
+        "éABC".as_bytes()
+    );
 }
 
 fn env(vars: &[(&str, &str)]) -> Env {

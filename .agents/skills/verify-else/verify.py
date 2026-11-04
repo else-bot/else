@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast native Linux amd64 verification. Build on host, drive in a private omabox."""
+"""Native macOS/Linux verification with private processes or an isolated omabox."""
 
 import argparse
 import importlib.util
@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,7 +25,8 @@ SCRIPT = Path(__file__).resolve()
 _spec = importlib.util.spec_from_file_location("else_dev", ROOT / "scripts/dev.py")
 dev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev)
-SEPARATE_CHECKS = "Native desktop input, doctests, provider subscriptions, real VMs, S3 replication, installer updates, arm64 and macOS"
+SEPARATE_CHECKS = "Native desktop input, doctests, provider subscriptions, real VMs, S3 replication, installer updates"
+CANCELLED = threading.Event()
 
 
 def require(condition, message):
@@ -34,16 +36,33 @@ def require(condition, message):
 
 def clean_env():
     return {k: v for k, v in os.environ.items()
-            if not k.startswith(("ELSE_", "PG")) and k not in {
+            if not k.startswith(("ELSE_", "PG", "AWS_")) and k not in {
                 "DATABASE_URL", "TEST_DATABASE_URL", "SECRET_KEY", "SECRET_KEY_FILE",
                 "OWNER_TOKEN_FILE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}}
+
+
+def runtime_env(home):
+    home.mkdir()
+    return {**clean_env(), "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_DATA_HOME": str(home / ".local/share"), "XDG_STATE_HOME": str(home / ".local/state"),
+            "XDG_CACHE_HOME": str(home / ".cache")}
 
 
 def command(argv, *, timeout=600, **kwargs):
     """Terminate only our process group, including child processes, on failure or interruption."""
     with subprocess.Popen(argv, start_new_session=True, **kwargs) as child:
         try:
-            code = child.wait(timeout=timeout)
+            deadline = time.monotonic() + timeout
+            while child.poll() is None:
+                require(not CANCELLED.is_set(), "verification interrupted")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    child.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+            code = child.returncode
             if code:
                 raise subprocess.CalledProcessError(code, argv)
         finally:
@@ -65,6 +84,7 @@ def capture(argv):
 def until(probe, check, description, timeout=15):
     deadline = time.monotonic() + timeout
     while True:
+        require(not CANCELLED.is_set(), "verification interrupted")
         value = probe()
         if check(value):
             return value
@@ -82,7 +102,7 @@ class Instance:
         self.scratch = tempfile.TemporaryDirectory(prefix="else-verify-")
         self.work = Path(self.scratch.name)
         self.data = self.work / "data"
-        self.env = clean_env()
+        self.env = runtime_env(self.work / "home")
         self.env.update(ELSE_DATA_DIR=str(self.data), ELSE_BOTS_DIR=str(self.work / "projects"),
                         ELSE_SYNTHETIC_PROVIDER="1", ELSE_BACKUP_INTERVAL_SECS="0",
                         ELSE_CODEX_BIN="/nonexistent/verify-codex",
@@ -149,6 +169,7 @@ class Instance:
             "authenticated": True, "synthetic_available": True}, indent=2) + "\n")
 
     def request(self, method, path, body=None, expected=200, auth=True, record=True):
+        require(not CANCELLED.is_set(), "verification interrupted")
         headers = {"Content-Type": "application/json"}
         if auth:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -205,6 +226,9 @@ def bots(api):
     require(api.request("DELETE", f"/v1/bots/{main}", expected=409)["error"]["code"] == "main_bot",
             "main bot deletion must be refused")
     bot = create_bot(api)
+    edited = api.request("PATCH", f"/v1/bots/{bot['id']}", {"name": "Renamed", "role": "Edited role"})["bot"]
+    require(edited["name"] == "Renamed" and edited["role"] == "Edited role", "bot settings did not persist")
+    api.request("PATCH", f"/v1/bots/{bot['id']}", {"name": ""}, expected=400)
     api.request("DELETE", f"/v1/bots/{bot['id']}", expected=(200, 202))
     until(lambda: api.request("GET", f"/v1/bots/{bot['id']}"),
           lambda v: v["bot"]["cleanup"] and v["bot"]["cleanup"]["state"] == "done", "bot cleanup finished")
@@ -219,7 +243,7 @@ def bots(api):
 def messaging(api):
     bot = create_bot(api)
     path = f"/v1/bots/{bot['id']}"
-    body = {"request_id": str(uuid.uuid4()), "text": "amd64 café ✓", "provider_id": "synthetic"}
+    body = {"request_id": str(uuid.uuid4()), "text": "Native café ✓", "provider_id": "synthetic"}
     sent = api.request("POST", path + "/turns", body, expected=202)
     retry = api.request("POST", path + "/turns", body)
     require(sent["turn"]["id"] == retry["turn"]["id"], "retry duplicated a turn")
@@ -264,11 +288,29 @@ def categories(api):
             "category deletion removed its bot or left assignment")
 
 
+def onboarding(api):
+    require(api.request("GET", "/v1/capabilities")["onboarding_required"], "fresh setup skipped onboarding")
+    body = {"name": "Verification Assistant", "profile": {
+        "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "medium", "service_tier": "priority"}}
+    main = api.request("POST", "/v1/onboarding", body)["main_bot_id"]
+    require(not api.request("GET", "/v1/capabilities")["onboarding_required"], "onboarding did not complete")
+    path = f"/v1/bots/{main}/conversation"
+    before = api.request("GET", path)
+    require(len(before["items"]) == 1 and before["items"][0]["kind"] == "assistant" and
+            body["name"] in before["items"][0]["text"], "onboarding greeting missing or duplicated")
+    api.request("POST", "/v1/onboarding", body)
+    api.stop()
+    api.start()
+    after = api.request("GET", path)
+    require(before["items"] == after["items"] and before["turns"] == after["turns"],
+            "onboarding retry or restart changed the greeting")
+
+
 def worker(spec):
-    output = Path.home() / "else-verification" / spec["run_id"]
+    output = Path(spec["output"]) if "output" in spec else Path.home() / "else-verification" / spec["run_id"]
     output.mkdir(parents=True)
     results = {}
-    jobs = [("bots", bots), ("messaging", messaging), ("categories", categories)]
+    jobs = [("bots", bots), ("messaging", messaging), ("categories", categories), ("onboarding", onboarding)]
     jobs += [(f"test-{item['name']}", item) for item in spec["tests"]]
     # Start the longest existing suites early so their waits overlap the short journeys.
     long = ["test-delegation", "test-backup", "test-task_secrets"]
@@ -286,7 +328,7 @@ def worker(spec):
             else:
                 with tempfile.TemporaryDirectory(prefix="else-test-") as work, (evidence / "test.log").open("w") as log:
                     command([feature["executable"], "--test-threads", str(spec["test_threads"])],
-                            cwd=work, env={**clean_env(), "TOKIO_WORKER_THREADS": "2"}, stdout=log, stderr=subprocess.STDOUT,
+                            cwd=work, env={**runtime_env(Path(work) / "home"), "TOKIO_WORKER_THREADS": "2"}, stdout=log, stderr=subprocess.STDOUT,
                             timeout=spec["timeout"])
                 summaries = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored", (evidence / "test.log").read_text())
                 require(summaries, "test binary produced no libtest result")
@@ -302,7 +344,10 @@ def worker(spec):
         for future in as_completed(pending):
             name = pending[future]
             results[name] = future.result()
-            print(f"{name}: {results[name]['status']} ({results[name]['seconds']}s)", flush=True)
+            summary = f"{name}: {results[name]['status']} ({results[name]['seconds']}s)"
+            print(summary, flush=True)
+            with (output / "worker.log").open("a") as log:
+                log.write(summary + "\n")
     report = {"status": "passed" if all(r["status"] == "passed" for r in results.values()) else "failed",
               "lanes": results, "not_covered": SEPARATE_CHECKS, "excluded_targets": spec["excluded_targets"]}
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -316,29 +361,66 @@ def positive(value):
     return value
 
 
-def native_session(name, binary):
+def native_session(name, args):
     """Keep a seeded API alive in the box while an agent drives the real desktop."""
-    evidence = Path.home() / "else-verification" / name
-    evidence.mkdir(parents=True, exist_ok=False)
-    with Instance(str(binary), evidence) as api:
-        api.request("POST", "/v1/onboarding", {"name": "Verification Assistant", "profile": {
-            "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "medium", "service_tier": "priority"}})
-        require(not api.request("GET", "/v1/capabilities")["onboarding_required"], "welcome screen incomplete")
+    evidence = args.output.resolve() if args.output else Path.home() / "else-verification" / name
+    evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
+    instance = Instance(str(args.api_binary.resolve()), evidence)
+    if args.fixture_provider:
+        login = Path(instance.env["HOME"]) / ".codex"
+        login.mkdir()
+        (login / "auth.json").write_text("{}")
+        instance.env["ELSE_CODEX_BIN"] = str(SCRIPT.with_name("fake-codex.py"))
+    with instance as api:
+        if not args.welcome:
+            api.request("POST", "/v1/onboarding", {"name": "Verification Assistant", "profile": {
+                "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "medium", "service_tier": "priority"}})
+            require(not api.request("GET", "/v1/capabilities")["onboarding_required"], "welcome screen incomplete")
         session = {"pid": api.child.pid, "url": api.url, "data": str(api.data)}
         (evidence / "session.json").write_text(json.dumps(session) + "\n")
         (evidence / "desktop.env").write_text(
             f"ELSE_API_URL={api.url}\nELSE_OWNER_TOKEN_FILE={api.data / 'owner-token'}\n"
             f"ELSE_DESKTOP_CONFIG_FILE={evidence / 'desktop' / 'desktop.json'}\n")
         print(f"Ready: {api.url}; session {name}", flush=True)
+        desktop = None
+        bundle_id = None
         try:
+            if args.desktop_binary:
+                binary = args.desktop_binary.resolve()
+                if platform.system() == "Darwin":
+                    bundle_id = "bot.else.verification." + uuid.uuid4().hex
+                    binary = dev.publish_app(binary, evidence / "apps", bundle_id, "Else Verification")
+                env = {**api.env, "ELSE_API_URL": api.url, "ELSE_OWNER_TOKEN_FILE": str(api.data / "owner-token"),
+                       "ELSE_DESKTOP_CONFIG_FILE": str(evidence / "desktop/desktop.json")}
+                with (evidence / "desktop.log").open("w") as log:
+                    desktop = subprocess.Popen([str(binary)], cwd=api.work, env=env, stdout=log,
+                                               stderr=subprocess.STDOUT, start_new_session=True)
+                (evidence / "desktop-process.json").write_text(json.dumps({
+                    "pid": desktop.pid, "binary": str(binary), "bundle_id": bundle_id}) + "\n")
+                deadline = time.monotonic() + 3600
+                while desktop.poll() is None:
+                    require(api.child.poll() is None, "native verification API exited; see api.log")
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(str(binary), 3600)
+                    try:
+                        desktop.wait(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                require(desktop.returncode == 0, "native desktop exited unsuccessfully; see desktop.log")
+                return
             code = api.child.wait(timeout=3600)
             raise RuntimeError(f"native verification API exited: {code}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("native verification session expired after one hour")
+        finally:
+            dev.stop(desktop, grace=5)
+            if bundle_id:
+                subprocess.run(["defaults", "delete", bundle_id], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
 
 
 def native_probe(name, args):
-    evidence = Path.home() / "else-verification" / name
+    evidence = args.output.resolve() if args.output else Path.home() / "else-verification" / name
     state = json.loads((evidence / "session.json").read_text())
     require(dev.published_url(state["data"], state["pid"]) == state["url"] and
             dev.holds(state["pid"], Path(state["data"]) / "api.lock"),
@@ -362,10 +444,16 @@ def main():
     parser.add_argument("--test-threads", type=positive, default=2)
     parser.add_argument("--timeout", type=positive, default=180, help="deadline per test binary in seconds")
     parser.add_argument("--output", type=Path, help="new evidence directory, default target/verification/<unique run>")
+    parser.add_argument("--backend", choices=["auto", "process", "omabox"], default="auto",
+                        help="auto uses private processes on macOS and omabox on Linux; process also supports containers")
+    parser.add_argument("--build-dir", type=Path, help="explicit private Cargo cache, default .else-dev/.build")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
-    parser.add_argument("--session", help="inside omabox only: hold a seeded API for native desktop verification")
+    parser.add_argument("--session", help="hold a seeded API for native desktop verification")
     parser.add_argument("--api-binary", type=Path, default=ROOT / "target/debug/else-api", help="built API binary for --session")
-    parser.add_argument("--probe", help="inside omabox only: read a session or call its public API")
+    parser.add_argument("--desktop-binary", type=Path, help="also launch and own this desktop in --session")
+    parser.add_argument("--fixture-provider", action="store_true", help="--session only: offline Codex protocol fixture for composer input")
+    parser.add_argument("--welcome", action="store_true", help="--session only: complete onboarding through the actual desktop")
+    parser.add_argument("--probe", help="read a session or call its public API")
     parser.add_argument("--method", default="GET", choices=["GET", "POST", "PATCH", "PUT", "DELETE"])
     parser.add_argument("--path", default="/v1/bots")
     parser.add_argument("--body", help="JSON request body for --probe")
@@ -373,33 +461,48 @@ def main():
     args = parser.parse_args()
 
     def interrupted(_signal, _frame):
+        CANCELLED.set()
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupted)
+    backend = args.backend if args.backend != "auto" else ("process" if platform.system() == "Darwin" else "omabox")
     if args.worker:
-        require(os.environ.get("WAYLAND_DISPLAY") not in {None, "omabox-guard"}, "run workers inside omabox")
+        if backend == "omabox":
+            require(os.environ.get("WAYLAND_DISPLAY") not in {None, "omabox-guard"}, "run workers inside omabox")
         return worker(json.loads(args.worker.read_text()))
     if args.session or args.probe:
-        require(os.environ.get("WAYLAND_DISPLAY") not in {None, "omabox-guard"}, "run session/probe inside omabox")
+        if backend == "omabox":
+            require(os.environ.get("WAYLAND_DISPLAY") not in {None, "omabox-guard"}, "run session/probe inside omabox")
         require(re.fullmatch(r"[a-zA-Z0-9_-]+", args.session or args.probe), "session name must be a simple directory name")
         if args.session:
-            native_session(args.session, args.api_binary)
+            native_session(args.session, args)
         else:
             native_probe(args.probe, args)
         return 0
-    require(platform.system() == "Linux" and platform.machine() == "x86_64", "this pass requires native Linux amd64")
-    require(shutil.which("omabox"), "omabox is required; read the omabox skill before running")
+    require((platform.system(), platform.machine()) in {("Darwin", "arm64"), ("Linux", "aarch64"), ("Linux", "x86_64")},
+            "requires native macOS arm64 or Linux arm64/amd64")
+    if backend == "omabox":
+        require(platform.system() == "Linux" and shutil.which("omabox"),
+                "omabox requires Linux and the installed omabox runner; use --backend process in a container")
+    build_env = dev.cargo_env()
+    if args.build_dir:
+        build_env["CARGO_TARGET_DIR"] = str(args.build_dir.resolve())
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     output = (args.output or ROOT / "target/verification" / run_id).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    metadata = json.loads(capture(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]))
+    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+                                                cwd=ROOT, env=build_env, text=True, timeout=60))
     targets = sorted(t["name"] for p in metadata["packages"] for t in p["targets"] if "test" in t["kind"])
     offline = [name for name in targets if not name.endswith("_live") and name != "replication"]
     selected = offline if args.full else args.tests or []
     require(all(t in offline for t in selected), "--tests must name offline targets: " + ", ".join(offline))
     started = time.monotonic()
-    report = {"revision": capture(["git", "rev-parse", "HEAD"]), "working_tree": capture(["git", "status", "--porcelain"]),
-              "rustc": capture(["rustc", "-Vv"]), "architecture": platform.machine(),
+    source_info = ROOT / ".else-source.json"
+    source = json.loads(source_info.read_text()) if source_info.exists() else {
+        "revision": capture(["git", "rev-parse", "HEAD"]), "working_tree": capture(["git", "status", "--porcelain"])}
+    report = {**source,
+              "rustc": capture(["rustc", "-Vv"]), "architecture": platform.machine(), "system": platform.system(),
+              "backend": backend, "isolation": "private HOME and process groups; shared host network" if backend == "process" else "network-isolated omabox",
               "jobs": args.jobs, "test_threads": args.test_threads, "status": "failed", "not_covered": SEPARATE_CHECKS}
     box = None
     try:
@@ -407,11 +510,11 @@ def main():
         with (output / "build.jsonl").open("w") as artifacts, (output / "build.log").open("w") as log:
             package = ["--workspace"] if args.full else ["-p", "else-api"]
             command(["cargo", "build", *package, "--locked", "--bins", "--message-format=json"],
-                    cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
+                    cwd=ROOT, env=build_env, stdout=artifacts, stderr=log, timeout=1800)
             if args.full or selected:
                 command(["cargo", "test", *package, "--locked", "--no-run", "--message-format=json", "--lib", "--bins",
                          *[flag for name in selected for flag in ["--test", name]]],
-                        cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
+                        cwd=ROOT, env=build_env, stdout=artifacts, stderr=log, timeout=1800)
         report["build_seconds"] = round(time.monotonic() - build_start, 3)
         frames = [json.loads(line) for line in (output / "build.jsonl").read_text().splitlines()]
         built = [f for f in frames if f.get("reason") == "compiler-artifact" and f.get("executable")]
@@ -421,7 +524,22 @@ def main():
                 "test_threads": args.test_threads, "timeout": args.timeout,
                 "excluded_targets": sorted(set(targets) - set(selected))}
         spec_file = output / "spec.json"
+        if backend == "process":
+            spec["output"] = str(output / "evidence")
         spec_file.write_text(json.dumps(spec, indent=2) + "\n")
+        if backend == "process":
+            worker_start = time.monotonic()
+            try:
+                worker(spec)
+            finally:
+                if (output / "evidence/results.json").exists():
+                    report.update(json.loads((output / "evidence/results.json").read_text()))
+                if (output / "evidence/worker.log").exists():
+                    shutil.copy2(output / "evidence/worker.log", output / "worker.log")
+                report["drive_seconds"] = round(time.monotonic() - worker_start, 3)
+                report["cleanup"] = ("owned process groups and private lane homes removed" if report["status"] == "passed"
+                                     else "lane cleanup attempted; inspect failed lane logs")
+            return 0 if report["status"] == "passed" else 1
         # Input must be visible read-only even when --output or Cargo's cache is outside this checkout.
         mounts = {str(output), metadata["target_directory"]}
         # rust-embed reads assets from dependency sources in dev builds, including age's error strings.

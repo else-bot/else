@@ -26,11 +26,12 @@ compares saved items/turns, including a changed process-bound event cursor.
 Run `verify.py --tests turns cancel ws` for steering, replay and socket behavior.
 The `ws` target starts real loopback WebSockets, but does not render GPUI.
 
-For native proof, use the private session and ensure the bot has an available
-provider before sending. The fixture's saved Codex provider is unavailable;
-do not type a message and assume it reaches Synthetic. The API driver always
+For native proof, use `--fixture-provider` with the private session in the
+[native desktop guide](../native-desktop.md). It supplies an offline Codex
+protocol fixture for actual composer input. Without that flag, the session's
+saved Codex provider is unavailable. The API driver always
 names Synthetic explicitly. If the UI cannot select it, record that missing
-precondition rather than starting a paid provider. For an authorized provider
+precondition rather than starting a paid provider. For every native
 run, capture composer submission, visible intermediate chunks, Stop work,
 and the final persisted conversation through the probe.
 

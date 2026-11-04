@@ -3,16 +3,18 @@
 
 Host (manual development, real provider logins allowed):
   dev.py reset | api | desktop | status | curl ARGS... | sql QUERY | drop   [--session NAME] [--dir PATH]
-Agents (disposable omabox, Synthetic only, foreground until Ctrl-C):
+Agents (disposable omabox on Linux, Synthetic only, foreground until Ctrl-C):
   dev.py run [--api-only]
 """
 
 import argparse
 from dataclasses import dataclass
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import signal
@@ -34,6 +36,11 @@ DROPPED = {"DATABASE_URL", "TEST_DATABASE_URL", "SECRET_KEY", "SECRET_KEY_FILE",
 INHERITED = {"ELSE_CODEX_BIN", "ELSE_CODEX_ALLOW_UNVERIFIED", "ELSE_CLAUDE_BIN", "ELSE_MSB_BIN",
              "ELSE_MSB_ALLOW_UNVERIFIED", "ELSE_VM_IMAGE", "ELSE_VM_DESKTOP", "ELSE_VM_NETWORK",
              "ELSE_MAX_ACTIVE_TURNS", "ELSE_SYNTHETIC_PROVIDER"}
+DARWIN = sys.platform == "darwin"
+MAC_RUN = ("dev.py run needs omabox, which is Linux only. On macOS run `scripts/dev.py api` and "
+           "`scripts/dev.py desktop` in two terminals of this checkout. Agents verifying the native "
+           "desktop use `python3 .agents/skills/verify-else/verify.py --session NAME --backend process "
+           "--api-binary PATH --desktop-binary PATH`; see .agents/skills/verify-else/native-desktop.md")
 
 
 class Refused(Exception):
@@ -84,6 +91,32 @@ def published_url(data, pid):
     return manifest["url"]
 
 
+def publish_app(binary, root, identifier, name):
+    """Publish a complete, immutable macOS app and return its executable."""
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staged = root / f".staging-{uuid.uuid4().hex}"
+    contents = staged / f"{name}.app/Contents"
+    try:
+        (contents / "MacOS").mkdir(parents=True)
+        shutil.copy2(binary, contents / "MacOS/else-desktop")
+        (contents / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": identifier, "CFBundleName": name, "CFBundleDisplayName": name,
+            "CFBundleExecutable": "else-desktop", "CFBundlePackageType": "APPL",
+            "NSHighResolutionCapable": True}))
+        digest = hashlib.sha256()
+        for part in ("MacOS/else-desktop", "Info.plist"):
+            with (contents / part).open("rb") as source:
+                digest.update(hashlib.file_digest(source, "sha256").digest())
+        final = root / digest.hexdigest()[:16]
+        try:
+            staged.rename(final)
+        except OSError:
+            require(final.is_dir(), f"cannot publish {final}")
+        return final / f"{name}.app/Contents/MacOS/else-desktop"
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
 def try_lock(path, create):
     """An exclusively flocked descriptor, None when another process holds it, or 0 when absent."""
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0)
@@ -118,6 +151,12 @@ class Session:
     token_file = property(lambda self: self.data / "owner-token")
     lock_path = property(lambda self: self.state.parent / f".{self.state.name}.lock")
     owner = property(lambda self: {"checkout": str(self.checkout), "session": self.name})
+    label = property(lambda self: f"else.bot · {self.checkout.name} · {self.name} · {self.bundle_id[-6:]}")
+    bundle_id = property(lambda self: "bot.else.dev." + hashlib.sha256(
+        json.dumps([str(self.checkout), self.name, str(self.state)]).encode()).hexdigest()[:16])
+
+    def app(self, binary):
+        return publish_app(binary, self.state / "apps", self.bundle_id, self.label)
 
     def env(self, host_providers):
         env = clean_env(host_providers)
@@ -269,7 +308,14 @@ def holds(pid, lock):
         fd = try_lock(lock, create=False)
         if fd:
             os.close(fd)
-        return fd is None
+        if fd is not None:
+            return False
+        try:
+            owned = subprocess.run(["lsof", "-a", "-p", str(pid), "-Ff", "--", str(lock)],
+                                   capture_output=True, text=True, timeout=5)
+            return owned.returncode == 0 and any(line.startswith("f") for line in owned.stdout.splitlines())
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     for entry in fds.iterdir():
         try:
             found = os.stat(entry)
@@ -314,6 +360,8 @@ def desktop_env(session, url):
     env = clean_env(host_providers=False)
     env.update(ELSE_API_URL=url, ELSE_OWNER_TOKEN_FILE=str(session.token_file),
                ELSE_DESKTOP_CONFIG_FILE=str(session.desktop_profile(url)))
+    if DARWIN:
+        env["ELSE_DESKTOP_TITLE"] = session.label
     return env
 
 
@@ -348,7 +396,7 @@ def owned_window(box, pid, alive, timeout=60):
 
 def run_box(args):
     """Agent GUI testing: a new isolated omabox owning its API, desktop, state, and evidence."""
-    require(shutil.which("omabox"), "omabox is required; read the omabox skill first")
+    require(shutil.which("omabox"), MAC_RUN if DARWIN else "omabox is required; read the omabox skill first")
     api = build("else-api", args.api_binary)
     desktop = None if args.api_only else build("else-desktop", args.desktop_binary)
     mounts = {str(Path(api).parent)} | ({str(Path(desktop).parent)} if desktop else set())
@@ -493,6 +541,8 @@ def main(argv=None):
                 "no display here (omabox guard): run the desktop from your own terminal, or use `dev.py run`")
         url = session.doctor()["url"]
         binary = build("else-desktop", args.desktop_binary)
+        if DARWIN:
+            binary = str(session.app(binary))
         os.chdir("/")
         os.execve(binary, [binary], desktop_env(session, url))
     elif args.command == "curl":

@@ -32,3 +32,11 @@ resulting sidebar. Test the mouse controls too when those controls change.
 - Selecting a bot should not start a provider turn.
 - Deletion can return 202 while cleanup drains; wait for disappearance.
 - API proof alone does not prove focus, selection, drafts, or dialog behavior.
+
+## Settings sidebar
+
+Open Settings for the selected bot. Change its name and description, save,
+and confirm both fields through `GET /v1/bots/{id}`. Collapse and reopen the
+sidebar without changing the selection. The default `bots` lane checks the
+public metadata update and rejects an empty name. Native input proves the
+controls and focus.

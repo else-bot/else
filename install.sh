@@ -1034,10 +1034,15 @@ install_server() {
 		switch_to "$target"
 		install_commands
 		setup_service
-		run_setup || die "else-api setup failed (log: $LOGS/setup.log)"
+		if [ "$mode" != current ]; then
+			run_setup || die "else-api setup failed (log: $LOGS/setup.log)"
+		fi
 		if api_running; then
 			ok "the API is running"
 		else
+			if [ "$mode" = current ]; then
+				run_setup || die "else-api setup failed (log: $LOGS/setup.log)"
+			fi
 			start_api || die "the API did not start; see: elsebot logs"
 		fi
 	fi

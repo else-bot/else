@@ -20,6 +20,15 @@ spec.loader.exec_module(runner)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_lane_retains_service_cleanup_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(runner, "run", side_effect=RuntimeError("fixture startup failed")), \
+                 patch.object(runner.subprocess, "run", return_value=SimpleNamespace(returncode=5)):
+                result = runner.lane(SimpleNamespace(), "ubuntu-arm64", Path(directory), None, None, queue.Queue())
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["cleanup_error"], "isolated services cleanup exited 5")
+            self.assertEqual(result["error"], "fixture startup failed")
+
     def source(self, root):
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         (root / ".gitignore").write_text(".env\ntarget/\n")

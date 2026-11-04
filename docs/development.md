@@ -58,7 +58,7 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
 
-For fast behavior checks on Linux amd64, use the
+For fast behavior checks on macOS arm64 and Linux arm64 or amd64, use the
 [verify-else skill](../.agents/skills/verify-else/SKILL.md):
 
 ```sh
@@ -67,12 +67,19 @@ For fast behavior checks on Linux amd64, use the
 .agents/skills/verify-else/verify.py --full
 ```
 
-The default runs independent HTTP journeys for bots, messaging/stop/restart,
-and categories. `--full` adds the existing offline workspace tests. Compilation
+The default runs independent HTTP journeys for bots and settings, messaging/stop/restart,
+categories, and onboarding with a persisted greeting. `--full` adds the existing offline workspace tests. Compilation
 uses the dev cache once, then test binaries run in bounded parallel lanes
-inside a private, network-isolated omabox. Logs and results survive teardown
+inside a private, network-isolated omabox on Linux. macOS uses private process
+groups, HOME, and XDG directories on the host network. Use `--backend process`
+inside an owned Linux container or VM. Logs and results survive teardown
 under `target/verification/`. The skill also documents native desktop input
 checks and explicit live-provider, VM, S3, installer, and platform exclusions.
+
+For macOS desktop automation, use the skill's [Lume workflow](../.agents/skills/verify-else/lume.md).
+It runs each checkout's API and GPUI desktop in its own headless macOS arm64
+guest. Input and screenshots go through the guest driver, so verification
+does not need the host's computer-use driver or a VM viewer.
 
 ### Build speed
 
@@ -119,12 +126,13 @@ python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --repeat 2
 ```
 
 The Ubuntu lane runs Ubuntu 26.04 aarch64 in Docker; macOS runs native arm64
-binaries and a temporary launchd service. Both build the API and desktop, run
-the application tests with temporary SQLite files and an isolated S3 emulator,
+binaries and a temporary launchd service. Both build the API and desktop, run the verify-else public API journeys and
+Python tooling checks, then run the application tests with temporary SQLite files and an isolated S3 emulator,
 and exercise the real installer with local v0.0.1/v0.0.2 Git tags: installation, busy-update
 refusal, backup-before-migration, preserved conversations, read-only database
 access, native binaries, and an idempotent reinstall. Ubuntu uses a managed
-API process, as the container has no systemd. Desktop rendering is not driven.
+API process, as the container has no systemd. Desktop input remains a separate check documented in the
+[native desktop guide](../.agents/skills/verify-else/native-desktop.md).
 
 The default development profile keeps assertions and overflow checks enabled.
 It avoids release optimization during functional testing; use `--profile
@@ -146,6 +154,7 @@ lane alone. Run the amd64 Debian/Ubuntu/Arch matrix separately on an amd64
 host with `scripts/test-install.sh`; these ARM64 lanes do not emulate amd64.
 
 ```sh
+python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --suite verification
 python3 scripts/test-e2e.py ubuntu-arm64 --suite application
 python3 scripts/test-e2e.py macos-arm64 --suite installer
 python3 scripts/test-e2e.py macos-arm64 --compile-live
@@ -491,6 +500,7 @@ The settings below only fill in the editor on the first launch; a saved profile 
 | `ELSE_DESKTOP_CONFIG_FILE` | `$XDG_CONFIG_HOME/else-bot/desktop.json`, else `~/.config/else-bot/desktop.json` | The profile. `elsebot desktop` uses the installation's `config/desktop.json`; `scripts/demo.sh desktop` uses one in the demo directory. |
 | `ELSE_API_URL` | unset | The first launch's address (`elsebot desktop` passes the installed API's when the server is on this machine). `https://` works for any host; `http://` only for loopback. A bare address gets `http://` for loopback and `https://` otherwise. Credentials, a path other than `/`, a query, and a fragment are refused. |
 | `ELSE_OWNER_TOKEN_FILE` (or the API's `OWNER_TOKEN_FILE`) | `$ELSE_DATA_DIR/owner-token`, else `$XDG_DATA_HOME/else-bot/owner-token`, else `~/.local/share/else-bot/owner-token` | The first launch's token, written by `else-api setup`. It must be a regular file you own with mode `0600`; symbolic links are refused. |
+| `ELSE_DESKTOP_TITLE` | `else.bot` | The window title. On macOS, `scripts/dev.py desktop` sets it to `else.bot · CHECKOUT · NAME · ID`. |
 | `ELSE_OWNER_TOKEN` | unset | The first launch's token, for a development launcher. Takes precedence over the file. Prefer the file. |
 
 The window lists bots on the left and the selected conversation on the right. New bot opens a dialog for the name, model, and category; deleting asks for confirmation, keeps history, and shows the bot as Deleting until its work has stopped. The header shows Stop work while the bot is busy and a sidebar button while the settings panel is closed. Each message goes to the bot's own provider and model. With categories (POC-031), the sidebar groups bots under a header per category, in the server's order (case-folded name, then ID), each listing its bots with a count, Rename and Delete; empty categories stay visible with No bots, and bots without a category, or whose category the desktop does not know, sit under Unassigned. The main bot stays above every category. Other bots sort by their latest owner-conversation message within each group, with creation time as the fallback before the first message. Without categories the same order applies to the flat list. New category (and Rename) opens a dialog; a create whose outcome is unknown is retried unchanged under the same request ID, and a dismissed dialog never receives a late result. The list itself changes only from the server's `bots` snapshots, the one ordered source: category operations neither patch it locally nor fetch it again, so a slower response cannot undo a newer change. A failed category operation is shown at the top of the bot list. Deleting a category says that its bots are kept and move to Unassigned and that no bot, conversation, memory, or file is deleted. The create-bot dialog offers the categories as a radio group (Tab to one, Space to choose, Enter creates), and Ctrl+Shift+M opens a Move dialog with a radio group of every category and Unassigned (Tab, Space, then Enter or Move; Esc closes). The bot context menu's Move to submenu changes the category directly. One move per bot is in flight at a time. Further moves are disabled until the server answers, so an earlier choice cannot land after a later one. Moving or renaming never changes the selection, the draft, the Main marker, the activity, or running work; Up/Down follow the grouped order. Replies stream into the transcript as the API commits them; per-turn notes show Queued, Working, Stopped, Failed, or Outcome unknown. Drafts are kept per bot while the desktop runs. A message whose send outcome is unknown stays visible as Not confirmed with Retry; after reconnecting the desktop asks the API whether it arrived and resends it under the same request ID only if it did not. Each message has a muted local date and time below its bubble. The view follows new output only while it is at the bottom.
@@ -545,6 +555,12 @@ scripts/dev.py desktop
 
 `api` builds `else-api` in the checkout-private `.else-dev/.build` cache, creates the session on first use, runs `setup`, and serves in the foreground until Ctrl-C. Host provider logins work as usual. Launcher builds ignore a shared `CARGO_TARGET_DIR` so another checkout cannot replace the executable between compilation and launch. They use four Cargo jobs by default; set `CARGO_BUILD_JOBS` explicitly to change that budget. The API binds `127.0.0.1:0` and writes its PID and actual URL to `data/api.json`. `dev.py` uses that URL only after it checks that the PID is the process it started, that the process holds the session's data lock, that the session's owner token is accepted, and that the API serves the session's database. `desktop` takes both the URL and the owner token file from the same session. After verifying that API, it atomically refreshes the private `desktop/desktop.json` profile with mode `0600`, so a restart follows the new port without sharing saved connections between worktrees. It refuses to start under the omabox guard; run it from your own terminal, or use [a private box](#test-the-desktop-in-a-private-box).
 
+On macOS, `desktop` runs the session's own app instead of the raw build output. It copies the built `else-desktop` into `.else-dev/NAME/apps/HASH/else.bot · CHECKOUT · NAME · ID.app` and runs that copy directly, with the session's environment. CHECKOUT is the checkout directory's name. HASH covers the copied executable and its `Info.plist`, so each rebuild publishes a new app and never changes one that is running. Older copies stay until `reset` or `drop` deletes the session.
+
+The bundle identifier, `bot.else.dev.` followed by a hash of the checkout path, session name, and state directory, stays the same across rebuilds. It differs between worktrees, sessions, and `--dir` directories, even when two checkouts have the same directory name. The Dock, the app menu, and the window title all show `else.bot · CHECKOUT · NAME · ID`. ID is a short suffix of the session identity, so equal checkout directory names still have different labels.
+
+Use the same two commands in each worktree. Each window connects to its checkout's API with that API's owner token. After restarting one checkout's `api`, close its window and run `desktop` again. The new API has a new port, and `desktop` writes it to the session's profile. The other checkout's API and window keep running.
+
 | Command | Effect |
 | --- | --- |
 | `scripts/dev.py status` | Prints the verified PID, URL, and state directory as JSON. |
@@ -566,20 +582,30 @@ A session never reads `.env`. Its API and desktop start in `/`, so their own `.e
 
 ### Test the desktop in a private box
 
+On macOS, use [a private Lume guest](../.agents/skills/verify-else/lume.md).
+Each invocation gets a separate VM, even when multiple worktrees use the same
+session name. Build artifacts, API data, desktop profiles, and input state
+belong to that run. Stop one run through its own manifest while the others
+continue. Host development windows remain available through `dev.py api` and
+`dev.py desktop` above.
+
+On Linux, use omabox as follows.
+
 Agents testing the GUI use one foreground command instead of the host commands. Read the installed omabox skill first.
 
 ```sh
 scripts/dev.py run
 ```
 
-`run` builds both binaries, creates a new box with `omabox up --new --net isolated`, and starts the API and the desktop inside it with fresh state in the box's home. The launcher completes onboarding before opening the desktop so native dialogs can be tested without a provider login. Only the Synthetic provider answers there: Codex, Claude, and Microsandbox are unavailable. `run` prints a JSON manifest with the box name, the desktop window's address, the in-box state path, the evidence directory, and `omabox` commands that name both the box and the window. It refuses to pick a window when the desktop's PID owns more than one or another `else-bot` window exists in the box. `--api-only` skips the desktop.
+`run` needs omabox, so it works on Linux only. Without omabox on macOS, it refuses and points to the host commands and to the native verification helper in `.agents/skills/verify-else/native-desktop.md`. `run` builds both binaries, creates a new box with `omabox up --new --net isolated`, and starts the API and the desktop inside it with fresh state in the box's home. The launcher completes onboarding before opening the desktop so native dialogs can be tested without a provider login. Only the Synthetic provider answers there: Codex, Claude, and Microsandbox are unavailable. `run` prints a JSON manifest with the box name, the desktop window's address, the in-box state path, the evidence directory, and `omabox` commands that name both the box and the window. It refuses to pick a window when the desktop's PID owns more than one or another `else-bot` window exists in the box. `--api-only` skips the desktop.
 
 Drive the window only with the printed `-b BOX --window ADDRESS`. The box's network is isolated, so probe the API with the printed `status_command` or `curl_command`, which run inside the box. Ctrl-C or `SIGTERM` stops the session, copies its logs, `doctor.json`, and manifests to `.else-dev/runs/RUN`, and removes the box with `omabox down -b BOX`. The live database stays in the box.
 
-After changing `scripts/dev.py`, run its checks in a box you own:
+After changing `scripts/dev.py`, run its checks in a box you own on Linux, or directly on a macOS host:
 
 ```sh
 omabox run -b BOX -- python3 scripts/test-dev.py
+python3 scripts/test-dev.py
 ```
 
 ## Stop and resume
