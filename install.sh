@@ -35,9 +35,9 @@
 # in Docker, the API's service (Linux: the systemd user unit
 # ~/.config/systemd/user/else-api.service, and lingering for your user when
 # it starts at boot; macOS: the launchd agent
-# ~/Library/LaunchAgents/bot.else.else-api.plist), and the links
-# ~/.local/bin/elsebot and ~/.local/share/applications/else-bot.desktop
-# (Linux).
+# ~/Library/LaunchAgents/bot.else.else-api.plist), the link
+# ~/.local/bin/elsebot, and the app: ~/.local/share/applications/else-bot.desktop
+# on Linux, a copy of the desktop in ~/Applications/else.bot.app on macOS.
 #
 # The API can start by itself (asked once, remembered; --autostart or
 # --no-autostart to choose): at boot on Linux, at login on macOS, where the
@@ -115,6 +115,8 @@ DATA="$ELSE_HOME/data"
 LOGS="$ELSE_HOME/logs"
 ENV_FILE="$CONFIG/.env"
 COMPONENTS_FILE="$CONFIG/components"
+APP="$ELSE_HOME/Applications/else.bot.app"
+[ "$ELSE_HOME" = "$HOME/.else" ] && APP="$HOME/Applications/else.bot.app"
 export RUSTUP_HOME="$TOOLCHAIN/rustup"
 export CARGO_HOME="$TOOLCHAIN/cargo"
 MSB="$MSB_PREFIX/bin/msb"
@@ -636,6 +638,13 @@ install_commands() {
 	fi
 	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\n' \
 		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env"
+	if [ "$DISTRO" = macos ] && want_app; then
+		if [ -d "$HOME/.else" ] && [ "$(cd "$ELSE_HOME" && pwd -P)" = "$(cd "$HOME/.else" && pwd -P)" ]; then
+			APP="$HOME/Applications/else.bot.app"
+		fi
+		publish_app
+		printf 'ELSEBOT_APP=%q\n' "$APP" >>"$CONFIG/elsebot.env"
+	fi
 	if want_server; then ln -sfn ../current/bin/else-api "$BIN/else-api"; fi
 	if want_app; then ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"; fi
 	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
@@ -654,6 +663,23 @@ Terminal=false
 Categories=Network;Chat;
 EOF
 	fi
+}
+
+publish_app() {
+	local status=0
+	python3 "$SRC/scripts/macos_app.py" --binary "$CURRENT/bin/else-desktop" --app "$APP" \
+		--home "$ELSE_HOME" --version "$("$CURRENT/bin/else-desktop" --version | awk '{print $2}')" || status=$?
+	case "$status" in
+	0) ;;
+	3)
+		local fallback="$ELSE_HOME/Applications/else.bot.app"
+		[ "$APP" != "$fallback" ] || die "$APP belongs to another installation; choose a different ELSE_HOME"
+		warn "$APP belongs to another installation; publishing this app at $fallback"
+		APP="$fallback"
+		publish_app
+		;;
+	*) die "could not publish the app at $APP" ;;
+	esac
 }
 
 # --- Configuration and services ---------------------------------------------
@@ -975,7 +1001,7 @@ stage2() {
 	fi
 	if want_app; then
 		if [ "$DISTRO" = macos ]; then
-			next "open the app: elsebot desktop"
+			next "open the app: else.bot in $(dirname "$APP"), or elsebot desktop"
 		else
 			next "open the app: elsebot desktop (or else.bot in your launcher)"
 		fi

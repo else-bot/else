@@ -82,13 +82,15 @@ Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The 
 
 ### Connect the app to a server
 
-When the app opens for the first time, it asks for the server's address and its owner token. On the same machine as the server, both are filled in. For another machine, print the token on the server:
+When the app opens for the first time on a machine with the server, it shows this machine's address and that its owner key is loaded. **Start local** reads the key, starts the API if it is stopped (with `elsebot start`), checks that the server accepts the key, saves the connection, and opens the app. Later launches use the saved connection and start this machine's API again if needed. On macOS the installer puts the app in `~/Applications/else.bot.app`, so it opens from Finder, the Dock, or `elsebot desktop` and keeps running after the terminal closes.
+
+For a server on another machine, choose **Edit configuration** (an app-only installation offers only this). Print the token on the server:
 
 ```sh
 cat ~/.else/data/owner-token
 ```
 
-Then enter the address and paste the token. Press **Check connection**. **Continue** (or **Save** later) becomes available only after the server accepts that exact address and token. Any edit requires a new check. **Change server**, at the top of the window, opens the same form at any time. A failed check keeps the current connection.
+Then enter the address and paste the token, and press **Connect to server**. The connection is saved only after the server accepts that exact address and token. **Change server**, at the top of the window, opens the same form at any time. A failed connection keeps the current one. Local keys are never filled into this form. Changing the address clears a prefilled remote key.
 
 The app saves the server in `~/.else/config/desktop.json` (mode 0600). This saved choice wins over the launcher's defaults.
 
@@ -144,7 +146,7 @@ Outside `~/.else`: the system packages, the guest image in Docker when the insta
 | Command | What it does |
 | --- | --- |
 | `elsebot status` | Installed and running versions; whether the API is up |
-| `elsebot desktop` | Open the app (the first launch asks which server to use) |
+| `elsebot desktop` | Open the app (the first launch offers this machine's server or another) |
 | `elsebot update` | Install the latest release (see above) |
 | `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
 | `elsebot logs` | Follow the API log |
