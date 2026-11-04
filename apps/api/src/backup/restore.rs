@@ -446,8 +446,7 @@ async fn load_and_check(
             "the restored migration state differs".into(),
         ));
     }
-    crate::db::MIGRATOR
-        .run(&mut conn)
+    crate::db::migrate_in(&mut conn)
         .await
         .map_err(|e| BackupError::Invalid(format!("migrations: {e}")))?;
     // Restored settings must still satisfy the adapters' rules: no profile

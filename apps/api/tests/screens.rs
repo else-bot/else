@@ -291,8 +291,8 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
         manager,
         ..
     } = setup(true).await;
-    let bot = app.create_bot("Seer", "looks").await;
-    let other = app.create_bot("Other", "elsewhere").await;
+    let bot = app.create_bot("Seer").await;
+    let other = app.create_bot("Other").await;
 
     // A model not verified for images is refused, and nothing is captured.
     let token = grant(&app, &bot, Some("gpt-5.4-mini")).await;
@@ -425,7 +425,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
 #[tokio::test(flavor = "multi_thread")]
 async fn computers_without_a_desktop_say_so() {
     let Setup { app, .. } = setup(false).await;
-    let bot = app.create_bot("Headless", "no desktop").await;
+    let bot = app.create_bot("Headless").await;
     let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
     let refused = error(&shot(&app, &token, json!({})).await);
     assert!(refused.contains("no desktop"), "{refused}");
@@ -443,7 +443,7 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         manager,
         ..
     } = setup(true).await;
-    let bot = app.create_bot("Hands", "clicks").await;
+    let bot = app.create_bot("Hands").await;
     let token = grant(&app, &bot, Some("gpt-6.1-sol")).await;
     let batch = json!({ "frame": [1280, 800],
         "actions": [{ "click": [100, 200] }, { "type": "hunter2-password" }] });

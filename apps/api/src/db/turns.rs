@@ -439,11 +439,10 @@ pub async fn fail_unstarted(
 pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     let turn = load_turn(&mut conn, turn_id).await?;
-    let (bot_name, bot_role): (String, String) =
-        sqlx::query_as("SELECT name, role FROM bots WHERE id = ?1")
-            .bind(turn.bot_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let bot_name: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
+        .bind(turn.bot_id)
+        .fetch_one(&mut *conn)
+        .await?;
     let text: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1 AND kind = 'user'")
         .bind(turn.source_item_id)
         .fetch_one(&mut *conn)
@@ -491,7 +490,6 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         turn_id,
         turn_no: turn.turn_no,
         bot_name,
-        bot_role,
         text,
         profile: turn.profile.map(|Json(profile)| profile),
         history,

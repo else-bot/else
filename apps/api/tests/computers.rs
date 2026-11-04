@@ -230,8 +230,8 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
     assert_eq!(
         fake.calls(),
         vec!["list".to_owned()],
@@ -291,8 +291,8 @@ async fn computers_mount_their_bots_project_directory() {
         },
     )
     .await;
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
     ready(&manager, a, "test:a").await;
     ready(&manager, b, "test:b").await;
     let specs = fake.specs.lock().unwrap().clone();
@@ -321,7 +321,7 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = Arc::new(manager(&app, &fake, config(2)).await);
-    let bot = app.create_bot("Stopped", "stopped").await;
+    let bot = app.create_bot("Stopped").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, name) = ready(&manager, bot_id, "test:x").await;
     manager.owner_stop(bot_id).await.unwrap();
@@ -376,8 +376,8 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
         ..config(1)
     };
     let manager = manager(&app, &fake, pausing).await;
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
     let (lease, _) = ready(&manager, a, "test:a").await;
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
@@ -403,7 +403,7 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot = app.create_bot("Idle", "idle").await;
+    let bot = app.create_bot("Idle").await;
     let bot_id: Uuid = bot.parse().unwrap();
     // A running turn holds the computer.
     let sent = app
@@ -457,7 +457,7 @@ async fn acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = Arc::new(manager(&app, &fake, config(2)).await);
-    let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     for round in 0..20 {
         let m = manager.clone();
         let acquire =
@@ -482,9 +482,9 @@ async fn startup_inspects_without_waking_recreating_or_removing() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(3)).await;
-    let kept: Uuid = app.create_bot("Kept", "kept").await.parse().unwrap();
-    let lost: Uuid = app.create_bot("Lost", "lost").await.parse().unwrap();
-    let paused: Uuid = app.create_bot("Paused", "paused").await.parse().unwrap();
+    let kept: Uuid = app.create_bot("Kept").await.parse().unwrap();
+    let lost: Uuid = app.create_bot("Lost").await.parse().unwrap();
+    let paused: Uuid = app.create_bot("Paused").await.parse().unwrap();
     let (lease, kept_name) = ready(&manager, kept, "test:k").await;
     manager.release(lease).await.unwrap();
     let (_, lost_name) = ready(&manager, lost, "test:l").await;
@@ -524,7 +524,7 @@ async fn deleting_a_bot_stops_its_computer_and_keeps_it() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot = app.create_bot("Gone", "gone").await;
+    let bot = app.create_bot("Gone").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, name) = ready(&manager, bot_id, "test:g").await;
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
@@ -545,8 +545,8 @@ async fn a_failed_stop_keeps_its_reservation_and_is_retried() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(1)).await;
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
     ready(&manager, a, "test:a").await;
     fake.fail_stop
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -571,7 +571,7 @@ async fn a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped() 
     let fake = Arc::new(Fake::default());
     *fake.create_delay.lock().unwrap() = Duration::from_millis(400);
     let manager = Arc::new(manager(&app, &fake, config(2)).await);
-    let bot = app.create_bot("Short", "short").await;
+    let bot = app.create_bot("Short").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(bot_id, "test:s").await.unwrap() });
@@ -594,7 +594,7 @@ async fn a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot: Uuid = app.create_bot("Lease", "lease").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Lease").await.parse().unwrap();
     let (lease, _) = ready(&manager, bot, "test:l").await;
     sqlx::query(
         "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
@@ -629,7 +629,7 @@ async fn nothing_is_used_until_the_runtime_has_been_inspected() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let manager = ComputerManager::new(app.db.pool.clone(), fake.clone(), config(2));
     manager.reconcile_startup().await.unwrap();
-    let bot: Uuid = app.create_bot("Wait", "wait").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Wait").await.parse().unwrap();
     assert!(matches!(
         manager.acquire(bot, "test:w").await.unwrap(),
         Acquire::Queued { .. }
@@ -659,7 +659,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot: Uuid = app.create_bot("Old", "upgrade").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Old").await.parse().unwrap();
     let (lease, old_name) = ready(&manager, bot, "turn:a").await;
 
     // Held by a lease: refused, nothing changes.
@@ -799,7 +799,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         ..config(1)
     };
     let first = manager(&app, &fake, isolated).await;
-    let bot: Uuid = app.create_bot("Offline", "upgrade").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Offline").await.parse().unwrap();
     let (lease, old_name) = ready(&first, bot, "turn:gone").await;
     drop(first);
     let _ = lease;
@@ -807,7 +807,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     // Restarted with another default network and a one-VM budget, with
     // another bot's computer using it.
     let manager = manager(&app, &fake, config(1)).await;
-    let other: Uuid = app.create_bot("Other", "busy").await.parse().unwrap();
+    let other: Uuid = app.create_bot("Other").await.parse().unwrap();
     // The stale lease of the stopped API's turn still holds the computer.
     assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
     manager.settle_offline(bot).await.unwrap();
@@ -910,7 +910,7 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     let app = TestApp::installed().await;
     let fake = Arc::new(Fake::default());
     let manager = manager(&app, &fake, config(2)).await;
-    let bot = app.create_bot("After", "upgrade").await;
+    let bot = app.create_bot("After").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let refused = |r: &Result<_, else_api::computers::ComputerError>| r.is_err();
 

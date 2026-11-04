@@ -411,7 +411,7 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
         "stored after restart"
     );
 
-    let other = app.create_bot("Ops", "Servers").await;
+    let other = app.create_bot("Ops").await;
     let (turn, token) = running(&app, &other, owner_tools()).await;
     let request = request_id(&app, &token).await;
     wait(&app, turn, "waiting").await;
@@ -432,7 +432,7 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
 async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
-    let other = app.create_bot("Home", "Family").await;
+    let other = app.create_bot("Home").await;
     let (turn, token) = running(&app, &main, owner_tools()).await;
     let request = request_id(&app, &token).await;
     let path = format!("/v1/bots/{main}/secret-requests/{request}/fulfill");
@@ -507,7 +507,7 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
         .unwrap();
     assert_eq!(none, 0);
 
-    let leaf = app.create_bot("Ops", "Servers").await;
+    let leaf = app.create_bot("Ops").await;
     let warm = app
         .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;

@@ -4,7 +4,7 @@ use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities, CreateBotRequest};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, WindowExt as _, h_flex, v_flex,
@@ -19,7 +19,6 @@ struct CreateForm {
     /// now say, until the server gives a definite answer.
     in_doubt: Option<CreateBotRequest>,
     name: Entity<InputState>,
-    role: Entity<TextareaState>,
     /// The new bot's provider and model, starting from the defaults.
     profile: Option<Entity<ProfilePicker>>,
     error: Option<String>,
@@ -188,11 +187,6 @@ impl ElseApp {
 
     pub(super) fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Work"));
-        let role = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("Role: what this bot helps with")
-                .auto_grow(3, 8)
-        });
         let profile = self
             .caps
             .clone()
@@ -202,7 +196,6 @@ impl ElseApp {
                 request_id: Uuid::new_v4(),
                 in_doubt: None,
                 name: name.clone(),
-                role,
                 profile,
                 error: None,
                 busy: false,
@@ -225,10 +218,7 @@ impl ElseApp {
                 name.read(cx).focus_handle(cx).focus(window, cx);
             }
             let form = &holder.read(cx).form;
-            let mut body = v_flex()
-                .gap_3()
-                .child(Input::new(&form.name))
-                .child(Textarea::new(&form.role));
+            let mut body = v_flex().gap_3().child(Input::new(&form.name));
             if let Some(profile) = &form.profile {
                 body = body.child(profile.clone());
             }
@@ -336,7 +326,6 @@ impl ElseApp {
             form.in_doubt.clone().unwrap_or_else(|| CreateBotRequest {
                 request_id: form.request_id,
                 name: form.name.read(cx).value().to_string(),
-                role: form.role.read(cx).value().to_string(),
                 profile: form.profile.as_ref().and_then(|p| p.read(cx).choice(cx)),
                 category_id: form.category,
             })

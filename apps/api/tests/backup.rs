@@ -118,7 +118,7 @@ async fn rows(url: &str, sql: &str) -> Vec<String> {
 /// An installation with bots, a conversation, and a changed profile.
 async fn populated() -> TestApp {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Planner", "plans trips ✈").await;
+    let bot = app.create_bot("Planner").await;
     for text in ["first message ünïcode", "second message"] {
         let reply = app
             .send(&bot, Uuid::new_v4(), text, Some("synthetic"))
@@ -138,7 +138,7 @@ async fn populated() -> TestApp {
 }
 
 const COMPARED: &[&str] = &[
-    "SELECT id, name, role, status FROM bots",
+    "SELECT id, name, status FROM bots",
     "SELECT id, bot_id, kind, last_turn_no FROM conversations",
     "SELECT id, conversation_id, seq, kind, text FROM items",
     "SELECT provider_id, model, reasoning_effort, service_tier, revision FROM provider_profiles",
@@ -528,6 +528,46 @@ async fn a_restored_profile_cannot_enable_native_agents() {
     assert!(
         !target.exists().await,
         "the refused restore left no database"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_imports_descriptions_its_backup_still_held() {
+    let _serial = SERIAL.lock().await;
+    let app = populated().await;
+    let planner: Uuid = sqlx::query_scalar("SELECT id FROM bots WHERE name = 'Planner'")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO legacy_bot_descriptions (bot_id, description) VALUES (?1, ?2)")
+        .bind(planner)
+        .bind("Plans trips ✈")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, key(1), config(dir.path()))
+        .run_once()
+        .await
+        .unwrap();
+    let target = Target::new(&app);
+    restore_into(&app, &summary.path, &key(1), &target, &dir.path().join("s"))
+        .await
+        .unwrap();
+    let imported = rows(
+        &target.url(),
+        &format!(
+            "SELECT authority, substr(body, -13) FROM memory_entry
+             WHERE bot_id = x'{}' AND body LIKE '%Plans trips ✈'",
+            planner.simple()
+        ),
+    )
+    .await;
+    assert_eq!(imported, [r#"["tool","Plans trips ✈"]"#]);
+    assert!(
+        rows(&target.url(), "SELECT bot_id FROM legacy_bot_descriptions")
+            .await
+            .is_empty()
     );
 }
 

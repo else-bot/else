@@ -572,28 +572,24 @@ async fn the_assistant_poc_works_end_to_end() {
         .as_str()
         .unwrap()
         .to_owned();
-    let create = |name: &'static str, role: &'static str| {
+    let create = |name: &'static str| {
         let api = &api;
         async move {
             let (status, body) = api
                 .call(
                     reqwest::Method::POST,
                     "/v1/bots",
-                    Some(json!({ "request_id": Uuid::new_v4(), "name": name, "role": role })),
+                    Some(json!({ "request_id": Uuid::new_v4(), "name": name })),
                 )
                 .await;
             assert_eq!(status, 201, "{body}");
             body["bot"]["id"].as_str().unwrap().to_owned()
         }
     };
-    let travel = create(
-        "Travel",
-        "Travel planning: trips, museums, flights, hotels, and itineraries",
-    )
-    .await;
-    let builder = create("Builder", "Runs small tasks on its own computer").await;
+    let travel = create("Travel").await;
+    let builder = create("Builder").await;
 
-    note("== 2. a corrected fact recalled from its source; delegation by role with one slot");
+    note("== 2. a corrected fact recalled from its source; delegation by name with one slot");
     let fact = api
         .send(
             &main,
@@ -672,7 +668,7 @@ async fn the_assistant_poc_works_end_to_end() {
     assert_eq!(
         delegations[0].0.to_string(),
         travel,
-        "routed by role to the new bot"
+        "routed by name to the new bot"
     );
     assert_eq!(delegations[0].1, "completed");
     assert_eq!(
@@ -883,7 +879,7 @@ async fn the_assistant_poc_works_end_to_end() {
         "the request and any partial reply are kept: {travel_items} -> {kept}"
     );
     // A bot with guest work and a running turn is deleted.
-    let scratch = create("Scratch", "temporary computer tasks").await;
+    let scratch = create("Scratch").await;
     let job_turn = api
         .send(&scratch, "codex", "On your computer start a background job running `sleep 900` and tell me its ID. Do not wait.")
         .await;
@@ -1152,7 +1148,7 @@ async fn the_assistant_poc_works_end_to_end() {
             .call(
                 reqwest::Method::POST,
                 "/v1/bots",
-                Some(json!({ "request_id": Uuid::new_v4(), "name": "Work", "role": "Help with my work projects" })),
+                Some(json!({ "request_id": Uuid::new_v4(), "name": "Work" })),
             )
             .await;
         assert_eq!(status, 201);

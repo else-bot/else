@@ -60,8 +60,8 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     let msb = || Arc::new(Msb::detect(dir.path(), None).expect("msb installed"));
     let manager = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
     manager.reconcile_startup().await.unwrap();
-    let a: Uuid = app.create_bot("Alpha", "alpha").await.parse().unwrap();
-    let b: Uuid = app.create_bot("Beta", "beta").await.parse().unwrap();
+    let a: Uuid = app.create_bot("Alpha").await.parse().unwrap();
+    let b: Uuid = app.create_bot("Beta").await.parse().unwrap();
 
     let started = std::time::Instant::now();
     let (lease_a, name_a) = ready(&manager, a, "test:a").await;
@@ -228,7 +228,7 @@ async fn guest_tools_desktop_and_isolation() {
         config,
     );
     manager.reconcile_startup().await.unwrap();
-    let bot: Uuid = app.create_bot("Desk", "desktop").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Desk").await.parse().unwrap();
     _cleanup
         .names
         .lock()
@@ -672,9 +672,9 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
         config,
     ));
     manager.reconcile_startup().await.unwrap();
-    let a = app.create_bot("RaceA", "a").await;
+    let a = app.create_bot("RaceA").await;
     let a_id: Uuid = a.parse().unwrap();
-    let b = app.create_bot("RaceB", "b").await;
+    let b = app.create_bot("RaceB").await;
     let b_id: Uuid = b.parse().unwrap();
     for id in [a_id, b_id] {
         cleanup
@@ -851,7 +851,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let site = "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1";
     let mut bots = Vec::new();
     for name in ["Alpha", "Beta"] {
-        let bot: Uuid = app.create_bot(name, "keeps things").await.parse().unwrap();
+        let bot: Uuid = app.create_bot(name).await.parse().unwrap();
         for list in [&cleanup_old.names, &cleanup_new.names] {
             list.lock()
                 .unwrap()
@@ -931,7 +931,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let alpha_password = std::fs::read_to_string(manager.desktop_password_file(alpha)).unwrap();
     // Saved state beyond chats: a deleted bot, a changed default bot, a
     // customized profile, and memory built into its tree and views.
-    let gamma = app.create_bot("Gamma", "temporary").await;
+    let gamma = app.create_bot("Gamma").await;
     assert!(
         app.owner("DELETE", &format!("/v1/bots/{gamma}"), None)
             .await
@@ -1024,7 +1024,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
         let mut out = Vec::new();
         for sql in [
-            "SELECT id, name, role, status FROM bots",
+            "SELECT id, name, status FROM bots",
             "SELECT default_bot_id FROM installation",
             "SELECT id, bot_id, kind, last_turn_no FROM conversations",
             "SELECT id, conversation_id, seq, kind, text FROM items",

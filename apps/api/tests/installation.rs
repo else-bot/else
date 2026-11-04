@@ -222,31 +222,25 @@ async fn constraints_and_rollback_hold_in_sqlite() {
             .await
             .is_err()
     );
-    // Name, role, and status/tombstone checks.
-    for (name, role, status, deleted) in [
-        ("", "r", "active", false),
-        (" padded ", "r", "active", false),
-        (&*"n".repeat(81), "r", "active", false),
-        ("ok", " ", "active", false),
-        ("ok", "r", "gone", false),
-        ("ok", "r", "deleted", false),
-        ("ok", "r", "active", true),
+    for (name, status, deleted) in [
+        ("", "active", false),
+        (" padded ", "active", false),
+        (&*"n".repeat(81), "active", false),
+        ("ok", "gone", false),
+        ("ok", "deleted", false),
+        ("ok", "active", true),
     ] {
         let result = sqlx::query(
-            "INSERT INTO bots (id, name, role, status, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END)",
+            "INSERT INTO bots (id, name, status, deleted_at)
+             VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') END)",
         )
         .bind(Uuid::new_v4())
         .bind(name)
-        .bind(role)
         .bind(status)
         .bind(deleted)
         .execute(&db.pool)
         .await;
-        assert!(
-            result.is_err(),
-            "accepted {name:?} {role:?} {status} {deleted}"
-        );
+        assert!(result.is_err(), "accepted {name:?} {status} {deleted}");
     }
 
     // A failure inside the bot+conversation transaction leaves nothing behind.
@@ -257,8 +251,7 @@ async fn constraints_and_rollback_hold_in_sqlite() {
         .unwrap();
     let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let name = else_api::app::bots::BotName::parse("Work").unwrap();
-    let role = else_api::app::bots::BotRole::parse("Help with work").unwrap();
-    installation::insert_bot(&mut tx, Uuid::new_v4(), &name, &role)
+    installation::insert_bot(&mut tx, Uuid::new_v4(), &name)
         .await
         .unwrap();
     // A second conversation for an existing bot violates the unique bot_id.

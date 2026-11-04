@@ -142,7 +142,7 @@ async fn setup() -> Setup {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let bot: Uuid = app.create_bot("Local", "scripts").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Local").await.parse().unwrap();
     assert!(matches!(
         manager.acquire(bot, "test:hold").await.unwrap(),
         Acquire::Ready { .. }

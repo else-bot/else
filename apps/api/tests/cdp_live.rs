@@ -304,7 +304,7 @@ async fn scripts_drive_the_visible_browser_safely() {
         },
     ));
     manager.reconcile_startup().await.unwrap();
-    let bot: Uuid = app.create_bot("Browser", "cdp").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Browser").await.parse().unwrap();
     ok(&manager, bot, "true", 120).await;
     tokio::time::sleep(Duration::from_secs(4)).await;
     write(&manager, bot, "site/cdp_site.py", SITE).await;
@@ -600,7 +600,7 @@ async fn scripts_drive_the_visible_browser_safely() {
     assert!(chromium.contains("--remote-debugging-address=127.0.0.1"));
 
     // Another bot's computer has its own browser.
-    let other: Uuid = app.create_bot("Other", "second").await.parse().unwrap();
+    let other: Uuid = app.create_bot("Other").await.parse().unwrap();
     ok(&manager, other, "true", 120).await;
     tokio::time::sleep(Duration::from_secs(4)).await;
     let mine: Value = serde_json::from_str(

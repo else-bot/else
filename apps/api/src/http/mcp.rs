@@ -217,19 +217,17 @@ fn tool_list() -> Value {
             "description": "Main bot only: register a new else.bot specialist for the owner, with \
                 the installation's default provider and no credentials, shared memory, or \
                 other access. Returns its bot_id at once; you may delegate to it in this \
-                attempt. Repeating the same name and role in this owner request returns the \
-                same bot; a changed role conflicts.",
+                attempt. Repeating the same name in this owner request returns the same bot. \
+                The bot learns its responsibilities from the tasks it receives, so give its \
+                first task with delegate.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "minLength": 1,
                               "maxLength": crate::app::bots::MAX_NAME_CHARS,
                               "description": "Short display name, for example GitHub." },
-                    "role": { "type": "string", "minLength": 1,
-                              "description": "Its responsibilities, in the second person or as a \
-                                  job description. A role grants no permissions." },
                 },
-                "required": ["name", "role"],
+                "required": ["name"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
@@ -448,13 +446,12 @@ async fn bots(state: &AppState, grant: &Grant) -> Outcome {
     match memory::readable_bots(&state.db, grant.bot_id).await {
         Ok(mut rows) => {
             if let Some(scope) = &grant.memory_scope {
-                rows.retain(|(id, _, _)| scope.contains(id));
+                rows.retain(|(id, _)| scope.contains(id));
             }
             let mut result = json!({ "bots": [], "more": false });
-            let shown = fill(&mut result, "bots", rows.len(), 2_000, |i, max| {
-                let (id, name, role) = &rows[i];
-                json!({ "bot_id": id, "name": name, "role": slice(role, 0, max).1,
-                        "self": *id == grant.bot_id })
+            let shown = fill(&mut result, "bots", rows.len(), 2_000, |i, _| {
+                let (id, name) = &rows[i];
+                json!({ "bot_id": id, "name": name, "self": *id == grant.bot_id })
             });
             result["more"] = json!(shown < rows.len());
             let log = format!("{shown} readable bots");
@@ -890,11 +887,10 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
 #[serde(deny_unknown_fields)]
 struct CreateBotArgs {
     name: String,
-    role: String,
 }
 
 async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::app::bots::{BotName, BotRole};
+    use crate::app::bots::BotName;
     use crate::db::bots::{self, BotError, Created, Refusal};
     let reject = |code: &str, message: &str| {
         (
@@ -903,16 +899,13 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         )
     };
     let Ok(parsed) = serde_json::from_value::<CreateBotArgs>(args.clone()) else {
-        return reject(
-            "INVALID_ARGUMENTS",
-            "pass exactly a name and a role, both strings.",
-        );
+        return reject("INVALID_ARGUMENTS", "pass exactly a name, as a string.");
     };
-    let (name, role) = match (BotName::parse(&parsed.name), BotRole::parse(&parsed.role)) {
-        (Ok(name), Ok(role)) => (name, role),
-        (Err(err), _) | (_, Err(err)) => return reject("INVALID_BOT", &err.to_string()),
+    let name = match BotName::parse(&parsed.name) {
+        Ok(name) => name,
+        Err(err) => return reject("INVALID_BOT", &err.to_string()),
     };
-    match bots::create_for_turn(&state.db, grant.turn_id, &name, &role).await {
+    match bots::create_for_turn(&state.db, grant.turn_id, &name).await {
         Ok(created) => {
             let (bot, new) = match created {
                 Created::New(bot) => (bot, true),
@@ -935,18 +928,12 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             let result = json!({
                 "bot_id": bot.id,
                 "name": bot.name,
-                "role": bot.role,
                 "status": bot.status,
                 "created": new,
                 "next": next,
             });
             (tool_result(result), Some(log))
         }
-        Err(BotError::RequestConflict) => reject(
-            "CREATE_CONFLICT",
-            "this request already created a bot with that name and a different role; \
-             retry with the original role, or use another name for another bot.",
-        ),
         Err(BotError::Refused(refusal)) => {
             let code = match refusal {
                 Refusal::NotMain => "NOT_ALLOWED",

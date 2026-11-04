@@ -213,7 +213,7 @@ async fn a_failed_onboarding_leaves_no_greeting_and_its_retry_greets_once() {
 async fn used_installations_and_other_bots_are_not_greeted() {
     let app = TestApp::installed().await;
     let main = app.main_bot().await;
-    let work = app.create_bot("Work", "work").await;
+    let work = app.create_bot("Work").await;
     let sent = app
         .send(
             &main,

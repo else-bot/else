@@ -115,7 +115,7 @@ fn worker(app: &TestApp, dir: &Path, replicator: Replicator) -> BackupWorker {
 
 async fn populated() -> TestApp {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     let reply = app
         .send(&bot, Uuid::new_v4(), "Remember TEAL-8", Some("synthetic"))
         .await;
@@ -492,7 +492,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
     let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
-    let bot = app.create_bot("Builder", "builds").await;
+    let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let reply = app
         .send(&bot, Uuid::new_v4(), "Remember TEAL-8", Some("synthetic"))
@@ -780,7 +780,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
         else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
     )]);
     let app = TestApp::with_parts(db.clone(), 4, registry, Some(manager.clone()));
-    let bot: Uuid = app.create_bot("Builder", "builds").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Builder").await.parse().unwrap();
     let Acquire::Ready { lease_id, .. } = manager.acquire(bot, "test:use").await.unwrap() else {
         panic!()
     };

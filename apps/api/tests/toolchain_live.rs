@@ -202,11 +202,7 @@ async fn toolchain_projects_persist_and_restore() {
     load(&home, dir.path(), "else-guest:2");
     let app = TestApp::installed().await;
     let manager = manager(&app, dir.path(), "else-guest:2").await;
-    let bot: Uuid = app
-        .create_bot("Builder", "programming")
-        .await
-        .parse()
-        .unwrap();
+    let bot: Uuid = app.create_bot("Builder").await.parse().unwrap();
 
     // The capability report: every runtime answers as the unprivileged
     // user, without a login shell, and matches the recorded image.
@@ -578,7 +574,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     // A bot whose computer was created from the old image, with a project
     // and browser state.
     let old = manager(&app, dir.path(), "else-guest:1").await;
-    let bot: Uuid = app.create_bot("Veteran", "existing").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Veteran").await.parse().unwrap();
     let before = run(
         &old,
         bot,
@@ -616,7 +612,7 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         runtime_name(&app, bot).await,
         (old_name.clone(), "else-guest:1".into())
     );
-    let newcomer: Uuid = app.create_bot("Newcomer", "new").await.parse().unwrap();
+    let newcomer: Uuid = app.create_bot("Newcomer").await.parse().unwrap();
     assert!(
         run(&manager, newcomer, "cargo --version", 120)
             .await

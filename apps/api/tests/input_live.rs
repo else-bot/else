@@ -386,8 +386,11 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         .await;
     assert_eq!(status, 200, "{body}");
     let (_, body) = api
-        .call(reqwest::Method::POST, "/v1/bots",
-              Some(json!({ "request_id": Uuid::new_v4(), "name": "Hands", "role": "Operates its desktop." })))
+        .call(
+            reqwest::Method::POST,
+            "/v1/bots",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Hands" })),
+        )
         .await;
     let bot = body["bot"]["id"].as_str().unwrap().to_owned();
     let long = Duration::from_secs(900);

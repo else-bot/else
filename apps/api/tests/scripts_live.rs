@@ -437,8 +437,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         .call(
             reqwest::Method::POST,
             "/v1/bots",
-            Some(json!({ "request_id": Uuid::new_v4(), "name": "Scripter",
-                         "role": "Automates tasks with scripts in its computer." })),
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Scripter" })),
         )
         .await;
     let bot = body["bot"]["id"].as_str().unwrap().to_owned();

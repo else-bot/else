@@ -2,7 +2,7 @@
 
 ## Sub-features
 
-- Create a named bot with a role; retry once without duplicating it.
+- Create a bot by name alone; retry once without duplicating it.
 - Select bots in the sidebar with independent transcripts and drafts.
 - Delete an ordinary bot while retaining its history.
 - Refuse deletion of the main bot.
@@ -21,7 +21,7 @@ database row remains deleted. `retained-row.json` records that side effect.
 Run `verify.py --tests bots cancel` for concurrency and deletion during work.
 
 For native proof, launch the documented private session. Use Ctrl+Shift+N,
-inspect the name/role fields, fill them and submit. Confirm one selected bot
+check that the dialog asks only for a name (plus model and category), fill it and submit. Confirm one selected bot
 and a matching ID/name from `--probe native`. Select another bot and return;
 check its draft/transcript. Delete through Ctrl+Shift+D, confirm, then probe
 again. Capture the creation action and deletion confirmation as well as the

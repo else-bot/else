@@ -436,10 +436,10 @@ pub async fn delegated_scope(
     let parent_reads: Vec<Uuid> = crate::db::memory::readable_bots(pool, parent)
         .await?
         .into_iter()
-        .map(|(id, _, _)| id)
+        .map(|(id, _)| id)
         .collect();
     let mut scope = vec![target];
-    for (id, _, _) in crate::db::memory::readable_bots(pool, target).await? {
+    for (id, _) in crate::db::memory::readable_bots(pool, target).await? {
         if id != target && parent_reads.contains(&id) {
             scope.push(id);
         }

@@ -259,7 +259,7 @@ async fn hanging_turn(app: &TestApp, bot: &str) -> (Uuid, Uuid) {
 async fn task_grants_are_scoped_to_their_turn() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
-    let other = app.create_bot("Other", "other").await;
+    let other = app.create_bot("Other").await;
     let foreign = app
         .send(&other, Uuid::new_v4(), "foreign secret", Some("synthetic"))
         .await;
@@ -321,7 +321,7 @@ async fn task_grants_are_scoped_to_their_turn() {
         .call(
             "POST",
             "/v1/bots",
-            Some(json!({ "request_id": Uuid::new_v4(), "name": "x", "role": "y" })),
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "x" })),
             Some(&token),
         )
         .await;
@@ -427,7 +427,7 @@ async fn task_grants_are_scoped_to_their_turn() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_bot_revokes_its_grants() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Temp", "temp").await;
+    let bot = app.create_bot("Temp").await;
     let (turn, conversation) = hanging_turn(&app, &bot).await;
     let token = app
         .scheduler

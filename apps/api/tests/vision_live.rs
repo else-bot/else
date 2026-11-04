@@ -407,8 +407,11 @@ async fn both_providers_read_pixels_from_their_desktop() {
         note(&format!("{provider} profile: {}", body["profile"]));
     }
     let (_, body) = api
-        .call(reqwest::Method::POST, "/v1/bots",
-              Some(json!({ "request_id": Uuid::new_v4(), "name": "Seer", "role": "Looks at its desktop." })))
+        .call(
+            reqwest::Method::POST,
+            "/v1/bots",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Seer" })),
+        )
         .await;
     let bot = body["bot"]["id"].as_str().unwrap().to_owned();
     let long = Duration::from_secs(600);

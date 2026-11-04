@@ -651,15 +651,12 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
 
     note("== 1. bots and categories");
     let mut bots = Vec::new();
-    for (name, role) in [
-        ("Scripter", "Automates tasks with scripts and the browser."),
-        ("Hands", "Operates its desktop visually."),
-    ] {
+    for name in ["Scripter", "Hands"] {
         let (_, body) = api
             .call(
                 reqwest::Method::POST,
                 "/v1/bots",
-                Some(json!({ "request_id": Uuid::new_v4(), "name": name, "role": role })),
+                Some(json!({ "request_id": Uuid::new_v4(), "name": name })),
             )
             .await;
         bots.push(body["bot"]["id"].as_str().unwrap().to_owned());

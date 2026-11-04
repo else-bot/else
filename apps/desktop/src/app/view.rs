@@ -356,22 +356,12 @@ impl ElseApp {
             .border_b_1()
             .border_color(theme.border)
             .child(
-                v_flex()
+                div()
                     .min_w_0()
                     .flex_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(bot.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .truncate()
-                            .child(bot.role.clone().unwrap_or_default()),
-                    ),
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(bot.name.clone()),
             )
             .child(actions.flex_none())
     }

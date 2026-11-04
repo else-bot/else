@@ -101,7 +101,6 @@ pub struct TurnInput {
     pub turn_id: Uuid,
     pub turn_no: i64,
     pub bot_name: String,
-    pub bot_role: String,
     pub text: String,
     /// The profile snapshot taken when the message was accepted.
     pub profile: Option<Profile>,
@@ -111,7 +110,7 @@ pub struct TurnInput {
     pub session: Option<SessionState>,
     /// Task grant for else.bot tools during this turn; revoked when it ends.
     pub tool_grant: Option<String>,
-    /// The bot's saved memory, bounded, for a new session.
+    /// The bot's saved memory, bounded, for a session that lacks this revision.
     pub memory: Option<MemoryContext>,
     /// Provider attempt number of this turn (continuations count up).
     pub attempt: i32,
@@ -169,14 +168,14 @@ pub struct DelegationContext {
     pub delegated_task: bool,
     /// For a delegated task: the bot that delegated it.
     pub parent_bot_id: Option<Uuid>,
-    /// Other active bots: ID, name, role.
-    pub registry: Vec<(Uuid, String, String)>,
+    /// Other active bots: ID and name.
+    pub registry: Vec<(Uuid, String)>,
     pub remaining: i64,
     /// Child outcomes not yet given to an attempt of this turn.
     pub outcomes: Vec<DelegationOutcome>,
 }
 
-/// Bounded saved memory for a session that has not received it.
+/// Bounded saved memory at one view revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryContext {
     pub revision: i64,
