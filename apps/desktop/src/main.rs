@@ -10,6 +10,38 @@ mod sidebar;
 
 use gpui_kit::*;
 
+gpui_kit::assets::icon_assets!(
+    BotMenuIcons,
+    [
+        FolderInput,
+        BellDot,
+        PencilLine,
+        Trash,
+        TriangleAlert,
+        Check,
+        ChevronRight
+    ]
+);
+
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = BotMenuIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(BotMenuIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -35,7 +67,7 @@ fn main() {
     let handle = runtime.handle().clone();
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             app::bind_keys(cx);

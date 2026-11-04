@@ -1,12 +1,14 @@
 //! Onboarding, bot creation, and bot deletion dialogs.
 
-use super::ElseApp;
-use crate::api::{Capabilities, CreateBotRequest};
+use super::{Connection, ElseApp};
+use crate::api::{Bot, Capabilities, CreateBotRequest};
 use crate::profile_picker::ProfilePicker;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -388,42 +390,75 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn open_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(bot) = self.selected_bot().cloned() else {
-            return;
-        };
-        // The main bot is the entry point and is never deleted (the API
-        // refuses it too).
-        if self.default_bot_id == Some(bot.id) {
+    fn deletable_bot(&mut self, id: Uuid, cx: &mut Context<Self>) -> Option<Bot> {
+        if self.connection != Connection::Connected || self.deleting.contains(&id) {
+            return None;
+        }
+        let bot = self.active_bots().find(|b| b.id == id)?.clone();
+        if self.default_bot_id == Some(id) {
             self.notice = Some(format!(
                 "{} is your main bot and cannot be deleted.",
                 bot.name
             ));
             cx.notify();
-            return;
+            return None;
         }
+        Some(bot)
+    }
+
+    pub(super) fn open_delete_dialog(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bot) = self.deletable_bot(id, cx) else {
+            return;
+        };
         let app = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let text = format!(
-                "Delete {}? This stops its work and removes it from messaging. Its history, \
-                 memory, and files are kept.",
-                bot.name
-            );
+        let cancel = cx.focus_handle();
+        let confirm = cx.focus_handle();
+        let focus_once = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if focus_once.replace(false) {
+                cancel.focus(window, cx);
+            }
+            let theme = cx.theme();
+            let consequence = |text: &'static str| {
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(div().text_color(theme.muted_foreground).child("•"))
+                    .child(text)
+            };
             let app = app.clone();
-            let id = bot.id;
             let app_ok = app.clone();
+            let confirm_ok = confirm.clone();
             dialog
-                .title("Delete bot")
+                .title(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Icon::new(IconName::TriangleAlert).text_color(theme.danger))
+                        .child(div().truncate().child(format!("Delete {}?", bot.name))),
+                )
                 .w(px(460.))
                 .on_ok(move |_, window, cx| {
-                    let _ = app_ok.update(cx, |app, cx| app.delete_bot(id, window, cx));
+                    if confirm_ok.is_focused(window) {
+                        let _ = app_ok.update(cx, |app, cx| app.delete_bot(id, window, cx));
+                    }
                     true
                 })
                 .child(
-                    div()
+                    v_flex()
+                        .gap_1()
                         .text_sm()
-                        .text_color(cx.theme().foreground)
-                        .child(text),
+                        .text_color(theme.foreground)
+                        .child(consequence("Its work in progress stops."))
+                        .child(consequence(
+                            "It leaves the sidebar and can no longer be messaged.",
+                        ))
+                        .child(consequence("Its history, memory, and files are kept.")),
                 )
                 .footer(
                     h_flex()
@@ -432,13 +467,15 @@ impl ElseApp {
                         .child(
                             Button::new("delete-cancel")
                                 .label("Cancel")
-                                .ghost()
+                                .outline()
+                                .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("delete-confirm")
                                 .label("Delete bot")
                                 .danger()
+                                .track_focus(&confirm)
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     let _ =
@@ -450,10 +487,15 @@ impl ElseApp {
     }
 
     fn delete_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deletable_bot(id, cx).is_none() {
+            return;
+        }
+        self.deleting.insert(id);
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_bot(id).await;
             let _ = this.update_in(cx, |app, window, cx| {
+                app.deleting.remove(&id);
                 match result {
                     Ok(receipt) => {
                         if let Some(bot) = app.bots.iter_mut().find(|b| b.id == id) {

@@ -123,6 +123,22 @@ impl ElseApp {
         cx.notify();
     }
 
+    pub(super) fn rename_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_bots().any(|b| b.id == id) {
+            return;
+        }
+        self.open_bot(id, window, cx);
+        if !self.settings_open {
+            self.toggle_settings(window, cx);
+        }
+        if let Some(entry) = self.settings.get(&id) {
+            entry.details.name.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.select_all(window, cx);
+            });
+        }
+    }
+
     pub(super) fn settings_shown(&self) -> bool {
         self.settings_open && self.selected_bot().is_some_and(|b| b.is_active())
     }
