@@ -52,6 +52,22 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 ```
 
+For fast behavior checks on Linux amd64, use the
+[verify-else skill](../.agents/skills/verify-else/SKILL.md):
+
+```sh
+.agents/skills/verify-else/verify.py
+.agents/skills/verify-else/verify.py --tests bots categories turns cancel ws
+.agents/skills/verify-else/verify.py --full
+```
+
+The default runs independent HTTP journeys for bots, messaging/stop/restart,
+and categories. `--full` adds the existing offline workspace tests. Compilation
+uses the dev cache once, then test binaries run in bounded parallel lanes
+inside a private, network-isolated omabox. Logs and results survive teardown
+under `target/verification/`. The skill also documents native desktop input
+checks and explicit live-provider, VM, S3, installer, and platform exclusions.
+
 ### Build speed
 
 Default checkout builds (`cargo build` / `cargo run`) skip debug information for
