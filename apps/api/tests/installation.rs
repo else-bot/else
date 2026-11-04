@@ -251,7 +251,8 @@ async fn constraints_and_rollback_hold_in_sqlite() {
         .unwrap();
     let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     let name = else_api::app::bots::BotName::parse("Work").unwrap();
-    installation::insert_bot(&mut tx, Uuid::new_v4(), &name)
+    let avatar = else_api::app::bots::Avatar::DEFAULT;
+    installation::insert_bot(&mut tx, Uuid::new_v4(), &name, avatar)
         .await
         .unwrap();
     // A second conversation for an existing bot violates the unique bot_id.

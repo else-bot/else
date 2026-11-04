@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
-use crate::app::bots::BotName;
+use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName};
 use crate::app::providers::Profile;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, serde::Serialize)]
@@ -41,10 +41,24 @@ pub struct BotRecord {
     pub queued_count: i64,
     /// Its sidebar category (POC-030), if any.
     pub category_id: Option<Uuid>,
+    avatar_shape: Option<AvatarShape>,
+    avatar_color: Option<AvatarColor>,
+}
+
+impl BotRecord {
+    /// The chosen avatar, or the one derived from the ID for bots saved
+    /// before avatars existed.
+    pub fn avatar(&self) -> Avatar {
+        match (self.avatar_shape, self.avatar_color) {
+            (Some(shape), Some(color)) => Avatar { shape, color },
+            _ => Avatar::derived(self.id),
+        }
+    }
 }
 
 const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status,
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
+        b.avatar_shape, b.avatar_color,
         a.id AS active_turn_id, a.status AS active_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
@@ -215,7 +229,7 @@ async fn create_as(
             return Err(BotError::CategoryNotFound);
         }
     }
-    insert_bot(&mut tx, bot_id, bot.name).await?;
+    insert_bot(&mut tx, bot_id, bot.name, Avatar::derived(bot_id)).await?;
     if let Some((provider, profile)) = bot.profile {
         super::bot_profiles::put_in(&mut tx, bot_id, provider, profile)
             .await
@@ -299,33 +313,44 @@ pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, 
     })
 }
 
-/// Rename an active bot. Repeating the same name changes nothing and
-/// journals nothing; a change journals one `bot.updated` in the same
-/// transaction. A deleted bot is refused and never revived.
-pub async fn rename(
+/// Owner edits to a bot's metadata. Absent fields keep their value.
+pub struct Patch<'a> {
+    pub name: Option<&'a BotName>,
+    pub avatar: Option<Avatar>,
+}
+
+/// Change an active bot's name, avatar, or both at once. Saving the values
+/// it already shows changes nothing and journals nothing; a change journals
+/// one `bot.updated` in the same transaction. A deleted bot is refused and
+/// never revived.
+pub async fn update(
     pool: &SqlitePool,
     bot_id: Uuid,
-    name: &BotName,
+    patch: Patch<'_>,
 ) -> Result<BotRecord, BotError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let status: Option<BotStatus> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
-        .bind(bot_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status {
-        None => return Err(BotError::NotFound),
-        Some(BotStatus::Active) => {}
-        Some(BotStatus::Deleting | BotStatus::Deleted) => return Err(BotError::Deleted),
+    let current = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
+    if current.status != BotStatus::Active {
+        return Err(BotError::Deleted);
     }
-    let changed = sqlx::query("UPDATE bots SET name = ?2 WHERE id = ?1 AND name IS NOT ?2")
-        .bind(bot_id)
-        .bind(name.as_str())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if changed > 0 {
-        super::events::bot_updated(&mut tx, bot_id).await?;
+    let name = patch.name.map_or(current.name.as_str(), BotName::as_str);
+    let avatar = patch.avatar.unwrap_or(current.avatar());
+    if name == current.name && avatar == current.avatar() {
+        tx.commit().await?;
+        return Ok(current);
     }
+    sqlx::query(
+        "UPDATE bots SET name = ?2,
+             avatar_shape = coalesce(?3, avatar_shape), avatar_color = coalesce(?4, avatar_color)
+         WHERE id = ?1",
+    )
+    .bind(bot_id)
+    .bind(name)
+    .bind(patch.avatar.map(|a| a.shape))
+    .bind(patch.avatar.map(|a| a.color))
+    .execute(&mut *tx)
+    .await?;
+    super::events::bot_updated(&mut tx, bot_id).await?;
     let bot = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
     tx.commit().await?;
     Ok(bot)

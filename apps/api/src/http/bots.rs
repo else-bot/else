@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::bots::BotName;
+use crate::app::bots::{Avatar, BotName};
 use crate::db::bots::{self, BotError, BotStatus, Created};
 use crate::views::*;
 
@@ -145,7 +145,10 @@ async fn show(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateBot {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar: Option<Avatar>,
 }
 
 async fn update(
@@ -153,8 +156,23 @@ async fn update(
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<UpdateBot>,
 ) -> Result<Json<Value>, ApiError> {
-    let name = BotName::parse(&body.name).map_err(invalid_bot)?;
-    let bot = bots::rename(&state.db, bot_id, &name).await?;
+    if body.name.is_none() && body.avatar.is_none() {
+        return Err(ApiError::bad_request(
+            "invalid_input",
+            "Send a name, an avatar, or both.",
+        ));
+    }
+    let name = body
+        .name
+        .as_deref()
+        .map(BotName::parse)
+        .transpose()
+        .map_err(invalid_bot)?;
+    let patch = bots::Patch {
+        name: name.as_ref(),
+        avatar: body.avatar,
+    };
+    let bot = bots::update(&state.db, bot_id, patch).await?;
     Ok(Json(json!({ "bot": bot_json(&bot) })))
 }
 

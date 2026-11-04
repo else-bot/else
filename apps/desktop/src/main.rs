@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod avatar;
 mod config;
 mod connection;
 mod model;

@@ -7,6 +7,7 @@ use super::{
     StopWork, ToggleSettings,
 };
 use crate::api::Bot;
+use crate::avatar::bot_avatar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -261,17 +262,25 @@ impl ElseApp {
                     .bg(theme.primary),
             );
         }
-        let mut row = v_flex()
+        let mut avatar = bot_avatar("avatar", bot.avatar, px(28.));
+        if pending {
+            avatar = avatar.still();
+        }
+        let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
+            .gap_2p5()
+            .items_center()
             .px_2()
             .py_1p5()
             .rounded_md()
-            .child(name_row)
+            .child(avatar)
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(activity),
+                v_flex().flex_1().min_w_0().child(name_row).child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(activity),
+                ),
             );
         if pending {
             row = row.opacity(0.5);
@@ -356,12 +365,23 @@ impl ElseApp {
             .border_b_1()
             .border_color(theme.border)
             .child(
-                div()
+                h_flex()
                     .min_w_0()
                     .flex_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
-                    .child(bot.name.clone()),
+                    .gap_2()
+                    .items_center()
+                    .child(bot_avatar(
+                        ElementId::Name(format!("header-avatar-{}", bot.id).into()),
+                        bot.avatar,
+                        px(26.),
+                    ))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(bot.name.clone()),
+                    ),
             )
             .child(actions.flex_none())
     }

@@ -9,7 +9,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use super::DbError;
-use crate::app::bots::{BotName, MAIN_BOT_NAME, welcome_message};
+use crate::app::bots::{Avatar, BotName, MAIN_BOT_NAME, welcome_message};
 use crate::app::providers::default_profiles;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -54,11 +54,14 @@ pub async fn insert_bot(
     tx: &mut Transaction<'_, Sqlite>,
     bot_id: Uuid,
     name: &BotName,
+    avatar: Avatar,
 ) -> Result<Uuid, sqlx::Error> {
     let conversation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
+    sqlx::query("INSERT INTO bots (id, name, avatar_shape, avatar_color) VALUES (?1, ?2, ?3, ?4)")
         .bind(bot_id)
         .bind(name.as_str())
+        .bind(avatar.shape)
+        .bind(avatar.color)
         .execute(&mut **tx)
         .await?;
     sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
@@ -168,7 +171,7 @@ pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {
             }
             let bot_id = Uuid::new_v4();
             let name = BotName::parse(MAIN_BOT_NAME).expect("valid constant");
-            insert_bot(&mut tx, bot_id, &name).await?;
+            insert_bot(&mut tx, bot_id, &name, Avatar::DEFAULT).await?;
             sqlx::query("INSERT INTO installation (default_bot_id) VALUES (?1)")
                 .bind(bot_id)
                 .execute(&mut *tx)

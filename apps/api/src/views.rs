@@ -14,6 +14,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         return json!({
             "id": bot.id,
             "name": bot.name,
+            "avatar": bot.avatar(),
             "deleted_at": bot.deleted_at,
             "cleanup": {
                 "state": if bot.status == BotStatus::Deleted { "done" } else { "pending" },
@@ -24,6 +25,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
     json!({
         "id": bot.id,
         "name": bot.name,
+        "avatar": bot.avatar(),
         "conversation_id": bot.conversation_id,
         "created_at": bot.created_at,
         "deleted_at": null,

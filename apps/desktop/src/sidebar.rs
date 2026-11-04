@@ -72,6 +72,7 @@ mod tests {
         Bot {
             id: Uuid::from_u128(id),
             name: name.into(),
+            avatar: Default::default(),
             conversation_id: None,
             selected_provider_id: None,
             activity: None,
