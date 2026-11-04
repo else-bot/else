@@ -35,10 +35,7 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
     assert_eq!(steps, vec![Step::Text("Hi".into())]);
     t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}));
     let steps = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"again"}}}));
-    assert_eq!(
-        steps,
-        vec![Step::Text("\n\n".into()), Step::Text("again".into())]
-    );
+    assert_eq!(steps, vec![Step::EndMessage, Step::Text("again".into())]);
     let steps =
         t.on(&json!({"type":"result","subtype":"success","is_error":false,"result":"Hi\n\nagain"}));
     assert_eq!(

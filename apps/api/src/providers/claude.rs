@@ -624,6 +624,11 @@ impl Provider for Claude {
                             cancel.cancel();
                         }
                     }
+                    Step::EndMessage => {
+                        if sink.end_message().await.is_err() {
+                            cancel.cancel();
+                        }
+                    }
                     Step::Accepted => {
                         // A stop racing acceptance still drains the turn.
                         if sink.running().await.is_err() {

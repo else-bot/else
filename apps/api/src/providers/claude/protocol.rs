@@ -19,6 +19,8 @@ pub(super) struct ResultInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Step {
     Text(String),
+    /// The current text block ended and another one started.
+    EndMessage,
     Accepted,
     /// A permission prompt or other request the CLI waits on.
     Control(String),
@@ -170,7 +172,7 @@ impl Tracker {
                         if let Some(text) = inner["delta"]["text"].as_str() {
                             if self.separate {
                                 self.separate = false;
-                                steps.push(Step::Text("\n\n".into()));
+                                steps.push(Step::EndMessage);
                                 self.text.push_str("\n\n");
                             }
                             self.wrote_text = true;

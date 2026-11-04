@@ -243,7 +243,7 @@ impl Provider for Synthetic {
             }
         }
         if input.text.contains("[synthetic:messages]")
-            && (sink.text("\n\n").await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())
+            && (sink.end_message().await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())
         {
             return TurnOutcome::Interrupted;
         }
