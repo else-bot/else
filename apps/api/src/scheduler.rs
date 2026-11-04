@@ -217,6 +217,18 @@ impl Scheduler {
         if orphaned > 0 {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
+        if let Some(_admission) = self.gate.enter() {
+            let admitted = crate::db::routines::admit_due(
+                &self.pool,
+                &self.registry,
+                chrono::Utc::now(),
+                crate::db::routines::ADMIT_BATCH,
+            )
+            .await;
+            if let Err(err) = admitted {
+                tracing::warn!(error = %err, "admitting due routines failed");
+            }
+        }
         // The slot is reserved before the claim, so a summary cannot take
         // it while the claim is in flight. Each claim is admitted through
         // the maintenance gate until its turn is registered as running, so
@@ -319,25 +331,7 @@ impl Scheduler {
                     input.bot_id,
                     input.conversation_id,
                     turn_id,
-                    if input.delegation.can_delegate {
-                        vec![
-                            Tool::ReadHistory,
-                            Tool::ReadMemory,
-                            Tool::Computer,
-                            Tool::RequestSecret,
-                            Tool::Delegate,
-                            Tool::CreateBot,
-                        ]
-                    } else if input.delegation.delegated_task {
-                        vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]
-                    } else {
-                        vec![
-                            Tool::ReadHistory,
-                            Tool::ReadMemory,
-                            Tool::Computer,
-                            Tool::RequestSecret,
-                        ]
-                    },
+                    turn_tools(&input),
                     memory_scope,
                     TOOL_GRANT_TTL,
                 )
@@ -424,6 +418,21 @@ impl Scheduler {
             }
         }
     }
+}
+
+fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
+    let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
+    if input.delegation.delegated_task {
+        return tools;
+    }
+    tools.push(Tool::RequestSecret);
+    if input.routine.is_none() {
+        tools.push(Tool::Routines);
+    }
+    if input.delegation.can_delegate {
+        tools.extend([Tool::Delegate, Tool::CreateBot]);
+    }
+    tools
 }
 
 /// The bots a delegated task may read: its own, plus those both the

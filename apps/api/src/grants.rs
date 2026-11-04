@@ -35,6 +35,9 @@ pub enum Tool {
     Computer,
     /// Ask the owner for credentials (owner conversations only).
     RequestSecret,
+    /// Manage the bot's own routines (owner messages only, never in a
+    /// delegated task or a routine run).
+    Routines,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -20,7 +20,7 @@ pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 use serde_json::json;
 
 use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Snapshot, Turn};
+use crate::model::{Item, Routine, Snapshot, Turn};
 
 /// The complete create payload, retained unchanged when delivery is uncertain.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -163,6 +163,11 @@ pub struct BotList {
     #[serde(default)]
     pub categories: Vec<Category>,
     pub bots: Vec<Bot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RoutineEnvelope {
+    routine: Routine,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -534,6 +539,23 @@ impl Client {
         self.call::<Onboarded>(Method::POST, "/v1/onboarding".into(), Some(body))
             .await
             .map(|(_, done)| done.main_bot_id)
+    }
+
+    /// Switch a routine on or off. Setting its current value is a no-op, so
+    /// a retry is safe; switching on schedules the next run from now.
+    pub async fn set_routine_enabled(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+        enabled: bool,
+    ) -> Result<Routine, ClientError> {
+        self.call::<RoutineEnvelope>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}/routines/{routine}"),
+            Some(json!({ "enabled": enabled })),
+        )
+        .await
+        .map(|(_, v)| v.routine)
     }
 
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {

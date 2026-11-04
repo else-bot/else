@@ -1,15 +1,34 @@
 # Routines and webhooks
 
-These are the planned triggers and authorization rules. The [security notes](security.md) cover prompt injection and the installation master key.
+A routine is a saved task that a bot runs on a cron schedule in its owner conversation. Webhook triggers are planned; their authorization rules follow. The [security notes](security.md) cover prompt injection and the installation master key.
 
-Routines should trigger a prompt in a bot conversation so it can carry out automated tasks.
+## Creating and managing routines
 
-They should support two kinds of triggers:
+The owner asks a bot in chat ("every weekday at 9, summarize my unread mail"). The bot saves it with the `routine_create` MCP tool: a name, the complete prompt, a cron expression, and an optional time zone. `routine_list`, `routine_update`, and `routine_delete` manage the bot's own routines. The bot and its routines come from the turn's task grant, never from tool arguments.
 
-- A cron schedule for recurring tasks.
-- An event, starting with webhooks authenticated through an `Authorization` header.
+Only a turn answering an owner message in the bot's own owner conversation may use these tools. Delegated tasks and routine runs get no routine permission, and every change rechecks the turn inside its own transaction. A bot has at most 20 routines. Names are unique among a bot's routines. Repeating a create with the same name in the same owner turn returns the routine it created; different settings conflict.
 
-## Webhook authorization
+Bot settings lists the conversation's routines under Model, with their schedule, time zone, next run, last run, and an on/off switch. The owner API is `GET /v1/bots/{bot_id}/routines` and `PATCH /v1/bots/{bot_id}/routines/{routine_id}` with `{"enabled": bool}`.
+
+## Schedules
+
+A schedule is a standard five-field cron expression: minute, hour, day of month, month, day of week. Fields use digits with `*`, `,`, `-`, and `/`. Names, `@daily`-style aliases, seconds, years, and extensions such as `L` or `#` are refused. Day of week 0 and 7 are Sunday. When both day fields are restricted, either one matching is enough, as in Vixie cron. Schedules can run as often as once a minute.
+
+Each routine is read in an IANA time zone, such as `Europe/Paris`. Without one it uses UTC, never the host's zone, and the result says so. Times follow the zone's wall clock across daylight saving changes. A time skipped when clocks go forward runs right after the gap. A time repeated when clocks go back runs once. A schedule with no future occurrence, such as 30 February, is refused.
+
+## Runs
+
+The scheduler admits due routines during its scan, before it claims turns, and never while maintenance holds its gate. One transaction records the occurrence and advances the next run time past now, so an occurrence runs at most once across retries and restarts. Occurrences missed while else.bot was down coalesce into one catch-up run, and the schedule then resumes after now.
+
+A run is skipped, and recorded with its reason, when the routine's previous run has not finished, the bot's queue is full, or no provider is available. Otherwise it queues an ordinary turn in the owner conversation. The turn uses the bot's current provider and profile, as an owner message without a named provider would. It never changes the selected provider or stops the owner's work. Stop, deletion, restart reconciliation, and uncertain outcomes apply to it like any turn.
+
+The run's prompt is a hidden routine item. Snapshots, events, and the bot's history tools leave it out, and memory never records it as owner text. The provider receives it labeled as a scheduled routine run, with instructions to do the task and report what actually happened. The report is an ordinary assistant message in the conversation. A run that fails before any reply shows its error as the routine's last run.
+
+Turning a routine off stops future runs; a run already admitted finishes. Turning it on schedules the next occurrence after now. Setting the value a routine already has changes nothing. Renaming or editing a routine leaves earlier runs as they were admitted.
+
+## Webhook authorization (planned)
+
+A future event trigger starts with webhooks authenticated through an `Authorization` header.
 
 Generate a separate bearer token for each webhook from 32 cryptographically random bytes, encoded as base64url. Generate each token independently of `SECRET_KEY` and every other webhook token. Enforce uniqueness on the stored token hash. The caller sends it over HTTPS:
 

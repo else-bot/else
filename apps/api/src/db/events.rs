@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use crate::db::{bots, turns};
-use crate::views::{bot_json, item_json, turn_json};
+use crate::db::{bots, routines, turns};
+use crate::views::{bot_json, item_json, routine_json, turn_json};
 
 async fn append(
     conn: &mut SqliteConnection,
@@ -40,13 +40,20 @@ pub async fn notify(_conn: &mut SqliteConnection, _bot_id: Uuid) -> Result<(), s
     Ok(())
 }
 
+/// The bot's current state, with its routines and their last runs: every
+/// routine change and every turn change journals one.
 pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     if let Some(bot) = bots::find_in(conn, bot_id).await? {
+        let routines: Vec<Value> = routines::list(conn, bot_id)
+            .await?
+            .iter()
+            .map(routine_json)
+            .collect();
         append(
             conn,
             bot_id,
             "bot.updated",
-            json!({ "bot_id": bot_id, "bot": bot_json(&bot) }),
+            json!({ "bot_id": bot_id, "bot": bot_json(&bot), "routines": routines }),
         )
         .await?;
     }
@@ -59,7 +66,7 @@ pub async fn item_upsert(
     item_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let item = turns::load_item(conn, item_id).await?;
-    if is_task(conn, item.conversation_id).await? {
+    if item.kind == "routine" || is_task(conn, item.conversation_id).await? {
         return Ok(());
     }
     let data = json!({

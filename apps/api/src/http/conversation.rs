@@ -15,7 +15,7 @@ use super::error::{ApiError, ApiPath};
 use super::turns::bot_deleted;
 use crate::db::bots::BotStatus;
 use crate::db::conversation;
-use crate::views::{activity_json, item_json, turn_json};
+use crate::views::{activity_json, item_json, routine_json, turn_json};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -79,6 +79,7 @@ async fn snapshot(
         "turns": snapshot.turns.iter().map(turn_json).collect::<Vec<_>>(),
         "activity": activity_json(bot),
         "older_before_seq": snapshot.older_before_seq,
+        "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
     })))
 }
 

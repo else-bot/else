@@ -397,6 +397,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         secrets: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
+        routine: None,
     }
 }
 

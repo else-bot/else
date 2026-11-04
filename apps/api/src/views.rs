@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 use crate::db::bots::{BotRecord, BotStatus};
+use crate::db::routines::Routine;
 use crate::db::turns::{ItemRecord, TurnRecord};
 
 /// Public projection of an active bot or a deletion receipt.
@@ -81,5 +82,33 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "text": item.text,
         "provider_id": item.provider_id,
         "created_at": item.created_at,
+    })
+}
+
+/// A routine with its derived last-run state. The prompt is included: the
+/// owner may read what each run will do.
+pub fn routine_json(routine: &Routine) -> Value {
+    let last_run = routine.last_run.as_ref().map(|run| {
+        json!({
+            "due_at": run.due_at,
+            "status": run.status,
+            "skip_reason": run.skip_reason,
+            "turn_id": run.turn_id,
+            "error": run.error_code.as_ref().map(|code| json!({ "code": code, "message": run.error_message })),
+            "finished_at": run.finished_at,
+        })
+    });
+    json!({
+        "id": routine.id,
+        "bot_id": routine.bot_id,
+        "name": routine.name,
+        "prompt": routine.prompt,
+        "cron": routine.cron,
+        "timezone": routine.timezone,
+        "enabled": routine.enabled,
+        "next_run_at": routine.next_run_at,
+        "created_at": routine.created_at,
+        "updated_at": routine.updated_at,
+        "last_run": last_run,
     })
 }

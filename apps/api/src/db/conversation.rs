@@ -15,9 +15,11 @@ pub struct Snapshot {
     pub turns: Vec<TurnRecord>,
     /// Pass as `before_seq` to load the previous page; `None` at the start.
     pub older_before_seq: Option<i64>,
+    /// The bot's routines, at the same snapshot.
+    pub routines: Vec<super::routines::Routine>,
 }
 
-/// Read history, turns, and the event cursor at one database snapshot, so a
+/// Read history, turns, routines, and the event cursor at one database snapshot, so a
 /// stream started from the cursor replays exactly what came after.
 pub async fn snapshot(
     pool: &SqlitePool,
@@ -36,7 +38,7 @@ pub async fn snapshot(
     // Fetch one extra row to learn whether older history exists.
     let mut items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2)
+         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2) AND i.kind <> 'routine'
          ORDER BY i.seq DESC LIMIT ?3"
     )))
     .bind(bot.conversation_id)
@@ -60,6 +62,7 @@ pub async fn snapshot(
     .fetch_all(&mut *tx)
     .await?;
     super::turns::attach_secret_requests(&mut tx, &mut turns).await?;
+    let routines = super::routines::list(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
         bot,
@@ -67,5 +70,6 @@ pub async fn snapshot(
         items,
         turns,
         older_before_seq,
+        routines,
     }))
 }
