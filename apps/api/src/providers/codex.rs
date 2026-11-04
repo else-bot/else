@@ -808,6 +808,42 @@ mod tests {
     }
 
     #[test]
+    fn a_welcome_does_not_displace_the_first_owner_message() {
+        let big = "x".repeat(20 * 1024);
+        let input = input(vec![
+            (1, "assistant", "Welcome to else.bot."),
+            (2, "user", "Remember my original request."),
+            (3, "assistant", &big),
+            (4, "user", &big),
+        ]);
+        let (packet, selection) = prompt::packet_with_selection(&input, 0);
+        assert_eq!(
+            packet
+                .matches("Owner: Remember my original request.")
+                .count(),
+            1
+        );
+        assert_eq!(selection.selected, vec![2, 4]);
+        assert_eq!(selection.omitted, vec![1, 3]);
+        assert!(packet.len() < prompt::HISTORY_BUDGET + 2048);
+    }
+
+    #[test]
+    fn a_welcome_keeps_its_place_in_history() {
+        let input = input(vec![
+            (1, "assistant", "Welcome to else.bot."),
+            (2, "user", "My original request."),
+            (2, "assistant", "First reply."),
+        ]);
+        let (packet, selection) = prompt::packet_with_selection(&input, 0);
+        assert!(packet.contains(
+            "[turn 1] Assistant: Welcome to else.bot.\n[turn 2] Owner: My original request.\n[turn 2] Assistant: First reply."
+        ));
+        assert_eq!(selection.selected, vec![1, 2]);
+        assert!(selection.omitted.is_empty());
+    }
+
+    #[test]
     fn a_large_first_message_still_fits_the_budget() {
         let first = "f".repeat(30 * 1024);
         let other = "o".repeat(10 * 1024);

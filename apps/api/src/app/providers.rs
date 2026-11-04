@@ -105,7 +105,7 @@ pub struct TurnInput {
     pub text: String,
     /// The profile snapshot taken when the message was accepted.
     pub profile: Option<Profile>,
-    /// Settled history from owner turns before this one, oldest first.
+    /// Settled conversation history before this turn, oldest first.
     pub history: Vec<HistoryEntry>,
     /// The bot's active native session with this provider, if any.
     pub session: Option<SessionState>,

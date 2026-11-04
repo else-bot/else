@@ -36,8 +36,8 @@ pub async fn required(state: &AppState) -> Result<bool, sqlx::Error> {
 }
 
 /// Name the main bot, give it this provider and model, and make them the
-/// defaults. Completion is recorded last, so a failed attempt is retried
-/// whole; repeating it after success changes the same things again.
+/// defaults. Completion and the first greeting commit together. Repeating
+/// a successful call changes the settings again without another greeting.
 async fn complete(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<Onboarding>,
@@ -67,11 +67,19 @@ async fn complete(
         .bind(name.as_str())
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE installation SET onboarded_at = coalesce(onboarded_at, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))")
-        .execute(&mut *tx)
-        .await?;
-    // The renamed bot reaches every client's list.
-    crate::db::events::notify(&mut tx, main).await?;
+    let first = sqlx::query(
+        "UPDATE installation SET onboarded_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE onboarded_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    let welcomed =
+        first && crate::db::installation::append_welcome(&mut tx, main, &name, provider_id).await?;
+    if !welcomed {
+        crate::db::events::bot_updated(&mut tx, main).await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({
         "main_bot_id": main,
