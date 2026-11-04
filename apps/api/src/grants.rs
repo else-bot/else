@@ -29,6 +29,8 @@ pub enum Tool {
     ReadMemory,
     /// Hand a task to another registered bot (main bot only).
     Delegate,
+    /// Register a new bot for the owner (main bot only).
+    CreateBot,
     /// Use the bot's own computer (commands, jobs, files, browser).
     Computer,
 }

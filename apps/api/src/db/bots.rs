@@ -1,9 +1,10 @@
 //! Bot creation, listing, lookup, and soft deletion.
 //!
 //! Creation is idempotent under a stable request ID: a matching retry returns
-//! the same bot and a changed payload conflicts. Deletion commits a tombstone
-//! and clears the saved default in one transaction before returning; history
-//! and conversations are retained.
+//! the same bot and a changed payload conflicts. The owner supplies that ID;
+//! the main bot's creations derive it from the owner turn and the name.
+//! Deletion commits a tombstone and clears the saved default in one
+//! transaction before returning; history and conversations are retained.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -74,7 +75,20 @@ pub enum BotError {
     #[error("the bot was deleted")]
     Deleted,
     #[error(transparent)]
+    Refused(#[from] Refusal),
+    #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+/// Why a turn may not create a bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    #[error("only the main bot, in the owner's conversation, can create bots")]
+    NotMain,
+    #[error("the request is no longer running")]
+    NotRunning,
+    #[error("this attempt already delegated; end it and wait for the result")]
+    AttemptDelegated,
 }
 
 pub struct NewBot<'a> {
@@ -105,8 +119,78 @@ pub async fn create(
     request_id: Uuid,
     bot: NewBot<'_>,
 ) -> Result<Created, BotError> {
+    create_as(pool, request_id, bot, None).await
+}
+
+/// Create a bot while the main bot's owner turn is running. Retries of the
+/// same name, including continuation attempts, return the same bot even if
+/// it was deleted; a changed role conflicts. The bot uses installation defaults.
+pub async fn create_for_turn(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    name: &BotName,
+    role: &BotRole,
+) -> Result<Created, BotError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"else.bot turn create_bot\0");
+    hasher.update(turn_id.as_bytes());
+    hasher.update(name.as_str().as_bytes());
+    let digest = hasher.finalize();
+    let request_id =
+        uuid::Builder::from_custom_bytes(digest[..16].try_into().expect("16 bytes")).into_uuid();
+    let bot = NewBot {
+        name,
+        role,
+        profile: None,
+        category_id: None,
+    };
+    create_as(pool, request_id, bot, Some(turn_id)).await
+}
+
+async fn authorize(conn: &mut sqlx::SqliteConnection, turn_id: Uuid) -> Result<(), BotError> {
+    let caller: Option<(Uuid, String, i32, String, Option<Uuid>, BotStatus)> = sqlx::query_as(
+        "SELECT t.bot_id, t.status, t.attempt, c.kind,
+                (SELECT default_bot_id FROM installation), b.status
+         FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         JOIN bots b ON b.id = t.bot_id
+         WHERE t.id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((bot, status, attempt, kind, main, bot_status)) = caller else {
+        return Err(Refusal::NotRunning.into());
+    };
+    if kind != "owner" || main != Some(bot) {
+        return Err(Refusal::NotMain.into());
+    }
+    if !matches!(status.as_str(), "sending" | "running") || bot_status != BotStatus::Active {
+        return Err(Refusal::NotRunning.into());
+    }
+    let delegated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM delegations WHERE root_turn_id = ?1 AND parent_attempt = ?2)",
+    )
+    .bind(turn_id)
+    .bind(attempt)
+    .fetch_one(&mut *conn)
+    .await?;
+    if delegated {
+        return Err(Refusal::AttemptDelegated.into());
+    }
+    Ok(())
+}
+
+async fn create_as(
+    pool: &SqlitePool,
+    request_id: Uuid,
+    bot: NewBot<'_>,
+    turn_id: Option<Uuid>,
+) -> Result<Created, BotError> {
     let hash = create_hash(&bot);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(turn_id) = turn_id {
+        authorize(&mut tx, turn_id).await?;
+    }
     let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
         "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = ?1",
     )

@@ -325,6 +325,7 @@ impl Scheduler {
                             Tool::ReadMemory,
                             Tool::Computer,
                             Tool::Delegate,
+                            Tool::CreateBot,
                         ]
                     } else {
                         vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer]

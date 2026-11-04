@@ -43,6 +43,9 @@ impl From<BotError> for ApiError {
                 "request_conflict",
                 "This request ID was already used with different input.",
             ),
+            BotError::Refused(err) => {
+                ApiError::new(StatusCode::FORBIDDEN, "not_allowed", err.to_string())
+            }
             BotError::Db(err) => err.into(),
         }
     }

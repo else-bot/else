@@ -54,11 +54,47 @@ async fn running_main(app: &TestApp) -> (String, Uuid, String) {
             main.parse().unwrap(),
             conversation,
             turn_id,
-            vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Delegate],
+            vec![
+                Tool::ReadHistory,
+                Tool::ReadMemory,
+                Tool::Delegate,
+                Tool::CreateBot,
+            ],
             DEFAULT_TTL,
         )
         .await;
     (main, turn_id, token)
+}
+
+async fn create_bot(app: &TestApp, token: &str, arguments: Value) -> common::Reply {
+    app.call(
+        "POST",
+        "/tools/v1/mcp",
+        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": { "name": "create_bot", "arguments": arguments } })),
+        Some(token),
+    )
+    .await
+}
+
+async fn bot_count(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM bots")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+}
+
+async fn forged(app: &TestApp, turn: Uuid) -> String {
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.scheduler
+        .grants()
+        .issue(bot, conversation, turn, vec![Tool::CreateBot], DEFAULT_TTL)
+        .await
 }
 
 async fn delegate(app: &TestApp, token: &str, target: &str, task: &str) -> common::Reply {
@@ -649,4 +685,245 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
     };
     assert_eq!(call(private_id).await.body["result"]["isError"], true);
     assert_ne!(call(shared_id).await.body["result"]["isError"], true);
+}
+
+const GITHUB_ROLE: &str = "Maintain the owner's organization repositories. Report candidate \
+                           branch cleanup before deleting anything.";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_main_bot_creates_specialists_it_can_delegate_to_at_once() {
+    let app = app_with(2).await;
+    let (_, root, token) = running_main(&app).await;
+
+    let reply = create_bot(
+        &app,
+        &token,
+        json!({ "name": "  GitHub ", "role": GITHUB_ROLE }),
+    )
+    .await;
+    let created = tool_text(&reply);
+    assert_eq!(created["created"], true, "{}", reply.body);
+    assert_eq!(created["status"], "active");
+    assert_eq!(created["name"], "GitHub");
+    let github = created["bot_id"].as_str().unwrap().to_owned();
+    let listed = app.owner("GET", "/v1/bots", None).await.body;
+    let shown = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == github.as_str())
+        .unwrap_or_else(|| panic!("{listed}"))
+        .clone();
+    assert_eq!(shown["role"], GITHUB_ROLE);
+    let profile: i64 = sqlx::query_scalar("SELECT count(*) FROM bot_profiles WHERE bot_id = ?1")
+        .bind(github.parse::<Uuid>().unwrap())
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(profile, 0, "no profile of its own");
+    let grants: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memory_read_grants WHERE reader_bot_id = ?1 OR target_bot_id = ?1",
+    )
+    .bind(github.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(grants, 0, "no shared memory");
+
+    let before = bot_count(&app).await;
+    let args = json!({ "name": "GitHub", "role": GITHUB_ROLE });
+    let (a, b, c) = tokio::join!(
+        create_bot(&app, &token, args.clone()),
+        create_bot(&app, &token, args.clone()),
+        create_bot(&app, &token, args.clone()),
+    );
+    for reply in [a, b, c] {
+        let again = tool_text(&reply);
+        assert_eq!(again["bot_id"], github.as_str(), "{}", reply.body);
+        assert_eq!(again["created"], false);
+    }
+    sqlx::query("UPDATE turns SET attempt = attempt + 1 WHERE id = ?1")
+        .bind(root)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_text(&create_bot(&app, &token, args).await)["bot_id"],
+        github.as_str()
+    );
+    assert_eq!(bot_count(&app).await, before);
+
+    let ops = json!({ "name": "Ops", "role": "Run routines." });
+    let (a, b, c) = tokio::join!(
+        create_bot(&app, &token, ops.clone()),
+        create_bot(&app, &token, ops.clone()),
+        create_bot(&app, &token, ops.clone()),
+    );
+    let replies: Vec<Value> = [a, b, c].iter().map(tool_text).collect();
+    assert_eq!(
+        replies.iter().filter(|r| r["created"] == true).count(),
+        1,
+        "{replies:?}"
+    );
+    assert!(replies.iter().all(|r| r["bot_id"] == replies[0]["bot_id"]));
+    assert_ne!(
+        replies[0]["bot_id"],
+        github.as_str(),
+        "another name is another bot"
+    );
+    assert_eq!(bot_count(&app).await, before + 1);
+
+    let refusals = [
+        (
+            json!({ "name": "GitHub", "role": "Something else." }),
+            "CREATE_CONFLICT",
+        ),
+        (
+            json!({ "name": "X", "role": "Y", "profile": "gpt" }),
+            "INVALID_ARGUMENTS",
+        ),
+        (json!({ "name": "X" }), "INVALID_ARGUMENTS"),
+        (json!({ "name": 7, "role": "Y" }), "INVALID_ARGUMENTS"),
+        (json!({ "name": "   ", "role": "Y" }), "INVALID_BOT"),
+        (json!({ "name": "X", "role": "" }), "INVALID_BOT"),
+    ];
+    for (arguments, code) in refusals {
+        let reply = create_bot(&app, &token, arguments.clone()).await;
+        assert_eq!(reply.body["result"]["isError"], true, "{arguments}");
+        let text = reply.body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(code), "{arguments}: {text}");
+    }
+    assert_eq!(bot_count(&app).await, before + 1);
+
+    let pending = tool_text(&delegate(&app, &token, &github, "List stale branches.").await);
+    assert_eq!(pending["status"], "pending", "{pending}");
+    assert_eq!(pending["target"]["bot_id"], github.as_str());
+    let parked = create_bot(&app, &token, json!({ "name": "Late", "role": "Y" })).await;
+    assert_eq!(parked.status, StatusCode::CONFLICT);
+    let name = else_api::app::bots::BotName::parse("Late").unwrap();
+    let role = else_api::app::bots::BotRole::parse("Y").unwrap();
+    let direct = else_api::db::bots::create_for_turn(&app.db.pool, root, &name, &role).await;
+    assert!(
+        matches!(
+            direct,
+            Err(else_api::db::bots::BotError::Refused(
+                else_api::db::bots::Refusal::AttemptDelegated
+                    | else_api::db::bots::Refusal::NotRunning
+            ))
+        ),
+        "{direct:?}"
+    );
+    assert_eq!(bot_count(&app).await, before + 1);
+    wait_status(&app, root, "completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_creation_replays_as_deleted() {
+    let app = app_with(2).await;
+    let (_, _, token) = running_main(&app).await;
+    let args = json!({ "name": "GitHub", "role": GITHUB_ROLE });
+    let github = tool_text(&create_bot(&app, &token, args.clone()).await)["bot_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let deleted = app
+        .owner("DELETE", &format!("/v1/bots/{github}"), None)
+        .await;
+    assert!(deleted.status.is_success(), "{}", deleted.body);
+    let before = bot_count(&app).await;
+    let replay = tool_text(&create_bot(&app, &token, args).await);
+    assert_eq!(replay["bot_id"], github.as_str());
+    assert_eq!(replay["created"], false);
+    assert_eq!(replay["status"], "deleted");
+    assert_eq!(bot_count(&app).await, before, "no replacement");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_running_main_owner_turn_creates_bots() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work", "Work projects").await;
+    let (main, root, token) = running_main(&app).await;
+    let before = bot_count(&app).await;
+    let args = json!({ "name": "GitHub", "role": GITHUB_ROLE });
+    let text = |reply: &common::Reply| {
+        reply.body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+        .bind(root)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let plain = app
+        .scheduler
+        .grants()
+        .issue(
+            main.parse().unwrap(),
+            conversation,
+            root,
+            vec![Tool::ReadMemory],
+            DEFAULT_TTL,
+        )
+        .await;
+    assert_eq!(
+        create_bot(&app, &plain, args.clone()).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    let sent = app
+        .send(&work, Uuid::new_v4(), SLOW, Some("synthetic"))
+        .await;
+    let leaf_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    app.wait_turn(&leaf_turn.to_string(), &["running"]).await;
+    let reply = create_bot(&app, &forged(&app, leaf_turn).await, args.clone()).await;
+    assert!(text(&reply).starts_with("NOT_ALLOWED"), "{}", reply.body);
+
+    let pending = tool_text(&delegate(&app, &token, &work, "[synthetic:hang] research").await);
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(
+            pending["task_id"]
+                .as_str()
+                .unwrap()
+                .parse::<Uuid>()
+                .unwrap(),
+        )
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    app.wait_turn_for(&child.to_string(), &["running"], Duration::from_secs(20))
+        .await;
+    let reply = create_bot(&app, &forged(&app, child).await, args.clone()).await;
+    assert!(text(&reply).starts_with("NOT_ALLOWED"), "{}", reply.body);
+    let name = else_api::app::bots::BotName::parse("GitHub").unwrap();
+    let role = else_api::app::bots::BotRole::parse(GITHUB_ROLE).unwrap();
+    assert!(matches!(
+        else_api::db::bots::create_for_turn(&app.db.pool, child, &name, &role).await,
+        Err(else_api::db::bots::BotError::Refused(
+            else_api::db::bots::Refusal::NotMain
+        ))
+    ));
+
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    wait_status(&app, root, "interrupted").await;
+    assert_eq!(
+        create_bot(&app, &token, args).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(matches!(
+        else_api::db::bots::create_for_turn(&app.db.pool, root, &name, &role).await,
+        Err(else_api::db::bots::BotError::Refused(
+            else_api::db::bots::Refusal::NotRunning
+        ))
+    ));
+    assert_eq!(bot_count(&app).await, before);
 }
