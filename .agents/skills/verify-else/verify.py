@@ -21,7 +21,6 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = Path(__file__).resolve()
-# scripts/dev.py owns the client side of the API's api.json contract.
 _spec = importlib.util.spec_from_file_location("else_dev", ROOT / "scripts/dev.py")
 dev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev)
@@ -60,7 +59,7 @@ def command(argv, *, timeout=600, **kwargs):
 
 
 def capture(argv):
-    return subprocess.check_output(argv, cwd=ROOT, text=True, timeout=60).strip()
+    return subprocess.check_output(argv, cwd=ROOT, env=dev.cargo_env(), text=True, timeout=60).strip()
 
 
 def until(probe, check, description, timeout=15):
@@ -408,11 +407,11 @@ def main():
         with (output / "build.jsonl").open("w") as artifacts, (output / "build.log").open("w") as log:
             package = ["--workspace"] if args.full else ["-p", "else-api"]
             command(["cargo", "build", *package, "--locked", "--bins", "--message-format=json"],
-                    cwd=ROOT, stdout=artifacts, stderr=log, timeout=1800)
+                    cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
             if args.full or selected:
                 command(["cargo", "test", *package, "--locked", "--no-run", "--message-format=json", "--lib", "--bins",
                          *[flag for name in selected for flag in ["--test", name]]],
-                        cwd=ROOT, stdout=artifacts, stderr=log, timeout=1800)
+                        cwd=ROOT, env=dev.cargo_env(), stdout=artifacts, stderr=log, timeout=1800)
         report["build_seconds"] = round(time.monotonic() - build_start, 3)
         frames = [json.loads(line) for line in (output / "build.jsonl").read_text().splitlines()]
         built = [f for f in frames if f.get("reason") == "compiler-artifact" and f.get("executable")]

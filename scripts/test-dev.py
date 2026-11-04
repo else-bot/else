@@ -16,6 +16,9 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest.mock import patch
+
+import dev
 
 DEV = Path(__file__).resolve().with_name("dev.py")
 
@@ -51,6 +54,15 @@ FAKE_API = textwrap.dedent('''\
         main = str(uuid.UUID(bytes=conn.execute("SELECT default_bot_id FROM installation").fetchone()[0]))
     token = (data / "owner-token").read_text()
     class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path != "/v1/onboarding" or self.headers.get("Authorization") != f"Bearer {token}":
+                self.send_error(403)
+                return
+            (state / "onboarding.json").write_text(json.dumps(body))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
         def do_GET(self):
             if self.path == "/readyz":
                 body, code = {"status": "ready"}, 200
@@ -99,6 +111,8 @@ FAKE_OMABOX = textwrap.dedent('''\
             if os.environ.get("FAKE_DUPLICATE"):
                 windows.append({"address": "0xcopy", "class": "else-bot", "pid": state["desktop_pid"]})
         print(json.dumps(windows))
+    elif command == "down":
+        sys.exit(int(os.environ.get("FAKE_DOWN_STATUS", "0")))
 ''')
 
 
@@ -193,6 +207,10 @@ class DevSessions(unittest.TestCase):
         self.assertIn("/PATH arguments only", forwarded.stderr)
         listed = self.dev(root, "curl", "/v1/bots")
         self.assertEqual(json.loads(listed.stdout)["default_bot_id"], info["main_bot_id"], listed.stderr)
+        payload = {"name": "https://example.com"}
+        posted = self.dev(root, "curl", "-X", "POST", "-d", json.dumps(payload), "/v1/onboarding")
+        self.assertEqual(posted.returncode, 0, posted.stderr)
+        self.assertEqual(json.loads((root / ".else-dev/default/onboarding.json").read_text()), payload)
 
     def test_ambient_owner_configuration_never_reaches_the_api(self):
         root = self.checkout("a")
@@ -309,6 +327,8 @@ class DevSessions(unittest.TestCase):
         evidence = Path(manifest["evidence"])
         self.assertEqual(json.loads((evidence / "manifest.json").read_text())["status"], "stopped")
         self.assertEqual(json.loads((evidence / "box/doctor.json").read_text())["pid"], manifest["api_pid"])
+        self.assertEqual(json.loads((evidence / "box/onboarding.json").read_text())["name"],
+                         "Development Assistant")
         self.assertFalse((evidence / "box/data").exists(), "live SQLite must stay in the box")
         state = boxes / "box-7/home/else-dev" / manifest["run"]
         self.assertTrue(dead(manifest["api_pid"]) and dead(manifest["desktop_pid"]))
@@ -322,6 +342,62 @@ class DevSessions(unittest.TestCase):
         calls = [json.loads(line) for line in (boxes / "calls.jsonl").read_text().splitlines()]
         self.assertEqual(calls[-1], ["down", "-b", "box-7"])
         self.assertNotIn(["shot"], [c[:1] for c in calls])
+
+    def test_failed_box_cleanup_fails_the_run(self):
+        process, boxes = self.run_box(self.checkout("cleanup"), {"FAKE_DOWN_STATUS": "4"})
+        lines = []
+        while not lines or lines[-1] != "}\n":
+            line = process.stdout.readline()
+            self.assertTrue(line, "no manifest")
+            lines.append(line)
+        manifest = json.loads("".join(lines))
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=30), 1)
+        report = json.loads((Path(manifest["evidence"]) / "manifest.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("cleanup_error", report)
+
+    def test_build_outputs_are_private_even_with_a_shared_cargo_target(self):
+        tools = self.tmp / "cargo-bin"
+        tools.mkdir()
+        executable(tools / "cargo", '''#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+name=sys.argv[sys.argv.index("-p")+1]
+path=Path(os.environ["CARGO_TARGET_DIR"])/"debug"/name
+print(json.dumps({"reason":"compiler-artifact","target":{"name":name},"executable":str(path)}))
+''')
+        roots = [self.checkout("build-a"), self.checkout("build-b")]
+        outputs = []
+        with patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}",
+                                    "CARGO_TARGET_DIR": str(self.tmp / "shared-target")}):
+            for root in roots:
+                with patch.object(dev, "ROOT", root):
+                    outputs.append(Path(dev.build("else-api", None)))
+        self.assertNotEqual(outputs[0], outputs[1])
+        for root, output in zip(roots, outputs):
+            self.assertTrue(output.is_relative_to(root))
+
+    def test_removal_cannot_delete_a_new_api_at_the_original_path(self):
+        root = self.checkout("removal")
+        session = dev.Session(root, "default", root / ".else-dev/default")
+        fd = session.lock()
+        remove = shutil.rmtree
+        try:
+            session.prepare(str(self.api), host_providers=False)
+            def start_new_api_while_deleting_old_state(path, *args, **kwargs):
+                if path == session.state:
+                    remove(path)
+                    return
+                session.prepare(str(self.api), host_providers=False)
+                (session.state / "new-api-state").write_text("new installation")
+                remove(path, *args, **kwargs)
+            with patch.object(dev.shutil, "rmtree", side_effect=start_new_api_while_deleting_old_state):
+                session.remove()
+            self.assertEqual((session.state / "new-api-state").read_text(), "new installation")
+            self.assertTrue(session.database.exists())
+        finally:
+            os.close(fd)
 
 
 if __name__ == "__main__":

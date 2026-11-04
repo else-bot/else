@@ -115,8 +115,6 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .context("starting async runtime")
 }
 
-/// Own the data directory and the database before any command reads
-/// credentials, opens SQLite, or changes either.
 fn lock(config: &Config) -> anyhow::Result<RuntimeLock> {
     let url = config.require_database().context("invalid configuration")?;
     Ok(else_api::runtime_lock::acquire(&config.data_dir, url)?)
@@ -147,8 +145,6 @@ fn backup_parts(
 /// checkpoint; a running API backs up on its own schedule.
 fn run_backup() -> anyhow::Result<()> {
     let config = load_config()?;
-    // A running (possibly older) API's database is never changed by this
-    // command.
     let _lock = lock(&config)
         .context("the API is running; it backs up on its schedule (or stop it first)")?;
     let (params, key) = backup_parts(&config)?;
@@ -446,8 +442,6 @@ fn run_setup() -> anyhow::Result<()> {
 
 fn run_serve() -> anyhow::Result<()> {
     let config = load_config()?;
-    // A second instance must not migrate, reconcile, or dispatch another's
-    // work, so ownership comes first.
     let lock = lock(&config)?;
     // Credentials load before the listener opens. Neither is logged.
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;

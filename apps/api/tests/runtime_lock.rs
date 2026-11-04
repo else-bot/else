@@ -173,7 +173,7 @@ async fn port_zero_instances_publish_their_bound_listener_and_callback() {
     fake_codex(&codex);
     let mut a = Served::start(root, &root.join("a"), Some(&codex));
     let b = Served::start(root, &root.join("b"), None);
-    let (ma, mb) = (a.manifest().await, b.manifest().await);
+    let (ma, mb) = tokio::join!(a.manifest(), b.manifest());
     assert_eq!(ma.pid, a.child.id());
     assert_eq!(mb.pid, b.child.id());
     assert_ne!(ma.url, mb.url);

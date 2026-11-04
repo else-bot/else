@@ -107,8 +107,6 @@ impl Config {
         };
         let bots_dir = match source.get("ELSE_BOTS_DIR") {
             Some(dir) => absolute_path("ELSE_BOTS_DIR", dir)?,
-            // Not `bots/`, which holds the private provider homes; a restore
-            // uses the same place.
             None => data_dir.join("projects"),
         };
         let owner_token_file = match source.get("OWNER_TOKEN_FILE") {

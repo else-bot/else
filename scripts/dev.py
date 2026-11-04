@@ -30,9 +30,7 @@ SCRIPT = Path(__file__).resolve()
 MARKER = ".else-dev-session"
 NAME = re.compile(r"(?!runs$)[A-Za-z0-9_-]{1,64}")
 LOOPBACK = re.compile(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}")
-# Owner configuration that must never reach a development API: databases, credentials, backups, S3.
 DROPPED = {"DATABASE_URL", "TEST_DATABASE_URL", "SECRET_KEY", "SECRET_KEY_FILE", "OWNER_TOKEN_FILE"}
-# Provider and VM preferences a host session may keep from the caller's environment (never from .env).
 INHERITED = {"ELSE_CODEX_BIN", "ELSE_CODEX_ALLOW_UNVERIFIED", "ELSE_CLAUDE_BIN", "ELSE_MSB_BIN",
              "ELSE_MSB_ALLOW_UNVERIFIED", "ELSE_VM_IMAGE", "ELSE_VM_DESKTOP", "ELSE_VM_NETWORK",
              "ELSE_MAX_ACTIVE_TURNS", "ELSE_SYNTHETIC_PROVIDER"}
@@ -174,16 +172,9 @@ class Session:
             return
         held = self.runtime_locks()
         try:
-            # The marker goes last, so an interrupted removal is still recognized as ours.
-            for child in self.state.iterdir():
-                if child.name == MARKER:
-                    continue
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-            (self.state / MARKER).unlink()
-            self.state.rmdir()
+            removed = self.state.with_name(f".{self.state.name}.removed-{uuid.uuid4().hex}")
+            self.state.rename(removed)
+            shutil.rmtree(removed)
         finally:
             for fd in held:
                 os.close(fd)
@@ -200,7 +191,6 @@ class Session:
         """Start the API on an ephemeral port and return it once its own manifest and doctor agree."""
         for fd in self.runtime_locks():
             os.close(fd)
-        (self.data / "api.json").unlink(missing_ok=True)
         child = subprocess.Popen([binary, "serve"], cwd="/", env=self.env(host_providers),
                                  stdout=log, stderr=subprocess.STDOUT if log else None, start_new_session=True)
         try:
@@ -287,12 +277,18 @@ def stop(child, grace=15):
         child.wait()
 
 
+def cargo_env():
+    return {**os.environ, "CARGO_TARGET_DIR": str(ROOT / ".else-dev/.build"),
+            "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "4")}
+
+
 def build(package, explicit):
     if explicit:
         return str(Path(explicit).resolve())
     output = subprocess.run(["cargo", "build", "--locked", "-q", "-p", package, "--bins",
                              "--message-format=json-render-diagnostics"],
-                            cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True).stdout
+                            cwd=ROOT, env=cargo_env(),
+                            stdout=subprocess.PIPE, text=True, check=True).stdout
     frames = [json.loads(line) for line in output.splitlines()]
     return next(f["executable"] for f in frames
                 if f.get("reason") == "compiler-artifact" and f["target"]["name"] == package and f.get("executable"))
@@ -341,9 +337,10 @@ def run_box(args):
     if not args.api_binary:
         # Dev builds read age's translations from the dependency source at runtime.
         metadata = json.loads(subprocess.check_output(
-            ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"], cwd=ROOT, text=True))
+            ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
+            cwd=ROOT, env=cargo_env(), text=True))
         age = next(p for p in metadata["packages"] if p["name"] == "age")
-        mounts |= {metadata["target_directory"], str(Path(age["manifest_path"]).parent / "i18n")}
+        mounts.add(str(Path(age["manifest_path"]).parent / "i18n"))
     run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
     evidence = ROOT / ".else-dev" / "runs" / run_id
     evidence.mkdir(parents=True)
@@ -387,11 +384,15 @@ def run_box(args):
             try:
                 source = home / "else-dev" / run_id if home else None
                 if source and source.is_dir():
-                    # Logs and manifests only: the live SQLite files stay in the box.
                     shutil.copytree(source, evidence / "box", symlinks=True,
                                     ignore=lambda d, names: {"data", "projects"} if Path(d) == source else set())
+            except OSError as error:
+                report.update(status="failed", evidence_error=str(error))
             finally:
-                subprocess.run(["omabox", "down", "-b", box], check=False)
+                try:
+                    subprocess.run(["omabox", "down", "-b", box], check=True, timeout=45)
+                except (OSError, subprocess.SubprocessError) as error:
+                    report.update(status="failed", cleanup_error=str(error))
         (evidence / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Evidence: {evidence}", file=sys.stderr)
     return 0 if report["status"] in ("stopped", "exited 0") else 1
@@ -405,6 +406,10 @@ def box_worker(spec):
         session.prepare(spec["api"], host_providers=False, log_name="setup.log")
         with (session.state / "api.log").open("a") as log:
             api = session.serve(spec["api"], host_providers=False, log=log)
+        if spec["desktop"]:
+            session.request("POST", "/v1/onboarding", {"name": "Development Assistant", "profile": {
+                "provider_id": "codex", "model": "gpt-6.1-sol",
+                "reasoning_effort": "medium", "service_tier": "priority"}})
         info = session.doctor(api.pid)
         (session.state / "doctor.json").write_text(json.dumps(info, indent=2) + "\n")
         ready = {"state": str(session.state), "url": info["url"], "api_pid": api.pid, "desktop_pid": None}
@@ -474,7 +479,7 @@ def main(argv=None):
         os.execve(binary, [binary], desktop_env(session, url))
     elif args.command == "curl":
         url = session.doctor()["url"]
-        require(not any("://" in a or a in ("--next", "-:") for a in extra),
+        require(not any(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", a) or a in ("--next", "-:") for a in extra),
                 "curl takes /PATH arguments only; the owner token goes to this session's API alone")
         header = f"Authorization: Bearer {session.token_file.read_text().strip()}\n"
         # Every connection, including redirects and stray host arguments, reaches the session's own listener.
