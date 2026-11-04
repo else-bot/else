@@ -29,7 +29,8 @@ checkout="$(git rev-parse --show-toplevel | sha256sum | cut -c1-12)"
 run_id="$(date +%Y%m%d-%H%M%S)-$$"
 logs="target/install-tests/$run_id"
 mkdir -p "$logs"
-exec 9>target/install-tests/owner.lock
+mkdir -p .else-dev
+exec 9>.else-dev/install-cache.lock
 flock -n 9 || { echo "another run in this checkout owns its install caches" >&2; exit 1; }
 
 DISTROS=("$@")

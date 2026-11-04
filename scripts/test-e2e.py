@@ -283,7 +283,10 @@ def native_cache(cache):
 def own_cache(cache_dir):
     """Hold the cache directory for this run; released when the process exits."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    handle = (cache_dir / "owner.lock").open("w")
+    locks = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "else-test-locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    identity = hashlib.sha256(str(cache_dir.resolve()).encode()).hexdigest()
+    handle = (locks / f"e2e-{identity}.lock").open("w")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

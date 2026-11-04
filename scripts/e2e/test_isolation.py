@@ -158,7 +158,7 @@ class InstallMatrixIsolationTests(unittest.TestCase):
                                          '[[package]]\nname = "else-desktop"\nversion = "0.0.5"\n')
         (path / "apps/api/migrations/0001_base.sql").write_text("SELECT 1;\n")
         (path / "deleted").touch()
-        (path / ".gitignore").write_text(".env\ntarget/\n")
+        (path / ".gitignore").write_text(".env\ntarget/\n.else-dev/\n")
         subprocess.run(["git", "init", "-q", str(path)], check=True)
         subprocess.run(["git", "-C", str(path), "add", "."], check=True)
         (path / "deleted").unlink()
@@ -197,7 +197,7 @@ class InstallMatrixIsolationTests(unittest.TestCase):
     def test_a_second_run_in_the_same_checkout_is_refused(self):
         fakes = Fakes(self)
         checkout = self.checkout(fakes.work / "checkout")
-        lock = checkout / "target/install-tests/owner.lock"
+        lock = checkout / ".else-dev/install-cache.lock"
         lock.parent.mkdir(parents=True)
         with lock.open("w") as held:
             fcntl.flock(held, fcntl.LOCK_EX)

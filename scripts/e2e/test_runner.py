@@ -4,6 +4,7 @@ import importlib.util
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -126,6 +127,17 @@ class RunnerTests(unittest.TestCase):
             runner.own_cache(second).close()
             owner.close()
             runner.own_cache(first).close()
+
+    def test_cache_ownership_survives_removing_cargo_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "target/e2e-cache"
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                with runner.own_cache(cache):
+                    shutil.rmtree(root / "target")
+                    with self.assertRaisesRegex(RuntimeError, "another E2E run owns"):
+                        runner.own_cache(cache)
+                runner.own_cache(cache).close()
 
     def test_installer_rejects_unscoped_fast_profile_and_relative_cache(self):
         for extra, message in [({"ELSE_INSTALL_TEST_PROFILE": "dev"}, "requires ELSE_INSTALL_TEST_CACHE"),
