@@ -21,7 +21,7 @@ use serde_json::json;
 
 use crate::avatar::Avatar;
 use crate::config::{Origin, OwnerToken};
-use crate::model::{Item, Routine, Snapshot, Turn};
+use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
 
 /// The complete create payload, retained unchanged when delivery is uncertain.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -390,8 +390,13 @@ impl Client {
         request_id: Uuid,
         text: String,
         provider_id: Option<String>,
+        reaction: Option<Reaction>,
     ) -> Result<Sent, ClientError> {
-        let body = json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
+        let mut body =
+            json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
+        if let Some(reaction) = reaction {
+            body["reaction"] = json!(reaction);
+        }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await
             .map(|(_, sent)| sent)

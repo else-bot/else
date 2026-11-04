@@ -1,3 +1,4 @@
+use crate::model::ReactionKind;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,35 +71,35 @@ impl Draft {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reaction {
-    ThumbsUp,
-    ThumbsDown,
-}
+impl ReactionKind {
+    pub(super) fn mark(self) -> &'static str {
+        match self {
+            ReactionKind::ThumbsUp => "👍",
+            ReactionKind::ThumbsDown => "👎",
+        }
+    }
 
-impl Reaction {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Reaction::ThumbsUp => "👍 Thumbs up",
-            Reaction::ThumbsDown => "👎 Thumbs down",
+            ReactionKind::ThumbsUp => "👍 Thumbs up",
+            ReactionKind::ThumbsDown => "👎 Thumbs down",
         }
     }
 
     pub(super) fn message(self, reference: &MessageReference) -> String {
-        let (mark, request) = match self {
-            Reaction::ThumbsUp => (
-                "👍",
+        let request = match self {
+            ReactionKind::ThumbsUp => {
                 "This worked well for me. Work out what made it work, and remember that \
-                 behavior so you keep doing it in similar situations.",
-            ),
-            Reaction::ThumbsDown => (
-                "👎",
+                 behavior so you keep doing it in similar situations."
+            }
+            ReactionKind::ThumbsDown => {
                 "This didn't work for me. Ask me what went wrong and how you can correct it. \
-                 Don't assume a cause. Use my feedback to improve.",
-            ),
+                 Don't assume a cause. Use my feedback to improve."
+            }
         };
         format!(
-            "{mark} Feedback on {}:\n{}\n\n{request}",
+            "{} Feedback on {}:\n{}\n\n{request}",
+            self.mark(),
             reference.subject(),
             reference.quote()
         )
@@ -180,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_thumbs_up_quotes_the_message_and_asks_the_bot_to_remember_what_worked() {
-        let message = Reaction::ThumbsUp.message(&reference(Author::Bot, "Step 1\nStep 2"));
+        let message = ReactionKind::ThumbsUp.message(&reference(Author::Bot, "Step 1\nStep 2"));
         assert!(
             message.starts_with("👍 Feedback on your earlier message:\n> Step 1\n> Step 2\n\n")
         );
@@ -190,7 +191,7 @@ mod tests {
 
     #[test]
     fn a_thumbs_down_asks_what_went_wrong_without_naming_a_cause() {
-        let message = Reaction::ThumbsDown.message(&reference(Author::Bot, "Step 1"));
+        let message = ReactionKind::ThumbsDown.message(&reference(Author::Bot, "Step 1"));
         assert!(message.starts_with("👎 Feedback on your earlier message:\n> Step 1\n\n"));
         assert!(message.contains("Don't assume a cause"));
         assert!(message.contains("what went wrong"));

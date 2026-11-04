@@ -1,5 +1,6 @@
-use super::reply::{Author, MessageReference, Reaction};
+use super::reply::{Author, MessageReference};
 use super::{Connection, ElseApp, RowKey};
+use crate::model::{Reaction, ReactionKind};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
@@ -20,7 +21,7 @@ impl ElseApp {
         };
         let connected = app.read(cx).connection == Connection::Connected;
         if author == Author::Bot {
-            for reaction in [Reaction::ThumbsUp, Reaction::ThumbsDown] {
+            for reaction in [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown] {
                 let owner = owner.clone();
                 menu = menu.item(
                     PopupMenuItem::new(reaction.label())
@@ -89,7 +90,7 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         item: Uuid,
-        reaction: Reaction,
+        kind: ReactionKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -99,7 +100,11 @@ impl ElseApp {
         else {
             return;
         };
-        self.enqueue(bot, reaction.message(&reference), window, cx);
+        let reaction = Reaction {
+            item_id: reference.item,
+            kind,
+        };
+        self.enqueue(bot, kind.message(&reference), Some(reaction), window, cx);
     }
 
     fn copy_message(&mut self, bot: Uuid, item: Uuid, _: &mut Window, cx: &mut Context<Self>) {

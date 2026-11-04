@@ -11,6 +11,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use crate::app::messages::Reaction;
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
 
 /// Turn statuses past the queue that hold the bot's single active slot.
@@ -57,11 +58,13 @@ pub struct ItemRecord {
     pub created_at: DateTime<Utc>,
     /// Set for the owner's message: the request that created it.
     pub request_id: Option<Uuid>,
+    /// Set for an owner's message sent as a reaction to an assistant message.
+    pub reaction: Option<Json<Reaction>>,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
     i.provider_id, i.created_at,
-    CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id";
+    CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -71,6 +74,8 @@ pub enum AcceptError {
     Deleted,
     #[error("request ID reused with different input")]
     RequestConflict,
+    #[error("reaction target is not an assistant message of this conversation")]
+    InvalidReaction,
     #[error("too many queued messages")]
     QueueFull,
     #[error("work is still stopping")]
@@ -95,6 +100,7 @@ pub struct SendRequest<'a> {
     pub bot_id: Uuid,
     pub request_id: Uuid,
     pub text: &'a str,
+    pub reaction: Option<Reaction>,
     /// The provider named by the request, as sent (part of the request hash).
     pub requested_provider: Option<&'a str>,
     /// The provider the turn is bound to.
@@ -103,9 +109,20 @@ pub struct SendRequest<'a> {
     pub max_queued: i64,
 }
 
+/// Text holds no NUL, so it is always the tail after the last separator.
+/// A reaction gets its own prefix, so text-only hashes are unchanged.
 pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(b"turn\0");
+    match req.reaction {
+        None => hasher.update(b"turn\0"),
+        Some(reaction) => {
+            hasher.update(b"reaction-turn\0");
+            hasher.update(reaction.item_id.hyphenated().to_string().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(reaction.kind.as_str().as_bytes());
+            hasher.update(b"\0");
+        }
+    }
     hasher.update(req.requested_provider.unwrap_or("").as_bytes());
     hasher.update(b"\0");
     hasher.update(req.text.as_bytes());
@@ -148,6 +165,17 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
             item,
             preempted: None,
         });
+    }
+    if let Some(reaction) = req.reaction {
+        let target: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM items WHERE id = ?1 AND conversation_id = ?2")
+                .bind(reaction.item_id)
+                .bind(conversation_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if target.as_deref() != Some("assistant") {
+            return Err(AcceptError::InvalidReaction);
+        }
     }
     if cancel_pending {
         return Err(AcceptError::CancellationPending);
@@ -193,14 +221,15 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'user', ?5)",
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, reaction)
+         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6)",
     )
     .bind(item_id)
     .bind(conversation_id)
     .bind(seq)
     .bind(turn_id)
     .bind(req.text)
+    .bind(req.reaction.map(Json))
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
@@ -614,4 +643,46 @@ pub async fn cancelling(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM turns WHERE status = 'cancelling'")
         .fetch_all(pool)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::messages::ReactionKind;
+
+    fn request(reaction: Option<Reaction>) -> SendRequest<'static> {
+        SendRequest {
+            bot_id: Uuid::nil(),
+            request_id: Uuid::nil(),
+            text: "Hello there",
+            reaction,
+            requested_provider: Some("synthetic"),
+            provider_id: "synthetic",
+            uses_profile: false,
+            max_queued: 1,
+        }
+    }
+
+    #[test]
+    fn a_text_only_send_keeps_its_saved_request_hash() {
+        assert_eq!(
+            hex::encode(request_hash(&request(None))),
+            "15fac7d6c0ee166df9bf70a936445c1584de89d06083cbc846c1a9162c0e8352"
+        );
+    }
+
+    #[test]
+    fn a_reaction_is_part_of_the_request_hash() {
+        let reaction = |item_id, kind| Some(Reaction { item_id, kind });
+        let up = request_hash(&request(reaction(Uuid::nil(), ReactionKind::ThumbsUp)));
+        assert_ne!(up, request_hash(&request(None)));
+        assert_ne!(
+            up,
+            request_hash(&request(reaction(Uuid::nil(), ReactionKind::ThumbsDown)))
+        );
+        assert_ne!(
+            up,
+            request_hash(&request(reaction(Uuid::max(), ReactionKind::ThumbsUp)))
+        );
+    }
 }

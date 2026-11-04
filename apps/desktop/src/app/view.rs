@@ -9,6 +9,7 @@ use super::{
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use crate::model::ReactionKind;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -426,6 +427,32 @@ impl ElseApp {
             };
             side.child(card)
         };
+        let reacted = |card: AnyElement, kind: ReactionKind| {
+            const HEIGHT: f32 = 30.;
+            div()
+                .relative()
+                .w_full()
+                .pt(px(HEIGHT / 2.))
+                .child(card)
+                .child(
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .right(px(-6.))
+                        .h(px(HEIGHT))
+                        .min_w(px(HEIGHT + 4.))
+                        .px_1p5()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.secondary)
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(16.))
+                        .line_height(px(20.))
+                        .child(kind.mark()),
+                )
+                .into_any_element()
+        };
         let note = |text: String, error: bool| {
             div()
                 .text_xs()
@@ -471,6 +498,10 @@ impl ElseApp {
                             .into_any_element()
                     }
                     None => card.into_any_element(),
+                };
+                let card = match conversation.reaction_for(id).filter(|_| !user) {
+                    Some(kind) => reacted(card, kind),
+                    None => card,
                 };
                 column = column.child(side(user, card));
                 if let Some(turn) = turn {

@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::{Activity, Bot};
@@ -28,6 +28,23 @@ pub struct Item {
     pub kind: String,
     pub text: String,
     pub provider_id: Option<String>,
+    /// Set on the owner's feedback message sent as a reaction.
+    #[serde(default)]
+    pub reaction: Option<Reaction>,
+}
+
+/// The owner's reaction to one of the bot's messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub item_id: Uuid,
+    pub kind: ReactionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionKind {
+    ThumbsUp,
+    ThumbsDown,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -343,6 +360,16 @@ impl Conversation {
         }
     }
 
+    /// The owner's latest reaction to `item_id`. Items are ordered by
+    /// sequence, so the result does not depend on how pages were merged.
+    pub fn reaction_for(&self, item_id: Uuid) -> Option<ReactionKind> {
+        self.items
+            .values()
+            .rev()
+            .find_map(|item| item.reaction.filter(|r| r.item_id == item_id))
+            .map(|r| r.kind)
+    }
+
     pub fn has_request(&self, request_id: Uuid) -> bool {
         self.items
             .values()
@@ -501,6 +528,65 @@ mod tests {
         assert_eq!(c.older_before_seq, None);
         assert_eq!(c.cursor(), format!("{PREFIX}:9"), "live cursor unchanged");
         assert!(c.has_request(Uuid::from_u128(501)));
+    }
+
+    fn reaction(id: u128, seq: i64, target: u128, kind: &str) -> serde_json::Value {
+        let mut item = item(
+            id,
+            seq,
+            "user",
+            "Feedback on your earlier message:\n> Done.",
+        );
+        item["reaction"] = json!({ "item_id": Uuid::from_u128(target), "kind": kind });
+        item
+    }
+
+    #[test]
+    fn the_newest_committed_reaction_marks_its_exact_target() {
+        let history = || {
+            vec![
+                item(1, 1, "user", "Do it twice"),
+                item(2, 2, "assistant", "Done."),
+                reaction(3, 3, 2, "thumbs_up"),
+                item(4, 4, "assistant", "Done."),
+                reaction(5, 5, 2, "thumbs_down"),
+                item(6, 6, "assistant", "Noted."),
+            ]
+        };
+        let whole = Conversation::from_snapshot(snapshot(6, history(), None)).unwrap();
+        let all = history();
+        let (older, newer) = all.split_at(3);
+        let mut paged = Conversation::from_snapshot(snapshot(6, newer.to_vec(), Some(4))).unwrap();
+        assert_eq!(
+            paged.reaction_for(Uuid::from_u128(2)),
+            Some(ReactionKind::ThumbsDown),
+            "a reaction newer than the loaded target is already loaded"
+        );
+        paged.merge_older(snapshot(6, older.to_vec(), None));
+        for c in [&whole, &paged] {
+            assert_eq!(
+                c.reaction_for(Uuid::from_u128(2)),
+                Some(ReactionKind::ThumbsDown)
+            );
+            assert_eq!(
+                c.reaction_for(Uuid::from_u128(4)),
+                None,
+                "same text, other item"
+            );
+            assert_eq!(c.reaction_for(Uuid::from_u128(6)), None);
+        }
+
+        paged
+            .apply(&frame(
+                7,
+                "item.upsert",
+                json!({ "item": reaction(7, 7, 2, "thumbs_up") }),
+            ))
+            .unwrap();
+        assert_eq!(
+            paged.reaction_for(Uuid::from_u128(2)),
+            Some(ReactionKind::ThumbsUp)
+        );
     }
 
     fn routine(enabled: bool, updated: &str, status: Option<&str>) -> serde_json::Value {

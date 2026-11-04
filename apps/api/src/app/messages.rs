@@ -1,5 +1,8 @@
 //! Owner message rules.
 
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 pub const MAX_TEXT_BYTES: usize = 32 * 1024;
 /// Waiting (not yet started) messages allowed per bot.
 pub const MAX_QUEUED_TURNS: i64 = 4;
@@ -12,6 +15,31 @@ pub enum InvalidMessage {
     TooLarge,
     #[error("Message text must not contain NUL characters.")]
     Nul,
+}
+
+/// The owner's reaction to one of the bot's messages, sent with the
+/// feedback message it prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reaction {
+    pub item_id: Uuid,
+    pub kind: ReactionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionKind {
+    ThumbsUp,
+    ThumbsDown,
+}
+
+impl ReactionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReactionKind::ThumbsUp => "thumbs_up",
+            ReactionKind::ThumbsDown => "thumbs_down",
+        }
+    }
 }
 
 /// Validate owner text. Whitespace is preserved exactly as sent.

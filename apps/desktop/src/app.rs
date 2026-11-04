@@ -33,6 +33,7 @@ use uuid::Uuid;
 use crate::api::{
     Bot, BotList, Capabilities, Category, Client, ClientError, Live, LiveCommand, LiveEvent, Sent,
 };
+use crate::model::Reaction;
 
 actions!(
     else_desktop,
@@ -90,6 +91,7 @@ struct PendingSend {
     request_id: Uuid,
     text: String,
     provider_id: Option<String>,
+    reaction: Option<Reaction>,
     /// `None` while sending; otherwise why the outcome is unknown.
     unknown: Option<String>,
     /// Set when the server definitely refused it. The text stays here until
@@ -398,7 +400,7 @@ impl ElseApp {
         let Some(message) = draft.message() else {
             return;
         };
-        if !self.enqueue(bot, message, window, cx) {
+        if !self.enqueue(bot, message, None, window, cx) {
             return;
         }
         self.composer
@@ -410,6 +412,7 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         text: String,
+        reaction: Option<Reaction>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -430,6 +433,7 @@ impl ElseApp {
             text,
             // The bot's own provider and model, chosen by the API.
             provider_id: None,
+            reaction,
             unknown: None,
             rejected: None,
         };
@@ -457,6 +461,7 @@ impl ElseApp {
                     pending.request_id,
                     pending.text.clone(),
                     pending.provider_id.clone(),
+                    pending.reaction,
                 )
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
