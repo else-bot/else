@@ -580,6 +580,22 @@ impl Client {
         .map(|(_, v)| v.routine)
     }
 
+    /// Delete a routine: it never runs again and a run already admitted
+    /// finishes. Deleting it again succeeds.
+    pub async fn delete_routine(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::DELETE,
+            format!("/v1/bots/{bot}/routines/{routine}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn delete_bot(self: Arc<Self>, bot: Uuid) -> Result<Bot, ClientError> {
         self.call::<BotEnvelope>(Method::DELETE, format!("/v1/bots/{bot}"), None)
             .await
