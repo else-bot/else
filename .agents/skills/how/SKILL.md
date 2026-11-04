@@ -18,7 +18,7 @@ Explorers use `how explorer`. Explainers use `how explainer`.
 
 If the scope is ambiguous, state your interpretation and explore. The user can redirect.
 
-- **Simple** (a single module, a small utility, a narrow question such as "how does function X work"): no explorers. Spawn one explainer that explores and explains in one pass, built from `references/explainer-prompt.md` without the explorer-findings section. Go to step 4.
+- **Simple** (a single module, a small utility, a narrow question such as "how does function X work"): the active owner explores and explains in one pass. Use `references/explainer-prompt.md` without the explorer-findings section. Reuse existing grounding. Spawn no explorer or separate explainer. Go to step 4.
 - **Complex** (a subsystem spanning multiple files or services, a cross-cutting feature, a full architectural overview): go to step 2.
 
 When in doubt, take the simple path.
@@ -33,7 +33,7 @@ Once all explorers have returned, spawn one explainer with `references/explainer
 
 ## 4. Present
 
-Present the explainer's output. Light edits for clarity or context from the conversation are fine. Do not substantially rewrite it.
+Present the active owner's explanation for simple work. For complex work, present the explainer's output. Light edits for clarity or context from the conversation are fine. Do not substantially rewrite a delegated explanation.
 
 ## Output format
 

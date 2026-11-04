@@ -8,6 +8,8 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
 # Arena
 
+For automatic invocations, apply the [delegation policy](../../rules/pstack-models.md#delegation-policy). If no substantive design choice remains, keep one implementation owner and independent review. An explicit request for arena or competing candidates still runs this workflow.
+
 Open a todolist with one entry per phase (Frame, Fan out, Cross-judge, Pick, Graft, Verify) before launching anything.
 
 ## Phase A: Frame

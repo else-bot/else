@@ -14,7 +14,7 @@
    7. Do it cheaper.
 
    When an earlier mantra meets the target, stop.
-3. Plan the fix from the trace. If it crosses a function boundary, `architect` first. Delegate implementation to a subagent using your configured perf-issue model. Preserve the role's configured preset and use the local runtime rules for delegation. Review the diff. Capture a post-fix trace.
+3. Plan the fix from the trace. Apply the [routing and delegation policy](../../../rules/pstack-models.md). Use `architect` for a substantive unresolved design choice or an explicit user request. Keep routine fixes with the active owner. Delegate bounded risky code or useful independent workstreams using the configured roles. Use one independent reviewer for correctness, comments, and risk classification. Capture a post-fix trace.
    Apply the **sequence-verifiable-units** principle skill, verifying each attempt before trying the next.
 4. Parse and compare the artifacts (JSON to sqlite, diff). "Inconclusive" or wrong-surface is not a pass. Flag it.
 5. Cite the measurement in the PR.

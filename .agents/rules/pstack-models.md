@@ -5,9 +5,10 @@ This repository's role choices override pstack's defaults and any user-level
 presets and role assignments. The effort is set per preset below. Keep the
 configured effort and speed when delegating.
 
-Opus 5.5 medium is the default for coding, explanations, and synthesis.
-Use Sol xhigh fast and Fable high for independent reviews, second opinions,
-and design before implementation. Reserve Opus high for the hardest tasks.
+Sol xhigh fast is the default for coordination, coding, explanations, and
+synthesis. Fable high provides independent design and review. Opus medium
+owns risky decisions and their hardest bounded implementation slice under
+the routing policy below. Use Opus high only when the user requests it.
 
 Role values are preset names, not API model IDs. Resolve each name through
 this table before spawning an agent. Panel lists run one agent per entry.
@@ -47,23 +48,94 @@ Recheck provider capabilities before using a model in a new environment.
 }
 ```
 
-feature, refactoring: opus-medium
-bug-fix: opus-medium
-perf-issue: opus-medium
-hillclimb: opus-medium
-judgment and prose: opus-medium
-hardest tasks: opus-high
+coordinator: sol-xhigh-fast
+feature, refactoring: sol-xhigh-fast
+bug-fix: sol-xhigh-fast
+perf-issue: sol-xhigh-fast
+hillclimb: sol-xhigh-fast
+judgment and prose: sol-xhigh-fast
+hardest tasks: opus-medium
+risk decision and implementation: opus-medium
+escalation: opus-medium
+routine reviewer: fable-high
+Claude-authored code reviewer: sol-xhigh-fast
 how explorer: sol-xhigh-fast
-how explainer: opus-medium
+how explainer: sol-xhigh-fast
 why investigators: sol-xhigh-fast
-why synthesizer: opus-medium
+why synthesizer: sol-xhigh-fast
 reflect tooling: sol-xhigh-fast
-reflect judgment, divergent, synthesizer: opus-medium
+reflect judgment: sol-xhigh-fast
+reflect divergent: fable-high
+reflect synthesizer: sol-xhigh-fast
 arena runners: sol-xhigh-fast, fable-high
 arena cross-judge pool: sol-xhigh-fast, fable-high
-swarm workers: opus-medium
+swarm workers: sol-xhigh-fast
 architect runners: sol-xhigh-fast, fable-high
 interrogate reviewers: sol-xhigh-fast, fable-high
+
+## Routing policy
+
+Explicit user model restrictions and requested panels take precedence.
+Role assignments guide delegation. They do not change an active session's
+model. Use the coordinator preset when starting a new coordinator.
+
+After tracing the affected code, record `risk: <changed invariant or none>`
+in the task checkpoint. Recheck it against the final diff. Route a decision
+to Opus medium when the change alters any of these guarantees:
+
+- Actor ownership, concurrency, backpressure, or cancellation.
+- Permission checks or secret handling.
+- Database migrations, durable identity, or persisted lifecycle transitions.
+- Cross-provider execution or session lifecycle.
+- Native OS packaging, process launch, or terminal independence.
+
+Changing labels, padding, or presentation in one of these files does not
+trigger Opus. For example, cron display wording stays routine when schedule
+execution is unchanged. Message steering triggers Opus when it changes
+cancellation or pending-secret withdrawal, even if requested as a UI fix.
+
+Escalate a concrete cross-model disagreement that source evidence cannot
+settle. Also escalate after two failed focused fix or verification attempts
+with root-cause evidence. An unavailable test platform is a verification gap,
+not a reason to repeat the task on another model.
+
+Give Opus one compact assignment with the decision, source locations,
+invariants, alternatives, evidence, owned files, and acceptance checks. Combine
+the decision and the hardest bounded code slice when a slice exists. The
+routine owner handles surrounding code and integration. Record why a
+decision-only assignment has no code slice. Do not replay the whole transcript
+or add routine Opus tracing, prose, cosmetic review, or a final pass to every
+task. Opus-authored code receives independent Sol review. Raise effort to
+Opus high only on an explicit user request.
+
+## Delegation policy
+
+For routine work, the active owner traces, implements, and verifies the
+change. Use one independent reviewer for correctness and comments. Fable
+reviews Sol-authored work. Sol reviews Claude-authored work. Fable and Opus
+are the same model family for this purpose. If user restrictions prevent a
+different-family reviewer, use a fresh permitted reviewer and report the gap.
+For mixed Sol and Claude work, assign review by authored scope so each scope
+has a reviewer from the other family, subject to the same user restrictions.
+The reviewer also checks the risk classification. Use these reviewer roles
+for pre-merge verification. Preserve required native and platform checks.
+
+Automatic architect or arena work requires a substantive unresolved choice
+about state, ownership, interfaces, or behavior. Crossing a function boundary,
+touching several files, or choosing error wording does not suffice. Reuse
+grounding already gathered. Keep simple how exploration and synthesis with
+the active owner. Combine comment review with correctness review. Preserve
+explicitly requested design variants, panels, and specialist checks.
+
+During the initial rollout adopted on 2026-11-04, the coordinator records the
+actual presets, risk classification, Opus decision and code ownership, rework
+rounds, and verification results in each task checkpoint. Review the first ten
+completed checkpoints for missed risk and unnecessary fanout before expanding
+the policy. Routine tasks should use no Opus. Qualifying risky changes should
+give Opus substantive decision and coding work unless the user restricts it.
+Compare actual provider usage on similar work before claiming credit savings.
+
+## Runtime targets
 
 Within T3, use its delegation tools for presets that need a different provider
 or explicit options. Follow the session's orchestration instructions for

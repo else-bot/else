@@ -19,9 +19,9 @@ invocation is unavailable, read the skill by path and follow it.
 
 ## Setup and model choices
 
-Edit [the model settings](../../rules/pstack-models.md) directly. Opus medium handles most implementation,
-judgment, and synthesis. Sol xhigh fast and Fable high form independent review
-and design panels. Opus high handles the hardest work.
+Edit [the model settings](../../rules/pstack-models.md) directly. That file owns
+the default roles, selective risk escalation, and delegation policy. Resolve
+its presets before choosing a model. Keep model defaults out of skill prose.
 
 Cross-provider delegation requires a runtime that supports it, such as T3.
 Report unsupported capabilities without changing the requested models.
