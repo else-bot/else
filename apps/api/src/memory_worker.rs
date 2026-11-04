@@ -395,7 +395,7 @@ impl SummaryTask {
                         "reasoning_effort": profile.reasoning_effort,
                         "service_tier": profile.service_tier,
                         "profile_revision": profile.revision,
-                        "prompt_version": crate::providers::codex::SUMMARY_PROMPT_VERSION,
+                        "prompt_version": crate::providers::prompt::SUMMARY_PROMPT_VERSION,
                         "attempt_bytes": sizes,
                         "output_bytes": text.len(),
                         "input_bytes": self.input.len(),

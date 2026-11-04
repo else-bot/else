@@ -1,0 +1,274 @@
+use super::*;
+use serde_json::Value;
+
+fn tracker() -> Tracker {
+    Tracker::new(claude_home::tool_names(), "claude-haiku-5-5", "u-1")
+}
+
+fn init(tools: Vec<String>, servers: Value) -> Value {
+    json!({ "type": "system", "subtype": "init", "model": "claude-haiku-5-5",
+                "tools": tools, "mcp_servers": servers,
+                "agents": ["general-purpose", "Explore"] })
+}
+
+fn connected() -> Value {
+    json!([{ "name": "elsebot", "status": "connected" }])
+}
+
+#[test]
+fn a_turn_is_accepted_by_its_echo_and_streams_text() {
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected()));
+    assert!(t.violation.is_none(), "{:?}", t.violation);
+    // Another message's echo is not acceptance.
+    assert!(
+        t.on(&json!({"type":"user","uuid":"other","isReplay":true}))
+            .is_empty()
+    );
+    assert_eq!(
+        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true})),
+        vec![Step::Accepted]
+    );
+    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}));
+    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}));
+    let steps = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}}));
+    assert_eq!(steps, vec![Step::Text("Hi".into())]);
+    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}));
+    let steps = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"again"}}}));
+    assert_eq!(
+        steps,
+        vec![Step::Text("\n\n".into()), Step::Text("again".into())]
+    );
+    let steps =
+        t.on(&json!({"type":"result","subtype":"success","is_error":false,"result":"Hi\n\nagain"}));
+    assert_eq!(
+        steps,
+        vec![Step::Result(ResultInfo {
+            success: true,
+            message: "Hi\n\nagain".into(),
+            num_turns: None,
+        })]
+    );
+    assert!(t.violation.is_none());
+}
+
+#[test]
+fn an_agent_tool_or_extra_server_in_the_inventory_is_refused() {
+    let mut tools = claude_home::tool_names();
+    tools.push("Agent".into());
+    let mut t = tracker();
+    t.on(&init(tools, connected()));
+    assert_eq!(t.violation.as_ref().unwrap().0, "policy_violation");
+    let mut t = tracker();
+    t.on(&init(
+            claude_home::tool_names(),
+            json!([{ "name": "elsebot", "status": "connected" }, { "name": "other", "status": "connected" }]),
+        ));
+    assert!(t.violation.is_some());
+    // else.bot's server failing to connect is not a working inventory.
+    let mut t = tracker();
+    t.on(&init(
+        claude_home::tool_names(),
+        json!([{ "name": "elsebot", "status": "failed" }]),
+    ));
+    assert!(t.violation.is_some());
+}
+
+#[test]
+fn the_built_in_agent_list_alone_is_not_a_violation_but_its_activity_is() {
+    // The init event lists built-in agents even with no Agent tool.
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected()));
+    assert!(t.violation.is_none());
+    t.on(&json!({"type":"system","subtype":"task_started","task_id":"x"}));
+    assert!(t.violation.as_ref().unwrap().1.contains("task_started"));
+    let mut t = tracker();
+    t.on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[]}}));
+    assert!(t.violation.as_ref().unwrap().1.contains("sub-agent"));
+}
+
+#[test]
+fn other_tools_models_and_permission_prompts_are_refused() {
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"t1","name":"mcp__elsebot__memory_search","input":{}}]}}),
+    );
+    assert!(t.violation.is_none());
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"t2","name":"WebFetch","input":{}}]}}),
+    );
+    assert!(t.violation.as_ref().unwrap().1.contains("WebFetch"));
+    let mut t = tracker();
+    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5"}}}));
+    assert_eq!(t.violation.as_ref().unwrap().0, "profile_mismatch");
+    let mut t = tracker();
+    let steps = t.on(&json!({"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write"}}));
+    assert_eq!(steps, vec![Step::Control("r9".into())]);
+    assert!(t.violation.as_ref().unwrap().1.contains("Write"));
+}
+
+#[test]
+fn a_pending_delegation_is_noticed_from_its_tool_result() {
+    let mut t = tracker();
+    t.on(
+        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"d1","name":"mcp__elsebot__delegate","input":{}}]}}),
+    );
+    let steps = t.on(&json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\"}"}]}]}}));
+    assert_eq!(steps, vec![Step::DelegationPending]);
+}
+
+#[test]
+fn a_no_tool_checkpoint_requires_an_empty_inventory() {
+    let mut t = Tracker::new(Vec::new(), "claude-haiku-5-5", "u");
+    t.on(&init(Vec::new(), json!([])));
+    assert!(t.violation.is_none());
+    let mut t = Tracker::new(Vec::new(), "claude-haiku-5-5", "u");
+    t.on(&init(claude_home::tool_names(), connected()));
+    assert!(t.violation.is_some());
+}
+
+#[test]
+fn profiles_need_explicit_supported_values() {
+    let claude = Claude::detect(None, None, None, String::new());
+    let ok = Profile {
+        model: "claude-opus-5-5".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    assert!(claude.validate_profile(&ok).is_ok());
+    for bad in [
+        Profile {
+            model: "opus".into(),
+            ..ok.clone()
+        },
+        Profile {
+            model: "claude-opus-4".into(),
+            ..ok.clone()
+        },
+        Profile {
+            reasoning_effort: "ultra".into(),
+            ..ok.clone()
+        },
+        Profile {
+            service_tier: "priority".into(),
+            ..ok.clone()
+        },
+    ] {
+        assert!(claude.validate_profile(&bad).is_err(), "{bad:?}");
+    }
+    assert!(matches!(
+        claude.availability(),
+        Availability::Unavailable(_)
+    ));
+}
+
+#[test]
+fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
+    let claude = Claude::detect(None, None, None, String::new())
+        .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
+    let profile = Profile {
+        model: "claude-sonnet-5-5".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "default".into(),
+    };
+    let args: Vec<String> = claude
+        .args(&profile, &Session::Resume("abc".into()), "SYSTEM", true)
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+    let after = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+    assert_eq!(after("--tools"), claude_home::HOST_TOOLS.join(","));
+    assert_eq!(after("--model"), "claude-sonnet-5-5");
+    assert_eq!(after("--effort"), "medium");
+    assert_eq!(after("--resume"), "abc");
+    assert_eq!(after("--setting-sources"), "");
+    assert_eq!(after("--system-prompt"), "SYSTEM");
+    assert!(after("--disallowedTools").contains("Agent"));
+    let allowed: Vec<String> = after("--allowedTools")
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(allowed, claude.turn_tools());
+    assert!(allowed.iter().all(|t| {
+        claude_home::HOST_TOOLS.contains(&t.as_str()) || t.starts_with("mcp__elsebot__")
+    }));
+    assert!(allowed.iter().any(|t| t == "Bash"));
+    assert!(args.contains(&"--strict-mcp-config".to_owned()));
+    assert!(
+        !args
+            .iter()
+            .any(|a| a == "--continue" || a == "-c" || a == "--bare")
+    );
+}
+
+fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
+    ResultInfo {
+        success,
+        message: "m".into(),
+        num_turns,
+    }
+}
+
+#[test]
+fn only_a_provable_non_start_is_a_refusal() {
+    // No session could be opened: nothing ran.
+    let t = tracker();
+    assert!(matches!(
+        decide(&t, &info(false, Some(0)), false, false),
+        TurnOutcome::Failed { ref code, .. } if code == "provider_refused"
+    ));
+    // A success, model output, or an unknown turn count without the
+    // echo may have consumed the message.
+    assert!(matches!(
+        decide(&t, &info(true, Some(1)), false, false),
+        TurnOutcome::Uncertain { .. }
+    ));
+    assert!(matches!(
+        decide(&t, &info(false, None), false, false),
+        TurnOutcome::Uncertain { .. }
+    ));
+    let mut active = tracker();
+    active.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}));
+    assert!(matches!(
+        decide(&active, &info(false, Some(0)), false, false),
+        TurnOutcome::Uncertain { .. }
+    ));
+}
+
+#[test]
+fn completion_requires_a_verified_init() {
+    let mut t = tracker();
+    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}));
+    assert!(matches!(
+        decide(&t, &info(true, Some(1)), false, false),
+        TurnOutcome::Failed { ref code, .. } if code == "policy_violation"
+    ));
+    t.on(&init(claude_home::tool_names(), connected()));
+    assert_eq!(
+        decide(&t, &info(true, Some(1)), false, false),
+        TurnOutcome::Completed
+    );
+}
+
+#[tokio::test]
+async fn an_abandoned_read_keeps_its_partial_line() {
+    use tokio::io::AsyncWriteExt;
+    let (mut tx, rx) = tokio::io::duplex(64);
+    let mut events = Events::new(BufReader::new(rx));
+    tx.write_all(br#"{"type":"result","#).await.unwrap();
+    // A timer wins the select while half the line has been read.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.next())
+            .await
+            .is_err()
+    );
+    tx.write_all(b"\"subtype\":\"success\"}\n").await.unwrap();
+    let event = events.next().await.unwrap().unwrap();
+    assert_eq!(event["subtype"], "success");
+    drop(tx);
+    assert_eq!(events.next().await.unwrap(), None);
+}
