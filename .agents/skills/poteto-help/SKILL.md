@@ -19,8 +19,7 @@ is unavailable, read the skill by path and follow it.
 
 ## Setup and model choices
 
-Read [the shared configuration](../../README.md) and
-[setup-pstack](../setup-pstack/SKILL.md). The editable configuration is
+Read [setup-pstack](../setup-pstack/SKILL.md). The editable configuration is
 `.agents/rules/pstack-models.md`. Opus medium handles most implementation,
 judgment, and synthesis. Sol xhigh fast and Fable high form independent review
 and design panels. Opus high handles the hardest work.
