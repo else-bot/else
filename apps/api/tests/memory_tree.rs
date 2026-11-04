@@ -89,7 +89,7 @@ async fn assert_exact_coverage(app: &TestApp, bot: Uuid) -> memory_tree::SavedVi
 async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
-    let bot: Uuid = app.create_bot("Tree", "tree").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Tree").await.parse().unwrap();
     let mut merged_once = false;
     for batch in 0..12 {
         for i in 0..10 {
@@ -138,7 +138,7 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
 async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
-    let bot = app.create_bot("Long", "long").await;
+    let bot = app.create_bot("Long").await;
     let bot_id: Uuid = bot.parse().unwrap();
     add(&app, bot_id, "a", "short one").await;
     add(&app, bot_id, "b", &"long ".repeat(40)).await; // 200 bytes > 64
@@ -217,7 +217,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
 async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
-    let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
     // A worker claims, then stalls past its lease; another takes over.
     let slow = memory_tree::claim(&app.db.pool, Duration::from_secs(60))
@@ -309,7 +309,7 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
 async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
-    let bot = app.create_bot("Saved", "saved").await;
+    let bot = app.create_bot("Saved").await;
     let bot_id: Uuid = bot.parse().unwrap();
     for n in 0..40 {
         add(&app, bot_id, &format!("s{n}"), &format!("s{n}")).await;
@@ -413,7 +413,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    let bot = app.create_bot("Wide", "wide").await;
+    let bot = app.create_bot("Wide").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let long = "w".repeat(10_009);
     add(&app, bot_id, "long", &long).await;
@@ -460,7 +460,7 @@ async fn cut_text_is_marked_with_where_the_rest_is() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_longer_than_one_batch_keeps_publishing() {
     let app = TestApp::installed().await;
-    let bot: Uuid = app.create_bot("Backlog", "backlog").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Backlog").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
     // Seed 10,050 built leaves behind a stalled first leaf.
     sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = ?1")
@@ -504,7 +504,7 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
 async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
     let app = TestApp::installed().await;
     small_recipe(&app).await;
-    let bot = app.create_bot("Catch", "catch").await;
+    let bot = app.create_bot("Catch").await;
     let bot_id: Uuid = bot.parse().unwrap();
     for n in 0..5 {
         add(&app, bot_id, &format!("u{n}"), &format!("u{n}")).await;
@@ -558,7 +558,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    let bot = app.create_bot("Ctx", "ctx").await;
+    let bot = app.create_bot("Ctx").await;
     let bot_id: Uuid = bot.parse().unwrap();
     for n in 0..60 {
         add(&app, bot_id, &format!("c{n}"), &format!("c{n}")).await;
@@ -612,7 +612,7 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
     assert_eq!(kept, damaged, "publication paused instead of rewriting");
 
     // A view pointing at a generation that does not exist is invalid.
-    let other: Uuid = app.create_bot("Gen", "gen").await.parse().unwrap();
+    let other: Uuid = app.create_bot("Gen").await.parse().unwrap();
     add(&app, other, "g", "g").await;
     sqlx::query("UPDATE memory_store SET generation = 999 WHERE bot_id = ?1")
         .bind(other)

@@ -27,7 +27,6 @@ use crate::model::{Item, Snapshot, Turn};
 pub struct CreateBotRequest {
     pub request_id: Uuid,
     pub name: String,
-    pub role: String,
     pub profile: Option<ProfileChoice>,
     pub category_id: Option<Uuid>,
 }
@@ -120,13 +119,11 @@ pub struct Cleanup {
     pub error: Option<serde_json::Value>,
 }
 
-/// An active bot, or a deletion receipt (`cleanup` set, no role).
+/// An active bot, or a deletion receipt (`cleanup` set).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Bot {
     pub id: Uuid,
     pub name: String,
-    #[serde(default)]
-    pub role: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<Uuid>,
     #[serde(default)]
@@ -488,15 +485,10 @@ impl Client {
         .map(|(_, v)| v.bot)
     }
 
-    /// Replace a bot's name and role (its instructions). Repeating the same
-    /// values is a no-op, so a retry after an unknown outcome is safe.
-    pub async fn update_bot(
-        self: Arc<Self>,
-        bot: Uuid,
-        name: String,
-        role: String,
-    ) -> Result<Bot, ClientError> {
-        let body = json!({ "name": name, "role": role });
+    /// Rename a bot. Repeating the same name is a no-op, so a retry after
+    /// an unknown outcome is safe.
+    pub async fn update_bot(self: Arc<Self>, bot: Uuid, name: String) -> Result<Bot, ClientError> {
+        let body = json!({ "name": name });
         self.call::<BotEnvelope>(Method::PATCH, format!("/v1/bots/{bot}"), Some(body))
             .await
             .map(|(_, v)| v.bot)

@@ -40,8 +40,8 @@ async fn seqs(app: &TestApp, bot: Uuid) -> Vec<i64> {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     let app = TestApp::installed().await;
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
 
     // 30 distinct appends and 10 retries of one key, across two bots, at once.
     let mut tasks = tokio::task::JoinSet::new();
@@ -147,7 +147,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
 #[tokio::test(flavor = "multi_thread")]
 async fn conversation_messages_enter_memory_once_with_their_source() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Work", "work").await;
+    let bot = app.create_bot("Work").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let request = Uuid::new_v4();
     let sent = app
@@ -195,9 +195,9 @@ async fn conversation_messages_enter_memory_once_with_their_source() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_explicit_owner_corrections_supersede_owner_entries() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Family", "family").await;
+    let bot = app.create_bot("Family").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    let other: Uuid = app.create_bot("Other", "other").await.parse().unwrap();
+    let other: Uuid = app.create_bot("Other").await.parse().unwrap();
     let sent = app
         .send(
             &bot,
@@ -373,7 +373,7 @@ fn owner_entry<'a>(key: &'a str, body: &'a str, supersedes: Option<i64>) -> NewE
 #[tokio::test(flavor = "multi_thread")]
 async fn responses_stay_within_budget_even_with_escaped_text() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Big", "big").await;
+    let bot = app.create_bot("Big").await;
     let bot_id: Uuid = bot.parse().unwrap();
     // Quotes and control characters double or sextuple when escaped twice.
     let body = "\"\u{1}".repeat(400);
@@ -444,7 +444,7 @@ async fn responses_stay_within_budget_even_with_escaped_text() {
 #[tokio::test(flavor = "multi_thread")]
 async fn search_pages_ignore_corrections_made_after_the_first_page() {
     let app = TestApp::installed().await;
-    let bot: Uuid = app.create_bot("Pages", "pages").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Pages").await.parse().unwrap();
     for i in 0..21 {
         append(
             &app,
@@ -486,7 +486,7 @@ async fn search_pages_ignore_corrections_made_after_the_first_page() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_append_racing_a_deletion_never_lands_after_it() {
     let app = TestApp::installed().await;
-    let bot: Uuid = app.create_bot("Race", "race").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     // A deletion in progress holds the bot row.
     let mut deletion = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
@@ -521,7 +521,7 @@ async fn an_append_racing_a_deletion_never_lands_after_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn malformed_json_rpc_is_rejected_before_dispatch() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Rpc", "rpc").await;
+    let bot = app.create_bot("Rpc").await;
     let (_, token) = running_grant(&app, &bot).await;
     let send = |body: Value| app.call("POST", "/tools/v1/mcp", Some(body), Some(&token));
     for (body, code) in [
@@ -563,8 +563,8 @@ async fn malformed_json_rpc_is_rejected_before_dispatch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     let app = TestApp::installed().await;
-    let me = app.create_bot("Family", "family").await;
-    let work = app.create_bot("Work", "work").await;
+    let me = app.create_bot("Family").await;
+    let work = app.create_bot("Work").await;
     let fact = app
         .send(
             &work,

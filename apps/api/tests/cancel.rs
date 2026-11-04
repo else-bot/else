@@ -106,7 +106,7 @@ async fn stop_work_cancels_through_its_boundary_only() {
         "completed"
     );
     // The request ID cannot be reused for another bot.
-    let other = app.create_bot("Other", "other").await;
+    let other = app.create_bot("Other").await;
     assert_eq!(
         stop(&app, &other, request).await.status,
         StatusCode::CONFLICT
@@ -188,7 +188,7 @@ async fn a_provider_that_ignores_interruption_ends_uncertain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Busy", "busy bot").await;
+    let bot = app.create_bot("Busy").await;
     let stuck = app
         .send(
             &bot,
@@ -279,7 +279,7 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn late_output_after_deletion_is_fenced() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Streaming", "streams slowly").await;
+    let bot = app.create_bot("Streaming").await;
     let slow = app
         .send(
             &bot,
@@ -350,7 +350,7 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         .call(
             Method::POST,
             "/v1/bots",
-            Some(json!({ "request_id": Uuid::new_v4(), "name": "Second", "role": "second" })),
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Second" })),
         )
         .await;
     let second = created["bot"]["id"].as_str().unwrap().to_owned();
@@ -546,7 +546,7 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
     );
 
     // An active turn that no provider task owns.
-    let other = app.create_bot("Orphan", "orphan").await;
+    let other = app.create_bot("Orphan").await;
     let queued = app
         .send(
             &other,

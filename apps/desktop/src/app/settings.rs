@@ -2,7 +2,7 @@ use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use crate::api::{Bot, BotProfile, ClientError, ProfileChoice};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
     v_flex,
@@ -15,14 +15,12 @@ pub(super) const PANEL_WIDTH: Pixels = px(336.);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Metadata {
     name: String,
-    role: String,
 }
 
 impl Metadata {
     fn of(bot: &Bot) -> Self {
         Self {
             name: bot.name.clone(),
-            role: bot.role.clone().unwrap_or_default(),
         }
     }
 
@@ -32,8 +30,6 @@ impl Metadata {
             Some("Give the bot a name.")
         } else if name.chars().count() > 80 {
             Some("Keep the name to 80 characters or fewer.")
-        } else if self.role.trim().is_empty() {
-            Some("Describe what the bot should do.")
         } else {
             None
         }
@@ -58,25 +54,21 @@ struct Details {
     seen: Metadata,
     saved: Metadata,
     name: Entity<InputState>,
-    role: Entity<TextareaState>,
     save: Save,
-    _edits: [Subscription; 2],
+    _edits: Subscription,
 }
 
 impl Details {
     fn draft(&self, cx: &App) -> Metadata {
         Metadata {
             name: self.name.read(cx).value().to_string(),
-            role: self.role.read(cx).value().to_string(),
         }
     }
 
     fn show(&self, values: &Metadata, window: &mut Window, cx: &mut App) {
-        let (name, role) = (values.name.clone(), values.role.clone());
+        let name = values.name.clone();
         self.name
             .update(cx, |state, cx| state.set_value(name, window, cx));
-        self.role
-            .update(cx, |state, cx| state.set_value(role, window, cx));
     }
 }
 
@@ -167,11 +159,6 @@ impl ElseApp {
                         state.set_value(latest.name.clone(), window, cx)
                     });
                 }
-                if draft.role == details.saved.role {
-                    details.role.update(cx, |state, cx| {
-                        state.set_value(latest.role.clone(), window, cx)
-                    });
-                }
             }
             details.seen = latest.clone();
             details.saved = latest;
@@ -192,9 +179,7 @@ impl ElseApp {
         details.save = Save::Saving(attempt);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client
-                .update_bot(bot, draft.name.clone(), draft.role.clone())
-                .await;
+            let result = client.update_bot(bot, draft.name.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| {
                 app.finish_details(bot, attempt, draft, result, window, cx)
             });
@@ -491,12 +476,6 @@ impl ElseApp {
             );
         section("Details", cx)
             .child(field("Name", Input::new(&details.name).disabled(saving)))
-            .child(
-                field("Description", Textarea::new(&details.role).disabled(saving)).child(muted(
-                    "The bot's instructions: what it helps with and how it should answer.",
-                    cx,
-                )),
-            )
             .children(status)
             .child(actions)
             .into_any_element()
@@ -639,22 +618,11 @@ fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Det
             .placeholder("Name")
             .default_value(values.name.clone())
     });
-    let role = cx.new(|cx| {
-        let mut state = TextareaState::new(window, cx)
-            .placeholder("What this bot helps with and how it should answer")
-            .auto_grow(4, 12);
-        state.set_value(values.role.clone(), window, cx);
-        state
-    });
     Details {
-        _edits: [
-            cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe(&role, |_, _, _: &InputEvent, cx| cx.notify()),
-        ],
+        _edits: cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
         seen: values.clone(),
         saved: values,
         name,
-        role,
         save: Save::Idle,
     }
 }
@@ -695,19 +663,15 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 mod tests {
     use super::Metadata;
 
-    fn metadata(name: &str, role: &str) -> Metadata {
-        Metadata {
-            name: name.into(),
-            role: role.into(),
-        }
+    fn metadata(name: &str) -> Metadata {
+        Metadata { name: name.into() }
     }
 
     #[test]
     fn details_mirror_the_api_limits() {
-        assert_eq!(metadata("  Planner ", "Plan my week.").problem(), None);
-        assert_eq!(metadata(&"é".repeat(80), "ok").problem(), None);
-        assert!(metadata(" ", "ok").problem().is_some());
-        assert!(metadata(&"é".repeat(81), "ok").problem().is_some());
-        assert!(metadata("ok", "\n ").problem().is_some());
+        assert_eq!(metadata("  Planner ").problem(), None);
+        assert_eq!(metadata(&"é".repeat(80)).problem(), None);
+        assert!(metadata(" ").problem().is_some());
+        assert!(metadata(&"é".repeat(81)).problem().is_some());
     }
 }

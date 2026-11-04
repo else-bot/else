@@ -112,7 +112,7 @@ async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::Summa
 async fn summaries_fill_long_ranges_with_a_complete_audit() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let bot: Uuid = app.create_bot("Sum", "sum").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Sum").await.parse().unwrap();
     add(&app, bot, "a", "short").await;
     add(&app, bot, "b", &"a long owner message ".repeat(10)).await;
     add(&app, bot, "c", "after").await;
@@ -133,7 +133,7 @@ async fn summaries_fill_long_ranges_with_a_complete_audit() {
     assert_eq!(audit["recipe"]["node_bytes"], 64);
     assert_eq!(audit["sources"]["entries"], json!([1]));
     assert_eq!(audit["model"]["model"], "gpt-6.1-sol");
-    assert_eq!(audit["model"]["prompt_version"], "else-summary-v1");
+    assert_eq!(audit["model"]["prompt_version"], "else-summary-v2");
     assert_eq!(audit["model"]["output_bytes"], 15);
     assert_eq!(
         audit["context"]["nodes"],
@@ -154,7 +154,7 @@ async fn summaries_fill_long_ranges_with_a_complete_audit() {
 async fn oversized_or_failed_summaries_are_never_installed() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let bot: Uuid = app.create_bot("Big", "big").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Big").await.parse().unwrap();
     add(&app, bot, "a", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     {
@@ -215,7 +215,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let app = TestApp::with_options(db, 1);
     recipe(&app, 64).await;
-    let bot = app.create_bot("Busy", "busy").await;
+    let bot = app.create_bot("Busy").await;
     let bot_id: Uuid = bot.parse().unwrap();
     add(&app, bot_id, "a", &"x".repeat(200)).await;
     // The only slot runs a turn: no summary may start.
@@ -264,7 +264,7 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
 async fn new_sessions_get_bounded_memory_once() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let bot = app.create_bot("Mem", "mem").await;
+    let bot = app.create_bot("Mem").await;
     let bot_id: Uuid = bot.parse().unwrap();
     for n in 0..400 {
         add(&app, bot_id, &format!("m{n}"), &format!("fact number {n}")).await;
@@ -294,11 +294,59 @@ async fn new_sessions_get_bounded_memory_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn work_in_another_conversation_refreshes_a_warm_session() {
+    let app = TestApp::installed().await;
+    let bot: Uuid = app.create_bot("GitHub").await.parse().unwrap();
+    add(&app, bot, "owner", "Keep the repositories tidy.").await;
+    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    let before = memory_tree::session_context(&app.db.pool, bot)
+        .await
+        .unwrap()
+        .unwrap();
+    let warm = else_api::app::providers::SessionState {
+        native_id: "warm".into(),
+        fingerprint: "same".into(),
+        considered_through_turn: 1,
+        memory_revision: Some(before.revision),
+    };
+    assert!(else_api::providers::prompt::memory_for(Some(&before), Some(&warm)).is_none());
+
+    let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    memory::append(
+        &mut tx,
+        bot,
+        &NewEntry {
+            request_key: "task",
+            kind: Kind::DelegatedTask,
+            body: "Delete merged branches older than 90 days in elsebot-test-org.",
+            source: json!({}),
+            supersedes_seq: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    else_api::memory_worker::drain(&app.db.pool).await.unwrap();
+    let after = memory_tree::session_context(&app.db.pool, bot)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(after.revision, before.revision);
+    assert!(after.text.contains("older than 90 days"), "{}", after.text);
+    let given = else_api::providers::prompt::memory_for(Some(&after), Some(&warm));
+    assert_eq!(
+        given,
+        Some(&after),
+        "the warm session gets the new revision"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn copies_continue_while_a_summary_runs() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let slow: Uuid = app.create_bot("Slow", "slow").await.parse().unwrap();
-    let quick: Uuid = app.create_bot("Quick", "quick").await.parse().unwrap();
+    let slow: Uuid = app.create_bot("Slow").await.parse().unwrap();
+    let quick: Uuid = app.create_bot("Quick").await.parse().unwrap();
     add(&app, slow, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     *fake.delay.lock().unwrap() = Duration::from_secs(2);
@@ -344,7 +392,7 @@ async fn copies_continue_while_a_summary_runs() {
 async fn shutdown_cancels_an_active_summary_promptly() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let bot: Uuid = app.create_bot("Stop", "stop").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Stop").await.parse().unwrap();
     add(&app, bot, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     *fake.delay.lock().unwrap() = Duration::from_secs(60);
@@ -390,7 +438,7 @@ async fn shutdown_cancels_an_active_summary_promptly() {
 async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     let app = TestApp::installed().await;
     recipe(&app, 64).await;
-    let bot: Uuid = app.create_bot("Wait", "wait").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Wait").await.parse().unwrap();
     add(&app, bot, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
@@ -445,7 +493,7 @@ async fn a_node_larger_than_the_session_budget_is_reported_omitted() {
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    let bot: Uuid = app.create_bot("Huge", "huge").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("Huge").await.parse().unwrap();
     add(&app, bot, "huge", &"h".repeat(30_000)).await;
     else_api::memory_worker::drain(&app.db.pool).await.unwrap();
     let memory = memory_tree::session_context(&app.db.pool, bot)

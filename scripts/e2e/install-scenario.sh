@@ -79,7 +79,7 @@ echo "--- an update is refused while a bot works"
 echo "ELSE_SYNTHETIC_PROVIDER=1" >>$H/config/.env
 "$cli" restart
 wait_health 0.0.1
-bot="$(api -X POST $URL/v1/bots -d "{\"request_id\":\"$(uuid)\",\"name\":\"Worker\",\"role\":\"works\"}" | jq -r .bot.id)"
+bot="$(api -X POST $URL/v1/bots -d "{\"request_id\":\"$(uuid)\",\"name\":\"Worker\"}" | jq -r .bot.id)"
 busy="$(send '[synthetic:hang]')"
 wait_status "$busy" running
 if "$cli" update --yes --skip-guest-image >"$H-refused.log" 2>&1; then

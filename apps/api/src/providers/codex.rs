@@ -39,7 +39,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v10";
+const PROMPT_VERSION: &str = "else-codex-v11";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
@@ -163,7 +163,6 @@ impl Codex {
     /// it unsafe or stale is part of the fingerprint.
     fn fingerprint(&self, profile: &Profile, input: &TurnInput, account: &str) -> String {
         let mut hasher = Sha256::new();
-        // The delegation role and the registry are part of the instructions.
         let registry = prompt::registry_text(input);
         let runtime = self
             .host
@@ -185,7 +184,6 @@ impl Codex {
             &profile.reasoning_effort,
             &profile.service_tier,
             &input.bot_name,
-            &input.bot_role,
         ] {
             hasher.update(part.as_bytes());
             hasher.update([0]);
@@ -506,13 +504,8 @@ impl Codex {
         // Record which native session this attempt uses before sending, so
         // an uncertain delivery retires it instead of being resumed with a
         // stale coverage cursor.
-        // A new session, or one that never received memory, gets the saved
-        // memory once; an existing session is not re-injected.
         let resumed_session = input.session.as_ref().filter(|s| s.native_id == thread_id);
-        let inject = input
-            .memory
-            .as_ref()
-            .filter(|_| resumed_session.is_none_or(|s| s.memory_revision.is_none()));
+        let inject = prompt::memory_for(input.memory.as_ref(), resumed_session);
         let mut state = SessionState {
             native_id: thread_id.clone(),
             fingerprint,
@@ -746,7 +739,7 @@ impl Codex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::providers::HistoryEntry;
+    use crate::app::providers::{HistoryEntry, MemoryContext};
     use uuid::Uuid;
 
     fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
@@ -756,7 +749,6 @@ mod tests {
             turn_id: Uuid::new_v4(),
             turn_no: 9,
             bot_name: "Work".into(),
-            bot_role: "Help with work".into(),
             text: "latest".into(),
             profile: None,
             history: history
@@ -917,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_changes_with_profile_and_role() {
+    fn fingerprint_changes_with_profile_and_name() {
         let a = input(vec![]);
         let profile = Profile {
             model: "gpt-6.1-sol".into(),
@@ -937,7 +929,7 @@ mod tests {
         };
         assert_ne!(base, codex.fingerprint(&high, &a, "chatgpt:a"));
         let mut b = a.clone();
-        b.bot_role = "Different".into();
+        b.bot_name = "Different".into();
         assert_ne!(base, codex.fingerprint(&profile, &b, "chatgpt:a"));
         assert_eq!(base, codex.fingerprint(&profile, &a.clone(), "chatgpt:a"));
         let dir = tempfile::tempdir().unwrap();
@@ -963,6 +955,94 @@ mod tests {
             let _ = std::fs::remove_file(&auth);
         }
         Codex::detect(Some(Host::new(dir, dir)), Some(program), Some(auth))
+    }
+
+    fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
+        let received = dir.join("received.jsonl");
+        let script = format!(
+            r#"exec python3 -c '
+import json, sys
+def out(m): print(json.dumps(m), flush=True)
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    method, p = m["method"], m.get("params") or {{}}
+    if method == "mcpServerStatus/list": r = {{"data": []}}
+    elif method == "account/read": r = {{"account": {{"type": "chatgpt", "email": "o@example.test"}}}}
+    elif method == "thread/resume": r = {{"thread": {{"id": p["threadId"]}}}}
+    elif method == "thread/start": r = {{"thread": {{"id": "fresh-thread"}}}}
+    elif method == "turn/start":
+        with open({received:?}, "a") as f: f.write(json.dumps(p["input"][0]["text"]) + "\n")
+        r = {{"turn": {{"id": "native-turn"}}}}
+    else: r = {{}}
+    out({{"id": m["id"], "result": r}})
+    if method == "turn/start":
+        out({{"method": "turn/completed", "params": {{"threadId": p["threadId"],
+             "turn": {{"id": "native-turn", "status": "completed"}}}}}})
+'"#
+        );
+        let codex = detect_with(
+            dir,
+            &format!("[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n{script}"),
+            true,
+        );
+        assert!(matches!(codex.availability(), Availability::Available));
+        (codex, received)
+    }
+
+    #[tokio::test]
+    async fn a_warm_thread_receives_memory_whenever_its_revision_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, received) = fake_codex(dir.path());
+        let turn = |session| TurnInput {
+            turn_no: 3,
+            bot_name: "GitHub".into(),
+            text: "Clean up the stale branches.".into(),
+            profile: Some(Profile {
+                model: MODELS[0].into(),
+                reasoning_effort: "medium".into(),
+                service_tier: "default".into(),
+            }),
+            session,
+            memory: Some(MemoryContext {
+                revision: 7,
+                text: "[else.bot memory] Owner correction: rebase branches, never merge them.\n\n"
+                    .into(),
+            }),
+            bot_id: Uuid::from_u128(7),
+            ..input(Vec::new())
+        };
+        let base = turn(None);
+        let fingerprint = codex.fingerprint(
+            base.profile.as_ref().unwrap(),
+            &base,
+            "chatgpt:o@example.test",
+        );
+        let warm = |memory_revision| SessionState {
+            native_id: "warm-thread".into(),
+            fingerprint: fingerprint.clone(),
+            considered_through_turn: 2,
+            memory_revision,
+        };
+        let memory = "Owner correction: rebase branches, never merge them.";
+
+        for (session, native, refreshed) in [
+            (None, "fresh-thread", true),
+            (Some(warm(Some(6))), "warm-thread", true),
+            (Some(warm(Some(7))), "warm-thread", false),
+        ] {
+            let sink = super::super::recording::Recorded::default();
+            let outcome = codex
+                .run(turn(session), &sink, CancellationToken::new())
+                .await;
+            assert_eq!(outcome, TurnOutcome::Completed);
+            let text = super::super::recording::received(&received).pop().unwrap();
+            assert_eq!(text.contains(memory), refreshed, "{native}: {text}");
+            assert!(text.ends_with("Clean up the stale branches."));
+            let state = sink.last_session();
+            assert_eq!(state.native_id, native);
+            assert_eq!(state.memory_revision, Some(7));
+        }
     }
 
     #[test]

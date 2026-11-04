@@ -191,7 +191,7 @@ class Instance:
 
 
 def create_bot(api):
-    body = {"request_id": str(uuid.uuid4()), "name": "Verification", "role": "Synthetic verification"}
+    body = {"request_id": str(uuid.uuid4()), "name": "Verification"}
     bot = api.request("POST", "/v1/bots", body, expected=201)["bot"]
     retry = api.request("POST", "/v1/bots", body)["bot"]
     require(bot["id"] == retry["id"], "retry created a second bot")

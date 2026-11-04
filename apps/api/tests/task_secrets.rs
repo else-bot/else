@@ -242,8 +242,8 @@ async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value
 #[tokio::test(flavor = "multi_thread")]
 async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
     let Setup { app, .. } = setup().await;
-    let bot = app.create_bot("Mailer", "sends mail").await;
-    let other = app.create_bot("Other", "other").await;
+    let bot = app.create_bot("Mailer").await;
+    let other = app.create_bot("Other").await;
     let path = format!("/v1/bots/{bot}/task-secrets/smtp");
     let body = json!({ "env": { "SMTP_USER": "bot", "SMTP_PASSWORD": PASSWORD } });
     let created = app.owner("PUT", &path, Some(body.clone())).await;
@@ -311,8 +311,8 @@ async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     let Setup { app, guest, .. } = setup().await;
-    let bot = app.create_bot("Mailer", "sends mail").await;
-    let other = app.create_bot("Other", "other").await;
+    let bot = app.create_bot("Mailer").await;
+    let other = app.create_bot("Other").await;
     for (who, name) in [(&bot, "smtp"), (&other, "theirs")] {
         let put = app
             .owner(
@@ -414,7 +414,7 @@ async fn stop_work_ends_a_running_foreground_command() {
         guest,
         manager,
     } = setup().await;
-    let bot = app.create_bot("Worker", "works").await;
+    let bot = app.create_bot("Worker").await;
     let (_, token) = grant(&app, &bot).await;
     let app = Arc::new(app);
     let call = {
@@ -517,8 +517,8 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
         guest,
         manager,
     } = setup().await;
-    let slow = app.create_bot("Slow", "stalls").await;
-    let fast = app.create_bot("Fast", "stops").await;
+    let slow = app.create_bot("Slow").await;
+    let fast = app.create_bot("Fast").await;
     let app = Arc::new(app);
     let mut calls = Vec::new();
     for bot in [&slow, &fast] {
@@ -591,7 +591,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         guest,
         manager,
     } = setup().await;
-    let bot = app.create_bot("Clicker", "clicks").await;
+    let bot = app.create_bot("Clicker").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let (_, token) = grant(&app, &bot).await;
     let app = Arc::new(app);
@@ -709,7 +709,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
 #[tokio::test(flavor = "multi_thread")]
 async fn category_changes_leave_guest_jobs_running() {
     let Setup { app, manager, .. } = setup().await;
-    let bot = app.create_bot("Jobs", "runs jobs").await;
+    let bot = app.create_bot("Jobs").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let else_api::computers::jobs::Started::Job(job) = manager
         .start_job(bot_id, None, "sleep 600", Duration::from_secs(900))
@@ -764,7 +764,7 @@ async fn category_changes_leave_guest_jobs_running() {
 #[tokio::test(flavor = "multi_thread")]
 async fn input_allowances_survive_counter_cleanup() {
     let Setup { app, manager, .. } = setup().await;
-    let bot = app.create_bot("Input", "bounded input").await;
+    let bot = app.create_bot("Input").await;
     let (turn, _) = grant(&app, &bot).await;
     for expected in 1..=41 {
         assert_eq!(manager.count_input(turn).await.unwrap(), expected);

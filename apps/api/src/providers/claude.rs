@@ -58,7 +58,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "claude";
 /// Bump when the system prompt or packet format change.
-const PROMPT_VERSION: &str = "else-claude-v7";
+const PROMPT_VERSION: &str = "else-claude-v8";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -177,7 +177,6 @@ impl Claude {
             &profile.reasoning_effort,
             &profile.service_tier,
             &input.bot_name,
-            &input.bot_role,
         ] {
             hasher.update(part.as_bytes());
             hasher.update([0]);
@@ -477,10 +476,7 @@ impl Provider for Claude {
         if cancel.is_cancelled() {
             return TurnOutcome::Interrupted;
         }
-        let inject = input
-            .memory
-            .as_ref()
-            .filter(|_| resumed.is_none_or(|s| s.memory_revision.is_none()));
+        let inject = prompt::memory_for(input.memory.as_ref(), resumed);
         let mut state = SessionState {
             native_id: session.id().to_owned(),
             fingerprint,

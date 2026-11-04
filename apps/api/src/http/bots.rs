@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::bots::{BotName, BotRole};
+use crate::app::bots::BotName;
 use crate::db::bots::{self, BotError, BotStatus, Created};
 use crate::views::*;
 
@@ -52,11 +52,7 @@ impl From<BotError> for ApiError {
 }
 
 fn invalid_bot(err: crate::app::bots::InvalidBot) -> ApiError {
-    if err.is_size_limit() {
-        ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
-    } else {
-        ApiError::bad_request("invalid_input", err.to_string())
-    }
+    ApiError::bad_request("invalid_input", err.to_string())
 }
 
 #[derive(Deserialize)]
@@ -85,7 +81,6 @@ async fn list(
 struct CreateBot {
     request_id: Uuid,
     name: String,
-    role: String,
     /// The bot's own provider and model; without one it uses the defaults.
     #[serde(default)]
     profile: Option<super::settings::ProfileChoice>,
@@ -97,9 +92,8 @@ async fn create(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<CreateBot>,
 ) -> Result<Response, ApiError> {
-    let invalid = |err| invalid_bot(err).with_request_id(body.request_id);
-    let name = BotName::parse(&body.name).map_err(invalid)?;
-    let role = BotRole::parse(&body.role).map_err(invalid)?;
+    let name = BotName::parse(&body.name)
+        .map_err(|err| invalid_bot(err).with_request_id(body.request_id))?;
     let choice = match &body.profile {
         Some(choice) => Some((
             super::settings::validate_choice(&state, choice)
@@ -113,7 +107,6 @@ async fn create(
         body.request_id,
         bots::NewBot {
             name: &name,
-            role: &role,
             profile: choice
                 .as_ref()
                 .map(|(provider, profile)| (*provider, profile)),
@@ -149,13 +142,10 @@ async fn show(
     Ok(Json(json!({ "bot": bot_json(&bot) })))
 }
 
-/// The bot's name and role (its instructions), both required. Replacing
-/// them with the same values is a no-op, so a retry is always safe.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateBot {
     name: String,
-    role: String,
 }
 
 async fn update(
@@ -164,8 +154,7 @@ async fn update(
     ApiJson(body): ApiJson<UpdateBot>,
 ) -> Result<Json<Value>, ApiError> {
     let name = BotName::parse(&body.name).map_err(invalid_bot)?;
-    let role = BotRole::parse(&body.role).map_err(invalid_bot)?;
-    let bot = bots::update_metadata(&state.db, bot_id, &name, &role).await?;
+    let bot = bots::rename(&state.db, bot_id, &name).await?;
     Ok(Json(json!({ "bot": bot_json(&bot) })))
 }
 

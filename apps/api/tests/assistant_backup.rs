@@ -295,8 +295,8 @@ impl Drop for Target {
 #[tokio::test(flavor = "multi_thread")]
 async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let s = setup().await;
-    let a = s.app.create_bot("Alpha", "keeps notes").await;
-    let b = s.app.create_bot("Beta", "browses").await;
+    let a = s.app.create_bot("Alpha").await;
+    let b = s.app.create_bot("Beta").await;
     let (a_id, b_id): (Uuid, Uuid) = (a.parse().unwrap(), b.parse().unwrap());
     chat(&s.app, &a, "Alpha's chat").await;
     chat(&s.app, &b, "Beta's chat").await;
@@ -448,7 +448,7 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
 #[tokio::test(flavor = "multi_thread")]
 async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
     let s = setup().await;
-    let a = s.app.create_bot("Alpha", "keeps notes").await;
+    let a = s.app.create_bot("Alpha").await;
     let a_id: Uuid = a.parse().unwrap();
     let backups = s.dir.path().join("backups");
     // A turn that does not finish within the drain time defers the set.
@@ -559,7 +559,7 @@ async fn the_gate_refuses_changes_and_desktop_wakes_while_closed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_set_with_computers_needs_a_new_installation_to_restore() {
     let s = setup().await;
-    let a = s.app.create_bot("Alpha", "keeps notes").await;
+    let a = s.app.create_bot("Alpha").await;
     let Acquire::Ready { lease_id, .. } = s
         .manager
         .acquire(a.parse().unwrap(), "test:use")
@@ -587,7 +587,7 @@ async fn a_set_with_computers_needs_a_new_installation_to_restore() {
 #[tokio::test(flavor = "multi_thread")]
 async fn retention_keeps_every_artifact_a_kept_set_needs() {
     let s = setup().await;
-    let a = s.app.create_bot("Alpha", "keeps notes").await;
+    let a = s.app.create_bot("Alpha").await;
     let Acquire::Ready { lease_id, .. } = s
         .manager
         .acquire(a.parse().unwrap(), "test:use")
@@ -628,12 +628,7 @@ async fn used(s: &Setup, bot: Uuid) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_checkpoints_and_desktop_secrets_are_required() {
     let s = setup().await;
-    let a: Uuid = s
-        .app
-        .create_bot("Alpha", "keeps notes")
-        .await
-        .parse()
-        .unwrap();
+    let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     let name = used(&s, a).await;
     // A failed checkpoint defers the set: the computer keeps running.
     s.fake.checkpoint_fails.store(true, SeqCst);
@@ -684,12 +679,7 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
 #[tokio::test(flavor = "multi_thread")]
 async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_one() {
     let s = setup().await;
-    let a: Uuid = s
-        .app
-        .create_bot("Alpha", "keeps notes")
-        .await
-        .parse()
-        .unwrap();
+    let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     used(&s, a).await;
     // A file the bot fetched to the host, registered with its hash.
     let id = Uuid::new_v4();
@@ -755,12 +745,7 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
     let s = setup().await;
-    let a: Uuid = s
-        .app
-        .create_bot("Alpha", "keeps notes")
-        .await
-        .parse()
-        .unwrap();
+    let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     let name = used(&s, a).await;
     let set = worker(&s, Duration::from_secs(2)).run_once().await.unwrap();
     for stop_fails in [false, true] {
@@ -817,8 +802,8 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
 async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     let s = setup_with(true).await;
     let bots = s.dir.path().join("bots");
-    let a = s.app.create_bot("Alpha", "keeps notes").await;
-    let b = s.app.create_bot("Beta", "keeps sheets").await;
+    let a = s.app.create_bot("Alpha").await;
+    let b = s.app.create_bot("Beta").await;
     let (a_id, b_id): (Uuid, Uuid) = (a.parse().unwrap(), b.parse().unwrap());
     chat(&s.app, &a, "Alpha's chat").await;
     // Alpha's computer is created with the mount (and its project).

@@ -315,7 +315,6 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             "max_text_bytes": crate::app::messages::MAX_TEXT_BYTES,
             "max_queued_turns": crate::app::messages::MAX_QUEUED_TURNS,
             "max_bot_name_chars": crate::app::bots::MAX_NAME_CHARS,
-            "max_bot_role_bytes": crate::app::bots::MAX_ROLE_BYTES,
         },
     }))
 }

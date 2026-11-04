@@ -298,7 +298,7 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
 async fn one_socket_carries_several_channels_and_unsubscribe_stops_one() {
     let server = Server::start().await;
     let a = server.app.main_bot().await;
-    let b = server.app.create_bot("B", "b").await;
+    let b = server.app.create_bot("B").await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
     for bot in [&a, &b] {
         let cursor = server.snapshot(bot).await["event_cursor"]
@@ -346,7 +346,7 @@ async fn bots_channel_pushes_list_changes() {
     );
     assert_eq!(first["data"]["bots"].as_array().unwrap().len(), 1);
     let main = first["data"]["default_bot_id"].as_str().unwrap().to_owned();
-    let created = server.app.create_bot("Pushed", "role").await;
+    let created = server.app.create_bot("Pushed").await;
     let started = std::time::Instant::now();
     let update = next(&mut socket, Duration::from_secs(5)).await.unwrap();
     assert!(
@@ -415,7 +415,7 @@ async fn bots_channel_pushes_list_changes() {
 async fn cursor_errors_are_reported_per_channel() {
     let server = Server::start().await;
     let bot = server.app.main_bot().await;
-    let other = server.app.create_bot("Other", "other").await;
+    let other = server.app.create_bot("Other").await;
     let cursor = server.snapshot(&bot).await["event_cursor"]
         .as_str()
         .unwrap()
@@ -487,7 +487,7 @@ async fn ended_channels_do_not_use_up_the_subscription_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
     let server = Server::start().await;
-    let bot = server.app.create_bot("Temp", "temporary").await;
+    let bot = server.app.create_bot("Temp").await;
     let cursor = server.snapshot(&bot).await["event_cursor"]
         .as_str()
         .unwrap()

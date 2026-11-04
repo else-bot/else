@@ -4,7 +4,7 @@ These requirements describe the planned assistant. See the [product overview](..
 
 ## First version
 
-Start with one owner's messaging app. The owner can list bots, create a bot with a name and role, open its conversation, send messages, and delete the bot. Keep conversation history and memory persistent. The main assistant remains the default place to ask for help.
+Start with one owner's messaging app. The owner can list bots, create a bot with a name, open its conversation, send messages, and delete the bot. Each bot learns its responsibilities from those messages and its memory. Keep conversation history and memory persistent. The main assistant remains the default place to ask for help.
 
 Build the supporting provider, memory, authentication, backup, and execution contracts with this scope in mind. Research fixtures verify individual design choices. They are separate from application implementation.
 
@@ -16,7 +16,7 @@ The main assistant should act as a copy of myself in the sense that it learns my
 
 Context recognition and delegation should be entirely prompt-driven. The AI CLI connects the pieces, and the main assistant uses its prompt and context to decide which bot should handle a request.
 
-The SQL database should store the available bots and their roles. The main assistant needs that information in its context so it knows which bots exist and what it can delegate to each one.
+The SQL database stores the available bots by name. Bots have no stored description: each bot learns its responsibilities from what the owner asks it and from its memory, and updates that understanding as the owner corrects it. The main assistant sees the registry of bot names and IDs and decides what to delegate from its own memory of creating and delegating to each bot.
 
 For example:
 

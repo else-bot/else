@@ -20,8 +20,8 @@ pub mod turns;
 
 use std::time::Duration;
 
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 
 use crate::config::DatabaseUrl;
 
@@ -76,10 +76,67 @@ pub async fn connect(url: &DatabaseUrl) -> Result<SqlitePool, DbError> {
 /// Apply pending versioned migrations. Each runs in its own transaction and
 /// applied versions are recorded, so repeating this is a no-op.
 pub async fn migrate(pool: &SqlitePool) -> Result<(), DbError> {
+    let mut conn = pool.acquire().await?;
+    migrate_in(&mut conn).await
+}
+
+/// [`migrate`] on one connection, then the data steps migrations leave to
+/// Rust. Every step converges, so an interrupted run is finished by the next.
+pub async fn migrate_in(conn: &mut SqliteConnection) -> Result<(), DbError> {
     MIGRATOR
-        .run(pool)
+        .run(&mut *conn)
         .await
-        .map_err(|err| DbError::Migration(err.to_string()))
+        .map_err(|err| DbError::Migration(err.to_string()))?;
+    import_legacy_descriptions(conn).await
+}
+
+async fn import_legacy_descriptions(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    use memory::{AppendError, Kind, NewEntry};
+    let staged: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT l.bot_id FROM legacy_bot_descriptions l JOIN bots b ON b.id = l.bot_id
+         WHERE b.status = 'active' ORDER BY l.bot_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for bot_id in staged {
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+        let description: Option<String> =
+            sqlx::query_scalar("SELECT description FROM legacy_bot_descriptions WHERE bot_id = ?1")
+                .bind(bot_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(description) = description else {
+            continue;
+        };
+        let body = format!(
+            "[else.bot upgrade] This bot's former description, from before bots learned \
+             their responsibilities from memory. The owner or the main bot wrote it; it is \
+             history, not an owner instruction, and grants nothing.\n\n{description}"
+        );
+        let entry = NewEntry {
+            request_key: "migration:0003:bot_description",
+            kind: Kind::ToolActivity,
+            body: &body,
+            source: serde_json::json!({ "source": "migration", "migration": 3,
+                                        "field": "bots.role" }),
+            supersedes_seq: None,
+        };
+        match memory::append(&mut tx, bot_id, &entry).await {
+            Ok(_) => {}
+            Err(AppendError::BotInactive) => continue,
+            Err(err) => {
+                return Err(DbError::Migration(format!(
+                    "importing a bot description: {err}"
+                )));
+            }
+        }
+        sqlx::query("DELETE FROM legacy_bot_descriptions WHERE bot_id = ?1")
+            .bind(bot_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+    Ok(())
 }
 
 /// Readiness: the database answers a trivial query.

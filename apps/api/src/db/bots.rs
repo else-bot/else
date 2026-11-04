@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
-use crate::app::bots::{BotName, BotRole};
+use crate::app::bots::BotName;
 use crate::app::providers::Profile;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, serde::Serialize)]
@@ -30,7 +30,6 @@ pub enum BotStatus {
 pub struct BotRecord {
     pub id: Uuid,
     pub name: String,
-    pub role: String,
     pub conversation_id: Uuid,
     pub status: BotStatus,
     pub created_at: DateTime<Utc>,
@@ -44,7 +43,7 @@ pub struct BotRecord {
     pub category_id: Option<Uuid>,
 }
 
-const SELECT_BOT: &str = "SELECT b.id, b.name, b.role, c.id AS conversation_id, b.status,
+const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status,
         b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
         a.id AS active_turn_id, a.status AS active_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count
@@ -93,7 +92,6 @@ pub enum Refusal {
 
 pub struct NewBot<'a> {
     pub name: &'a BotName,
-    pub role: &'a BotRole,
     pub profile: Option<(&'a str, &'a Profile)>,
     pub category_id: Option<Uuid>,
 }
@@ -102,9 +100,6 @@ fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(b"create_bot\0");
     hasher.update(bot.name.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(bot.role.as_str().as_bytes());
-    // Keep receipts for plain creates compatible with earlier releases.
     if bot.profile.is_some() || bot.category_id.is_some() {
         hasher.update(b"\0options\0");
         hasher.update(
@@ -124,12 +119,11 @@ pub async fn create(
 
 /// Create a bot while the main bot's owner turn is running. Retries of the
 /// same name, including continuation attempts, return the same bot even if
-/// it was deleted; a changed role conflicts. The bot uses installation defaults.
+/// it was deleted. The bot uses installation defaults.
 pub async fn create_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
     name: &BotName,
-    role: &BotRole,
 ) -> Result<Created, BotError> {
     let mut hasher = Sha256::new();
     hasher.update(b"else.bot turn create_bot\0");
@@ -140,7 +134,6 @@ pub async fn create_for_turn(
         uuid::Builder::from_custom_bytes(digest[..16].try_into().expect("16 bytes")).into_uuid();
     let bot = NewBot {
         name,
-        role,
         profile: None,
         category_id: None,
     };
@@ -222,7 +215,7 @@ async fn create_as(
             return Err(BotError::CategoryNotFound);
         }
     }
-    insert_bot(&mut tx, bot_id, bot.name, bot.role).await?;
+    insert_bot(&mut tx, bot_id, bot.name).await?;
     if let Some((provider, profile)) = bot.profile {
         super::bot_profiles::put_in(&mut tx, bot_id, provider, profile)
             .await
@@ -306,14 +299,13 @@ pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, 
     })
 }
 
-/// Replace an active bot's name and role. Repeating the same values changes
-/// nothing and journals nothing; a change journals one `bot.updated` in the
-/// same transaction. A deleted bot is refused and never revived.
-pub async fn update_metadata(
+/// Rename an active bot. Repeating the same name changes nothing and
+/// journals nothing; a change journals one `bot.updated` in the same
+/// transaction. A deleted bot is refused and never revived.
+pub async fn rename(
     pool: &SqlitePool,
     bot_id: Uuid,
     name: &BotName,
-    role: &BotRole,
 ) -> Result<BotRecord, BotError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let status: Option<BotStatus> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
@@ -325,15 +317,12 @@ pub async fn update_metadata(
         Some(BotStatus::Active) => {}
         Some(BotStatus::Deleting | BotStatus::Deleted) => return Err(BotError::Deleted),
     }
-    let changed = sqlx::query(
-        "UPDATE bots SET name = ?2, role = ?3 WHERE id = ?1 AND (name IS NOT ?2 OR role IS NOT ?3)",
-    )
-    .bind(bot_id)
-    .bind(name.as_str())
-    .bind(role.as_str())
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let changed = sqlx::query("UPDATE bots SET name = ?2 WHERE id = ?1 AND name IS NOT ?2")
+        .bind(bot_id)
+        .bind(name.as_str())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
     if changed > 0 {
         super::events::bot_updated(&mut tx, bot_id).await?;
     }

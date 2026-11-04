@@ -256,7 +256,7 @@ async fn a_crash_before_launch_never_launches_and_ends_the_job() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let first = api(&app, &guest, 2).await;
     faults::arm("job.after_insert");
     let crashed = first
@@ -280,7 +280,7 @@ async fn a_crash_after_launch_keeps_the_same_job_running_once() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let first = api(&app, &guest, 2).await;
     faults::arm("job.after_launch");
     assert!(matches!(
@@ -324,8 +324,8 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
 
     // Start decision recorded, runtime never called: the slot stays
     // reserved until a restart learns nothing was created.
@@ -399,8 +399,8 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
     *guest.create_delay.lock().unwrap() = Duration::from_millis(500);
-    let a: Uuid = app.create_bot("A", "a").await.parse().unwrap();
-    let b: Uuid = app.create_bot("B", "b").await.parse().unwrap();
+    let a: Uuid = app.create_bot("A").await.parse().unwrap();
+    let b: Uuid = app.create_bot("B").await.parse().unwrap();
     let manager = Arc::new(api(&app, &guest, 1).await);
     // The caller gives up while the computer is being created.
     let m = manager.clone();
@@ -444,7 +444,7 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot = app.create_bot("Busy", "busy").await;
+    let bot = app.create_bot("Busy").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
     let Started::Job(job) = manager
@@ -518,7 +518,7 @@ async fn a_launch_whose_reply_is_lost_is_recovered_not_failed() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
     guest.lose_launch_reply.store(true, SeqCst);
     let Started::Job(job) = manager
@@ -550,7 +550,7 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
     let Started::Job(job) = manager
         .start_job(bot, None, "work", Duration::from_secs(600))
@@ -602,7 +602,7 @@ async fn a_job_for_a_stopped_turn_is_refused() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
     // A turn that has already been stopped (or never ran).
     let ended = Uuid::new_v4();
@@ -626,7 +626,7 @@ async fn a_stop_before_the_job_had_a_lease_completes() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let first = api(&app, &guest, 2).await;
     faults::arm("job.after_insert");
     assert!(matches!(
@@ -654,7 +654,7 @@ async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
     let _serial = SERIAL.lock().await;
     let app = TestApp::installed().await;
     let guest = Arc::new(Guest::default());
-    let bot: Uuid = app.create_bot("A", "a").await.parse().unwrap();
+    let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
     let Started::Job(job) = manager
         .start_job(bot, None, "work", Duration::from_secs(600))

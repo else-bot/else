@@ -84,7 +84,7 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .owner(
             "POST",
             "/v1/bots",
-            Some(json!({ "request_id": bot_request, "name": "B", "role": "r" })),
+            Some(json!({ "request_id": bot_request, "name": "B" })),
         )
         .await;
     assert_eq!(reply.status, StatusCode::CREATED);
@@ -179,7 +179,7 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .owner(
             "POST",
             "/v1/bots",
-            Some(json!({ "request_id": shared, "name": "Late", "role": "r" })),
+            Some(json!({ "request_id": shared, "name": "Late" })),
         )
         .await;
     assert_eq!(
@@ -216,8 +216,8 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     let app = TestApp::installed().await;
-    let a = app.create_bot("Alpha", "first").await;
-    let b = app.create_bot("Beta", "second").await;
+    let a = app.create_bot("Alpha").await;
+    let b = app.create_bot("Beta").await;
     let work = create(&app, Uuid::new_v4(), "Work").await.body["category"]["id"].clone();
     let home = create(&app, Uuid::new_v4(), "Home").await.body["category"]["id"].clone();
 
@@ -327,7 +327,7 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
 #[tokio::test(flavor = "multi_thread")]
 async fn categories_change_during_a_turn_and_survive_a_restart_without_interrupting_it() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Busy", "works").await;
+    let bot = app.create_bot("Busy").await;
     let sent = app
         .send(
             &bot,
@@ -356,7 +356,7 @@ async fn categories_change_during_a_turn_and_survive_a_restart_without_interrupt
 #[tokio::test(flavor = "multi_thread")]
 async fn task_grants_cannot_change_categories() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Bot", "role").await;
+    let bot = app.create_bot("Bot").await;
     let sent = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -421,7 +421,7 @@ async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let bot = Uuid::new_v4();
     let conversation = Uuid::new_v4();
-    sqlx::query("INSERT INTO bots (id, name, role) VALUES (?1, 'Old', 'from before')")
+    sqlx::query("INSERT INTO bots (id, name) VALUES (?1, 'Old')")
         .bind(bot)
         .execute(&db.pool)
         .await
@@ -460,8 +460,8 @@ async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
 async fn concurrent_category_and_bot_changes_never_fail_with_server_errors() {
     let app = std::sync::Arc::new(TestApp::installed().await);
     for round in 0..25 {
-        let a = app.create_bot(&format!("A{round}"), "a").await;
-        let b = app.create_bot(&format!("B{round}"), "b").await;
+        let a = app.create_bot(&format!("A{round}")).await;
+        let b = app.create_bot(&format!("B{round}")).await;
         let c = create(&app, Uuid::new_v4(), &format!("C{round}"))
             .await
             .body["category"]["id"]

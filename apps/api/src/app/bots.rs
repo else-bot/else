@@ -1,12 +1,9 @@
 //! Bot definition rules.
 
 pub const MAX_NAME_CHARS: usize = 80;
-pub const MAX_ROLE_BYTES: usize = 8 * 1024;
 
-/// Name and role of the main bot created once by explicit setup.
+/// Name of the main bot created once by explicit setup.
 pub const MAIN_BOT_NAME: &str = "Assistant";
-pub const MAIN_BOT_ROLE: &str = "Main assistant. Understand the owner's personal, family, and work \
-context, remember what matters, and coordinate with the other bots when they are better suited.";
 
 const WELCOME: &str = "Hi, I'm {bot_name}. Welcome to else.bot.
 
@@ -32,19 +29,8 @@ pub fn welcome_message(name: &BotName) -> String {
 pub enum InvalidBot {
     #[error("Name must be 1 to 80 characters after trimming.")]
     Name,
-    #[error("Role must not be empty.")]
-    Role,
-    #[error("Role must be at most 8 KiB.")]
-    RoleTooLarge,
-    #[error("Name and role must not contain NUL characters.")]
+    #[error("Name must not contain NUL characters.")]
     Nul,
-}
-
-impl InvalidBot {
-    /// Size violations are reported as `413`, others as `400`.
-    pub fn is_size_limit(&self) -> bool {
-        matches!(self, Self::RoleTooLarge)
-    }
 }
 
 /// Trimmed display name. Duplicates are allowed; IDs identify bots.
@@ -69,29 +55,6 @@ impl BotName {
     }
 }
 
-/// Role text changes instructions, never permissions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BotRole(String);
-
-impl BotRole {
-    pub fn parse(raw: &str) -> Result<Self, InvalidBot> {
-        if raw.contains('\0') {
-            return Err(InvalidBot::Nul);
-        }
-        if raw.len() > MAX_ROLE_BYTES {
-            return Err(InvalidBot::RoleTooLarge);
-        }
-        if raw.trim().is_empty() {
-            return Err(InvalidBot::Role);
-        }
-        Ok(Self(raw.to_owned()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,18 +65,7 @@ mod tests {
         assert_eq!(BotName::parse("   "), Err(InvalidBot::Name));
         assert!(BotName::parse(&"é".repeat(80)).is_ok());
         assert_eq!(BotName::parse(&"é".repeat(81)), Err(InvalidBot::Name));
-    }
-
-    #[test]
-    fn role_rules() {
-        assert!(BotRole::parse("Help with my work").is_ok());
-        assert_eq!(BotRole::parse(" \n"), Err(InvalidBot::Role));
-        assert_eq!(
-            BotRole::parse(&"x".repeat(8193)),
-            Err(InvalidBot::RoleTooLarge)
-        );
-        assert_eq!(BotRole::parse("a\0b"), Err(InvalidBot::Nul));
         assert_eq!(BotName::parse("a\0b"), Err(InvalidBot::Nul));
-        assert!(BotName::parse(MAIN_BOT_NAME).is_ok() && BotRole::parse(MAIN_BOT_ROLE).is_ok());
+        assert!(BotName::parse(MAIN_BOT_NAME).is_ok());
     }
 }

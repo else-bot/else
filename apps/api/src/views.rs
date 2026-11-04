@@ -10,7 +10,6 @@ use crate::db::turns::{ItemRecord, TurnRecord};
 /// Public projection of an active bot or a deletion receipt.
 pub fn bot_json(bot: &BotRecord) -> Value {
     if bot.status != BotStatus::Active {
-        // Deletion receipts expose no role or conversation reference.
         return json!({
             "id": bot.id,
             "name": bot.name,
@@ -24,7 +23,6 @@ pub fn bot_json(bot: &BotRecord) -> Value {
     json!({
         "id": bot.id,
         "name": bot.name,
-        "role": bot.role,
         "conversation_id": bot.conversation_id,
         "created_at": bot.created_at,
         "deleted_at": null,

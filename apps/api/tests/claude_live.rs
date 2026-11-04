@@ -162,7 +162,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     eprintln!("capabilities: {}", caps.body["providers"]);
     assert_eq!(caps.body["providers"][0]["available"], true);
 
-    let a = app.create_bot("Alpha", "keeps notes").await;
+    let a = app.create_bot("Alpha").await;
     let (_, status, _) = ask(
         &app,
         &a,
@@ -243,7 +243,7 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     // Per-bot isolation: bot B is pointed at A's native session, but the
     // transcript is not under B's project directory, so a new session is
     // started.
-    let b = app.create_bot("Beta", "keeps other notes").await;
+    let b = app.create_bot("Beta").await;
     let (_, status, _) = ask(&app, &b, "claude", "Synthetic test. Reply OK.").await;
     assert_eq!(status, "completed");
     sqlx::query(
@@ -424,9 +424,7 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
         Some(computers.clone()),
     );
     serve(&app, listener).await;
-    let bot = app
-        .create_bot("Builder", "Runs small tasks on its computer")
-        .await;
+    let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();
 
     let (_, s1, t1) = ask(

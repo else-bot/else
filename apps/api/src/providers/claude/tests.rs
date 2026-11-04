@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::providers::MemoryContext;
 use serde_json::Value;
 
 fn tracker() -> Tracker {
@@ -329,4 +330,125 @@ async fn an_abandoned_read_keeps_its_partial_line() {
     assert_eq!(event["subtype"], "success");
     drop(tx);
     assert_eq!(events.next().await.unwrap(), None);
+}
+
+fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let received = dir.join("received.jsonl");
+    let program = dir.join("claude");
+    std::fs::write(
+        &program,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
+if a[:1] == ["auth"]: print('{{"loggedIn":true}}'); sys.exit()
+out = lambda e: print(json.dumps(e), flush=True)
+out({{"type": "system", "subtype": "init", "model": a[a.index("--model") + 1],
+     "tools": a[a.index("--tools") + 1].split(","),
+     "mcp_servers": [{{"name": "elsebot", "status": "connected"}}]}})
+msg = json.loads(sys.stdin.readline())
+with open({received:?}, "a") as f: f.write(json.dumps(msg["message"]["content"]) + "\n")
+out({{"type": "user", "uuid": msg["uuid"], "isReplay": True}})
+out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok", "num_turns": 1}})
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = claude_home::HostConfig {
+        dir: dir.join("config"),
+        explicit: true,
+    };
+    let claude = Claude::detect(
+        Some(Host::new(dir, &dir.join("bots"))),
+        Some(program),
+        Some(config),
+        String::new(),
+    );
+    assert!(matches!(claude.availability(), Availability::Available));
+    (claude, received)
+}
+
+fn specialist_turn(session: Option<SessionState>) -> TurnInput {
+    TurnInput {
+        bot_id: Uuid::from_u128(7),
+        conversation_id: Uuid::from_u128(8),
+        turn_id: Uuid::new_v4(),
+        turn_no: 3,
+        bot_name: "GitHub".into(),
+        text: "Clean up the stale branches.".into(),
+        profile: Some(Profile {
+            model: MODELS[0].into(),
+            reasoning_effort: "medium".into(),
+            service_tier: "default".into(),
+        }),
+        history: Vec::new(),
+        session,
+        tool_grant: None,
+        memory: Some(MemoryContext {
+            revision: 7,
+            text: "[else.bot memory] Owner correction: rebase branches, never merge them.\n\n"
+                .into(),
+        }),
+        attempt: 1,
+        delegation: Default::default(),
+        secrets: Vec::new(),
+        handoff: None,
+        jobs: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_warm_session_receives_memory_whenever_its_revision_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (claude, received) = fake_claude(dir.path());
+    let base = specialist_turn(None);
+    let profile = base.profile.clone().unwrap();
+    let fingerprint = claude.fingerprint(&profile, &base);
+    let native = Uuid::new_v4().to_string();
+    let dirs = claude
+        .host
+        .as_ref()
+        .unwrap()
+        .bot_dirs(base.bot_id, ID)
+        .unwrap();
+    let project: String = std::fs::canonicalize(&dirs.project)
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = dir.path().join("config/projects").join(project);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(transcripts.join(format!("{native}.jsonl")), "").unwrap();
+    let warm = |memory_revision| SessionState {
+        native_id: native.clone(),
+        fingerprint: fingerprint.clone(),
+        considered_through_turn: 2,
+        memory_revision,
+    };
+    let memory = "Owner correction: rebase branches, never merge them.";
+
+    for (session, refreshed) in [
+        (None, true),
+        (Some(warm(Some(6))), true),
+        (Some(warm(Some(7))), false),
+    ] {
+        let resumed = session.as_ref().map(|s| s.native_id.clone());
+        let sink = super::super::recording::Recorded::default();
+        let outcome = claude
+            .run(specialist_turn(session), &sink, CancellationToken::new())
+            .await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let text = super::super::recording::received(&received).pop().unwrap();
+        assert_eq!(text.contains(memory), refreshed, "{resumed:?}: {text}");
+        assert!(text.ends_with("Clean up the stale branches."));
+        let state = sink.last_session();
+        assert_eq!(state.memory_revision, Some(7));
+        if let Some(native) = resumed {
+            assert_eq!(state.native_id, native, "the same native session");
+        }
+    }
 }

@@ -80,7 +80,7 @@ async fn handoff(app: &TestApp, turn: Uuid) -> Option<Handoff> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Owner fact: the code word is PURPLE-7.").await;
     let (t2, _) = say(&app, &bot, A, "Second message on A.").await;
     assert!(
@@ -161,7 +161,7 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_or_missing_source_uses_the_recorded_history() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Remember BLUE-3.").await;
     // The outgoing provider cannot produce a verified checkpoint.
     a.fail_checkpoints(Some("cannot prove a no-tool run")).await;
@@ -206,7 +206,7 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, B, "First on B.").await;
     say(&app, &bot, A, "Then A.").await;
     // B's native session disappears (its files were removed).
@@ -243,7 +243,7 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Plain first turn.").await;
     // A turn interrupted mid-way on A.
     let reply = app
@@ -320,7 +320,7 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "On A.").await;
     let reply = app
         .send(&bot, Uuid::new_v4(), "On B [synthetic:stall-send]", Some(B))
@@ -419,7 +419,7 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     let bot_id: Uuid = bot.parse().unwrap();
     // A job the API recorded, which no assistant reply mentions.
     let job = Uuid::new_v4();
@@ -475,7 +475,7 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_after_sending_makes_the_handoff_uncertain() {
     let Two { app, a, b } = two().await;
-    let bot = app.create_bot("Planner", "plans trips").await;
+    let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "On A.").await;
     let reply = app
         .send(&bot, Uuid::new_v4(), "On B [synthetic:stall-send]", Some(B))

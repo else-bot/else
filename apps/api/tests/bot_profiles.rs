@@ -83,23 +83,19 @@ async fn bots_use_their_own_model_or_the_defaults() {
         .owner(
             "POST",
             "/v1/bots",
-            Some(
-                json!({ "request_id": Uuid::new_v4(), "name": "Deep", "role": "thinks",
-                         "profile": choice("high", "priority") }),
-            ),
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Deep",
+                         "profile": choice("high", "priority") })),
         )
         .await;
     assert_eq!(own.status, StatusCode::CREATED, "{}", own.body);
     let own = own.body["bot"]["id"].as_str().unwrap().to_owned();
-    let plain = app.create_bot("Plain", "uses defaults").await;
+    let plain = app.create_bot("Plain").await;
     let refused = app
         .owner(
             "POST",
             "/v1/bots",
-            Some(
-                json!({ "request_id": Uuid::new_v4(), "name": "Bad", "role": "x",
-                         "profile": choice("ultra", "default") }),
-            ),
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Bad",
+                         "profile": choice("ultra", "default") })),
         )
         .await;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST, "nothing created");
@@ -171,7 +167,7 @@ async fn creation_is_atomic_and_retries_never_overwrite_later_choices() {
         .clone();
     let request_id = Uuid::new_v4();
     let payload = json!({
-        "request_id": request_id, "name": "Created", "role": "works",
+        "request_id": request_id, "name": "Created",
         "profile": choice("high", "priority"), "category_id": category
     });
     // A failure after inserting the bot must roll back its receipt, profile,

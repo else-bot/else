@@ -294,13 +294,13 @@ pub async fn readable(pool: &SqlitePool, reader: Uuid, target: Uuid) -> Result<b
     .await
 }
 
-/// Active bots `reader` may read, itself first.
+/// Active bots `reader` may read, itself first, with their names.
 pub async fn readable_bots(
     pool: &SqlitePool,
     reader: Uuid,
-) -> Result<Vec<(Uuid, String, String)>, sqlx::Error> {
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT b.id, b.name, b.role FROM bots b
+        "SELECT b.id, b.name FROM bots b
          WHERE b.status = 'active' AND (b.id = ?1 OR EXISTS (
              SELECT 1 FROM memory_read_grants g WHERE g.reader_bot_id = ?1 AND g.target_bot_id = b.id))
          ORDER BY b.id <> ?1, b.created_at, b.id",

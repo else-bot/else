@@ -478,8 +478,8 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
     if main != Some(bot) {
         return Ok(Context::default());
     }
-    let registry: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, name, role FROM bots WHERE status = 'active' AND id <> ?1
+    let registry: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, name FROM bots WHERE status = 'active' AND id <> ?1
          ORDER BY created_at, id",
     )
     .bind(bot)

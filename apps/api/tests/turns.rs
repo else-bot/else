@@ -163,7 +163,7 @@ async fn concurrent_duplicate_sends_accept_once() {
 async fn bots_keep_separate_histories_and_order() {
     let app = TestApp::installed().await;
     let a = app.main_bot().await;
-    let b = app.create_bot("Work", "Help with work").await;
+    let b = app.create_bot("Work").await;
     let mut turns = Vec::new();
     for (bot, text) in [(&a, "a1"), (&b, "b1"), (&a, "a2"), (&b, "b2"), (&a, "a3")] {
         let reply = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
@@ -255,8 +255,8 @@ async fn different_bots_run_concurrently_within_the_global_limit() {
     let app = TestApp::with_options(db, 2);
     let bots = [
         app.main_bot().await,
-        app.create_bot("B", "b").await,
-        app.create_bot("C", "c").await,
+        app.create_bot("B").await,
+        app.create_bot("C").await,
     ];
     for bot in &bots {
         app.send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
@@ -428,7 +428,7 @@ async fn invalid_and_rejected_sends_create_nothing() {
         .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 
-    let deleted = app.create_bot("Gone", "temp").await;
+    let deleted = app.create_bot("Gone").await;
     app.owner("DELETE", &format!("/v1/bots/{deleted}"), None)
         .await;
     let reply = app

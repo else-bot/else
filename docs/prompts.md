@@ -12,7 +12,7 @@ Provider-native sub-agent spawning is disabled throughout the POC. A bot can del
 
 The [prompt and delegation research](research/prompts-and-delegation.md) tested Codex CLI 0.166.0 with GPT 6.1 Sol, high reasoning, and priority/Fast configuration. Thirteen v1 synthetic inference cases and three v2 asynchronous cases passed. Seventeen scripted guard checks also passed. The model made real MCP calls to a disposable server with scripted results. No real child model, guest command, or external action ran through that server.
 
-Use trusted `developerInstructions` for the else.bot package and ordinary turn input for the owner's message. Include bot roles and a registry snapshot from SQLite. Treat registry roles as descriptions, with permissions enforced separately by the API. Family and work are test roles. Production routing uses the configured registry.
+Use trusted `developerInstructions` for the else.bot package and ordinary turn input for the owner's message. Include a registry of bot names and IDs from SQLite. Learn each bot's responsibilities from memory and the owner's requests. The API enforces permissions separately. Family and work were test roles in the research fixture.
 
 Start with one-hop delegation and at most two child tasks per owner request. A delegate call returns a pending ID immediately. Park the parent attempt and release its provider process before running the child. The root task remains working. Queue a continuation with the recorded child result. Do not poll while holding the only provider slot. The API enforces the wait and tool restrictions even when the model ignores them.
 
@@ -25,7 +25,7 @@ Build the prompt from versioned configuration in SQLite:
 | Part | What it defines |
 | --- | --- |
 | Shared else.bot instructions | Personal assistant behavior, context recognition, initiative, action reporting, and rules for handling external content. |
-| Bot role | Responsibilities, available skills, and the bot registry used for delegation. The main assistant coordinates; other bots receive their own roles. |
+| Bot responsibilities | Learned from the owner's requests and the bot's saved memory, never from a stored description. Owner corrections and newer statements replace older understanding. The main assistant also gets the registry of bot names and IDs and coordinates delegation. |
 | Owner configuration | Owner-approved preferences, time zone, and standing instructions. Retrieved memories retain their source and remain contextual evidence. |
 | Execution rules | Host CLI role, guest execution through scoped tools, routine scope, VM activity locks, interruption, and provider handoffs. Describe the limits enforced by the API and runtime. |
 
@@ -47,8 +47,8 @@ This draft establishes the shared behavior. Bot-specific instructions and the ow
 
 ```text
 You are {bot_name}, an else.bot personal agent for {owner_name}.
-Your responsibilities are {bot_role}. Use the owner's approved preferences to
-recognize personal, family, and work context. Delegate through the registered
+Learn your responsibilities from the owner's requests and your saved memory.
+Use the owner's approved preferences to recognize personal, family, and work context. Delegate through the registered
 bots and skills when another bot should handle the task. Use only the else.bot
 delegation tool when available and permitted. Do not spawn native CLI sub-agents,
 teams, or independent agent sessions. Follow the execution profile supplied by

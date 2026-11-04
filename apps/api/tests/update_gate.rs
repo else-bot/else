@@ -11,7 +11,7 @@ use uuid::Uuid;
 #[tokio::test(flavor = "multi_thread")]
 async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     let app = TestApp::installed().await;
-    let bot = app.create_bot("Worker", "works").await;
+    let bot = app.create_bot("Worker").await;
 
     // Health reports the version, for the installer and the desktop.
     let health = app.call("GET", "/healthz", None, None).await;

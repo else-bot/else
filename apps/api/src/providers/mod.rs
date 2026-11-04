@@ -179,3 +179,57 @@ mod executable_tests {
         assert_eq!(executable(Some(&missing), "codex"), Some(missing));
     }
 }
+
+#[cfg(test)]
+pub(crate) mod recording {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use crate::app::providers::{Fenced, Selection, SessionState, TurnSink};
+
+    #[derive(Default)]
+    pub struct Recorded {
+        pub sessions: Mutex<Vec<SessionState>>,
+    }
+
+    impl Recorded {
+        pub fn last_session(&self) -> SessionState {
+            self.sessions.lock().unwrap().last().cloned().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl TurnSink for Recorded {
+        async fn packet(&self, _: &Selection, _: &str) -> Result<(), Fenced> {
+            Ok(())
+        }
+        async fn sending(&self) -> Result<(), Fenced> {
+            Ok(())
+        }
+        async fn running(&self) -> Result<(), Fenced> {
+            Ok(())
+        }
+        async fn text(&self, _: &str) -> Result<(), Fenced> {
+            Ok(())
+        }
+        async fn end_message(&self) -> Result<(), Fenced> {
+            Ok(())
+        }
+        async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
+            self.sessions.lock().unwrap().push(state.clone());
+            Ok(())
+        }
+        async fn reported(&self, _: &serde_json::Value, _: &str) -> Result<(), Fenced> {
+            Ok(())
+        }
+    }
+
+    pub fn received(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}

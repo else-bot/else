@@ -313,9 +313,7 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
 
     // Two bots keep separate native sessions and context.
     let a = app.main_bot().await;
-    let b = app
-        .create_bot("Garden", "Helps with the vegetable garden")
-        .await;
+    let b = app.create_bot("Garden").await;
     let (_, status, _) = ask(
         &app,
         &a,
@@ -556,13 +554,8 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-    let work = app.create_bot("Work", "Help with my work projects").await;
-    let family = app
-        .create_bot(
-            "Family",
-            "Family logistics: school, appointments, reminders",
-        )
-        .await;
+    let work = app.create_bot("Work").await;
+    let family = app.create_bot("Family").await;
     // The fact lives only in Work's memory (saved through a synthetic turn).
     let fact = app
         .send(
@@ -654,7 +647,7 @@ async fn code_mode_reaches_only_elsebot_tools() {
     let app = TestApp::with_registry(db, 2, registry);
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let bot = app.create_bot("Probe", "Security probe").await;
+    let bot = app.create_bot("Probe").await;
 
     let (turn, status, text) = ask(
         &app,
@@ -778,9 +771,7 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
         )
         .await;
     assert_eq!(reply.status, axum::http::StatusCode::OK, "{}", reply.body);
-    let bot = app
-        .create_bot("Life", "Family logistics and work projects")
-        .await;
+    let bot = app.create_bot("Life").await;
     let bot_id: Uuid = bot.parse().unwrap();
     let corpus: Vec<(Kind, String)> = vec![
         (Kind::OwnerMessage, "Synthetic: my daughter Mila has a dentist appointment on Tuesday 14 October at 16:00 at Rue Verte clinic; she needs her insurance card number 8821-4410 with her.".into()),
@@ -927,10 +918,13 @@ async fn main_bot_creates_a_github_specialist_on_request() {
     let router = app.router.clone();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
-    let updated = app.owner(
-        "PATCH", &format!("/v1/bots/{main}"),
-        Some(json!({"name": "Sharky", "role": "You are sharky my main assistant for running example.test business"})),
-    ).await;
+    let updated = app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{main}"),
+            Some(json!({"name": "Sharky"})),
+        )
+        .await;
     assert_eq!(updated.status, axum::http::StatusCode::OK);
     let (turn, status, text) = ask(
         &app,
@@ -948,8 +942,8 @@ async fn main_bot_creates_a_github_specialist_on_request() {
         .unwrap();
     eprintln!("Specialist creation response ({status}): {text}");
     assert_eq!(status, "completed", "{error:?}: {text}");
-    let specialists: Vec<(Uuid, String, String)> =
-        sqlx::query_as("SELECT id, name, role FROM bots WHERE id <> ?1 AND status = 'active'")
+    let specialists: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM bots WHERE id <> ?1 AND status = 'active'")
             .bind(main.parse::<Uuid>().unwrap())
             .fetch_all(&app.db.pool)
             .await
@@ -960,8 +954,10 @@ async fn main_bot_creates_a_github_specialist_on_request() {
         1,
         "a registered else.bot must exist: {text}"
     );
-    let definition = format!("{} {}", specialists[0].1, specialists[0].2).to_lowercase();
-    assert!(definition.contains("github"), "{specialists:?}");
+    assert!(
+        specialists[0].1.to_lowercase().contains("github"),
+        "{specialists:?}"
+    );
     let creations: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM memory_entry WHERE kind = 'tool_activity' \
          AND source->>'turn_id' = ?1 AND source->>'tool' = 'create_bot'",
@@ -980,10 +976,10 @@ async fn main_bot_creates_a_github_specialist_on_request() {
 }
 
 /// POC-016: with one provider slot, the real main bot routes a subtask to a
-/// newly created bot by role, parks, the child runs through its own
+/// newly created bot by name, parks, the child runs through its own
 /// API-managed attempt, and the parent continues with the recorded result.
 #[tokio::test(flavor = "multi_thread")]
-async fn main_bot_delegates_by_role_with_one_provider_slot() {
+async fn main_bot_delegates_by_name_with_one_provider_slot() {
     if !live() {
         eprintln!("SKIPPED: set ELSE_LIVE_CODEX=1 to run live Codex checks");
         return;
@@ -1006,13 +1002,8 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let main = app.main_bot().await;
-    app.create_bot("Work", "Help with my work projects").await;
-    let garden = app
-        .create_bot(
-            "Garden",
-            "Garden care: plants, watering schedules, pests, and soil",
-        )
-        .await;
+    app.create_bot("Work").await;
+    let garden = app.create_bot("Garden").await;
 
     let (turn, status, text) = ask(
         &app,
@@ -1063,7 +1054,7 @@ async fn main_bot_delegates_by_role_with_one_provider_slot() {
     assert_eq!(
         delegations[0].0,
         garden.parse::<Uuid>().unwrap(),
-        "routed by role to the new bot"
+        "routed by name to the new bot"
     );
     assert_eq!(delegations[0].1, "completed");
     assert_eq!(
@@ -1141,9 +1132,7 @@ async fn codex_uses_its_guest_computer_through_tools() {
     let app = TestApp::with_parts(db, 2, Registry::new(vec![codex]), Some(computers.clone()));
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let bot = app
-        .create_bot("Builder", "Runs small tasks on its computer")
-        .await;
+    let bot = app.create_bot("Builder").await;
     let bot_id: Uuid = bot.parse().unwrap();
 
     let (turn, status, text) = ask(

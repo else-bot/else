@@ -236,12 +236,12 @@ impl TestApp {
             .to_owned()
     }
 
-    pub async fn create_bot(&self, name: &str, role: &str) -> String {
+    pub async fn create_bot(&self, name: &str) -> String {
         let reply = self
             .owner(
                 "POST",
                 "/v1/bots",
-                Some(serde_json::json!({ "request_id": uuid::Uuid::new_v4(), "name": name, "role": role })),
+                Some(serde_json::json!({ "request_id": uuid::Uuid::new_v4(), "name": name })),
             )
             .await;
         assert_eq!(reply.status, axum::http::StatusCode::CREATED);
