@@ -56,6 +56,16 @@ pub struct BotTask {
     pub prompt: String,
 }
 
+/// A delegated bot's settled reply, shown in the delegating bot's
+/// conversation. The item's ID is the delegation's.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BotReply {
+    pub sender_bot_id: Uuid,
+    pub sender_name: String,
+    pub prompt: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ItemRecord {
     pub id: Uuid,
@@ -71,6 +81,7 @@ pub struct ItemRecord {
     /// Set for an owner's message sent as a reaction to an assistant message.
     pub reaction: Option<Json<Reaction>>,
     pub bot_task: Option<Json<BotTask>>,
+    pub bot_reply: Option<Json<BotReply>>,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
@@ -79,7 +90,11 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
     CASE WHEN i.kind = 'status' AND i.conversation_id <> t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name, 'prompt', d.task)
          FROM delegations d JOIN bots b ON b.id = d.parent_bot_id WHERE d.child_turn_id = i.turn_id)
-    END AS bot_task";
+    END AS bot_task,
+    CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
+        (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
+         FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
+    END AS bot_reply";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -569,6 +584,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'status', 'assistant')
+           -- A child's reply reached this bot as its delegation outcome.
+           AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
          ORDER BY t.turn_no, i.seq",
     )
     .bind(turn.conversation_id)

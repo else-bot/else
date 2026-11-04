@@ -161,8 +161,21 @@ impl ElseApp {
                 // are aligned to the bubble's side.
                 let mut column = super::view::reading_column().gap_1().py_1p5();
                 let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
-                if let Some(task) = &item.bot_task {
-                    let sender = self.bots.iter().find(|b| b.id == task.sender_bot_id);
+                let exchange = item
+                    .bot_task
+                    .as_ref()
+                    .map(|task| (task.sender_bot_id, task.sender_name.as_str(), "Task"))
+                    .or_else(|| {
+                        item.bot_reply.as_ref().map(|reply| {
+                            (
+                                reply.sender_bot_id,
+                                reply.sender_name.as_str(),
+                                reply.status.label(),
+                            )
+                        })
+                    });
+                if let Some((sender_id, sender_name, kind)) = exchange {
+                    let sender = self.bots.iter().find(|b| b.id == sender_id);
                     let recipient = self.bots.iter().find(|b| b.id == view.bot_id);
                     let label = h_flex()
                         .gap_1p5()
@@ -174,8 +187,8 @@ impl ElseApp {
                             sender.map(|b| bot_avatar("task-sender", b.avatar, px(18.)).still()),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(format!(
-                            "{} → {} · Task",
-                            task.sender_name,
+                            "{} → {} · {kind}",
+                            sender_name,
                             recipient.map_or("Bot", |b| b.name.as_str())
                         )));
                     card = div()
@@ -187,7 +200,20 @@ impl ElseApp {
                         .border_color(theme.primary.opacity(0.3))
                         .bg(theme.primary.opacity(0.05))
                         .child(label)
-                        .child(div().pt_2().child(text.render()));
+                        .children(item.bot_reply.as_ref().map(|reply| {
+                            div()
+                                .pt_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("Task: {}", reply.prompt))
+                        }))
+                        .child(div().pt_2().child(
+                            if item.bot_reply.is_some() && item.text.trim().is_empty() {
+                                div().child("Finished without a reply.").into_any_element()
+                            } else {
+                                text.render()
+                            },
+                        ));
                 } else if !user && run.first {
                     if let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
                         column = column.child(

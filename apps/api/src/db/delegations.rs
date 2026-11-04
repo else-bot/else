@@ -5,8 +5,9 @@
 //! request. The child runs as an ordinary queued
 //! turn of the target bot, in a separate task conversation, through the
 //! same scheduler. The target's owner conversation shows a receipt and the
-//! child's reply; the task conversation keeps its execution (source item,
-//! grants, native session). The parent attempt then ends; its owner turn waits
+//! child's reply, and the delegating bot's conversation shows the settled
+//! reply; the task conversation keeps its execution (source item, grants,
+//! native session). The parent attempt then ends; its owner turn waits
 //! (`waiting`) with no provider process, and a database trigger requeues it
 //! as a continuation once every child has an outcome. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
@@ -386,6 +387,53 @@ pub async fn cancel_for_root(conn: &mut SqliteConnection, root: Uuid) -> Result<
     .fetch_all(&mut *conn)
     .await?;
     stop_children(conn, children, "The delegating request ended.").await
+}
+
+/// Show a settled child's reply in the delegating bot's conversation, on
+/// the root turn, once: the item's ID is the delegation's. Every terminal
+/// transition journals `turn_changed` in its own transaction, which calls
+/// this, so the reply commits with the outcome and before the root resumes.
+/// Display only: provider history and memory skip it.
+pub async fn publish_reply(
+    conn: &mut SqliteConnection,
+    child_turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    let row: Option<(Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT d.id, d.parent_bot_id, d.root_turn_id, r.conversation_id,
+                coalesce(nullif(d.result, ''), nullif(c.error_message, ''),
+                    CASE d.status WHEN 'failed' THEN 'Task failed before it could reply.'
+                         WHEN 'cancelled' THEN 'Task stopped before it could reply.' ELSE '' END)
+         FROM delegations d JOIN turns r ON r.id = d.root_turn_id
+         JOIN turns c ON c.id = d.child_turn_id
+         JOIN bots p ON p.id = d.parent_bot_id
+         WHERE d.child_turn_id = ?1 AND d.status IN ('completed', 'failed', 'cancelled')
+           AND p.status = 'active' AND NOT EXISTS (SELECT 1 FROM items WHERE id = d.id)",
+    )
+    .bind(child_turn)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((id, parent, root, conversation, text)) = row else {
+        return Ok(());
+    };
+    let seq: i64 = sqlx::query_scalar(
+        "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
+         RETURNING last_item_seq",
+    )
+    .bind(conversation)
+    .fetch_one(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+    )
+    .bind(id)
+    .bind(conversation)
+    .bind(seq)
+    .bind(root)
+    .bind(text)
+    .execute(&mut *conn)
+    .await?;
+    events::item_upsert(conn, parent, id).await
 }
 
 pub use crate::app::providers::DelegationOutcome as Outcome;

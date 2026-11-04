@@ -36,6 +36,8 @@ pub struct Item {
     pub reaction: Option<Reaction>,
     #[serde(default)]
     pub bot_task: Option<BotTask>,
+    #[serde(default)]
+    pub bot_reply: Option<BotReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -43,6 +45,32 @@ pub struct BotTask {
     pub sender_bot_id: Uuid,
     pub sender_name: String,
     pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BotReply {
+    pub sender_bot_id: Uuid,
+    pub sender_name: String,
+    pub prompt: String,
+    pub status: BotReplyStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotReplyStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl BotReplyStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "Reply",
+            Self::Failed => "Reply · Failed",
+            Self::Cancelled => "Reply · Stopped",
+        }
+    }
 }
 
 /// The owner's reaction to one of the bot's messages.
@@ -504,6 +532,31 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    #[test]
+    fn child_replies_keep_their_attribution_across_replay_and_reload() {
+        let own_reply = item(1, 1, "assistant", "I'll ask Marketing.");
+        let mut child_reply = item(2, 2, "status", "**Conversions:** 120");
+        child_reply["bot_reply"] = json!({
+            "sender_bot_id": Uuid::from_u128(10), "sender_name": "Marketing",
+            "prompt": "Report this week's KPIs.", "status": "completed",
+        });
+        let mut live =
+            Conversation::from_snapshot(snapshot(1, vec![own_reply.clone()], None)).unwrap();
+        let event = frame(2, "item.upsert", json!({ "item": child_reply.clone() }));
+        assert_eq!(live.apply(&event), Ok(Applied::Changed));
+        assert_eq!(live.apply(&event), Ok(Applied::Duplicate));
+        let reloaded =
+            Conversation::from_snapshot(snapshot(2, vec![own_reply, child_reply], None)).unwrap();
+        let shown = live.item(Uuid::from_u128(2)).unwrap();
+        assert_eq!(Some(shown), reloaded.item(shown.id));
+        let reply = shown.bot_reply.as_ref().unwrap();
+        assert_eq!(reply.sender_name, "Marketing");
+        assert_eq!(reply.prompt, "Report this week's KPIs.");
+        assert_eq!(reply.status, BotReplyStatus::Completed);
+        assert_eq!(live.items().count(), 2);
+        assert_eq!(live.latest_reply().unwrap().id, Uuid::from_u128(1));
     }
 
     #[test]

@@ -132,7 +132,8 @@ pub async fn turn_changed(
         "turn": turn_json(&turn),
     });
     append(conn, bot_id, "turn.updated", data).await?;
-    bot_updated(conn, bot_id).await
+    bot_updated(conn, bot_id).await?;
+    crate::db::delegations::publish_reply(conn, turn_id).await
 }
 
 /// A new owner message: its item, its queued turn, and the bot's activity
