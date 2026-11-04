@@ -1,7 +1,7 @@
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use std::collections::HashMap;
 
-use crate::api::{Bot, BotProfile, ClientError, ProfileChoice};
+use crate::api::{Bot, BotProfile, ProfileChoice};
 use crate::avatar::{Avatar, AvatarColor, AvatarShape, bot_avatar};
 use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -9,10 +9,11 @@ use chrono::{DateTime, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
-    WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::*;
 use std::time::Duration;
@@ -33,15 +34,99 @@ impl Metadata {
             avatar: bot.avatar,
         }
     }
+}
 
-    fn problem(&self) -> Option<&'static str> {
-        let name = self.name.trim();
-        if name.is_empty() {
-            Some("Give the bot a name.")
-        } else if name.chars().count() > 80 {
-            Some("Keep the name to 80 characters or fewer.")
-        } else {
-            None
+fn parse_name(text: &str) -> Result<String, &'static str> {
+    let name = text.trim();
+    if name.is_empty() {
+        Err("Give the bot a name.")
+    } else if name.chars().count() > 80 {
+        Err("Keep the name to 80 characters or fewer.")
+    } else {
+        Ok(name.to_owned())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MetadataSync {
+    seen: Metadata,
+    revision: Option<i64>,
+    saved: Metadata,
+    desired: Metadata,
+    sending: Option<Metadata>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MetadataChange {
+    name: Option<String>,
+    avatar: Option<Avatar>,
+}
+
+impl MetadataSync {
+    fn new(values: Metadata, revision: Option<i64>) -> Self {
+        Self {
+            seen: values.clone(),
+            revision,
+            saved: values.clone(),
+            desired: values,
+            sending: None,
+            error: None,
+        }
+    }
+
+    fn begin(&mut self) -> Option<MetadataChange> {
+        if self.sending.is_some() || self.desired == self.saved {
+            return None;
+        }
+        let change = MetadataChange {
+            name: (self.desired.name != self.saved.name).then(|| self.desired.name.clone()),
+            avatar: (self.desired.avatar != self.saved.avatar).then_some(self.desired.avatar),
+        };
+        self.sending = Some(self.desired.clone());
+        self.error = None;
+        Some(change)
+    }
+
+    fn finish(&mut self, result: Result<(Metadata, Option<i64>), String>) {
+        let Some(sent) = self.sending.take() else {
+            return;
+        };
+        match result {
+            Ok((server, revision)) => {
+                let server = if revision < self.revision {
+                    self.saved.clone()
+                } else {
+                    self.revision = revision;
+                    server
+                };
+                if self.desired.name == sent.name {
+                    self.desired.name = server.name.clone();
+                }
+                if self.desired.avatar == sent.avatar {
+                    self.desired.avatar = server.avatar;
+                }
+                self.saved = server;
+            }
+            Err(err) => self.error = (self.desired != self.saved).then_some(err),
+        }
+    }
+
+    fn remote(&mut self, latest: Metadata, revision: Option<i64>) {
+        if revision < self.revision || (revision.is_none() && latest == self.seen) {
+            return;
+        }
+        if self.desired.name == self.saved.name {
+            self.desired.name = latest.name.clone();
+        }
+        if self.desired.avatar == self.saved.avatar {
+            self.desired.avatar = latest.avatar;
+        }
+        self.saved = latest.clone();
+        self.seen = latest;
+        self.revision = revision;
+        if self.desired == self.saved {
+            self.error = None;
         }
     }
 }
@@ -50,7 +135,6 @@ impl Metadata {
 enum Save {
     Idle,
     Saving(Uuid),
-    Saved,
     Failed(String),
 }
 
@@ -61,29 +145,12 @@ impl Save {
 }
 
 struct Details {
-    seen: Metadata,
-    saved: Metadata,
+    sync: MetadataSync,
     name: Entity<InputState>,
-    avatar: Avatar,
+    editing: bool,
+    problem: Option<&'static str>,
     picking: bool,
-    save: Save,
     _edits: Subscription,
-}
-
-impl Details {
-    fn draft(&self, cx: &App) -> Metadata {
-        Metadata {
-            name: self.name.read(cx).value().to_string(),
-            avatar: self.avatar,
-        }
-    }
-
-    fn show(&mut self, values: &Metadata, window: &mut Window, cx: &mut App) {
-        let name = values.name.clone();
-        self.name
-            .update(cx, |state, cx| state.set_value(name, window, cx));
-        self.avatar = values.avatar;
-    }
 }
 
 enum ModelState {
@@ -158,12 +225,7 @@ impl ElseApp {
         if !self.settings_open {
             self.toggle_settings(window, cx);
         }
-        if let Some(entry) = self.settings.get(&id) {
-            entry.details.name.update(cx, |state, cx| {
-                state.focus(window, cx);
-                state.select_all(window, cx);
-            });
-        }
+        self.edit_name(id, window, cx);
     }
 
     pub(super) fn settings_shown(&self) -> bool {
@@ -197,107 +259,97 @@ impl ElseApp {
         self.settings
             .retain(|id, _| bots.iter().any(|b| b.id == *id && b.is_active()));
         for bot in &self.bots {
-            let Some(details) = self.settings.get_mut(&bot.id).map(|s| &mut s.details) else {
-                continue;
-            };
-            let latest = Metadata::of(bot);
-            if latest == details.seen {
-                continue;
+            if let Some(entry) = self.settings.get_mut(&bot.id) {
+                entry
+                    .details
+                    .sync
+                    .remote(Metadata::of(bot), bot.metadata_revision);
             }
-            if !details.save.busy() {
-                let draft = details.draft(cx);
-                if draft.name == details.saved.name {
-                    details.name.update(cx, |state, cx| {
-                        state.set_value(latest.name.clone(), window, cx)
-                    });
-                }
-                if draft.avatar == details.saved.avatar {
-                    details.avatar = latest.avatar;
-                }
-            }
-            details.seen = latest.clone();
-            details.saved = latest;
         }
         self.ensure_settings(window, cx);
     }
 
-    fn save_details(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+    fn edit_name(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) else {
             return;
         };
-        let draft = details.draft(cx);
-        if details.save.busy() || draft.problem().is_some() {
-            return;
+        if !details.editing {
+            details.editing = true;
+            details.problem = None;
+            let name = details.sync.desired.name.clone();
+            details
+                .name
+                .update(cx, |state, cx| state.set_value(name, window, cx));
         }
-        let name = (draft.name != details.saved.name).then(|| draft.name.clone());
-        let avatar = (draft.avatar != details.saved.avatar).then_some(draft.avatar);
-        let attempt = Uuid::new_v4();
-        details.save = Save::Saving(attempt);
+        details.name.update(cx, |state, cx| {
+            state.focus(window, cx);
+            state.select_all(window, cx);
+        });
         cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = client.update_bot(bot, name, avatar).await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.finish_details(bot, attempt, draft, result, window, cx)
-            });
-        })
-        .detach();
     }
 
-    fn finish_details(
-        &mut self,
-        bot: Uuid,
-        attempt: Uuid,
-        sent: Metadata,
-        result: Result<Bot, ClientError>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn commit_name(&mut self, bot: Uuid, cx: &mut Context<Self>) {
         let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) else {
             return;
         };
-        if details.save != Save::Saving(attempt) {
+        if !details.editing {
             return;
         }
-        match result {
-            Ok(bot) => {
-                let saved = Metadata::of(&bot);
-                if details.draft(cx) == sent {
-                    details.show(&saved, window, cx);
-                }
-                details.saved = saved;
-                details.save = Save::Saved;
-                details.picking = false;
+        match parse_name(&details.name.read(cx).value()) {
+            Ok(name) => {
+                details.editing = false;
+                details.problem = None;
+                details.sync.desired.name = name;
+                self.flush_details(bot, cx);
             }
-            Err(err) => details.save = Save::Failed(err.to_string()),
+            Err(problem) => details.problem = Some(problem),
         }
         cx.notify();
-    }
-
-    fn cancel_details(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
-            let saved = details.saved.clone();
-            details.show(&saved, window, cx);
-            details.save = Save::Idle;
-            details.picking = false;
-            cx.notify();
-        }
-    }
-
-    fn toggle_avatar_picker(&mut self, bot: Uuid, cx: &mut Context<Self>) {
-        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
-            details.picking = !details.picking;
-            cx.notify();
-        }
     }
 
     fn pick_avatar(&mut self, bot: Uuid, avatar: Avatar, cx: &mut Context<Self>) {
-        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details)
-            && !details.save.busy()
-        {
-            details.avatar = avatar;
+        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
+            details.sync.desired.avatar = avatar;
+            self.flush_details(bot, cx);
             cx.notify();
         }
+    }
+
+    fn set_picking(&mut self, bot: Uuid, open: bool, cx: &mut Context<Self>) {
+        if let Some(details) = self.settings.get_mut(&bot).map(|s| &mut s.details) {
+            details.picking = open;
+            cx.notify();
+        }
+    }
+
+    fn flush_details(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let Some(change) = self
+            .settings
+            .get_mut(&bot)
+            .and_then(|s| s.details.sync.begin())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = client.update_bot(bot, change.name, change.avatar).await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(details) = app.settings.get_mut(&bot).map(|s| &mut s.details) else {
+                    return;
+                };
+                details.sync.finish(
+                    result
+                        .as_ref()
+                        .map(|bot| (Metadata::of(bot), bot.metadata_revision))
+                        .map_err(ToString::to_string),
+                );
+                if details.sync.error.is_none() {
+                    app.flush_details(bot, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn load_profile(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -684,7 +736,6 @@ impl ElseApp {
             Some(entry) => {
                 body = body
                     .child(self.render_details(bot.id, &entry.details, cx))
-                    .child(self.render_category(bot, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx));
             }
@@ -705,48 +756,62 @@ impl ElseApp {
     }
 
     fn render_details(&self, bot: Uuid, details: &Details, cx: &mut Context<Self>) -> AnyElement {
-        let draft = details.draft(cx);
-        let dirty = draft != details.saved;
-        let saving = details.save.busy();
-        let problem = draft.problem().filter(|_| dirty);
-        let connected = self.connection == Connection::Connected;
-        let status = match (&details.save, problem) {
-            (_, Some(problem)) => Some(note(problem, true, cx)),
-            (Save::Failed(err), _) => Some(note(format!("Couldn't save. {err}"), true, cx)),
-            (Save::Saved, _) if !dirty => Some(note("Saved.", false, cx)),
-            _ => None,
+        let theme = cx.theme().clone();
+        let name = if details.editing {
+            div()
+                .id("bot-name-editor")
+                .w_full()
+                .on_mouse_down_out(cx.listener(move |app, _, _, cx| app.commit_name(bot, cx)))
+                .child(
+                    Input::new(&details.name)
+                        .text_center()
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .into_any_element()
+        } else {
+            let (hover, border) = (theme.sidebar_accent, theme.border);
+            div()
+                .id("bot-name")
+                .max_w_full()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .border_1()
+                .border_color(transparent_black())
+                .cursor_text()
+                .hover(move |style| style.bg(hover).border_color(border))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_center()
+                .truncate()
+                .aria_description("Click to rename")
+                .child(details.sync.desired.name.clone())
+                .on_click(cx.listener(move |app, _, window, cx| app.edit_name(bot, window, cx)))
+                .into_any_element()
         };
-        let actions = h_flex()
-            .gap_2()
-            .child(
-                Button::new("save-details")
-                    .label(if saving { "Saving…" } else { "Save changes" })
-                    .small()
-                    .primary()
-                    .disabled(!dirty || saving || problem.is_some() || !connected)
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.save_details(bot, window, cx)),
-                    ),
-            )
-            .child(
-                Button::new("cancel-details")
-                    .label("Cancel")
-                    .small()
-                    .ghost()
-                    .disabled(!dirty || saving)
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.cancel_details(bot, window, cx)),
-                    ),
-            );
+        let problem = details
+            .problem
+            .filter(|_| details.editing)
+            .map(|problem| note(problem, true, cx));
+        let error = details.sync.error.clone().map(|err| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(note(format!("Couldn't save. {err}"), true, cx))
+                .child(
+                    Button::new("retry-details")
+                        .label("Retry")
+                        .xsmall()
+                        .outline()
+                        .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
+                )
+        });
         v_flex()
-            .gap_4()
+            .items_center()
+            .gap_2()
             .child(self.render_avatar_editor(bot, details, cx))
-            .child(
-                section("Details", cx)
-                    .child(field("Name", Input::new(&details.name).disabled(saving)))
-                    .children(status)
-                    .child(actions),
-            )
+            .child(h_flex().w_full().justify_center().child(name))
+            .children(problem)
+            .children(error)
             .into_any_element()
     }
 
@@ -796,169 +861,32 @@ impl ElseApp {
                     .group("avatar-editor")
                     .child(bot_avatar(
                         ElementId::Name(format!("settings-avatar-{bot}").into()),
-                        details.avatar,
+                        details.sync.desired.avatar,
                         px(96.),
                     ))
                     .child(badge),
-            )
-            .on_click(cx.listener(move |app, _, _, cx| app.toggle_avatar_picker(bot, cx)));
-        let mut editor = v_flex()
-            .items_center()
-            .gap_3()
-            .child(h_flex().justify_center().child(hero));
-        if details.picking {
-            editor = editor.child(self.render_avatar_picker(bot, details, cx));
-        }
-        editor.into_any_element()
-    }
-
-    fn render_avatar_picker(
-        &self,
-        bot: Uuid,
-        details: &Details,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let saving = details.save.busy();
-        let current = details.avatar;
-        let shapes = AvatarShape::ALL.map(|shape| {
-            let picked = current.shape == shape;
-            let avatar = Avatar { shape, ..current };
-            Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
-                .ghost()
-                .w(px(44.))
-                .h(px(44.))
-                .p_0()
-                .rounded(px(12.))
-                .selected(picked)
-                .toggled(picked)
-                .disabled(saving)
-                .tooltip(shape.label())
-                .accessibility_label(format!("{} shape", shape.label()))
-                .border_2()
-                .border_color(if picked {
-                    theme.ring
-                } else {
-                    transparent_black()
-                })
-                .child(
-                    bot_avatar(
-                        ElementId::Name(format!("avatar-shape-art-{shape:?}").into()),
-                        avatar,
-                        px(32.),
-                    )
-                    .still(),
-                )
-                .on_click(cx.listener(move |app, _, _, cx| app.pick_avatar(bot, avatar, cx)))
-        });
-        let colors = AvatarColor::ALL.map(|color| {
-            let picked = current.color == color;
-            let avatar = Avatar { color, ..current };
-            Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
-                .ghost()
-                .w(px(30.))
-                .h(px(30.))
-                .p_0()
-                .rounded_full()
-                .selected(picked)
-                .toggled(picked)
-                .disabled(saving)
-                .tooltip(color.label())
-                .accessibility_label(format!("{} color", color.label()))
-                .border_2()
-                .border_color(if picked {
-                    theme.ring
-                } else {
-                    transparent_black()
-                })
-                .child(
-                    div()
-                        .size(px(20.))
-                        .rounded_full()
-                        .bg(color.fill())
-                        .border_1()
-                        .border_color(theme.border),
-                )
-                .on_click(cx.listener(move |app, _, _, cx| app.pick_avatar(bot, avatar, cx)))
-        });
-        let header = h_flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("AVATAR"),
-            )
-            .child(
-                Button::new("reset-avatar")
-                    .label("Reset")
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Back to the blue star")
-                    .disabled(saving || current == Avatar::default())
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.pick_avatar(bot, Avatar::default(), cx)
-                    })),
             );
-        v_flex()
-            .w_full()
-            .gap_3()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .child(header)
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .justify_center()
-                    .children(shapes),
-            )
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .justify_center()
-                    .children(colors),
-            )
-            .child(muted("Save changes to keep the new look.", cx))
-            .into_any_element()
-    }
-
-    fn render_category(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
-        let moving = self.moving.contains(&bot.id);
-        let current = bot
-            .category_id
-            .and_then(|id| self.categories.iter().find(|c| c.id == id))
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "Unassigned".to_owned());
-        let row = h_flex()
-            .gap_2()
-            .items_center()
-            .child(div().flex_1().min_w_0().text_sm().truncate().child(current))
-            .child(
-                Button::new("change-category")
-                    .label(if moving { "Moving…" } else { "Change…" })
-                    .small()
-                    .outline()
-                    .disabled(moving || self.connection != Connection::Connected)
-                    .on_click(cx.listener(|app, _, window, cx| app.open_move_dialog(window, cx))),
-            );
-        let notice = self
-            .category_notice
-            .clone()
-            .map(|notice| note(notice, true, cx));
-        section("Category", cx)
-            .child(row)
-            .children(notice)
-            .child(muted(
-                "Groups the bot in the sidebar. Nothing else changes.",
-                cx,
-            ))
+        let app = cx.entity().downgrade();
+        let toggle = app.clone();
+        Popover::new("avatar-picker")
+            .anchor(Anchor::TopCenter)
+            .open(details.picking)
+            .on_open_change(move |open, _, cx| {
+                let _ = toggle.update(cx, |app, cx| app.set_picking(bot, *open, cx));
+            })
+            .trigger(hero)
+            .content(move |_, _, cx| {
+                let current = app
+                    .upgrade()
+                    .and_then(|app| {
+                        let app = app.read(cx);
+                        app.settings
+                            .get(&bot)
+                            .map(|s| s.details.sync.desired.avatar)
+                    })
+                    .unwrap_or_default();
+                avatar_picker(app.clone(), bot, current, cx)
+            })
             .into_any_element()
     }
 
@@ -1025,9 +953,6 @@ impl ElseApp {
                         self.provider_label(&choice.provider_id),
                         effort_label(&choice.reasoning_effort),
                     )))
-                    .children(
-                        (!saved.own).then(|| muted("Follows the defaults for new bots", cx)),
-                    )
                     .children((!offered).then(|| {
                         note(
                             "This provider no longer offers the saved model. It stays until you apply another.",
@@ -1285,20 +1210,140 @@ fn last_run(run: &LastRun, timezone: &str) -> (String, bool) {
 
 fn new_details(bot: &Bot, window: &mut Window, cx: &mut Context<ElseApp>) -> Details {
     let values = Metadata::of(bot);
+    let id = bot.id;
     let name = cx.new(|cx| {
         InputState::new(window, cx)
             .placeholder("Name")
             .default_value(values.name.clone())
     });
     Details {
-        _edits: cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
-        avatar: values.avatar,
-        seen: values.clone(),
-        saved: values,
+        _edits: cx.subscribe(&name, move |app, _, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => app.commit_name(id, cx),
+            InputEvent::Change => {
+                if let Some(details) = app.settings.get_mut(&id).map(|s| &mut s.details) {
+                    details.problem = None;
+                }
+                cx.notify();
+            }
+            InputEvent::Focus => {}
+        }),
+        sync: MetadataSync::new(values, bot.metadata_revision),
         name,
+        editing: false,
+        problem: None,
         picking: false,
-        save: Save::Idle,
     }
+}
+
+fn avatar_picker(app: WeakEntity<ElseApp>, bot: Uuid, current: Avatar, cx: &App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let pick = move |avatar: Avatar| {
+        let app = app.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let _ = app.update(cx, |app, cx| app.pick_avatar(bot, avatar, cx));
+        }
+    };
+    let shapes = AvatarShape::ALL.map(|shape| {
+        let picked = current.shape == shape;
+        let avatar = Avatar { shape, ..current };
+        Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
+            .ghost()
+            .w(px(44.))
+            .h(px(44.))
+            .p_0()
+            .rounded(px(12.))
+            .toggled(picked)
+            .accessibility_label(format!("{} shape", shape.label()))
+            .child(ring(
+                px(44.),
+                px(12.),
+                picked,
+                cx,
+                bot_avatar(
+                    ElementId::Name(format!("avatar-shape-art-{shape:?}").into()),
+                    avatar,
+                    px(32.),
+                )
+                .still(),
+            ))
+            .on_click(pick(avatar))
+    });
+    let colors = AvatarColor::ALL.map(|color| {
+        let picked = current.color == color;
+        let avatar = Avatar { color, ..current };
+        let swatch = div()
+            .size(px(20.))
+            .rounded_full()
+            .p(px(1.))
+            .bg(theme.border)
+            .child(div().size_full().rounded_full().bg(color.fill()));
+        Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
+            .ghost()
+            .w(px(30.))
+            .h(px(30.))
+            .p_0()
+            .rounded_full()
+            .toggled(picked)
+            .accessibility_label(format!("{} color", color.label()))
+            .child(ring(px(30.), px(15.), picked, cx, swatch))
+            .on_click(pick(avatar))
+    });
+    let header = h_flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child("AVATAR"),
+        )
+        .child(
+            Button::new("reset-avatar")
+                .label("Reset")
+                .xsmall()
+                .ghost()
+                .disabled(current == Avatar::default())
+                .on_click(pick(Avatar::default())),
+        );
+    v_flex()
+        .w(px(288.))
+        .gap_3()
+        .child(header)
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .justify_center()
+                .children(shapes),
+        )
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .justify_center()
+                .children(colors),
+        )
+        .into_any_element()
+}
+
+fn ring(size: Pixels, radius: Pixels, picked: bool, cx: &App, content: impl IntoElement) -> Div {
+    let theme = cx.theme();
+    let (ring, gap) = if picked {
+        (theme.ring, theme.popover)
+    } else {
+        (transparent_black(), transparent_black())
+    };
+    let layer = |size: Pixels, radius: Pixels, fill: Hsla| {
+        div()
+            .size(size)
+            .rounded(radius)
+            .bg(fill)
+            .flex()
+            .items_center()
+            .justify_center()
+    };
+    layer(size, radius, ring).child(layer(size - px(4.), radius - px(2.), gap).child(content))
 }
 
 fn section(title: &'static str, cx: &App) -> Div {
@@ -1309,13 +1354,6 @@ fn section(title: &'static str, cx: &App) -> Div {
             .text_color(cx.theme().muted_foreground)
             .child(title.to_uppercase()),
     )
-}
-
-fn field(label: &'static str, input: impl IntoElement) -> Div {
-    v_flex()
-        .gap_1()
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-        .child(input)
 }
 
 fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
@@ -1335,20 +1373,142 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::Metadata;
+    use super::{Metadata, MetadataChange, MetadataSync, parse_name};
+    use crate::avatar::{Avatar, AvatarColor, AvatarShape};
 
-    fn metadata(name: &str) -> Metadata {
+    fn metadata(name: &str, avatar: Avatar) -> Metadata {
         Metadata {
             name: name.into(),
-            avatar: Default::default(),
+            avatar,
+        }
+    }
+
+    fn egg() -> Avatar {
+        Avatar {
+            shape: AvatarShape::ALL[1],
+            color: AvatarColor::ALL[1],
         }
     }
 
     #[test]
-    fn details_mirror_the_api_limits() {
-        assert_eq!(metadata("  Planner ").problem(), None);
-        assert_eq!(metadata(&"é".repeat(80)).problem(), None);
-        assert!(metadata(" ").problem().is_some());
-        assert!(metadata(&"é".repeat(81)).problem().is_some());
+    fn names_mirror_the_api_limits() {
+        assert_eq!(parse_name("  Planner "), Ok("Planner".into()));
+        assert!(parse_name(&"é".repeat(80)).is_ok());
+        assert!(parse_name(" ").is_err());
+        assert!(parse_name(&"é".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn one_request_at_a_time_and_newer_intent_survives_its_response() {
+        let mut sync = MetadataSync::new(metadata("Old", Avatar::default()), Some(0));
+        sync.desired.name = "New".into();
+        assert_eq!(
+            sync.begin(),
+            Some(MetadataChange {
+                name: Some("New".into()),
+                avatar: None,
+            })
+        );
+        sync.desired.avatar = egg();
+        assert_eq!(sync.begin(), None, "waits for the request in flight");
+        sync.remote(metadata("Old", Avatar::default()), Some(0));
+        assert_eq!(sync.desired, metadata("New", egg()), "stale list ignored");
+
+        sync.finish(Ok((metadata("New", Avatar::default()), Some(1))));
+        assert_eq!(sync.desired, metadata("New", egg()), "the newer pick stays");
+        assert_eq!(
+            sync.begin(),
+            Some(MetadataChange {
+                name: None,
+                avatar: Some(egg()),
+            }),
+            "only the pick made meanwhile"
+        );
+        sync.finish(Ok((metadata("New", egg()), Some(2))));
+        assert_eq!(sync.begin(), None, "nothing left to save");
+    }
+
+    #[test]
+    fn a_delayed_echo_cannot_change_the_shape_of_the_next_color_pick() {
+        let mut sync = MetadataSync::new(metadata("Bot", Avatar::default()), Some(0));
+        sync.desired.avatar = egg();
+        sync.begin();
+        sync.finish(Ok((metadata("Bot", egg()), Some(1))));
+        let cloud = Avatar {
+            shape: AvatarShape::Cloud,
+            ..egg()
+        };
+        sync.desired.avatar = cloud;
+        sync.begin();
+        sync.finish(Ok((metadata("Bot", cloud), Some(2))));
+        sync.remote(metadata("Bot", egg()), Some(1));
+        sync.desired.avatar.color = AvatarColor::Pink;
+        assert_eq!(
+            sync.begin(),
+            Some(MetadataChange {
+                name: None,
+                avatar: Some(Avatar {
+                    color: AvatarColor::Pink,
+                    ..cloud
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn a_newer_remote_edit_survives_an_older_http_response() {
+        let mut sync = MetadataSync::new(metadata("Old", Avatar::default()), Some(0));
+        sync.desired.name = "Local".into();
+        sync.begin();
+        sync.remote(metadata("Remote", Avatar::default()), Some(2));
+        sync.finish(Ok((metadata("Local", Avatar::default()), Some(1))));
+        assert_eq!(sync.desired.name, "Remote");
+        assert_eq!(sync.begin(), None);
+    }
+
+    #[test]
+    fn a_server_echo_confirms_a_save_whose_response_was_lost() {
+        let mut sync = MetadataSync::new(metadata("Old", Avatar::default()), Some(0));
+        sync.desired.avatar = egg();
+        sync.begin();
+        sync.finish(Err("lost response".into()));
+        sync.remote(metadata("Old", egg()), Some(1));
+        assert_eq!(sync.saved, sync.desired);
+        assert_eq!(sync.error, None);
+        assert_eq!(sync.begin(), None);
+    }
+
+    #[test]
+    fn a_server_echo_before_a_lost_response_stays_confirmed() {
+        let mut sync = MetadataSync::new(metadata("Old", Avatar::default()), Some(0));
+        sync.desired.avatar = egg();
+        sync.begin();
+        sync.remote(metadata("Old", egg()), Some(1));
+        sync.finish(Err("lost response".into()));
+        assert_eq!(sync.error, None);
+        assert_eq!(sync.begin(), None);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_change_for_a_retry() {
+        let mut sync = MetadataSync::new(metadata("Old", Avatar::default()), Some(0));
+        sync.desired.avatar = egg();
+        sync.begin();
+        sync.finish(Err("offline".into()));
+        assert_eq!(sync.error.as_deref(), Some("offline"));
+        sync.remote(metadata("Elsewhere", Avatar::default()), Some(1));
+        assert_eq!(
+            sync.desired,
+            metadata("Elsewhere", egg()),
+            "a remote rename lands; the unsaved pick stays"
+        );
+        assert_eq!(
+            sync.begin(),
+            Some(MetadataChange {
+                name: None,
+                avatar: Some(egg()),
+            })
+        );
+        assert_eq!(sync.error, None);
     }
 }

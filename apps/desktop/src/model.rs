@@ -28,6 +28,9 @@ pub struct Item {
     pub kind: String,
     pub text: String,
     pub provider_id: Option<String>,
+    /// Absent from older servers.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// Set on the owner's feedback message sent as a reaction.
     #[serde(default)]
     pub reaction: Option<Reaction>,

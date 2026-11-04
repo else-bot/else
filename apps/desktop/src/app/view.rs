@@ -10,6 +10,7 @@ use super::{
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
 use crate::model::ReactionKind;
+use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -45,7 +46,11 @@ impl Render for BotDrag {
 }
 
 impl ElseApp {
-    fn status_text(&self) -> (SharedString, bool) {
+    pub(crate) fn connected(&self) -> bool {
+        self.connection == Connection::Connected
+    }
+
+    pub(crate) fn status_text(&self) -> (SharedString, bool) {
         match &self.connection {
             Connection::Connecting => ("Connecting…".into(), false),
             Connection::Connected => ("Connected".into(), false),
@@ -66,7 +71,6 @@ impl ElseApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let (status, is_error) = self.status_text();
         let mut list = v_flex()
             .id("bot-list")
             .gap_1()
@@ -74,10 +78,22 @@ impl ElseApp {
             .flex_1()
             .overflow_y_scroll();
         let grouped = !self.categories.is_empty();
-        let groups = crate::sidebar::groups(&self.categories, &self.bots);
+        let layout = crate::sidebar::Layout::new(&self.categories, &self.bots, self.default_bot_id);
         let can_edit = self.connection == Connection::Connected;
         let owner = cx.entity().downgrade();
-        for group in groups {
+        if let Some(notice) = self.category_notice.clone() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(notice),
+            );
+        }
+        if let Some(main) = layout.pinned {
+            list = list.child(self.render_bot_row(main, cx));
+        }
+        for group in layout.groups {
             let destination = group.category.map(|c| c.id);
             let owner = owner.clone();
             let mut zone = v_flex()
@@ -173,29 +189,6 @@ impl ElseApp {
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
-            .child(
-                v_flex()
-                    .p_3()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(theme.sidebar_border)
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("else.bot"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if is_error {
-                                theme.danger
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(status),
-                    )
-                    .children(
-                        self.category_notice
-                            .clone()
-                            .map(|notice| div().text_xs().text_color(theme.danger).child(notice)),
-                    ),
-            )
             .child(list)
             .child(
                 div()
@@ -476,17 +469,10 @@ impl ElseApp {
                 };
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
-                // A reply's messages share one provider note and one status.
                 let run = conversation.run(id);
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
                 let mut column = v_flex().w_full().gap_1().px_4().py_1();
-                if !user
-                    && run.first
-                    && let Some(provider) = &item.provider_id
-                {
-                    column = column.child(note(self.provider_label(provider), false));
-                }
                 let card = card(text, user);
                 let card = match Author::of(&item.kind) {
                     Some(author) => {
@@ -503,7 +489,10 @@ impl ElseApp {
                     Some(kind) => reacted(card, kind),
                     None => card,
                 };
-                column = column.child(side(user, card));
+                column = column.child(side(user, card)).children(
+                    item.created_at
+                        .map(|at| beside(user, note(stamp(at), false))),
+                );
                 if let Some(turn) = turn {
                     let show_on_user = user && !turn.is_finished()
                         || user
@@ -515,8 +504,7 @@ impl ElseApp {
                     if show_on_user || show_on_assistant {
                         let (label, error) = turn_label(turn);
                         if !label.is_empty() {
-                            let row = h_flex().w_full().child(note(label, error));
-                            column = column.child(if user { row.justify_end() } else { row });
+                            column = column.child(beside(user, note(label, error)));
                         }
                     }
                 }
@@ -539,7 +527,8 @@ impl ElseApp {
                     .gap_1()
                     .px_4()
                     .py_1()
-                    .child(side(true, card(text, true).into_any_element()));
+                    .child(side(true, card(text, true).into_any_element()))
+                    .child(beside(true, note(stamp(pending.sent_at), false)));
                 if let Some(reason) = &pending.rejected {
                     return column
                         .child(
@@ -699,6 +688,7 @@ impl ElseApp {
                     Button::new("send")
                         .label("Send")
                         .primary()
+                        .h(COMPOSER_ROW)
                         .disabled(!can_send)
                         .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
                 ),
@@ -862,6 +852,32 @@ fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
 
 const NARROW: Pixels = px(1000.);
 
+/// One row of the composer: gpui-kit's medium Textarea draws a 1.25rem line
+/// (20px at the default rem) with 8px padding above and below inside a 1px
+/// border. A medium Button is only 32px, so Send takes this height to line up.
+const COMPOSER_ROW: Pixels = px(38.);
+
+fn beside(user: bool, note: Div) -> Div {
+    let row = h_flex().w_full().child(note);
+    if user { row.justify_end() } else { row }
+}
+
+fn stamp(at: DateTime<Utc>) -> String {
+    stamp_in(at, Local::now())
+}
+
+fn stamp_in<Tz: TimeZone>(at: DateTime<Utc>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let at = at.with_timezone(&now.timezone());
+    if at.year() == now.year() {
+        at.format("%-d %b, %H:%M").to_string()
+    } else {
+        at.format("%-d %b %Y, %H:%M").to_string()
+    }
+}
+
 impl Render for ElseApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(welcome) = &self.welcome {
@@ -924,5 +940,27 @@ impl Render for ElseApp {
             .child(self.render_main(cx))
             .children(settings.map(|bot| self.render_settings(&bot, cx)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_in;
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    #[test]
+    fn stamps_use_the_viewer_zone_and_name_another_year() {
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let now = "2026-11-04T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .with_timezone(&zone);
+        let at = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(stamp_in(at("2026-11-04T07:05:00Z"), now), "4 Nov, 09:05");
+        assert_eq!(stamp_in(at("2026-01-31T23:30:00Z"), now), "1 Feb, 01:30");
+        assert_eq!(
+            stamp_in(at("2025-12-31T21:59:00Z"), now),
+            "31 Dec 2025, 23:59"
+        );
     }
 }

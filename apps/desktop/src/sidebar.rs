@@ -1,11 +1,15 @@
-//! Sidebar grouping (POC-031): categories with their bots, then the
-//! unassigned bots. Pure, so the order is tested without a window.
+//! Sidebar layout (POC-031): the main bot pinned on top, then categories
+//! with their bots, then the unassigned bots. Pure, so the order is tested
+//! without a window.
 //!
 //! Categories are ordered as the server orders them: by the case-folded
-//! name's code points, then ID. Bots within a group are ordered the same
-//! way by name. A bot with no category, or with a category the client does
-//! not know (older records, a category being deleted), is unassigned.
-//! Empty categories are kept.
+//! name's code points, then ID. Bots within a group are ordered by recency:
+//! the newest message first, a never-messaged bot by its creation time, then
+//! the folded name and ID. A bot with no category, or with a category the
+//! client does not know (older records, a category being deleted), is
+//! unassigned. Empty categories are kept.
+
+use std::cmp::Reverse;
 
 use uuid::Uuid;
 
@@ -28,57 +32,84 @@ pub struct Group<'a> {
     pub bots: Vec<&'a Bot>,
 }
 
-pub fn groups<'a>(categories: &'a [Category], bots: &'a [Bot]) -> Vec<Group<'a>> {
-    let mut sorted: Vec<&Category> = categories.iter().collect();
-    sorted.sort_by_key(|c| (fold(&c.name), c.id));
-    let mut out: Vec<Group> = sorted
-        .into_iter()
-        .map(|category| Group {
-            category: Some(category),
-            bots: bots
-                .iter()
-                .filter(|b| known_category(categories, b.category_id) == Some(category.id))
-                .collect(),
-        })
-        .collect();
-    out.push(Group {
-        category: None,
-        bots: bots
-            .iter()
-            .filter(|b| known_category(categories, b.category_id).is_none())
-            .collect(),
-    });
-    for group in &mut out {
-        group.bots.sort_by_key(|b| (fold(&b.name), b.id));
-    }
-    out
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout<'a> {
+    /// The main bot, above every group and in none of them.
+    pub pinned: Option<&'a Bot>,
+    pub groups: Vec<Group<'a>>,
 }
 
-/// The active bots in display order (keyboard navigation follows it).
-pub fn order(categories: &[Category], bots: &[Bot]) -> Vec<Uuid> {
-    groups(categories, bots)
-        .into_iter()
-        .flat_map(|g| g.bots.into_iter())
-        .filter(|b| b.is_active())
-        .map(|b| b.id)
-        .collect()
+impl<'a> Layout<'a> {
+    pub fn new(categories: &'a [Category], bots: &'a [Bot], main: Option<Uuid>) -> Self {
+        let pinned = bots.iter().find(|b| Some(b.id) == main);
+        let others = || bots.iter().filter(move |b| Some(b.id) != main);
+        let mut sorted: Vec<&Category> = categories.iter().collect();
+        sorted.sort_by_key(|c| (fold(&c.name), c.id));
+        let mut groups: Vec<Group> = sorted
+            .into_iter()
+            .map(|category| Group {
+                category: Some(category),
+                bots: others()
+                    .filter(|b| known_category(categories, b.category_id) == Some(category.id))
+                    .collect(),
+            })
+            .collect();
+        groups.push(Group {
+            category: None,
+            bots: others()
+                .filter(|b| known_category(categories, b.category_id).is_none())
+                .collect(),
+        });
+        for group in &mut groups {
+            group.bots.sort_by_key(|b| {
+                (
+                    Reverse(b.last_message_at.or(b.created_at)),
+                    fold(&b.name),
+                    b.id,
+                )
+            });
+        }
+        Self { pinned, groups }
+    }
+
+    /// The active bots in display order (keyboard navigation follows it).
+    pub fn order(&self) -> Vec<Uuid> {
+        self.pinned
+            .into_iter()
+            .chain(self.groups.iter().flat_map(|g| g.bots.iter().copied()))
+            .filter(|b| b.is_active())
+            .map(|b| b.id)
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     fn bot(id: u128, name: &str, category: Option<u128>) -> Bot {
         Bot {
             id: Uuid::from_u128(id),
             name: name.into(),
+            metadata_revision: None,
             avatar: Default::default(),
             conversation_id: None,
             selected_provider_id: None,
             activity: None,
             cleanup: None,
             category_id: category.map(Uuid::from_u128),
+            created_at: None,
+            last_message_at: None,
         }
+    }
+
+    fn at(minute: u32) -> Option<DateTime<Utc>> {
+        Some(
+            format!("2026-11-04T10:{minute:02}:00Z")
+                .parse()
+                .expect("timestamp"),
+        )
     }
 
     fn category(id: u128, name: &str) -> Category {
@@ -86,6 +117,19 @@ mod tests {
             id: Uuid::from_u128(id),
             name: name.into(),
         }
+    }
+
+    fn shape<'a>(layout: &Layout<'a>) -> Vec<(Option<&'a str>, Vec<&'a str>)> {
+        layout
+            .groups
+            .iter()
+            .map(|g| {
+                (
+                    g.category.map(|c| c.name.as_str()),
+                    g.bots.iter().map(|b| b.name.as_str()).collect(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -104,28 +148,19 @@ mod tests {
             bot(14, "Orphan", Some(99)),
             bot(15, "alpha", Some(2)),
         ];
-        let groups = groups(&categories, &bots);
-        let shape: Vec<(Option<&str>, Vec<&str>)> = groups
-            .iter()
-            .map(|g| {
-                (
-                    g.category.map(|c| c.name.as_str()),
-                    g.bots.iter().map(|b| b.name.as_str()).collect(),
-                )
-            })
-            .collect();
+        let layout = Layout::new(&categories, &bots, None);
+        assert_eq!(layout.pinned, None);
         assert_eq!(
-            shape,
+            shape(&layout),
             vec![
                 (Some("Empty"), vec![]),
                 (Some("Family"), vec!["Mom"]),
-                // Same folded name: the ID breaks the tie.
                 (Some("work"), vec!["Alpha", "alpha", "zeta"]),
                 (None, vec!["beta", "Orphan"]),
             ]
         );
         assert_eq!(
-            order(&categories, &bots),
+            layout.order(),
             [13, 11, 15, 10, 12, 14].map(Uuid::from_u128).to_vec()
         );
     }
@@ -133,15 +168,55 @@ mod tests {
     #[test]
     fn without_categories_everything_is_unassigned() {
         let bots = vec![bot(1, "b", None), bot(2, "a", Some(7))];
-        let groups = groups(&[], &bots);
-        assert_eq!(groups.len(), 1);
+        let layout = Layout::new(&[], &bots, None);
+        assert_eq!(shape(&layout), vec![(None, vec!["a", "b"])]);
+    }
+
+    #[test]
+    fn main_is_pinned_above_every_category_and_listed_once() {
+        let categories = vec![category(1, "Work")];
+        let mut main = bot(1, "Main", Some(1));
+        main.last_message_at = at(1);
+        let mut busy = bot(2, "Busy", Some(1));
+        busy.last_message_at = at(30);
+        let bots = vec![busy, main, bot(3, "Loose", None)];
+        let layout = Layout::new(&categories, &bots, Some(Uuid::from_u128(1)));
+        assert_eq!(layout.pinned.map(|b| b.name.as_str()), Some("Main"));
         assert_eq!(
-            groups[0]
-                .bots
-                .iter()
-                .map(|b| b.name.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "b"]
+            shape(&layout),
+            vec![(Some("Work"), vec!["Busy"]), (None, vec!["Loose"])]
+        );
+        assert_eq!(layout.order(), [1, 2, 3].map(Uuid::from_u128).to_vec());
+    }
+
+    #[test]
+    fn newest_message_first_then_creation_time_within_a_category() {
+        let mut talked = bot(1, "Talked", None);
+        talked.created_at = at(0);
+        talked.last_message_at = at(20);
+        let mut older = bot(2, "Older", None);
+        older.created_at = at(0);
+        older.last_message_at = at(10);
+        let mut new = bot(3, "New", None);
+        new.created_at = at(40);
+        let mut stale = bot(4, "Stale", None);
+        stale.created_at = at(5);
+        let mut deleting = bot(5, "Deleting", None);
+        deleting.last_message_at = at(50);
+        deleting.cleanup = Some(crate::api::Cleanup {
+            state: "pending".into(),
+            error: None,
+        });
+        let bots = vec![stale, older, talked, new, deleting];
+        let layout = Layout::new(&[], &bots, None);
+        assert_eq!(
+            shape(&layout),
+            vec![(None, vec!["Deleting", "New", "Talked", "Older", "Stale"])]
+        );
+        assert_eq!(
+            layout.order(),
+            [3, 1, 2, 4].map(Uuid::from_u128).to_vec(),
+            "navigation skips the bot being deleted"
         );
     }
 }

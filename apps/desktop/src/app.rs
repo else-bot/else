@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::*;
 use uuid::Uuid;
@@ -90,6 +91,7 @@ pub enum Connection {
 struct PendingSend {
     request_id: Uuid,
     text: String,
+    sent_at: DateTime<Utc>,
     provider_id: Option<String>,
     reaction: Option<Reaction>,
     /// `None` while sending; otherwise why the outcome is unknown.
@@ -372,7 +374,8 @@ impl ElseApp {
 
     fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         // The order the sidebar shows.
-        let ids: Vec<Uuid> = crate::sidebar::order(&self.categories, &self.bots);
+        let ids =
+            crate::sidebar::Layout::new(&self.categories, &self.bots, self.default_bot_id).order();
         if ids.is_empty() {
             return;
         }
@@ -431,6 +434,7 @@ impl ElseApp {
         let pending = PendingSend {
             request_id: Uuid::new_v4(),
             text,
+            sent_at: Utc::now(),
             // The bot's own provider and model, chosen by the API.
             provider_id: None,
             reaction,
