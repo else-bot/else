@@ -1,9 +1,9 @@
 # Pstack model configuration
 
 This repository's role choices override pstack's defaults and any user-level
-`pstack-models.mdc` or `pstack-models.md`. Keep changes here when running
-`setup-pstack` in this repository. The budget is custom, with the effort set
-per preset below. Keep the configured effort and speed when delegating.
+`pstack-models.mdc` or `pstack-models.md`. Edit this file directly to change
+presets and role assignments. The effort is set per preset below. Keep the
+configured effort and speed when delegating.
 
 Opus 5.5 medium is the default for coding, explanations, and synthesis.
 Use Sol xhigh fast and Fable high for independent reviews, second opinions,

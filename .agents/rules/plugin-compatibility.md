@@ -13,9 +13,9 @@ references from the instruction file's own directory, not the shell's cwd.
 
 Use `.agents/rules/pstack-models.md` for model selection. It overrides upstream
 model defaults, budget adjustments, and home-directory configuration paths.
-The other `.agents/rules/*.md` apply here too. The TypeScript rule applies
-only to TypeScript files. Update bundled documents in place. New project
-skills live in `.agents/skills/`. Use the local `create-skill` workflow.
+The other `.agents/rules/*.md` apply here too. Update bundled documents in
+place. New project skills live in `.agents/skills/`. Use the local
+`create-skill` workflow.
 
 Workflow verbs describe intent. Use only the current runtime's tools and
 accepted arguments. In Claude Code, delegation uses `Agent` and supported
