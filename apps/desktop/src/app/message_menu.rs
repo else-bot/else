@@ -2,7 +2,10 @@ use super::reply::{Author, MessageReference};
 use super::{Connection, ElseApp, RowKey};
 use crate::model::{Reaction, ReactionKind};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::actions::Cancel;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::{Disableable as _, h_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -21,18 +24,29 @@ impl ElseApp {
         };
         let connected = app.read(cx).connection == Connection::Connected;
         if author == Author::Bot {
-            for reaction in [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown] {
-                let owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(reaction.label())
-                        .disabled(!connected)
-                        .on_click(move |_, window, cx| {
-                            let _ = owner
-                                .update(cx, |app, cx| app.react(bot, item, reaction, window, cx));
-                        }),
-                );
-            }
-            menu = menu.separator();
+            let owner = owner.clone();
+            menu = menu
+                .item(
+                    PopupMenuItem::element(move |_, _| {
+                        h_flex().gap_1().children(
+                            [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown].map(|reaction| {
+                                let owner = owner.clone();
+                                Button::new(reaction.mark())
+                                    .ghost()
+                                    .label(reaction.mark())
+                                    .disabled(!connected)
+                                    .on_click(move |_, window, cx| {
+                                        let _ = owner.update(cx, |app, cx| {
+                                            app.react(bot, item, reaction, window, cx)
+                                        });
+                                        window.dispatch_action(Box::new(Cancel), cx);
+                                    })
+                            }),
+                        )
+                    })
+                    .disabled(true),
+                )
+                .separator();
         }
         let act = |f: fn(&mut Self, Uuid, Uuid, &mut Window, &mut Context<Self>)| {
             let owner = owner.clone();

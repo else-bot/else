@@ -79,13 +79,6 @@ impl ReactionKind {
         }
     }
 
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            ReactionKind::ThumbsUp => "👍 Thumbs up",
-            ReactionKind::ThumbsDown => "👎 Thumbs down",
-        }
-    }
-
     pub(super) fn message(self, reference: &MessageReference) -> String {
         let request = match self {
             ReactionKind::ThumbsUp => {
