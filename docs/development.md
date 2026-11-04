@@ -180,6 +180,8 @@ measured application and full-lane times and cache conditions.
 
 ## Run the API
 
+The commands below use the root `.env` and `~/.else` defaults. To run beside another checkout without sharing a port, database, or credentials, use [isolated development sessions](#run-isolated-development-sessions) instead.
+
 Provision the installation once, then start the API from the repository root:
 
 ```sh
@@ -458,7 +460,7 @@ To rotate the owner token, stop the API, move the old file away, run `setup`, an
 
 ### Database tests
 
-Database tests use a private temporary SQLite file per test. No server or `TEST_DATABASE_URL` is needed, and owner data is never used. Run `cargo test --workspace --locked`. Live provider and VM tests remain opt-in through their `ELSE_LIVE_*` flags. S3 replication tests run with `cargo test -p else-api --test replication -- --ignored` and require the Compose S3 emulator; some restart that container. See [acceptance.md](implementation/acceptance.md) for historical live scenarios.
+Database tests use a private temporary SQLite file per test. No server or `TEST_DATABASE_URL` is needed, and owner data is never used. Run `cargo test --workspace --locked`. Live provider and VM tests remain opt-in through their `ELSE_LIVE_*` flags. S3 replication tests run with `cargo test -p else-api --test replication -- --ignored` and require the Compose S3 emulator; some restart that container. The optional `scripts/test-replication.py` runner runs them against an emulator scoped to this worktree. See [acceptance.md](implementation/acceptance.md) for historical live scenarios.
 
 ## Run the desktop
 
@@ -500,13 +502,65 @@ The right sidebar opens with bot settings. Settings in the header, the collapse 
 
 The token is sent only as an `Authorization` header to the configured origin, over TLS (`https://`, `wss://`) unless the origin is loopback. HTTPS and WebSocket share one rustls configuration that verifies certificates with the platform's trust store. Redirects are never followed, and the token never appears in URLs, logs, or messages. A rejected token or an unreachable API is shown in the sidebar; loaded bots stay visible while the desktop retries. The sidebar and the open conversation update live over the WebSocket; nothing polls. Up/Down (or Ctrl+N/Ctrl+P) move the selection while the sidebar has focus. Closing the window quits the desktop; work already accepted by the API keeps running.
 
-`scripts/demo.sh` runs a disposable installation for manual checks, with its own SQLite database and `/tmp/else-demo` data directory and the synthetic provider enabled: `scripts/demo.sh reset`, then `scripts/demo.sh api` and `scripts/demo.sh desktop` in separate terminals. `scripts/demo.sh drop` removes it.
+To run the desktop against a session that no other checkout can touch, use `scripts/dev.py` as described in the next section.
 
 The workspace shares its root `Cargo.lock` and `target` directory. The backup research crate remains excluded so its documented standalone commands still work. See [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html).
 
+## Run isolated development sessions
+
+`scripts/dev.py` runs the API and the desktop against a session that belongs to this checkout. Two worktrees can run sessions at the same time: each session has its own SQLite database, data directory, credentials, bot projects, and port. Use it instead of `cargo run -p else-api` whenever another checkout or the installation may run on this machine. It needs only Python 3.11 or later and Cargo.
+
+### Develop on the host
+
+To start the default session, run each command in its own terminal from the repository root:
+
+```sh
+scripts/dev.py api
+scripts/dev.py desktop
+```
+
+`api` builds `else-api`, creates the session on first use, runs `setup`, and serves in the foreground until Ctrl-C. Host provider logins work as usual. The API binds `127.0.0.1:0` and writes its PID and actual URL to `data/api.json`. `dev.py` uses that URL only after it checks that the PID is the process it started, that the process holds the session's data lock, that the session's owner token is accepted, and that the API serves the session's database. `desktop` takes both the URL and the owner token file from the same session. It refuses to start under the omabox guard; run it from your own terminal, or use [a private box](#test-the-desktop-in-a-private-box).
+
+| Command | Effect |
+| --- | --- |
+| `scripts/dev.py status` | Prints the verified PID, URL, and state directory as JSON. |
+| `scripts/dev.py curl [CURL ARGS] /v1/PATH` | Calls the session API with its owner token. An argument that starts with `/` gets the session URL; full URLs are refused, and every connection goes to the session's listener. The token is passed on standard input. |
+| `scripts/dev.py sql "QUERY"` | Runs read-only SQL on the session database. |
+| `scripts/dev.py reset` | Deletes the session state and runs setup again. |
+| `scripts/dev.py drop` | Deletes the session state. |
+
+Add `--session NAME` to any command to keep several sessions in one checkout. State lives in `.else-dev/NAME` in the checkout, which Git ignores. It is outside Cargo's target directory, so `cargo clean` or another worktree sharing `CARGO_TARGET_DIR` never deletes a live database or lock. Bot projects live in the session's `projects` directory. `--dir PATH` names another state directory. `scripts/demo.sh` runs the `demo` session and maps `ELSE_DEMO_DIR` to `--dir`.
+
+A session never reads `.env`. Its API and desktop start in `/`, so their own `.env` lookup finds nothing. Database, credential, backup, S3, AWS, and PostgreSQL variables from your shell are dropped. The session sets its own data, database, token, key, project, and backup paths, and turns scheduled backups off. Sessions never use `~/.else-dev/bots`, the earlier default bots directory. Nothing moves an existing installation's projects automatically: to keep using them outside a session, set `ELSE_BOTS_DIR=~/.else-dev/bots` (as an absolute path) explicitly. `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, the Microsandbox and VM image variables, `ELSE_MAX_ACTIVE_TURNS`, and `ELSE_SYNTHETIC_PROVIDER` pass through from your shell. The Synthetic provider is on unless you set `ELSE_SYNTHETIC_PROVIDER=0`.
+
+`reset` and `drop` delete a directory only when its `.else-dev-session` marker names this checkout and session. They refuse:
+
+- a symbolic link, or a directory without the marker, such as an old `/tmp/else-demo`;
+- another checkout's or another session's directory;
+- a session whose `dev.py api` is running, recorded by the `.NAME.lock` file beside the state, which is never deleted;
+- a directory where any else.bot API holds its data or database lock, however that API was started.
+
+### Test the desktop in a private box
+
+Agents testing the GUI use one foreground command instead of the host commands. Read the installed omabox skill first.
+
+```sh
+scripts/dev.py run
+```
+
+`run` builds both binaries, creates a new box with `omabox up --new --net isolated`, and starts the API and the desktop inside it with fresh state in the box's home. Only the Synthetic provider answers there: Codex, Claude, and Microsandbox are unavailable. `run` prints a JSON manifest with the box name, the desktop window's address, the in-box state path, the evidence directory, and `omabox` commands that name both the box and the window. It refuses to pick a window when the desktop's PID owns more than one or another `else-bot` window exists in the box. `--api-only` skips the desktop.
+
+Drive the window only with the printed `-b BOX --window ADDRESS`. The box's network is isolated, so probe the API with the printed `status_command` or `curl_command`, which run inside the box. Ctrl-C or `SIGTERM` stops the session, copies its logs, `doctor.json`, and manifests to `.else-dev/runs/RUN`, and removes the box with `omabox down -b BOX`. The live database stays in the box.
+
+After changing `scripts/dev.py`, run its checks in a box you own:
+
+```sh
+omabox run -b BOX -- python3 scripts/test-dev.py
+```
+
 ## Stop and resume
 
-Stop the API with Ctrl-C or `elsebot stop`, and start it again to resume using the same SQLite file. Keep the database, `-wal`, and `-shm` files together while it is open; copying only the main file during WAL activity is not a backup. Use the encrypted backup command for recovery copies. `scripts/demo.sh drop` removes only its marked disposable installation.
+Stop the API with Ctrl-C or `elsebot stop`, and start it again to resume using the same SQLite file. Keep the database, `-wal`, and `-shm` files together while it is open; copying only the main file during WAL activity is not a backup. Use the encrypted backup command for recovery copies. `scripts/dev.py drop` removes only a session that this checkout created.
 
 ## Start implementation work
 

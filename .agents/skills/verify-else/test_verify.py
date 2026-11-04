@@ -54,6 +54,45 @@ class RunnerChecks(unittest.TestCase):
             clean = verify.clean_env()
         self.assertEqual(clean, {k: env[k] for k in ["PATH", "HOME", "WAYLAND_DISPLAY"]})
 
+    def start_fake(self, directory, serve):
+        fake = Path(directory) / "fake-api"
+        fake.write_text("#!/usr/bin/env python3\nimport os, sys\n" + serve)
+        fake.chmod(0o700)
+        api = verify.Instance(str(fake), Path(directory))
+        self.addCleanup(api.__exit__)
+        api.data.mkdir()
+        (api.data / "api.json").write_text(json.dumps({"pid": os.getpid(), "url": "http://127.0.0.1:9"}))
+        return api
+
+    def test_start_uses_the_port_its_own_child_publishes(self):
+        serve = """import http.server, json, pathlib
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "19"); self.end_headers()
+        self.wfile.write(b'{"status": "ready"}')
+    def log_message(self, *_): pass
+assert os.environ["ELSE_API_BIND"] == "127.0.0.1:0"
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+data = pathlib.Path(os.environ["ELSE_DATA_DIR"])
+(data / "api.json").write_text(json.dumps({"pid": os.getpid(), "url": f"http://127.0.0.1:{server.server_port}"}))
+server.serve_forever()
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            api = self.start_fake(directory, serve)
+            with patch.object(verify.Instance, "doctor"):
+                api.start()
+            published = json.loads((api.data / "api.json").read_text())
+            self.assertEqual(published["pid"], api.child.pid)
+            self.assertEqual(api.url, published["url"])
+            self.assertNotEqual(api.url, "http://127.0.0.1:9")
+
+    def test_start_fails_when_its_child_exits_without_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = self.start_fake(directory, "import time\ntime.sleep(0.3)\nsys.exit(3)\n")
+            with self.assertRaisesRegex(RuntimeError, "exited before publishing"):
+                api.start()
+            self.assertFalse((api.data / "api.json").exists(), "a stale manifest must not be trusted")
+
 
 if __name__ == "__main__":
     unittest.main()
