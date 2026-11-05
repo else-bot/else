@@ -11,9 +11,14 @@
 //! question `skipped` (it was not permission); any other end of the turn
 //! marks it `cancelled` (a trigger).
 //!
-//! The only standing grant is `destructive` for one bot, given by choosing
-//! "Always allow" on a destructive card. External actions are approved one
-//! at a time, always.
+//! Destructive actions may be allowed in advance in two separate scopes,
+//! each chosen on a destructive card. "Always allow destructive actions"
+//! covers the bot's own requests but never a routine run. "Always allow for
+//! this routine" covers runs of that one routine admitted with its current
+//! prompt revision; editing the prompt ends it. Which scope a card offers
+//! and which grant applies come from the turn's source in the database,
+//! never from what a model wrote. External actions are approved one at a
+//! time, always.
 
 use std::collections::HashMap;
 
@@ -26,8 +31,10 @@ use uuid::Uuid;
 use super::events;
 use super::turns::{self, AskingCaller as Caller};
 
+use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, Choice, DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, Spec, Status,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, Choice, DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN,
+    Outcome, Spec, Standing, Status, approval_choices,
 };
 
 /// A question as shown to the owner and recorded in events.
@@ -56,7 +63,7 @@ impl QuestionInfo {
         self.status == Status::Answered
             && matches!(
                 self.answer.as_deref(),
-                Some(APPROVE) | Some(APPROVE_FOREVER)
+                Some(APPROVE) | Some(APPROVE_FOREVER) | Some(APPROVE_ROUTINE)
             )
     }
 
@@ -250,30 +257,85 @@ pub async fn has_permission(
     .await
 }
 
+/// Which standing grant can apply to a turn, by where its work comes from.
+#[derive(Debug, Clone, Copy)]
+enum Scope {
+    /// An owner request or other work of the bot: the bot's own grant.
+    Bot,
+    /// A routine run. `current`: it was admitted with the routine's current
+    /// prompt revision and the routine still exists, so a grant can be
+    /// given and used. `granted`: the routine's grant is for that revision.
+    Routine { current: bool, granted: bool },
+    /// A task a routine run delegated: no standing grant applies.
+    RoutineTask,
+}
+
+impl Scope {
+    /// The standing grant a destructive card of this turn offers.
+    fn offer(self) -> Option<Standing> {
+        match self {
+            Scope::Bot => Some(Standing::Bot),
+            Scope::Routine { current: true, .. } => Some(Standing::Routine),
+            Scope::Routine { .. } | Scope::RoutineTask => None,
+        }
+    }
+}
+
+async fn scope(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Scope, sqlx::Error> {
+    let run: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT coalesce(rr.prompt_revision = r.prompt_revision AND r.deleted_at IS NULL, false),
+             EXISTS (SELECT 1 FROM routine_grants g
+                     WHERE g.routine_id = rr.routine_id AND g.prompt_revision = rr.prompt_revision)
+         FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id WHERE rr.turn_id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(match run {
+        Some((current, granted)) => Scope::Routine { current, granted },
+        None if super::delegations::origin(conn, turn_id).await? == Origin::RoutineRun => {
+            Scope::RoutineTask
+        }
+        None => Scope::Bot,
+    })
+}
+
 /// What a gated computer tool call may do now.
 #[derive(Debug)]
 pub enum Gate {
-    /// Run it: the owner approved exactly this call (consumed here), or the
-    /// bot holds the standing destructive grant.
-    Run { standing: bool },
+    /// Run it: the owner approved exactly this call (consumed here), or a
+    /// standing destructive grant of this scope applies.
+    Run { standing: Option<Standing> },
     /// The owner has not answered yet; the attempt must end.
     Pending(QuestionInfo),
     /// The owner declined this call in this request.
     Denied(QuestionInfo),
 }
 
-/// Decide a destructive or external action, atomically: a
-/// standing grant runs a destructive call; an approval for exactly these
-/// arguments is consumed by this one call; otherwise the owner is asked.
+/// Decide a destructive or external action, atomically: a standing grant
+/// of the turn's scope runs a destructive call; an approval for exactly
+/// these arguments is consumed by this one call; otherwise the owner is
+/// asked, on a card offering only the grant this turn's scope can receive.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?
         .ok_or(RequestError::NotRunning)?;
-    if spec.kind == Kind::Destructive
-        && has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await?
-    {
-        return Ok(Gate::Run { standing: true });
+    let scope = scope(&mut tx, turn_id).await?;
+    if spec.kind == Kind::Destructive {
+        let standing = match scope {
+            Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {
+                Some(Standing::Bot)
+            }
+            Scope::Routine {
+                current: true,
+                granted: true,
+            } => Some(Standing::Routine),
+            _ => None,
+        };
+        if standing.is_some() {
+            return Ok(Gate::Run { standing });
+        }
     }
     if let Some(found) = find_same(&mut tx, turn_id, spec).await? {
         match found.status {
@@ -291,14 +353,18 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
                     == 1;
                 if consumed {
                     tx.commit().await?;
-                    return Ok(Gate::Run { standing: false });
+                    return Ok(Gate::Run { standing: None });
                 }
             }
             Status::Answered => return Ok(Gate::Denied(found)),
             Status::Skipped | Status::Cancelled => {}
         }
     }
-    let question = insert(&mut tx, turn_id, &caller, spec).await?;
+    let spec = Spec {
+        choices: approval_choices(spec.kind, scope.offer()),
+        ..spec.clone()
+    };
+    let question = insert(&mut tx, turn_id, &caller, &spec).await?;
     tx.commit().await?;
     Ok(Gate::Pending(question))
 }
@@ -332,6 +398,8 @@ pub enum SettleError {
     Settled(Status),
     #[error("choose one of this question's options")]
     InvalidChoice,
+    #[error("The routine task changed or was deleted. Approve once to allow only this action.")]
+    RoutineChanged,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -388,6 +456,15 @@ pub async fn answer(
         }
         return Err(SettleError::Settled(question.status));
     }
+    if question.kind == Kind::Destructive {
+        match (choice, scope(&mut tx, question.turn_id).await?) {
+            (APPROVE_ROUTINE, Scope::Routine { current: true, .. }) => {}
+            (APPROVE_ROUTINE, _) => return Err(SettleError::RoutineChanged),
+            (APPROVE_FOREVER, Scope::Bot) => {}
+            (APPROVE_FOREVER, _) => return Err(SettleError::InvalidChoice),
+            _ => {}
+        }
+    }
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE owner_questions SET status = 'answered', answer = ?2,
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -405,6 +482,22 @@ pub async fn answer(
         .bind(bot_id)
         .bind(DESTRUCTIVE_SCOPE)
         .bind(question.id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if question.kind == Kind::Destructive && choice == APPROVE_ROUTINE {
+        sqlx::query(
+            "INSERT INTO routine_grants (routine_id, prompt_revision, question_id)
+             SELECT r.id, r.prompt_revision, ?2
+             FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id
+             WHERE rr.turn_id = ?1 AND r.bot_id = ?3 AND r.deleted_at IS NULL
+               AND rr.prompt_revision = r.prompt_revision
+             ON CONFLICT (routine_id) DO UPDATE SET prompt_revision = excluded.prompt_revision,
+                 question_id = excluded.question_id, granted_at = excluded.granted_at",
+        )
+        .bind(question.turn_id)
+        .bind(question.id)
+        .bind(bot_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -455,7 +548,7 @@ pub async fn mark_delivered(
     sqlx::query(
         "UPDATE owner_questions SET delivered_attempt = ?3,
              consumed_attempt = CASE WHEN json_type(action, '$.host') = 'text'
-                 AND answer IN ('approve', 'approve_forever') THEN ?3 ELSE consumed_attempt END
+                 AND answer IN ('approve', 'approve_forever', 'approve_routine') THEN ?3 ELSE consumed_attempt END
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
            AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
     )
@@ -504,5 +597,56 @@ pub async fn revoke_permission(
         .execute(pool)
         .await?
         .rows_affected();
+    Ok(removed == 1)
+}
+
+/// The owner's standing approval of destructive actions for one routine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RoutineGrant {
+    pub routine_id: Uuid,
+    pub granted_at: DateTime<Utc>,
+    pub question_id: Uuid,
+}
+
+/// The routine grants of a bot that still apply: to an existing routine,
+/// for its current prompt.
+pub async fn routine_grants(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+) -> Result<Vec<RoutineGrant>, sqlx::Error> {
+    let rows: Vec<(Uuid, DateTime<Utc>, Uuid)> = sqlx::query_as(
+        "SELECT g.routine_id, g.granted_at, g.question_id
+         FROM routine_grants g JOIN routines r ON r.id = g.routine_id
+         WHERE r.bot_id = ?1 AND r.deleted_at IS NULL AND g.prompt_revision = r.prompt_revision
+         ORDER BY g.granted_at, g.routine_id",
+    )
+    .bind(bot_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(routine_id, granted_at, question_id)| RoutineGrant {
+            routine_id,
+            granted_at,
+            question_id,
+        })
+        .collect())
+}
+
+/// Withdraw a routine's grant. False when it held none.
+pub async fn revoke_routine_grant(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    routine_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let removed = sqlx::query(
+        "DELETE FROM routine_grants WHERE routine_id = ?1
+             AND routine_id IN (SELECT id FROM routines WHERE bot_id = ?2)",
+    )
+    .bind(routine_id)
+    .bind(bot_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(removed == 1)
 }

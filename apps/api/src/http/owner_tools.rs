@@ -73,9 +73,12 @@ pub(super) fn permission_schema() -> Value {
             take with your HOST shell or file tools (the owner's machine), which the API \
             cannot gate itself. Computer tools do not need this: declare their effect \
             argument instead. destructive: deletes, overwrites, or changes something hard to \
-            undo. external: sends a message or email, posts or edits anything others can see, \
-            pays, or otherwise reaches people or services outside. Returns approved at once \
-            when the owner gave this bot standing permission for destructive actions; \
+            undo, here or on a remote service (deleting a remote git branch, repository, file, \
+            or record is destructive, not external). external: sends a message or email, posts \
+            or edits anything others can see, pays, or otherwise reaches people or services \
+            outside. Returns approved \
+            at once when a standing permission for destructive actions applies (the owner's \
+            Always allow for this bot, or for this routine in its scheduled runs); \
             otherwise status pending: tell the owner briefly what and why, end this attempt, \
             and act only after the approval arrives in the continuation, on exactly that \
             action, once. External actions are approved one at a time, always. At most one \
@@ -207,7 +210,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
 }
 
 pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::app::questions::Spec;
+    use crate::app::questions::{Spec, Standing};
     use crate::db::owner_questions::{self, Gate};
     let spec = match Spec::permission(args) {
         Ok(spec) => spec,
@@ -215,8 +218,15 @@ pub(super) async fn ask_permission(state: &AppState, grant: &Grant, args: &Value
     };
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Run { standing }) => (
-            tool_result(json!({ "status": "approved", "standing": standing,
-                "next": "Do exactly this host action now, once, then report what you did." })),
+            tool_result(
+                json!({ "status": "approved", "standing": standing.is_some(),
+                "scope": standing, "next": match standing {
+                    Some(Standing::Routine) => "Standing permission for destructive actions in \
+                        this routine's runs applies. Do exactly this host action now, then \
+                        report what you did.",
+                    _ => "Do exactly this host action now, once, then report what you did.",
+                } }),
+            ),
             Some(format!("approved host action: {:?}", spec.context)),
         ),
         Ok(Gate::Pending(question)) => {

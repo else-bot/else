@@ -4,10 +4,11 @@ use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
 use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
+use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::*;
 use std::time::Duration;
 
@@ -214,7 +215,7 @@ impl ElseApp {
                                 text.render()
                             },
                         ));
-                } else if !user && run.first {
+                } else if !user && run.first && turn.and_then(|t| t.routine.as_ref()).is_none() {
                     if let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
                         column = column.child(
                             h_flex()
@@ -226,6 +227,14 @@ impl ElseApp {
                                 .child(bot.name.clone()),
                         );
                     }
+                }
+                if let Some(routine) = turn.and_then(|t| t.routine.as_ref()) {
+                    if run.first {
+                        column = column.child(routine_banner(routine, cx));
+                    }
+                    card = card
+                        .border_color(theme.primary.opacity(0.25))
+                        .bg(theme.primary.opacity(0.035));
                 }
                 let card = if conversation
                     .latest_reply()
@@ -355,6 +364,45 @@ impl ElseApp {
             }
         }
     }
+}
+
+pub(super) fn routine_banner(
+    run: &crate::model::RoutineRun,
+    cx: &mut Context<ElseApp>,
+) -> AnyElement {
+    let theme = cx.theme();
+    gpui_kit::component::v_flex()
+        .w_full()
+        .gap_1p5()
+        .px_3p5()
+        .py_2p5()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.primary.opacity(0.25))
+        .bg(theme.primary.opacity(0.07))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(theme.primary)
+                .child(Icon::new(IconName::Clock).size_3p5())
+                .child("Scheduled routine")
+                .child(
+                    div()
+                        .flex_1()
+                        .text_right()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            run.due_at
+                                .with_timezone(&Local)
+                                .format("%e %b · %H:%M %Z")
+                                .to_string(),
+                        ),
+                ),
+        )
+        .child(div().text_sm().font_semibold().child(run.name.clone()))
+        .into_any_element()
 }
 
 /// A short public description of a turn's state. Returns (text, is_error).

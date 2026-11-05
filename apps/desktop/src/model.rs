@@ -115,6 +115,7 @@ impl SecretRequest {
 pub const APPROVE: &str = "approve";
 pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
+pub const APPROVE_ROUTINE: &str = "approve_routine";
 
 /// One option of a bot's question, by its stable id and shown label.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -173,6 +174,15 @@ pub struct Turn {
     /// Absent from servers without owner questions.
     #[serde(default)]
     pub questions: Vec<Question>,
+    #[serde(default)]
+    pub routine: Option<RoutineRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoutineRun {
+    pub routine_id: Uuid,
+    pub name: String,
+    pub due_at: DateTime<Utc>,
 }
 
 /// The last due occurrence of a routine: the turn it started, or why it
@@ -559,6 +569,34 @@ mod tests {
         assert_eq!(reply.status, BotReplyStatus::Completed);
         assert_eq!(live.items().count(), 2);
         assert_eq!(live.latest_reply().unwrap().id, Uuid::from_u128(1));
+    }
+
+    #[test]
+    fn routine_provenance_survives_events_reload_and_history_paging() {
+        let id = Uuid::from_u128(901);
+        let turn = json!({
+            "id": id, "request_id": Uuid::from_u128(501), "turn_no": 1,
+            "provider_id": "codex", "status": "waiting", "error": null,
+            "effect_uncertain": false,
+            "routine": { "routine_id": Uuid::from_u128(71), "name": "Merged branch cleanup",
+                         "due_at": "2026-11-05T04:00:00Z" },
+        });
+        let mut initial = snapshot(
+            1,
+            vec![item(1, 1, "assistant", "Ready for approval.")],
+            None,
+        );
+        initial.turns = vec![serde_json::from_value(turn.clone()).unwrap()];
+        let mut live = Conversation::from_snapshot(snapshot(0, vec![], None)).unwrap();
+        live.apply(&frame(1, "turn.updated", json!({ "turn": turn })))
+            .unwrap();
+        let reloaded = Conversation::from_snapshot(initial.clone()).unwrap();
+        let mut paged = Conversation::from_snapshot(snapshot(2, vec![], Some(2))).unwrap();
+        paged.merge_older(initial);
+        let expected = reloaded.turn(id).unwrap().routine.as_ref().unwrap();
+        assert_eq!(expected.name, "Merged branch cleanup");
+        assert_eq!(live.turn(id).unwrap().routine.as_ref(), Some(expected));
+        assert_eq!(paged.turn(id).unwrap().routine.as_ref(), Some(expected));
     }
 
     #[test]

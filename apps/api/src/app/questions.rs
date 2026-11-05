@@ -37,8 +37,20 @@ pub const MAX_CHOICE_LABEL: usize = 120;
 pub const APPROVE: &str = "approve";
 pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
+pub const APPROVE_ROUTINE: &str = "approve_routine";
 /// The one standing grant a bot can hold.
 pub const DESTRUCTIVE_SCOPE: &str = "destructive";
+
+/// Where a standing approval of destructive actions applies. Neither ever
+/// covers external actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Standing {
+    /// Every request of the bot except routine runs and their tasks.
+    Bot,
+    /// Runs of one routine admitted with its current prompt.
+    Routine,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
@@ -90,8 +102,8 @@ impl Status {
 }
 
 /// The options of an approval card. Only a destructive action offers a
-/// standing grant.
-pub fn approval_choices(kind: Kind) -> Vec<Choice> {
+/// standing grant, and only the one `offer` names.
+pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
     let mut choices = vec![
         Choice {
             id: APPROVE.into(),
@@ -102,11 +114,16 @@ pub fn approval_choices(kind: Kind) -> Vec<Choice> {
             label: "Deny".into(),
         },
     ];
-    if kind == Kind::Destructive {
-        choices.push(Choice {
+    match (kind, offer) {
+        (Kind::Destructive, Some(Standing::Bot)) => choices.push(Choice {
             id: APPROVE_FOREVER.into(),
             label: "Always allow destructive actions".into(),
-        });
+        }),
+        (Kind::Destructive, Some(Standing::Routine)) => choices.push(Choice {
+            id: APPROVE_ROUTINE.into(),
+            label: "Always allow for this routine".into(),
+        }),
+        _ => {}
     }
     choices
 }
@@ -125,6 +142,8 @@ pub struct Approval {
 }
 
 /// What the bot asks: a question with options, or an action to approve.
+/// An approval's choices are those of an owner request; the gate replaces
+/// them with the standing grant the asking turn may receive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     pub kind: Kind,
@@ -237,7 +256,7 @@ impl Spec {
             kind,
             title,
             context: Some(action.to_owned()),
-            choices: approval_choices(kind),
+            choices: approval_choices(kind, Some(Standing::Bot)),
             approval: Some(Approval {
                 action: Action::Host {
                     host: action.to_owned(),
@@ -263,7 +282,7 @@ impl Spec {
             kind,
             title,
             context: Some(context),
-            choices: approval_choices(kind),
+            choices: approval_choices(kind, Some(Standing::Bot)),
             approval: Some(Approval {
                 action: Action::Tool {
                     tool: tool.to_owned(),

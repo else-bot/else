@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{APPROVE, APPROVE_FOREVER, DENY, Question};
+use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question};
 
 /// The owner's click on a pending card, until the turn's event settles it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +53,10 @@ fn outcome(question: &Question, bot_name: &str) -> String {
             (true, Some(APPROVE)) => "Approved once.".into(),
             (true, Some(APPROVE_FOREVER)) => {
                 format!("Approved, and destructive actions are always allowed for {bot_name}.")
+            }
+            (true, Some(APPROVE_ROUTINE)) => {
+                "Approved. Destructive actions are allowed for this routine's saved task on future runs."
+                    .into()
             }
             (true, Some(DENY)) => "Denied.".into(),
             _ => format!(
@@ -148,6 +152,9 @@ impl ElseApp {
         };
         submit.state = match result {
             Ok(()) => SubmitState::Recorded,
+            Err(ClientError::Api { code, message, .. }) if code == "routine_changed" => {
+                SubmitState::Failed(message)
+            }
             Err(ClientError::Api { status: 409, .. }) => SubmitState::Failed(
                 "This card was already answered, skipped, or withdrawn. Nothing changed.".into(),
             ),
@@ -182,6 +189,12 @@ impl ElseApp {
             || submit.is_some_and(QuestionSubmit::locks)
             || self.connection != Connection::Connected;
         let approval = question.is_approval();
+        let routine = view.conversation.as_ref().and_then(|c| {
+            c.turns_in_order()
+                .into_iter()
+                .find(|t| t.questions.iter().any(|q| q.id == id))
+                .and_then(|t| t.routine.as_ref())
+        });
         let mut card = v_flex()
             .w_full()
             .gap_2()
@@ -190,6 +203,7 @@ impl ElseApp {
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
+            .children(routine.map(|run| super::message_row::routine_banner(run, cx)))
             .child(note(heading(question, &bot_name)))
             .child(div().font_semibold().child(question.title.clone()));
         if let Some(context) = &question.context {
@@ -210,9 +224,18 @@ impl ElseApp {
                 "external" => "Approval covers exactly this action, once. Sending, posting, or \
                                paying is never allowed in advance."
                     .to_owned(),
-                _ => "Approve once covers exactly this action. Always allow lets this bot take \
+                _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => {
+                    "Always allow for this routine remembers destructive \
+                    approval for its saved task on future runs. Other routines and chat requests \
+                    still need approval. Changing the task clears this permission."
+                        .to_owned()
+                }
+                _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => {
+                    "Approve once covers exactly this action. Always allow lets this bot take \
                       destructive actions without asking."
-                    .to_owned(),
+                        .to_owned()
+                }
+                _ => "Approval covers exactly this action, once.".to_owned(),
             }));
         }
         let mut buttons = if approval {

@@ -10,6 +10,10 @@ Only work rooted in an owner message may use these tools: a turn answering the o
 
 To move a routine to another bot, for example one the main bot just created, the initiating bot delegates a task stating the complete prompt, schedule, and time zone. The receiving bot saves it as its own and replies with the saved routine. The initiating bot disables or deletes its own copy only after that reply confirms the save. An owner-rooted delegated task may also list, update, or delete the receiving bot's existing routines. Each saved run uses that bot's normal access in its owner conversation. No credentials move with the handoff.
 
+A run asks for approval like any owner request. On a destructive card from a run the owner may choose "Always allow for this routine". The current run and later runs of that routine then take destructive actions without asking, until the routine's prompt changes. A rename, a schedule change, or switching the routine off and on keeps the grant. Editing the prompt ends it, even when the edit is later undone. The bot's own "Always allow destructive actions" does not cover routine runs, and no grant covers external actions. See [decision 0002](decisions/0002-owner-questions.md).
+
+`GET /v1/bots/{bot_id}/permissions` includes active `routine_grants`. The owner revokes one with `DELETE /v1/bots/{bot_id}/permissions/routines/{routine_id}`. A run admitted before routine grants were introduced supports only one-time approval. Later runs offer the routine grant.
+
 Bot settings lists the conversation's routines under Model, each with its name, schedule, an on/off switch, and a delete button that asks for confirmation. Hovering a routine shows its full prompt, next run, and last run.
 
 The owner API supports:
@@ -30,7 +34,7 @@ The scheduler admits due routines during its scan, before it claims turns, and n
 
 A run is skipped, and recorded with its reason, when the routine's previous run has not finished, the bot's queue is full, or no provider is available. Otherwise it queues an ordinary turn in the owner conversation. The turn uses the bot's current provider and profile, as an owner message without a named provider would. It never changes the selected provider or stops the owner's work. Stop, deletion, restart reconciliation, and uncertain outcomes apply to it like any turn.
 
-The run's prompt is a hidden routine item. Snapshots, events, and the bot's history tools leave it out, and memory never records it as owner text. The provider receives it labeled as a scheduled routine run, with instructions to do the task and report what actually happened. The report is an ordinary assistant message in the conversation. A run that fails before any reply shows its error as the routine's last run.
+The run's prompt is a hidden routine item. Snapshots, events, and the bot's history tools leave it out, and memory never records it as owner text. The provider receives it labeled as a scheduled routine run, with instructions to do the task and report what actually happened. The desktop labels replies and approval cards with the routine's original name and scheduled time. A run that fails before any reply shows its error as the routine's last run.
 
 Turning a routine off stops future runs; a run already admitted finishes. Turning it on schedules the next occurrence after now. Setting the value a routine already has changes nothing. Renaming or editing a routine leaves earlier runs as they were admitted.
 

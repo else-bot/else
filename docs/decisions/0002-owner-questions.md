@@ -21,7 +21,14 @@ The shared lifecycle is shared in SQL, not in the row: whatever ends a turn with
 
 `owner_questions`: `kind` is `choice`, `destructive`, or `external`. `title` and optional `context` are what the card shows. `choices` is an ordered list of `{id, label}`, empty for open questions answered in chat. The application models each approval as a typed action paired with its argument hash. `action` records what an approval is for (a tool name and its exact arguments, or a host action the bot described); `action_hash` binds tool approvals to those arguments. `status` is `pending`, `answered`, `skipped` (a newer owner message replaced it; it was not permission), or `cancelled` (the turn ended for another reason). `answer` is the chosen id. `consumed_attempt` records the one tool call that used an approval, or the continuation that received an approved host action. Repeating a host permission request after delivery needs a new approval.
 
-`bot_permissions` holds the only standing grant: `destructive` for one bot, given by choosing "Always allow" on a destructive card and revocable through the owner API. External actions never get a standing grant.
+Destructive actions can be allowed in advance in two separate scopes. External actions never get a standing grant.
+
+- `bot_permissions` holds `destructive` for one bot, given by choosing "Always allow destructive actions" (`approve_forever`) on a card from an owner request. It covers the bot's turns except routine runs and the tasks they delegate.
+- `routine_grants` holds one row per routine, given by choosing "Always allow for this routine" (`approve_routine`) on a card a run of that routine showed. It records the routine's `prompt_revision`. Every run records the revision it was admitted with, and the grant covers a run only when the grant, the run, and the routine's current prompt share one revision and the routine is not deleted. It covers no other routine, owner request, or delegated task.
+
+The gate derives the scope from the turn's stored source: a `routine_runs` row for a run, otherwise the turn's origin. A model never names the routine. A card offers only the grant its turn's scope can receive. A run admitted before the latest prompt edit offers none.
+
+`routines.prompt_revision` increases on every prompt change, so editing a prompt ends its grant, and editing it back to earlier text does not restore an old grant. A rename or schedule change keeps it. When the prompt changes while a run's card waits, answering `approve_routine` is refused. The owner can still approve that one action with `approve`. Both grants are listed and revocable through the owner API.
 
 ### Enforcement
 
@@ -31,5 +38,6 @@ An owner message sent while a question is pending supersedes the turn and marks 
 
 ## Consequences
 
-- Delegated tasks have no owner conversation: they cannot ask, and must not take destructive or external actions unless the bot holds the standing destructive grant.
+- Delegated tasks have no owner conversation: they cannot ask, and must not take destructive or external actions unless the bot holds the standing destructive grant. A task a routine run delegated has no standing grant.
+- A bot's standing grant given before routine grants existed no longer covers its routine runs. Their first destructive action asks again and offers the routine grant.
 - The model still classifies its own actions. The API enforces the declared class and the one-shot binding, not the semantics of opaque commands.

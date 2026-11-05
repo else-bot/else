@@ -159,7 +159,7 @@ pub struct TurnInput {
 }
 
 /// The routine occurrence a turn runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutineRun {
     pub routine_id: Uuid,
     pub name: String,

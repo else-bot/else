@@ -19,7 +19,7 @@ pub use crate::app::providers::Selection;
 use crate::app::providers::{
     HistoryEntry, InputFile, JobReceipt, MemoryContext, SessionState, TurnInput,
 };
-use crate::app::questions::{APPROVE, APPROVE_FOREVER, Action, DENY};
+use crate::app::questions::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, Action, DENY};
 
 /// Byte budget for rebuilt history in one packet.
 pub const HISTORY_BUDGET: usize = 32 * 1024;
@@ -204,10 +204,11 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          another bot. Every computer_run, computer_job_start, computer_write_file, and computer_input call, and \
          every browser click or type, declares its effect: local (reads, or changes only \
          inside your computer or project directory that are easy to undo), destructive \
-         (deletes, overwrites, or changes something hard to undo, on your computer or the \
-         host), or external (sends a message or email, posts, edits, or publishes anything \
-         others can see, pays, or otherwise communicates with people or services outside). \
-         A call without effect is refused and never assumed local. A destructive or external \
+         (deletes, overwrites, or changes something hard to undo, on your computer, the host, \
+         or a remote service), or external (sends a message or email, posts, edits, or \
+         publishes anything others can see, pays, or otherwise communicates with people or \
+         services outside). Deleting or overwriting something remote, such as a git branch, \
+         repository, file, or record, is destructive, not external. A call without effect is refused and never assumed local. A destructive or external \
          call includes a clear purpose and context for the approval card: the recipient or \
          destination, the complete drafted message or proposed change, and what will happen. \
          Never include credentials in these details. A destructive or external \
@@ -220,9 +221,12 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          the exact action, end the attempt, and act only after the approval arrives, only on \
          that action. External actions are approved one at a time, always: a batch the owner \
          asked for, or a similar action they approved before, does not approve the next one. \
-         The owner may choose Always allow for destructive actions of this bot; a tool result \
-         tells you when that standing permission applies, and it never covers external \
-         actions. A new owner message while a card is pending skips the card; that is not \
+         On a destructive card the owner may choose Always allow. In an owner request it \
+         covers destructive actions of this bot, but never a scheduled routine run. In a \
+         routine run it covers destructive actions in the current and future runs of that \
+         one routine until its prompt changes, and nothing else: not other routines, not \
+         owner requests, not tasks you delegate. A tool result tells you when standing \
+         permission applies; it never covers external actions. A new owner message while a card is pending skips the card; that is not \
          approval. If the message grants what you asked, ask again through the card so the \
          approval is recorded. Never split an action to avoid a card, and never claim an \
          approval you did not receive.\n\n\
@@ -377,14 +381,30 @@ fn questions_block(input: &TurnInput) -> String {
                     }
                     Action::Host { host } => format!("{}\nHost action: {host}", question.title),
                 };
+                let standing = match answer {
+                    APPROVE_FOREVER => {
+                        " The owner also allowed destructive actions of this bot from now on, \
+                         outside routine runs."
+                    }
+                    APPROVE_ROUTINE => {
+                        " The owner also allowed destructive actions in this routine's runs from \
+                         now on, while its prompt stays unchanged; a tool result says when that \
+                         applies."
+                    }
+                    _ => "",
+                };
                 let next = match (answer, action) {
-                    (APPROVE | APPROVE_FOREVER, Action::Tool { tool, .. }) => format!(
-                        "Approved: call {tool} again with the original tool call arguments, once. \
-                         Typed text is redacted here; never substitute the summary into the call. \
-                         A different call needs a new card."
-                    ),
-                    (APPROVE | APPROVE_FOREVER, Action::Host { .. }) => {
-                        "Approved: do exactly this host action, once, then report.".to_owned()
+                    (APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE, Action::Tool { tool, .. }) => {
+                        format!(
+                            "Approved: call {tool} again with the original tool call arguments, \
+                             once. Typed text is redacted here; never substitute the summary \
+                             into the call. A different call needs a new card.{standing}"
+                        )
+                    }
+                    (APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE, Action::Host { .. }) => {
+                        format!(
+                            "Approved: do exactly this host action, once, then report.{standing}"
+                        )
                     }
                     (DENY, _) => format!(
                         "Denied: do not do this {kind} action or an equivalent; continue without it or ask what the owner wants."
