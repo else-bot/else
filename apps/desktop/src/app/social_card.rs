@@ -65,19 +65,26 @@ impl ElseApp {
                     .cloned()
                     .collect();
                 let form = cx.new(|cx| {
-                    let mut form = crate::socials::SocialsView::new(
-                        client,
-                        bots,
-                        Some((id, setup.provider, bot)),
-                        window,
-                        cx,
-                    );
                     if let Some(connection) =
                         setup.connection_id.filter(|_| setup.status == "connected")
                     {
-                        form.show_receipt(connection, setup.provider, window, cx);
+                        crate::socials::SocialsView::new_receipt(
+                            client,
+                            bots,
+                            (id, setup.provider, bot),
+                            connection,
+                            window,
+                            cx,
+                        )
+                    } else {
+                        crate::socials::SocialsView::new(
+                            client,
+                            bots,
+                            Some((id, setup.provider, bot)),
+                            window,
+                            cx,
+                        )
                     }
-                    form
                 });
                 let layout = cx.observe_in(&form, window, move |app, _, _, cx| {
                     app.remeasure_row(RowKey::SocialSetup(id), cx);

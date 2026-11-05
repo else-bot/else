@@ -7,6 +7,58 @@ use gpui_kit::component::{
 };
 
 impl SocialsView {
+    fn render_receipt(&self, receipt: &Receipt, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let card = v_flex()
+            .w_full()
+            .gap_3()
+            .p_4()
+            .rounded(theme.radius_lg)
+            .bg(theme.secondary);
+        let Receipt::Ready {
+            connection,
+            access,
+            destinations,
+        } = receipt
+        else {
+            return card.child(div().text_sm().child(match receipt {
+                Receipt::Loading { .. } => "Loading current connection access…",
+                _ => "This connection is no longer available. Manage connections in Settings → Socials.",
+            })).into_any_element();
+        };
+        let rights = if connection.state != "active" {
+            "Paused; no tools may use this connection"
+        } else if !access.permissions.read {
+            "No access"
+        } else if access.permissions.send {
+            "Read, message actions, and approved sends"
+        } else if access.permissions.write {
+            "Read and message actions"
+        } else {
+            "Read only"
+        };
+        card.child(
+            div()
+                .font_semibold()
+                .child(format!("{} · Current access", connection.provider.label())),
+        )
+        .child(div().text_sm().child(connection.display_name.clone()))
+        .child(
+            div()
+                .text_sm()
+                .child(format!("Conversations: {destinations}")),
+        )
+        .child(div().text_sm().child(format!("Access: {rights}")))
+        .child(div().text_sm().child(access.instructions.clone()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Manage access and instructions any time in Settings → Socials."),
+        )
+        .into_any_element()
+    }
+
     fn render_form(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(form) = &self.form else {
             return div().into_any_element();
@@ -19,63 +71,6 @@ impl SocialsView {
             .p_4()
             .rounded(theme.radius_lg)
             .bg(theme.secondary);
-        if form.phase == Phase::Connected {
-            if form.connection.is_none() {
-                return card.child(div().text_sm().child(if self.busy { "Loading current connection access…" } else { "This connection is no longer available. Manage connections in Settings → Socials." })).into_any_element();
-            }
-            let identity = form
-                .connection
-                .as_ref()
-                .map(|c| c.display_name.as_str())
-                .unwrap_or(provider.label());
-            let destinations = form
-                .destinations
-                .iter()
-                .filter(|d| form.selected.contains(&d.id))
-                .map(|d| d.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let access = if form
-                .connection
-                .as_ref()
-                .is_some_and(|c| c.state != "active")
-            {
-                "Paused; no tools may use this connection"
-            } else if !form.permissions.read {
-                "No access"
-            } else if form.permissions.send {
-                "Read, message actions, and approved sends"
-            } else if form.permissions.write {
-                "Read and message actions"
-            } else {
-                "Read only"
-            };
-            return card
-                .child(
-                    div()
-                        .font_semibold()
-                        .child(format!("{} · Current access", provider.label())),
-                )
-                .child(div().text_sm().child(identity.to_owned()))
-                .child(
-                    div()
-                        .text_sm()
-                        .child(format!("Conversations: {destinations}")),
-                )
-                .child(div().text_sm().child(format!("Access: {access}")))
-                .child(
-                    div()
-                        .text_sm()
-                        .child(form.instructions.read(cx).value().to_string()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("Manage access and instructions any time in Settings → Socials."),
-                )
-                .into_any_element();
-        }
         card = card.child(
             h_flex()
                 .justify_between()
@@ -83,7 +78,7 @@ impl SocialsView {
                 .child(div().font_semibold().child(format!(
                     "{} · {}",
                     provider.label(),
-                    if form.phase == Phase::Credential {
+                    if matches!(form.editor, Editor::Credential { .. }) {
                         "Connect"
                     } else {
                         "Access"
@@ -100,15 +95,16 @@ impl SocialsView {
                         .on_click(cx.listener(|view, _, window, cx| view.cancel(window, cx))),
                 ),
         );
-        if form.phase == Phase::Credential {
+        if let Editor::Credential { replacement } = &form.editor {
+            let replacing = replacement.is_some();
             card = card.child(div().text_sm().child(provider.token_help()))
                 .child(div().text_xs().text_color(theme.muted_foreground).child("The API stores the token encrypted and uses it to call the platform. The assistant never sees the token, and it stays out of chat history."))
                 .child(Button::new("social-token-help").focus_ring(false).cursor_pointer().ghost().xsmall().label(if provider == Provider::Telegram { "Open BotFather" } else { "Open Discord Developer Portal" }).on_click(move |_, _, cx| {
                     cx.open_url(match provider { Provider::Telegram => "https://t.me/BotFather", Provider::Discord => "https://discord.com/developers/applications" });
                 }))
                 .child(Input::new(&form.token).focus_ring(false).aria_label(format!("{} bot token", provider.label())).disabled(self.busy || !self.available))
-                .child(h_flex().justify_end().child(Button::new("social-connect").focus_ring(false).cursor_pointer().primary().small().label(if form.replacing { "Validate replacement token" } else { "Validate bot token" }).disabled(self.busy || !self.available).on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
-            if !form.replacing {
+                .child(h_flex().justify_end().child(Button::new("social-connect").focus_ring(false).cursor_pointer().primary().small().label(if replacing { "Validate replacement token" } else { "Validate bot token" }).disabled(self.busy || !self.available).on_click(cx.listener(|view, _, window, cx| view.connect(window, cx)))));
+            if !replacing {
                 let existing: Vec<_> = self
                     .connections
                     .iter()
@@ -141,21 +137,43 @@ impl SocialsView {
             }
             return card.into_any_element();
         }
-        if let Some(connection) = &form.connection {
-            card = card
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .child(connection.display_name.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{} · {}", connection.state, connection.health)),
-                );
-        }
+        let Some(access) = form.editor.access() else {
+            return match &form.editor {
+                Editor::Failed(connection) => {
+                    let connection = connection.clone();
+                    card.child(
+                        Button::new("social-retry-access")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .ghost()
+                            .small()
+                            .label("Retry loading access")
+                            .disabled(self.busy || !self.available)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.open(connection.clone(), window, cx)
+                            })),
+                    )
+                    .into_any_element()
+                }
+                _ => card
+                    .child(div().text_sm().child("Loading current connection access…"))
+                    .into_any_element(),
+            };
+        };
+        let connection = &access.connection;
+        card = card
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .child(connection.display_name.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{} · {}", connection.state, connection.health)),
+            );
         let mut bots = h_flex().gap_1().flex_wrap();
         for bot in &self.bots {
             if self.setup.is_some_and(|(_, assigned)| bot.id != assigned) {
@@ -168,8 +186,8 @@ impl SocialsView {
                     .cursor_pointer()
                     .small()
                     .ghost()
-                    .selected(form.selected_bot == Some(id))
-                    .toggled(form.selected_bot == Some(id))
+                    .selected(access.bot == Some(id))
+                    .toggled(access.bot == Some(id))
                     .label(bot.name.clone())
                     .disabled(self.busy || !self.available)
                     .on_click(cx.listener(move |view, _, window, cx| {
@@ -189,9 +207,9 @@ impl SocialsView {
                     .font_semibold()
                     .child("Choose conversations"),
             );
-        for destination in &form.destinations {
+        for destination in &access.destinations {
             let id = destination.id.clone();
-            let selected = form.selected.contains(&id);
+            let selected = access.draft.destinations.contains(&id);
             let name = format!(
                 "{} {} · {}",
                 if selected { "✓" } else { "+" },
@@ -214,35 +232,35 @@ impl SocialsView {
                     .label(name)
                     .disabled(self.busy || !self.available)
                     .on_click(cx.listener(move |view, _, _, cx| {
-                        if let Some(form) = &mut view.form
-                            && !form.selected.remove(&id)
+                        if let Some(access) =
+                            view.form.as_mut().and_then(|form| form.editor.access_mut())
                         {
-                            form.selected.insert(id.clone());
+                            if access.draft.destinations.contains(&id) {
+                                access.draft.destinations.retain(|selected| selected != &id);
+                            } else {
+                                access.draft.destinations.push(id.clone());
+                            }
                         }
                         cx.notify();
                     })),
             );
         }
-        if form.destinations.is_empty() {
+        if access.destinations.is_empty() {
             card = card.child(div().text_sm().text_color(theme.muted_foreground).child(match provider {
                 Provider::Telegram => "No chats received yet. Add this bot to your group, or send it a private message, then refresh. A Telegram bot cannot import your old personal chat history.",
                 Provider::Discord => "No channels are available. Add the bot to your server and allow View Channels, then refresh. Reading ordinary server messages may also require Message Content Intent.",
             }));
         }
-        if form.connection.is_some() {
-            card = card.child(
-                Button::new("social-refresh-destinations")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .xsmall()
-                    .label("Refresh conversations")
-                    .disabled(self.busy || !self.available)
-                    .on_click(
-                        cx.listener(|view, _, window, cx| view.refresh_destinations(window, cx)),
-                    ),
-            );
-        }
+        card = card.child(
+            Button::new("social-refresh-destinations")
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .xsmall()
+                .label("Refresh conversations")
+                .disabled(self.busy || !self.available)
+                .on_click(cx.listener(|view, _, window, cx| view.refresh_destinations(window, cx))),
+        );
         card = card.child(
             div()
                 .text_xs()
@@ -250,16 +268,20 @@ impl SocialsView {
                 .child("What may this assistant do?"),
         );
         for (key, label, enabled) in [
-            ("read", "Read selected conversations", form.permissions.read),
+            (
+                "read",
+                "Read selected conversations",
+                access.draft.permissions.read,
+            ),
             (
                 "write",
                 "Edit, delete, react, pin, and create threads",
-                form.permissions.write,
+                access.draft.permissions.write,
             ),
             (
                 "send",
                 "Send drafts after your approval",
-                form.permissions.send,
+                access.draft.permissions.send,
             ),
         ] {
             card = card.child(
@@ -296,21 +318,23 @@ impl SocialsView {
                     .cursor_pointer()
                     .ghost()
                     .xsmall()
-                    .selected(form.wake == policy)
-                    .toggled(form.wake == policy)
+                    .selected(access.draft.wake_policy == policy)
+                    .toggled(access.draft.wake_policy == policy)
                     .label(label)
-                    .disabled(self.busy || !self.available || !form.permissions.read)
+                    .disabled(self.busy || !self.available || !access.draft.permissions.read)
                     .on_click(cx.listener(move |view, _, _, cx| {
-                        if let Some(form) = &mut view.form {
-                            form.wake = policy;
-                            form.permissions.wake = policy != WakePolicy::Never;
+                        if let Some(access) =
+                            view.form.as_mut().and_then(|form| form.editor.access_mut())
+                        {
+                            access.draft.wake_policy = policy;
+                            access.draft.permissions.wake = policy != WakePolicy::Never;
                         }
                         cx.notify();
                     })),
             );
         }
-        let bot_name = form
-            .selected_bot
+        let bot_name = access
+            .bot
             .and_then(|id| self.bots.iter().find(|b| b.id == id))
             .map(|b| b.name.as_str())
             .unwrap_or("the assistant");
@@ -318,61 +342,62 @@ impl SocialsView {
             .child(div().text_xs().font_semibold().child(format!("What should {bot_name} do here?")))
             .child(Textarea::new(&form.instructions).bordered(false).aria_label(format!("What should {bot_name} do here?")).disabled(self.busy || !self.available))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Describe what matters, when to reply, and what to ask you first. These instructions guide behavior. The permissions above still limit every tool call, and new conversations stay excluded."))
-            .child(h_flex().justify_end().child(Button::new("social-save-access").focus_ring(false).cursor_pointer().primary().small().label(if self.setup.is_some() { "Connect to assistant" } else { "Save access" }).disabled(self.busy || !self.available || form.selected_bot.is_none() || (form.permissions.read && form.selected.is_empty())).on_click(cx.listener(|view, _, window, cx| view.save(window, cx)))));
-        if let Some(connection) = &form.connection {
-            let paused = connection.state != "active";
-            card = card.child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .child(
-                        Button::new("social-pause")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label(if paused {
-                                "Resume connection"
-                            } else {
-                                "Pause connection"
-                            })
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| view.active(window, cx))),
-                    )
-                    .child(
-                        Button::new("social-replace-token")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Replace token")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.clear(window, cx);
-                                if let Some(form) = &mut view.form {
-                                    form.phase = Phase::Credential;
-                                    form.replacing = true;
+            .child(h_flex().justify_end().child(Button::new("social-save-access").focus_ring(false).cursor_pointer().primary().small().label(if self.setup.is_some() { "Connect to assistant" } else { "Save access" }).disabled(self.busy || !self.available || access.bot.is_none() || (self.setup.is_some() && !access.draft.permissions.read) || (access.draft.permissions.read && access.draft.destinations.is_empty())).on_click(cx.listener(|view, _, window, cx| view.save(window, cx)))));
+        let paused = connection.state != "active";
+        card = card.child(
+            h_flex()
+                .gap_1()
+                .flex_wrap()
+                .child(
+                    Button::new("social-pause")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .ghost()
+                        .xsmall()
+                        .label(if paused {
+                            "Resume connection"
+                        } else {
+                            "Pause connection"
+                        })
+                        .disabled(self.busy || !self.available)
+                        .on_click(cx.listener(|view, _, window, cx| view.active(window, cx))),
+                )
+                .child(
+                    Button::new("social-replace-token")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .ghost()
+                        .xsmall()
+                        .label("Replace token")
+                        .disabled(self.busy || !self.available)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.clear(window, cx);
+                            if let Some(form) = &mut view.form {
+                                if let Some(connection) = form.editor.connection().cloned() {
+                                    form.editor = Editor::Credential {
+                                        replacement: Some(connection),
+                                    };
                                 }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("social-disconnect")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .xsmall()
-                            .label("Disconnect")
-                            .disabled(self.busy || !self.available)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if let Some(form) = &mut view.form {
-                                    form.confirm_disconnect = true;
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("social-disconnect")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .ghost()
+                        .xsmall()
+                        .label("Disconnect")
+                        .disabled(self.busy || !self.available)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            if let Some(form) = &mut view.form {
+                                form.confirm_disconnect = true;
+                            }
+                            cx.notify();
+                        })),
+                ),
+        );
         if form.confirm_disconnect {
             card = card
                 .child(
@@ -527,6 +552,10 @@ impl Render for SocialsView {
                     .child(notice.clone()),
             );
         }
-        root.child(self.render_form(cx))
+        if let Some(receipt) = &self.receipt {
+            root.child(self.render_receipt(receipt, cx))
+        } else {
+            root.child(self.render_form(cx))
+        }
     }
 }
