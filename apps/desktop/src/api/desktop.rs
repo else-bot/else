@@ -19,6 +19,9 @@ const MAX_PNG_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 4096;
 const MAX_PIXELS: u64 = 8 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest single text commit the viewer types; longer ones are refused
+/// with a notice instead of being truncated.
+pub const MAX_TEXT_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComputerState {
@@ -54,9 +57,14 @@ pub enum DesktopEvent {
     Notice(String),
 }
 
+enum Input {
+    Command(DesktopCommand),
+    Text(Box<str>),
+}
+
 #[derive(Clone)]
 pub struct DesktopCommands {
-    queue: mpsc::Sender<(u64, DesktopCommand)>,
+    queue: mpsc::Sender<(u64, Input)>,
     motion: watch::Sender<Option<(u64, DesktopCommand)>>,
     sequence: Arc<AtomicU64>,
     cancel: watch::Sender<bool>,
@@ -64,11 +72,22 @@ pub struct DesktopCommands {
 
 impl DesktopCommands {
     pub fn send_or_disconnect(&self, command: DesktopCommand) -> bool {
+        self.enqueue(Input::Command(command))
+    }
+
+    /// Queues committed text, which is dropped unless the desktop is in control
+    /// mode when its turn comes. Callers bound it by [`MAX_TEXT_CHARS`].
+    pub fn type_text(&self, text: &str) -> bool {
+        debug_assert!(text.chars().count() <= MAX_TEXT_CHARS);
+        text.is_empty() || self.enqueue(Input::Text(text.into()))
+    }
+
+    fn enqueue(&self, input: Input) -> bool {
         if *self.cancel.borrow() {
             return false;
         }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        if self.queue.try_send((sequence, command)).is_err() {
+        if self.queue.try_send((sequence, input)).is_err() {
             self.cancel.send_replace(true);
             return false;
         }
@@ -102,6 +121,18 @@ enum ServerEvent {
         code: String,
         message: String,
     },
+}
+
+/// The X11 keysym that types `ch`, or `None` for control characters the
+/// guest cannot receive as text.
+fn text_keysym(ch: char) -> Option<u32> {
+    Some(match ch {
+        '\n' | '\r' => 0xff0d,
+        '\t' => 0xff09,
+        ch if ch.is_control() => return None,
+        ch if (ch as u32) <= 0xff => ch as u32,
+        ch => 0x0100_0000 | ch as u32,
+    })
 }
 
 fn valid_dimensions(width: u32, height: u32) -> bool {
@@ -224,7 +255,7 @@ impl Client {
         &self,
         bot: Uuid,
         wake: bool,
-        mut commands: mpsc::Receiver<(u64, DesktopCommand)>,
+        mut commands: mpsc::Receiver<(u64, Input)>,
         mut motion: watch::Receiver<Option<(u64, DesktopCommand)>>,
         mut cancel: watch::Receiver<bool>,
         events: &mpsc::Sender<DesktopEvent>,
@@ -299,14 +330,25 @@ impl Client {
             };
         }
         let mut last_sequence = 0;
+        let mut typing: Option<std::vec::IntoIter<u32>> = None;
         loop {
             tokio::select! {
                 biased;
                 _ = events.closed() => return Ok(()),
                 _ = cancel.changed() => return Err("Desktop input stopped because its queue was full.".into()),
-                command = commands.recv() => {
-                    let Some((sequence, command)) = command else { return Ok(()) };
+                command = commands.recv(), if typing.is_none() => {
+                    let Some((sequence, input)) = command else { return Ok(()) };
                     last_sequence = sequence;
+                    let command = match input {
+                        Input::Command(command) => command,
+                        Input::Text(text) => {
+                            if mode == DesktopMode::Control {
+                                let keys: Vec<u32> = text.chars().filter_map(text_keysym).collect();
+                                typing = Some(keys.into_iter());
+                            }
+                            continue;
+                        },
+                    };
                     match &command {
                         DesktopCommand::Pointer { .. } | DesktopCommand::Key { .. }
                             if mode != DesktopMode::Control => continue,
@@ -315,7 +357,7 @@ impl Client {
                     let text = serde_json::to_string(&command).expect("desktop command serializes");
                     send!(Message::Text(text.into()));
                 },
-                changed = motion.changed() => {
+                changed = motion.changed(), if typing.is_none() => {
                     if changed.is_err() { return Ok(()); }
                     let pending = motion.borrow_and_update().clone();
                     if let Some((sequence, command)) = pending.filter(|(sequence, _)| *sequence > last_sequence) {
@@ -374,6 +416,21 @@ impl Client {
                             return Err("The desktop connection stopped responding.".into());
                         },
                         Ok(Some(Ok(_))) => {},
+                    }
+                },
+                () = std::future::ready(()), if typing.is_some() => {
+                    let next = typing.as_mut().and_then(Iterator::next);
+                    let Some(key) = next.filter(|_| mode == DesktopMode::Control) else {
+                        typing = None;
+                        continue;
+                    };
+                    if typing.as_ref().is_some_and(|keys| keys.len() == 0) {
+                        typing = None;
+                    }
+                    for down in [true, false] {
+                        let text = serde_json::to_string(&DesktopCommand::Key { key, down })
+                            .expect("desktop command serializes");
+                        send!(Message::Text(text.into()));
                     }
                 },
             }
@@ -475,12 +532,76 @@ mod tests {
         assert!(!*cancel_rx.borrow());
         assert!(matches!(
             rx.recv().await,
-            Some((_, DesktopCommand::Pointer { buttons: 0, .. }))
+            Some((
+                _,
+                Input::Command(DesktopCommand::Pointer { buttons: 0, .. })
+            ))
         ));
         assert!(matches!(
             rx.recv().await,
-            Some((_, DesktopCommand::Key { down: false, .. }))
+            Some((_, Input::Command(DesktopCommand::Key { down: false, .. })))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_long_text_commit_is_typed_in_order_before_later_input() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut received = Vec::new();
+            loop {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                if text.contains(r#""type":"mode""#) {
+                    ws.send(Message::Text(text.clone())).await.unwrap();
+                }
+                let done = received.len() > 1 && text == r#"{"type":"mode","mode":"control"}"#;
+                received.push(text.to_string());
+                if done {
+                    return received;
+                }
+            }
+        });
+        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let control = || DesktopCommand::Mode {
+            mode: DesktopMode::Control,
+        };
+        let watch = DesktopCommand::Mode {
+            mode: DesktopMode::Watch,
+        };
+        let commit = format!("{}é漢\n", "ab".repeat(60));
+        assert!(stream.commands.send_or_disconnect(control()));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Mode(DesktopMode::Control))
+        ));
+        assert!(stream.commands.type_text(&commit));
+        assert!(stream.commands.send_or_disconnect(DesktopCommand::Release));
+        assert!(stream.commands.send_or_disconnect(watch));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Mode(DesktopMode::Watch))
+        ));
+        assert!(stream.commands.type_text("ignored while watching"));
+        assert!(stream.commands.send_or_disconnect(control()));
+        let received = server.await.unwrap();
+
+        let tap = |key: u32| {
+            [true, false].map(|down| format!(r#"{{"type":"key","key":{key},"down":{down}}}"#))
+        };
+        let mut expected = vec![r#"{"type":"mode","mode":"control"}"#.to_owned()];
+        for _ in 0..60 {
+            expected.extend(tap(0x61));
+            expected.extend(tap(0x62));
+        }
+        expected.extend(tap(0xe9));
+        expected.extend(tap(0x0100_6f22));
+        expected.extend(tap(0xff0d));
+        expected.push(r#"{"type":"release"}"#.to_owned());
+        expected.push(r#"{"type":"mode","mode":"watch"}"#.to_owned());
+        expected.push(r#"{"type":"mode","mode":"control"}"#.to_owned());
+        assert_eq!(received, expected);
     }
 
     #[tokio::test]

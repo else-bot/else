@@ -9,6 +9,9 @@ use uuid::Uuid;
 
 use crate::api::{Client, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode};
 
+#[cfg(target_os = "macos")]
+mod text_input;
+
 actions!(computer_viewer, [GuestTab, GuestBackTab]);
 
 pub(super) fn bind_keys(cx: &mut App) {
@@ -53,6 +56,8 @@ pub(super) struct ComputerView {
     buttons: u8,
     keys: HashMap<String, u32>,
     modifiers: Modifiers,
+    #[cfg(target_os = "macos")]
+    marked_text: Option<String>,
     scroll: Point<f32>,
     _session: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -103,6 +108,8 @@ impl ComputerView {
             buttons: 0,
             keys: HashMap::new(),
             modifiers: Modifiers::default(),
+            #[cfg(target_os = "macos")]
+            marked_text: None,
             scroll: point(0., 0.),
             _session: None,
             _subscriptions: vec![blur, activation],
@@ -256,6 +263,10 @@ impl ComputerView {
 
     fn clear_input(&mut self) {
         self.keys.clear();
+        #[cfg(target_os = "macos")]
+        {
+            self.marked_text = None;
+        }
         self.buttons = 0;
         self.modifiers = Modifiers::default();
         self.scroll = point(0., 0.);
@@ -343,7 +354,6 @@ impl ComputerView {
     }
 
     fn image_area(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let mut area = div()
             .id("computer-screen")
             .relative()
@@ -377,11 +387,11 @@ impl ComputerView {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .text_color(theme.muted_foreground)
+                    .text_color(rgb(0xaaaaaa))
                     .child(div().opacity(0.55).child(
                         crate::avatar::bot_avatar("computer-avatar", self.avatar, px(56.)).still(),
                     ))
-                    .child(div().text_sm().text_color(theme.foreground).child(text))
+                    .child(div().text_sm().text_color(rgb(0xf5f5f5)).child(text))
                     .child(div().text_xs().child(hint)),
             );
         }
@@ -430,7 +440,7 @@ impl ComputerView {
                 .on_click(cx.listener(|view, _, _, cx| view.monitor(true, cx)));
         } else if self.controlling() {
             area = area
-                .cursor_crosshair()
+                .cursor_pointer()
                 .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, _cx| {
                     if let Some((x, y)) = screen_point(view.bounds, view.resolution, event.position)
                         && let Some(commands) = &view.commands
@@ -495,7 +505,22 @@ impl ComputerView {
                 move |bounds, _, cx| {
                     let _ = view.update(cx, |view, _| view.bounds = bounds);
                 },
-                |_, _, _, _| (),
+                {
+                    #[cfg(target_os = "macos")]
+                    let view = cx.entity();
+                    move |bounds, _, window, cx| {
+                        #[cfg(target_os = "macos")]
+                        if view.read(cx).controlling() {
+                            window.handle_input(
+                                &view.read(cx).focus.clone(),
+                                ElementInputHandler::new(bounds, view.clone()),
+                                cx,
+                            );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = (bounds, window, cx);
+                    }
+                },
             )
             .absolute()
             .inset_0()
@@ -568,6 +593,10 @@ impl Render for ComputerView {
             }))
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if view.controlling() {
+                    #[cfg(target_os = "macos")]
+                    if text_input::is_text(&event.keystroke) {
+                        return;
+                    }
                     view.key(&event.keystroke, true, cx);
                     window.prevent_default();
                     cx.stop_propagation();
