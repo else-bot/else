@@ -4,6 +4,7 @@
 //! started for the previous server can reach the new one.
 
 mod settings;
+mod updates;
 mod view;
 
 use settings::Presentation;
@@ -139,7 +140,7 @@ struct Setup {
     draft: Draft,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 2],
+    navigation_focus: [FocusHandle; 3],
     _attempt: Option<Task<()>>,
 }
 
@@ -150,6 +151,7 @@ pub struct Shell {
     active: Option<Active>,
     setup: Option<Setup>,
     settings_focus: FocusHandle,
+    updates: updates::View,
 }
 
 impl Shell {
@@ -181,6 +183,7 @@ impl Shell {
             .as_ref()
             .ok()
             .map(|local| LocalServer::key_state(&local.key()));
+        let updates = updates::View::new(&launch, &runtime, window, cx);
         let mut shell = Self {
             launch,
             key,
@@ -188,6 +191,7 @@ impl Shell {
             active: None,
             setup: None,
             settings_focus: cx.focus_handle(),
+            updates,
         };
         match loaded {
             Ok(Some(profile))
@@ -235,7 +239,7 @@ impl Shell {
             draft: Draft::new(),
             error,
             focus,
-            navigation_focus: [cx.focus_handle(), cx.focus_handle()],
+            navigation_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             _attempt: None,
         });
         cx.notify();
@@ -511,6 +515,7 @@ impl Shell {
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active) = &self.active {
+            self.updates.dismiss();
             self.setup = None;
             active
                 .app

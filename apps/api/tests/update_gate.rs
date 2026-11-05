@@ -23,6 +23,10 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
         .await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["running"]).await;
+    let busy = app.owner("GET", "/v1/maintenance/update", None).await;
+    assert_eq!(busy.status, StatusCode::OK, "{}", busy.body);
+    assert_eq!(busy.body["active_turns"], 1);
+    assert_eq!(busy.body["running_commands"], 0);
     let refused = app.owner("POST", "/v1/maintenance/update", None).await;
     assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
     assert_eq!(refused.body["error"]["code"], "busy");
@@ -53,6 +57,11 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     let again = app.owner("POST", "/v1/maintenance/update", None).await;
     assert_eq!(again.status, StatusCode::OK);
 
+    // The report works while the gate is held, and never reopens it.
+    let held_report = app.owner("GET", "/v1/maintenance/update", None).await;
+    assert_eq!(held_report.status, StatusCode::OK, "{}", held_report.body);
+    assert_eq!(held_report.body["active_turns"], 0);
+
     // New work waits for the new version; reads still work.
     let held = app
         .send(&bot, Uuid::new_v4(), "after the update", Some("synthetic"))
@@ -78,6 +87,8 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
     assert!(accepted.status.is_success(), "{}", accepted.body);
 
     // Owner only.
-    let anonymous = app.call("POST", "/v1/maintenance/update", None, None).await;
-    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    for method in ["GET", "POST"] {
+        let anonymous = app.call(method, "/v1/maintenance/update", None, None).await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED, "{method}");
+    }
 }

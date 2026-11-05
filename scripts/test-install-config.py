@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline checks for installer components, database configuration, and release switching."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -8,9 +9,11 @@ import plistlib
 import pty
 import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -691,6 +694,127 @@ class DotenvConfigTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((home / "data/else.sqlite3").is_file(), result.stdout + result.stderr)
+
+# The installer's real API checks and update gate, against a local responder
+# at the configured bind; only the service commands and the build are stubbed.
+GATE_HARNESS = DEFINITIONS + r"""
+elsebot() { echo "elsebot $1" >>"$ELSE_HOME/events"; }
+for step in refresh_provider_paths build_guest_image backup_if_migrating install_commands \
+    setup_service run_setup check_providers; do
+    eval "$step() { echo $step >>\"\$ELSE_HOME/events\"; }"
+done
+"$@"
+"""
+
+
+class Responder(ThreadingHTTPServer):
+    def __init__(self, host, family, status=200):
+        self.address_family = family
+        self.status = status
+        self.requests = []
+        super().__init__((host, 0), Handler)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def reply(self):
+        self.server.requests.append((self.command, self.path, self.headers.get("Authorization")))
+        status, body = 200, b'{"ok":true}'
+        if self.path == "/v1/maintenance/update":
+            status = self.server.status
+            body = (b'{"message":"2 bots are working"}' if status == 409
+                    else b'{"queued_turns":1,"background_jobs":0}')
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = reply
+
+    def log_message(self, *args):
+        pass
+
+
+class InstallerApiAddressTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home = Path(directory.name)
+        for path in ("config", "data", "versions/0.0.3", "versions/0.0.6"):
+            (self.home / path).mkdir(parents=True)
+        (self.home / "current").symlink_to("versions/0.0.3")
+        (self.home / "data/owner-token").write_text("default-token")
+
+    def serve(self, host="127.0.0.1", family=socket.AF_INET, status=200):
+        server = Responder(host, family, status)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, server.server_address[1]
+
+    def configure(self, bind, *extra):
+        (self.home / "config/.env").write_text("\n".join([f"ELSE_API_BIND={bind}", *extra, ""]))
+
+    def run_installer(self, *command, **overrides):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "USER": "tester",
+               "ELSE_HOME": str(self.home), **overrides}
+        return subprocess.run(["bash", "-c", GATE_HARNESS, "install.sh", *command], env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def gate(self, **overrides):
+        return self.run_installer("eval", "api_url; echo; api_running && prepare_running_api",
+                                  **overrides)
+
+    def assert_gate(self, server, result, url, token):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0], url)
+        self.assertEqual(server.requests, [("GET", "/healthz", None),
+                                           ("POST", "/v1/maintenance/update", f"Bearer {token}")])
+
+    def test_a_custom_ipv4_port_and_owner_key_file_are_used(self):
+        server, port = self.serve()
+        key = self.home / "elsewhere/key"
+        key.parent.mkdir()
+        key.write_text("file-token")
+        self.configure(f"127.0.0.1:{port}", f"OWNER_TOKEN_FILE={key}")
+        self.assert_gate(server, self.gate(), f"http://127.0.0.1:{port}", "file-token")
+
+    def test_a_wildcard_ipv4_bind_is_reached_on_loopback(self):
+        server, port = self.serve()
+        self.configure(f"0.0.0.0:{port}")
+        self.assert_gate(server, self.gate(), f"http://127.0.0.1:{port}", "default-token")
+
+    def test_ipv6_loopback_and_the_configured_data_directory_are_used(self):
+        server, port = self.serve("::1", socket.AF_INET6)
+        data = self.home / "other-data"
+        data.mkdir()
+        (data / "owner-token").write_text("data-token")
+        self.configure(f"[::1]:{port}", f"ELSE_DATA_DIR={data}")
+        self.assert_gate(server, self.gate(), f"http://[::1]:{port}", "data-token")
+
+    def test_a_wildcard_ipv6_bind_is_reached_on_loopback(self):
+        server, port = self.serve("::1", socket.AF_INET6)
+        self.configure(f"[::]:{port}")
+        result = self.run_installer("start_api")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"running on http://[::1]:{port}", result.stdout)
+        self.assertEqual(server.requests, [("GET", "/readyz", None)])
+
+    def test_without_a_configuration_the_installer_port_is_used(self):
+        server, port = self.serve()
+        result = self.gate(ELSE_API_PORT=str(port))
+        self.assert_gate(server, result, f"http://127.0.0.1:{port}", "default-token")
+
+    def test_busy_api_at_the_configured_bind_refuses_before_stopping(self):
+        server, port = self.serve(status=409)
+        self.configure(f"127.0.0.1:{port}", f"ELSE_BOTS_DIR={self.home}/bots")
+        result = self.run_installer("install_server", "update", "0.0.3", "0.0.6")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("not updating: 2 bots are working", result.stderr)
+        self.assertEqual(server.requests[-1][:2], ("POST", "/v1/maintenance/update"))
+        events = (self.home / "events").read_text() if (self.home / "events").exists() else ""
+        self.assertNotIn("elsebot stop", events)
+        self.assertEqual(os.readlink(self.home / "current"), "versions/0.0.3")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ use gpui_kit::component::{
 pub(super) enum SettingsSection {
     Server,
     Email,
+    Updates,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,9 +103,13 @@ impl Shell {
             setup.navigation_focus[match section {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
+                SettingsSection::Updates => 2,
             }]
             .focus(window, cx);
             cx.notify();
+        }
+        if section == SettingsSection::Updates {
+            self.update_action(super::updates::Action::RefreshWork, cx);
         }
     }
 
@@ -163,10 +168,27 @@ impl Shell {
                 IconName::Mail,
                 SettingsSection::Email,
                 &setup.navigation_focus[1],
+            ))
+            .child(nav_item(
+                "settings-updates",
+                "Updates",
+                IconName::RefreshCw,
+                SettingsSection::Updates,
+                &setup.navigation_focus[2],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
             SettingsSection::Email => email_settings(cx),
+            SettingsSection::Updates => self.render_updates(cx),
+        };
+        let body = if section == SettingsSection::Updates {
+            div().size_full().p_6().child(body).into_any_element()
+        } else {
+            div()
+                .h_full()
+                .child(div().p_8().w_full().child(body))
+                .overflow_y_scrollbar()
+                .into_any_element()
         };
         v_flex()
             .id("app-settings")
@@ -226,12 +248,12 @@ impl Shell {
                             .id(match section {
                                 SettingsSection::Server => "settings-server-content",
                                 SettingsSection::Email => "settings-email-content",
+                                SettingsSection::Updates => "settings-updates-content",
                             })
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(div().p_8().w_full().child(body))
-                            .overflow_y_scrollbar(),
+                            .child(body),
                     ),
             )
             .into_any_element()
@@ -564,7 +586,7 @@ fn settings_row(
         )
 }
 
-fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {
+pub(super) fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {
     v_flex()
         .gap_2()
         .child(

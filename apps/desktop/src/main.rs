@@ -13,6 +13,7 @@ mod model;
 mod preferences;
 mod profile_picker;
 mod sidebar;
+mod updates;
 
 use gpui_kit::*;
 
@@ -63,7 +64,12 @@ gpui_kit::assets::icon_assets!(
         MessageSquareOff,
         Folder,
         ArrowRight,
-        CalendarX
+        CalendarX,
+        RefreshCw,
+        Download,
+        Terminal,
+        ShieldCheck,
+        RotateCw
     ]
 );
 
