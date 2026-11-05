@@ -34,7 +34,7 @@ if [ "$(uname -s)" != Darwin ]; then
 fi
 
 echo "--- install v0.0.1 through a pipe"
-cat "$SOURCE/install.sh" | ELSE_VERSION=0.0.1 bash -s -- --yes --skip-guest-image 2>&1 | tee "$H-install.log"
+cat "$SOURCE/install.sh" | ELSE_VERSION=0.0.1 bash -s -- --yes --from-source --skip-guest-image 2>&1 | tee "$H-install.log"
 [ "$(readlink $H/current)" = versions/0.0.1 ] || fail "current is $(readlink $H/current)"
 cache="${ELSE_INSTALL_TEST_CACHE:-$H}"
 for f in "$H/versions/0.0.1/bin/else-api" "$H/versions/0.0.1/bin/else-desktop" "$cli" \
@@ -81,7 +81,7 @@ wait_health 0.0.1
 bot="$(api -X POST $URL/v1/bots -d "{\"request_id\":\"$(uuid)\",\"name\":\"Worker\"}" | jq -r .bot.id)"
 busy="$(send '[synthetic:hang]')"
 wait_status "$busy" running
-if "$cli" update --yes --skip-guest-image >"$H-refused.log" 2>&1; then
+if "$cli" update --yes --from-source --skip-guest-image >"$H-refused.log" 2>&1; then
 	cat "$H-refused.log"
 	fail "updated while busy"
 fi
@@ -98,7 +98,7 @@ api -X POST "$URL/v1/bots/$bot/cancel" -d "{\"request_id\":\"$(uuid)\"}" >/dev/n
 wait_status "$busy" interrupted
 done_before="$(send 'before the update')"
 wait_status "$done_before" completed
-"$cli" update --yes --skip-guest-image 2>&1 | tee "$H-update.log"
+"$cli" update --yes --from-source --skip-guest-image 2>&1 | tee "$H-update.log"
 [ "$(readlink $H/current)" = versions/0.0.2 ] || fail "current is $(readlink $H/current)"
 wait_health 0.0.2
 [ -d $H/versions/0.0.1 ] || fail "the previous release was not kept"
@@ -111,9 +111,9 @@ wait_status "$after" completed
 check_db
 
 echo "--- running it again changes nothing"
-"$cli" update --yes --skip-guest-image 2>&1 | tee "$H-again.log"
+"$cli" update --yes --from-source --skip-guest-image 2>&1 | tee "$H-again.log"
 grep -q "0.0.2 is installed; checking" "$H-again.log" || fail "not detected as current"
-grep -q "already built" "$H-again.log" || fail "rebuilt"
+grep -q "already installed" "$H-again.log" || fail "rebuilt"
 if [ "$(uname -s)" = Darwin ]; then
     grep -q "not needed (no guest image)" "$H-again.log" || fail "the installer required Docker without a guest image"
 else

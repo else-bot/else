@@ -109,7 +109,7 @@ S3 replication checks need Docker with Compose. This command owns and removes it
 scripts/test-replication.py
 ```
 
-For installer coverage on Linux, run `scripts/test-install.sh` with a distribution such as `debian-12`, `ubuntu-24.04`, or `arch`. It installs and updates disposable containers. Native ARM64 application and installer lanes run with:
+For prebuilt installer coverage, run `python3 scripts/test-install-downloads.py`. It serves disposable release archives locally and checks platform selection, checksums, updates, and source-build opt-in without installing system packages. For source-build installer coverage on Linux, run `scripts/test-install.sh` with a distribution such as `debian-12`, `ubuntu-24.04`, or `arch`. It installs and updates disposable containers with `--from-source`. Native ARM64 application and installer lanes run with:
 
 ```sh
 python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64
@@ -179,7 +179,7 @@ After the merge, `release-tag` builds the desktop and API on native runners for 
 
 All three builds must pass their binary version checks before the workflow verifies the guest image and tags the release commit. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
 
-Rerun a failed `release-tag` run to resume publication at the same commit. Ordinary pushes after a version is tagged skip the binary builds. The workflow builds before tagging because [tags pushed with `GITHUB_TOKEN` do not trigger another workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow). Installers still build from source and discover updates from the version tag.
+Rerun a failed `release-tag` run to resume publication at the same commit. Ordinary pushes after a version is tagged skip the binary builds. The workflow builds before tagging because [tags pushed with `GITHUB_TOKEN` do not trigger another workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow). The installer discovers the latest published binary release through `releases/latest/download/SHA256SUMS`, so a tag with unfinished uploads is not installed. It downloads only the selected components, verifies the checksums and executable versions, and keeps the existing backup and rollback flow. `--from-source` uses version tags and a private Rust toolchain instead; use it for older releases without binary assets. `ELSE_RELEASES_URL` overrides the repository's GitHub releases URL for local fixtures or another release server.
 
 To package a local native release build, use the matching platform:
 

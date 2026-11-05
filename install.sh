@@ -10,6 +10,7 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
   --both               the server and the app (the default on a fresh machine)
   --server-only        the server only (home hardware or a VPS)
   --app-only           the app only, connecting to a server elsewhere
+  --from-source        build locally instead of downloading release binaries
   --autostart          start the API by itself: at boot (Linux) or at login (macOS)
   --no-autostart       only start it with: elsebot start
   --skip-guest-image   do not download the guest VM image (bot computers then use a plain image)
@@ -32,6 +33,7 @@ COMPONENTS=""
 COMPONENTS_FLAG=""
 SKIP_GUEST=0
 AUTOSTART="${ELSE_AUTOSTART:-}"
+FROM_SOURCE=0
 ARGS=("$@")
 
 SRC="$ELSE_HOME/src"
@@ -252,7 +254,7 @@ install_packages() {
 
 ensure_bootstrap_tools() {
 	if [ "$DISTRO" = macos ]; then
-		have git || die "git is missing: run 'xcode-select --install', then try again"
+		have git || die "git is required to fetch the release's installation helpers"
 		return
 	fi
 	local missing
@@ -265,15 +267,21 @@ ensure_bootstrap_tools() {
 }
 
 apt_packages() {
-	local list="build-essential pkg-config curl ca-certificates git jq tar gzip sqlite3"
+	local list="curl ca-certificates git jq tar gzip sqlite3"
+	if [ "$FROM_SOURCE" = 1 ]; then list="$list build-essential pkg-config"; fi
 	if want_app; then
-		list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
+		if [ "$FROM_SOURCE" = 1 ]; then
+			list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
+		else
+			list="$list libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxcb1 libx11-xcb1 libx11-6 libfontconfig1 libfreetype6 libvulkan1 libzstd1"
+		fi
 	fi
 	echo "$list"
 }
 
 pacman_packages() {
-	local list="base-devel pkgconf curl ca-certificates git jq tar gzip sqlite"
+	local list="curl ca-certificates git jq tar gzip sqlite"
+	if [ "$FROM_SOURCE" = 1 ]; then list="$list base-devel pkgconf"; fi
 	if want_app; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
@@ -384,18 +392,56 @@ ensure_msb() {
 	ok "msb $("$MSB" --version | awk '{print $2}')"
 }
 
+releases_url() {
+	if [ -n "${ELSE_RELEASES_URL:-}" ]; then
+		printf '%s\n' "${ELSE_RELEASES_URL%/}"
+		return
+	fi
+	local repo="${REPO_URL%.git}"
+	case "$repo" in
+	https://github.com/*) ;;
+	git@github.com:*) repo="https://github.com/${repo#git@github.com:}" ;;
+	*) die "set ELSE_RELEASES_URL for this repository, or use --from-source" ;;
+	esac
+	printf '%s/releases\n' "$repo"
+}
+
+download() {
+	curl --retry 3 --connect-timeout 15 -fsSL "$1" -o "$2"
+}
+
+release_platform() {
+	case "$DISTRO/$ARCH" in
+	macos/aarch64) echo macos-arm64 ;;
+	macos/*) die "prebuilt macOS releases require Apple silicon" ;;
+	*/x86_64) echo linux-amd64 ;;
+	*/aarch64) echo linux-arm64 ;;
+	*) die "no release binaries for $DISTRO/$ARCH" ;;
+	esac
+}
+
 resolve_release() {
 	if [ -n "$WANT_VERSION" ]; then
 		WANT_VERSION="${WANT_VERSION#v}"
-		return
+	elif [ "$FROM_SOURCE" = 0 ]; then
+		local checksums base
+		base="$(releases_url)"
+		checksums="$(mktemp)"
+		if ! download "$base/latest/download/SHA256SUMS" "$checksums"; then
+			rm -f "$checksums"
+			die "the latest published release has no downloadable binaries; use --from-source for older releases"
+		fi
+		WANT_VERSION="$(sed -n 's/^[0-9a-f]*  else-api-v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)-linux-amd64\.tar\.gz$/\1/p' "$checksums")"
+		rm -f "$checksums"
+	else
+		local tags
+		tags="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
+			die "cannot reach $REPO_URL"
+		WANT_VERSION="$(printf '%s\n' "$tags" |
+			sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' |
+			sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
 	fi
-	local tags
-	tags="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
-		die "cannot reach $REPO_URL"
-	WANT_VERSION="$(printf '%s\n' "$tags" |
-		sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' |
-		sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
-	[ -n "$WANT_VERSION" ] || die "no else.bot release found at $REPO_URL (tags vX.Y.Z)"
+	[[ "$WANT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot resolve a release version (expected X.Y.Z)"
 }
 
 fetch_source() {
@@ -430,7 +476,44 @@ source_version() {
 	sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1
 }
 
-build_release() {
+download_release() (
+	local version="$1" platform base tmp pkg archive hash member actual
+	shift
+	platform="$(release_platform)"
+	base="$(releases_url)/download/v$version"
+	mkdir -p "$VERSIONS"
+	tmp="$(mktemp -d "$VERSIONS/.download-$version.XXXXXX")"
+	trap 'rm -rf "$tmp"' EXIT
+	mkdir -p "$tmp/bin"
+	download "$base/SHA256SUMS" "$tmp/SHA256SUMS" ||
+		die "cannot download checksums for v$version; use --from-source if this release has no binaries"
+	for pkg in "$@"; do
+		archive="$pkg-v$version-$platform.tar.gz"
+		hash="$(awk -v name="$archive" '$2 == name {print $1}' "$tmp/SHA256SUMS")"
+		[[ "$hash" =~ ^[0-9a-f]{64}$ ]] || die "missing or invalid checksum for $archive"
+		info "Downloading $archive"
+		download "$base/$archive" "$tmp/$archive" || die "cannot download $archive"
+		if [ "$DISTRO" = macos ]; then
+			(cd "$tmp" && printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -) || die "checksum verification failed for $archive"
+		else
+			(cd "$tmp" && printf '%s  %s\n' "$hash" "$archive" | sha256sum -c -) || die "checksum verification failed for $archive"
+		fi
+		member="$pkg"
+		if [ "$DISTRO" = macos ] && [ "$pkg" = else-desktop ]; then
+			member="else.bot.app/Contents/MacOS/else-desktop"
+		fi
+		tar -xOzf "$tmp/$archive" "$member" >"$tmp/bin/$pkg" || die "the archive has no $member"
+		chmod 755 "$tmp/bin/$pkg"
+		actual="$("$tmp/bin/$pkg" --version)" || die "cannot run $pkg on this host"
+		[ "$actual" = "$pkg $version" ] || die "$pkg reports '$actual', expected '$pkg $version'"
+	done
+	mkdir -p "$VERSIONS/$version/bin"
+	for pkg in "$@"; do
+		mv -f "$tmp/bin/$pkg" "$VERSIONS/$version/bin/$pkg"
+	done
+)
+
+install_release() {
 	local version="$1" dest="$VERSIONS/$1" pkg missing=""
 	local built_profile output="$BUILD_PROFILE"
 	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
@@ -441,11 +524,19 @@ build_release() {
 			missing="$missing $pkg"
 		fi
 	done
-	step "Build else.bot $version"
+	step "Install else.bot $version"
 	if [ -z "$missing" ]; then
-		ok "already built ($dest)"
+		ok "already installed ($dest)"
 		return
 	fi
+	if [ "$FROM_SOURCE" = 0 ]; then
+		# shellcheck disable=SC2086
+		download_release "$version" $missing
+		printf '%s\n' release >"$dest/.build-profile"
+		ok "downloaded into $dest"
+		return
+	fi
+	ensure_rust
 	info "Building${missing} ($BUILD_PROFILE); the first build takes several minutes"
 	local args="" log="$LOGS/build-$version.log"
 	for pkg in $missing; do args="$args -p $pkg"; done
@@ -855,6 +946,12 @@ check_providers() {
 
 
 macos_prerequisites() {
+	if [ "$FROM_SOURCE" = 0 ]; then
+		if want_app; then
+			python3 --version >/dev/null 2>&1 || die "Python 3 is required to install the macOS app bundle"
+		fi
+		return
+	fi
 	step "Xcode"
 	if ! xcode-select -p >/dev/null 2>&1; then
 		xcode-select --install >/dev/null 2>&1 || true
@@ -908,14 +1005,13 @@ stage2() {
 		linux_packages
 		if want_server; then linux_access; fi
 	fi
-	ensure_rust
 	if want_server; then
 		decide_guest_image
 		if [ "$NO_MSB" != 1 ]; then ensure_msb; fi
 	else
 		GUEST_IMAGE_STATE=skip
 	fi
-	build_release "$target"
+	install_release "$target"
 	if want_server; then
 		install_server "$mode" "$installed" "$target"
 	else
@@ -1020,6 +1116,7 @@ main() {
 		--both) set_components_flag both ;;
 		--server-only) set_components_flag server ;;
 		--app-only) set_components_flag app ;;
+		--from-source) FROM_SOURCE=1 ;;
 		--autostart) AUTOSTART=1 ;;
 		--no-autostart) AUTOSTART=0 ;;
 		--skip-guest-image) SKIP_GUEST=1 ;;
@@ -1029,15 +1126,20 @@ main() {
 		shift
 	done
 	detect_platform
-
+	if [ "$FROM_SOURCE" = 0 ]; then
+		release_platform >/dev/null
+		[ "$BUILD_PROFILE" = release ] || die "ELSE_INSTALL_TEST_PROFILE requires --from-source"
+	fi
+	printf '%selse.bot installer%s\n' "$BOLD" "$RESET"
+	info "System: $DISTRO_NAME ($ARCH)"
 	if [ "${ELSE_INSTALL_STAGE:-1}" != 2 ]; then
-		printf '%selse.bot installer%s\n' "$BOLD" "$RESET"
-		info "System: $DISTRO_NAME ($ARCH)"
 		ensure_bootstrap_tools
 		resolve_release
 		fetch_source
-		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
-		exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		if [ "$FROM_SOURCE" = 0 ] && bash "$SRC/install.sh" --help 2>/dev/null | grep -q -- '--from-source'; then
+			export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
+			exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		fi
 	fi
 
 	mkdir -p "$LOGS"
@@ -1045,4 +1147,4 @@ main() {
 	summary
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then main "$@"; fi
