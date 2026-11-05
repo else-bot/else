@@ -14,6 +14,7 @@ use gpui_kit::component::{
 pub(super) enum SettingsSection {
     Server,
     Email,
+    Backups,
     Updates,
 }
 
@@ -68,9 +69,16 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
+            let height = if shell.upgrade().is_some_and(|shell| {
+                shell.read(cx).settings_section() == Some(SettingsSection::Backups)
+            }) {
+                px(760.)
+            } else {
+                px(560.)
+            };
             dialog
                 .w((viewport.width - px(64.)).min(px(1040.)))
-                .h((viewport.height - px(64.)).min(px(560.)))
+                .h((viewport.height - px(64.)).min(height))
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -103,10 +111,14 @@ impl Shell {
             setup.navigation_focus[match section {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
-                SettingsSection::Updates => 2,
+                SettingsSection::Backups => 2,
+                SettingsSection::Updates => 3,
             }]
             .focus(window, cx);
             cx.notify();
+        }
+        if section == SettingsSection::Backups && self.backups.is_none() {
+            self.open_backups(window, cx);
         }
         if section == SettingsSection::Updates {
             self.update_action(super::updates::Action::RefreshWork, cx);
@@ -175,18 +187,28 @@ impl Shell {
                 &setup.navigation_focus[1],
             ))
             .child(nav_item(
+                "settings-backups",
+                "Backups",
+                IconName::CloudUpload,
+                SettingsSection::Backups,
+                &setup.navigation_focus[2],
+            ))
+            .child(nav_item(
                 "settings-updates",
                 "Updates",
                 IconName::RefreshCw,
                 SettingsSection::Updates,
-                &setup.navigation_focus[2],
+                &setup.navigation_focus[3],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
             SettingsSection::Email => email_settings(cx),
+            SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
-        let body = if section == SettingsSection::Updates {
+        let body = if section == SettingsSection::Backups {
+            body
+        } else if section == SettingsSection::Updates {
             div().size_full().p_6().child(body).into_any_element()
         } else {
             div()
@@ -253,6 +275,7 @@ impl Shell {
                             .id(match section {
                                 SettingsSection::Server => "settings-server-content",
                                 SettingsSection::Email => "settings-email-content",
+                                SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })
                             .flex_1()

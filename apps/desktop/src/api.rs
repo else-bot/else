@@ -17,6 +17,8 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 mod attachments;
+mod backups;
+pub use backups::*;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;

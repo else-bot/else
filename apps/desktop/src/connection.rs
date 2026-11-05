@@ -3,6 +3,7 @@
 //! owner token, and saving replaces the whole messaging view, so nothing
 //! started for the previous server can reach the new one.
 
+mod backups;
 mod settings;
 mod updates;
 mod view;
@@ -115,6 +116,7 @@ async fn verify(profile: Profile, client: Arc<Client>) -> Result<Verified, Strin
 
 struct Active {
     profile: Profile,
+    client: Arc<Client>,
     app: Entity<ElseApp>,
     _app: Subscription,
 }
@@ -136,7 +138,7 @@ struct Setup {
     draft: Draft,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 3],
+    navigation_focus: [FocusHandle; 4],
     _attempt: Option<Task<()>>,
 }
 
@@ -148,6 +150,7 @@ pub struct Shell {
     setup: Option<Setup>,
     settings_focus: FocusHandle,
     updates: updates::View,
+    backups: Option<backups::View>,
 }
 
 impl Shell {
@@ -188,6 +191,7 @@ impl Shell {
             setup: None,
             settings_focus: cx.focus_handle(),
             updates,
+            backups: None,
         };
         match loaded {
             Ok(Some(profile))
@@ -235,7 +239,7 @@ impl Shell {
             draft: Draft::new(),
             error,
             focus,
-            navigation_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+            navigation_focus: std::array::from_fn(|_| cx.focus_handle()),
             _attempt: None,
         });
         cx.notify();
@@ -259,10 +263,12 @@ impl Shell {
             .as_ref()
             .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
             .unwrap_or_default();
-        let app = cx.new(|cx| ElseApp::new(client, preferences, window, cx));
+        self.backups = None;
+        let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
         let observer = cx.observe(&app, |_, _, cx| cx.notify());
         self.active = Some(Active {
             profile,
+            client,
             app,
             _app: observer,
         });
@@ -510,6 +516,7 @@ impl Shell {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active) = &self.active {
             self.updates.dismiss();
+            self.backups = None;
             self.setup = None;
             active
                 .app
