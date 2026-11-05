@@ -158,7 +158,6 @@ impl ProfilePicker {
                         .small()
                         .w_full()
                         .px_3()
-                        .py_2()
                         .disabled(self.disabled || !provider.cli_available)
                         .accessibility_label(format!("{} · {}", model_label(model), provider.label))
                         .child(
