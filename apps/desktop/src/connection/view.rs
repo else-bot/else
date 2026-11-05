@@ -54,13 +54,16 @@ impl Shell {
             )
             .child(div().flex_1())
             .child(
-                Button::new("server-change")
+                Button::new("app-settings-open")
                     .focus_ring(false)
+                    .track_focus(&self.settings_focus)
                     .cursor_pointer()
-                    .label("Change server")
+                    .icon(IconName::Settings)
+                    .label("Settings")
+                    .tooltip_with_action("Settings", &OpenAppSettings, Some(SHELL_CONTEXT))
                     .xsmall()
                     .ghost()
-                    .on_click(cx.listener(|shell, _, window, cx| shell.change_server(window, cx))),
+                    .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),
             );
         if cfg!(target_os = "macos") {
             return TitleBar::new().pr_2().child(content).into_any_element();
@@ -87,18 +90,6 @@ impl Shell {
             Page::Welcome => self.render_welcome(setup, &theme, cx),
             Page::Remote(form) => self.render_remote(setup, form, &theme, cx),
         };
-        let mut panel = panel;
-        if self.active.is_some() {
-            panel = panel.child(
-                Button::new("connection-cancel")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Cancel")
-                    .ghost()
-                    .w_full()
-                    .on_click(cx.listener(|shell, _, window, cx| shell.cancel(window, cx))),
-            );
-        }
         h_flex()
             .size_full()
             .items_stretch()
@@ -123,7 +114,12 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_welcome(&self, setup: &Setup, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_welcome(
+        &self,
+        setup: &Setup,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let busy = setup.draft.busy();
         let failure = match &setup.draft.check {
             Check::Failed(err) => Some(err.clone()),
@@ -297,26 +293,29 @@ impl Shell {
                     .disabled(busy.is_some())
                     .on_click(cx.listener(|shell, _, window, cx| shell.start_local(window, cx))),
             )
-            .child(
-                Button::new("connection-edit")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Edit configuration")
-                    .w_full()
-                    .h(px(40.))
-                    .mt(px(9.))
-                    .disabled(busy.is_some())
-                    .on_click(
-                        cx.listener(|shell, _, window, cx| shell.open_remote(None, window, cx)),
-                    ),
-            )
-            .child(note(
-                "Use Edit configuration to connect to a server on another machine.",
-                theme,
-            ))
+            .when(setup.presentation == Presentation::Onboarding, |panel| {
+                panel
+                    .child(
+                        Button::new("connection-edit")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label("Edit configuration")
+                            .w_full()
+                            .h(px(40.))
+                            .mt(px(9.))
+                            .disabled(busy.is_some())
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.open_remote(None, window, cx)
+                            })),
+                    )
+                    .child(note(
+                        "Use Edit configuration to connect to a server on another machine.",
+                        theme,
+                    ))
+            })
     }
 
-    fn render_remote(
+    pub(super) fn render_remote(
         &self,
         setup: &Setup,
         form: &RemoteForm,
@@ -324,6 +323,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Div {
         let busy = setup.draft.busy().is_some();
+        let settings = matches!(setup.presentation, Presentation::Settings(_));
         let field = |label: &'static str, input: AnyElement, hint: &'static str| {
             v_flex()
                 .gap(px(6.))
@@ -342,21 +342,31 @@ impl Shell {
             _ => setup.error.clone(),
         };
         v_flex()
-            .child(
-                div().pb(px(16.)).child(
-                    Button::new("connection-back")
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("Back to local setup")
-                        .icon(IconName::ChevronLeft)
-                        .ghost()
-                        .small()
-                        .on_click(
-                            cx.listener(|shell, _, window, cx| shell.back_to_welcome(window, cx)),
-                        ),
-                ),
-            )
-            .child(heading("Connect to a remote server".into(), theme))
+            .when(!settings, |panel| {
+                panel.child(
+                    div().pb(px(16.)).child(
+                        Button::new("connection-back")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label("Back to local setup")
+                            .icon(IconName::ChevronLeft)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.back_to_welcome(window, cx)
+                            })),
+                    ),
+                )
+            })
+            .child(heading(
+                if settings {
+                    "Connection details"
+                } else {
+                    "Connect to a remote server"
+                }
+                .into(),
+                theme,
+            ))
             .child(intro(
                 "Use the address and owner key from the machine running your else.bot server.",
                 theme,
@@ -365,6 +375,7 @@ impl Shell {
                 "Server address",
                 Input::new(&form.origin)
                     .focus_ring(false)
+                    .aria_label("Server address")
                     .into_any_element(),
                 "Use an HTTPS address, or a local SSH tunnel.",
             ))
@@ -372,6 +383,7 @@ impl Shell {
                 "Owner key",
                 Input::new(&form.token)
                     .focus_ring(false)
+                    .aria_label("Owner key")
                     .mask_toggle()
                     .into_any_element(),
                 "On your server, open ~/.else/data/owner-token.",
@@ -385,6 +397,8 @@ impl Shell {
                     .cursor_pointer()
                     .label(if busy {
                         "Connecting…"
+                    } else if settings {
+                        "Save connection"
                     } else {
                         "Connect to server"
                     })

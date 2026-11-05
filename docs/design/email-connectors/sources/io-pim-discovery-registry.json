@@ -1,0 +1,104 @@
+{
+  "name": "io-pim-discovery",
+  "max_stable_version": "0.11.0",
+  "updated_at": "2026-11-04T07:10:54.027362Z",
+  "repository": "https://github.com/pimalaya/io-pim-discovery",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.89",
+  "features": {
+    "autoconfig": [
+      "dep:io-http",
+      "dep:psl",
+      "dep:serde",
+      "dep:serde-xml-rs",
+      "dep:url"
+    ],
+    "cli": [
+      "stream",
+      "autoconfig",
+      "pacc",
+      "rfc6186",
+      "rfc6764",
+      "rfc8620",
+      "rfc8414",
+      "rfc9728",
+      "dep:clap",
+      "dep:simd-cpu",
+      "pimalaya-cli/terminal",
+      "pimalaya-cli/table"
+    ],
+    "client": [
+      "dep:anyhow",
+      "dep:io-http",
+      "io-http/client",
+      "dep:url",
+      "dep:resolv-conf",
+      "dep:ipconfig"
+    ],
+    "default": [
+      "rustls-ring"
+    ],
+    "native-tls": [
+      "stream",
+      "pimalaya-stream/native-tls",
+      "io-http/native-tls"
+    ],
+    "pacc": [
+      "dep:io-http",
+      "dep:serde",
+      "dep:serde_json",
+      "dep:url",
+      "dep:base64-codec",
+      "dep:sha2",
+      "dep:subtle"
+    ],
+    "rfc6186": [
+      "dep:serde",
+      "dep:url",
+      "dep:io-http"
+    ],
+    "rfc6764": [
+      "dep:serde",
+      "dep:url",
+      "rfc6186"
+    ],
+    "rfc8414": [
+      "dep:serde",
+      "dep:serde_json",
+      "dep:url",
+      "url/serde",
+      "dep:io-http"
+    ],
+    "rfc8620": [
+      "dep:serde",
+      "dep:serde_json",
+      "dep:url",
+      "rfc6186"
+    ],
+    "rfc9728": [
+      "rfc8414"
+    ],
+    "rustls-aws": [
+      "stream",
+      "pimalaya-stream/rustls-aws",
+      "io-http/rustls-aws"
+    ],
+    "rustls-ring": [
+      "stream",
+      "pimalaya-stream/rustls-ring",
+      "io-http/rustls-ring"
+    ],
+    "srv": [
+      "rfc6186"
+    ],
+    "stream": [
+      "client",
+      "dep:pimalaya-stream"
+    ],
+    "vendored": [
+      "pimalaya-stream?/vendored",
+      "io-http?/vendored"
+    ]
+  },
+  "checksum": "319a7b0e55da6e8f93b8a81fc69e77f4762c90c39787467b859a4513f6720f19"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "async-imap",
+  "max_stable_version": "0.12.0",
+  "updated_at": "2026-09-30T18:50:13.788310Z",
+  "repository": "https://github.com/async-email/async-imap",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.88",
+  "features": {
+    "compress": [
+      "async-compression"
+    ],
+    "default": [
+      "runtime-async-std"
+    ],
+    "runtime-async-std": [
+      "async-std",
+      "async-compression?/futures-io"
+    ],
+    "runtime-tokio": [
+      "tokio",
+      "async-compression?/tokio"
+    ]
+  },
+  "checksum": "f97b87216c9f0ccc63c516263169085fa34bba25633f6d96c6a9b9ca1fd5f70a"
+}

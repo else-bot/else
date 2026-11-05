@@ -1,0 +1,46 @@
+{
+  "name": "io-msgraph",
+  "max_stable_version": "0.7.0",
+  "updated_at": "2026-11-04T09:42:31.596259Z",
+  "repository": "https://github.com/pimalaya/io-msgraph",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.89",
+  "features": {
+    "client": [],
+    "default": [
+      "rustls-ring"
+    ],
+    "ical": [
+      "dep:ical-rs",
+      "dep:jiff"
+    ],
+    "native-tls": [
+      "client",
+      "pimalaya-stream/native-tls",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "rustls-aws": [
+      "client",
+      "pimalaya-stream/rustls-aws",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "rustls-ring": [
+      "client",
+      "pimalaya-stream/rustls-ring",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "schemars": [
+      "dep:schemars"
+    ],
+    "vcard": [
+      "dep:vcard-rs"
+    ],
+    "vendored": [
+      "pimalaya-stream?/vendored"
+    ]
+  },
+  "checksum": "89da8753e70f7f48c32d2816162c69b3f146629a559045ad5f321a638f8b6698"
+}

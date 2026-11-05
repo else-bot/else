@@ -1,0 +1,140 @@
+{
+  "a": {
+    "htmlRender": {
+      "attachmentId": "2323d691-0156-4a8b-8e75-01677ef49453-e2a863cb-e6de-47fa-beca-2ad372b0973d-html",
+      "title": "A · Connect inside the conversation",
+      "height": 990,
+      "heights": [
+        [
+          320,
+          1252
+        ],
+        [
+          375,
+          1094
+        ],
+        [
+          430,
+          1010
+        ],
+        [
+          520,
+          980
+        ],
+        [
+          640,
+          1007
+        ],
+        [
+          728,
+          990
+        ],
+        [
+          860,
+          955
+        ],
+        [
+          1000,
+          955
+        ],
+        [
+          1144,
+          938
+        ]
+      ]
+    },
+    "message": "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say."
+  },
+  "b": {
+    "htmlRender": {
+      "attachmentId": "2323d691-0156-4a8b-8e75-01677ef49453-d16f31f3-67b6-4d41-83e3-44f026b4d2c5-html",
+      "title": "B · Workspace Connections hub",
+      "height": 924,
+      "heights": [
+        [
+          320,
+          1179
+        ],
+        [
+          375,
+          1020
+        ],
+        [
+          430,
+          939
+        ],
+        [
+          520,
+          909
+        ],
+        [
+          640,
+          940
+        ],
+        [
+          728,
+          924
+        ],
+        [
+          860,
+          906
+        ],
+        [
+          1000,
+          906
+        ],
+        [
+          1144,
+          890
+        ]
+      ]
+    },
+    "message": "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say."
+  },
+  "c": {
+    "htmlRender": {
+      "attachmentId": "2323d691-0156-4a8b-8e75-01677ef49453-e86b421a-ce13-41f2-bad3-26a9afa214d8-html",
+      "title": "C · Guided account setup",
+      "height": 832,
+      "heights": [
+        [
+          320,
+          1004
+        ],
+        [
+          375,
+          913
+        ],
+        [
+          430,
+          817
+        ],
+        [
+          520,
+          788
+        ],
+        [
+          640,
+          848
+        ],
+        [
+          728,
+          832
+        ],
+        [
+          860,
+          814
+        ],
+        [
+          1000,
+          814
+        ],
+        [
+          1144,
+          798
+        ]
+      ]
+    },
+    "message": "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say."
+  }
+}

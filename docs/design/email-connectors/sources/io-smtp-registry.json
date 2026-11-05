@@ -1,0 +1,44 @@
+{
+  "name": "io-smtp",
+  "max_stable_version": "0.7.1",
+  "updated_at": "2026-11-03T20:44:27.284385Z",
+  "repository": "https://github.com/pimalaya/io-smtp",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.89",
+  "features": {
+    "client": [],
+    "default": [
+      "scram",
+      "rustls-ring"
+    ],
+    "native-tls": [
+      "client",
+      "url",
+      "pimalaya-stream/native-tls",
+      "dep:anyhow"
+    ],
+    "rustls-aws": [
+      "client",
+      "url",
+      "pimalaya-stream/rustls-aws",
+      "dep:anyhow"
+    ],
+    "rustls-ring": [
+      "client",
+      "url",
+      "pimalaya-stream/rustls-ring",
+      "dep:anyhow"
+    ],
+    "scram": [
+      "dep:rand",
+      "io-sasl/scram"
+    ],
+    "url": [
+      "dep:url"
+    ],
+    "vendored": [
+      "pimalaya-stream/vendored"
+    ]
+  },
+  "checksum": "d7a523a686b0659554dad558e6613b7316d978c1f5a56f0559cb52d4cba19455"
+}

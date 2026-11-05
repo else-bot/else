@@ -1,0 +1,120 @@
+{
+  "checked_at": "2026-11-05T05:14:25.260365+00:00",
+  "sources": [
+    {
+      "name": "email-lib-cargo",
+      "url": "https://raw.githubusercontent.com/pimalaya/core/master/email/Cargo.toml",
+      "path": "docs/design/email-connectors/sources/email-lib-cargo.txt",
+      "sha256": "a9e2148ab5e1bffa90ed9267f2022e1b4f5db860546a22c9aebf010569997979",
+      "bytes": 5884
+    },
+    {
+      "name": "email-lib-readme",
+      "url": "https://raw.githubusercontent.com/pimalaya/core/master/email/README.md",
+      "path": "docs/design/email-connectors/sources/email-lib-readme.txt",
+      "sha256": "255fea65fcb958cd7afde4b4c25b9b6d3ed28651a512e4880c3f539bfb098843",
+      "bytes": 3436
+    },
+    {
+      "name": "email-lib-watch",
+      "url": "https://raw.githubusercontent.com/pimalaya/core/master/email/src/envelope/watch/imap.rs",
+      "error": "HTTP Error 404: Not Found"
+    },
+    {
+      "name": "himalaya-cargo",
+      "url": "https://raw.githubusercontent.com/pimalaya/himalaya/master/Cargo.toml",
+      "path": "docs/design/email-connectors/sources/himalaya-cargo.txt",
+      "sha256": "bb059089477bd7823f8fc8340bd7b291d584f37c38d2a89d21fb7354b74829d3",
+      "bytes": 5397
+    },
+    {
+      "name": "emailengine-license",
+      "url": "https://raw.githubusercontent.com/postalsys/emailengine/master/LICENSE",
+      "error": "HTTP Error 404: Not Found"
+    },
+    {
+      "name": "email-lib-registry",
+      "url": "https://crates.io/api/v1/crates/email-lib",
+      "path": "docs/design/email-connectors/sources/email-lib-registry.json",
+      "sha256": "89fcef71ec68e432cff37a5cee744d9c9de61f55f9db22663fae98fa9f6dc7e0",
+      "bytes": 2376
+    },
+    {
+      "name": "async-imap-registry",
+      "url": "https://crates.io/api/v1/crates/async-imap",
+      "path": "docs/design/email-connectors/sources/async-imap-registry.json",
+      "sha256": "3b326babad8319620720ea2a9036e0ad4b32952e32230557d83a6d5570df2ae6",
+      "bytes": 600
+    },
+    {
+      "name": "jmap-client-registry",
+      "url": "https://crates.io/api/v1/crates/jmap-client",
+      "path": "docs/design/email-connectors/sources/jmap-client-registry.json",
+      "sha256": "7420930e17bd348708c2e2a3e9d0ba89581057cbdff645d0d23c2a0e1c7db178",
+      "bytes": 812
+    },
+    {
+      "name": "lettre-registry",
+      "url": "https://crates.io/api/v1/crates/lettre",
+      "path": "docs/design/email-connectors/sources/lettre-registry.json",
+      "sha256": "3015eed71e5ea7973acf131c780fd7483e1396b6da478446a6efb899ec626d43",
+      "bytes": 2542
+    },
+    {
+      "name": "io-imap-registry",
+      "url": "https://crates.io/api/v1/crates/io-imap",
+      "path": "docs/design/email-connectors/sources/io-imap-registry.json",
+      "sha256": "c3c0a2e7823fa0d3d99ccc3d433c3611cf2aac691b2b2cc8c79827e466deb1b2",
+      "bytes": 926
+    },
+    {
+      "name": "io-gmail-registry",
+      "url": "https://crates.io/api/v1/crates/io-gmail",
+      "path": "docs/design/email-connectors/sources/io-gmail-registry.json",
+      "sha256": "ab3b6ff978d3e8448da1a7e72702a8a10d0db7a9571ecb9733d13a591982d860",
+      "bytes": 872
+    },
+    {
+      "name": "io-msgraph-registry",
+      "url": "https://crates.io/api/v1/crates/io-msgraph",
+      "path": "docs/design/email-connectors/sources/io-msgraph-registry.json",
+      "sha256": "5ae99c24842ad6eb8acccdfcba222a9fee1e179ac3212216282b490fa4d8b01e",
+      "bytes": 978
+    },
+    {
+      "name": "io-jmap-registry",
+      "url": "https://crates.io/api/v1/crates/io-jmap",
+      "path": "docs/design/email-connectors/sources/io-jmap-registry.json",
+      "sha256": "e3a9cc1a68a2fd89858ee0be1442daa3e3604313cd015f0c6c4c8f9fd37cfffb",
+      "bytes": 954
+    },
+    {
+      "name": "io-smtp-registry",
+      "url": "https://crates.io/api/v1/crates/io-smtp",
+      "path": "docs/design/email-connectors/sources/io-smtp-registry.json",
+      "sha256": "dfe6b009716a7df9579ccde6794890f892c0b04c079cd7a54a00b73a8529d4fd",
+      "bytes": 888
+    },
+    {
+      "name": "io-pim-discovery-registry",
+      "url": "https://crates.io/api/v1/crates/io-pim-discovery",
+      "path": "docs/design/email-connectors/sources/io-pim-discovery-registry.json",
+      "sha256": "c5b92a9dfc1e6db303dedf30791cc1b57f72372820a7ba64eea626ee01128002",
+      "bytes": 2007
+    },
+    {
+      "name": "email-lib-watch-source",
+      "url": "https://raw.githubusercontent.com/pimalaya/core/b3a9640a2b2e882f07655e711197b3dbd72ea176/email/src/email/envelope/watch/imap.rs",
+      "path": "docs/design/email-connectors/sources/email-lib-watch-source.txt",
+      "sha256": "327ea745e084f3114b55cc3abd01468e8b869af75e830c4d7c8731ed1edfec92",
+      "bytes": 2604
+    },
+    {
+      "name": "emailengine-license-source",
+      "url": "https://raw.githubusercontent.com/postalsys/emailengine/3659113460405ce872d8a451969e742809ab0e4f/LICENSE_EMAILENGINE.txt",
+      "path": "docs/design/email-connectors/sources/emailengine-license-source.txt",
+      "sha256": "5a860ee459c29872d3005ab1a21a8281a24d2a7e4d5a451b4e62fb0824512dca",
+      "bytes": 9901
+    }
+  ]
+}

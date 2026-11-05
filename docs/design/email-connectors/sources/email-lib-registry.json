@@ -1,0 +1,124 @@
+{
+  "name": "email-lib",
+  "max_stable_version": "0.27.0",
+  "updated_at": "2026-02-19T07:24:53.465297Z",
+  "repository": "https://github.com/pimalaya/core/tree/master/email/",
+  "license": "MIT",
+  "rust_version": null,
+  "features": {
+    "autoconfig": [
+      "dep:email_address",
+      "dep:hickory-resolver",
+      "dep:http-lib",
+      "dep:serde",
+      "dep:serde-xml-rs"
+    ],
+    "default": [
+      "tokio-rustls"
+    ],
+    "derive": [
+      "dep:serde",
+      "chrono/serde",
+      "mml-lib/derive",
+      "secret-lib/derive",
+      "process-lib/derive",
+      "keyring-lib?/derive"
+    ],
+    "full": [
+      "tokio-rustls",
+      "imap",
+      "maildir",
+      "notmuch",
+      "smtp",
+      "sendmail",
+      "autoconfig",
+      "derive",
+      "keyring",
+      "notify",
+      "oauth2",
+      "sync",
+      "thread",
+      "watch",
+      "pgp-commands",
+      "pgp-gpg",
+      "pgp-native"
+    ],
+    "imap": [
+      "dep:utf7-imap",
+      "dep:imap-client",
+      "tokio?/sync"
+    ],
+    "keyring": [
+      "mml-lib/keyring",
+      "secret-lib/keyring"
+    ],
+    "maildir": [
+      "dep:maildirs",
+      "dep:notify",
+      "tokio?/sync"
+    ],
+    "notify": [
+      "dep:notify-rust"
+    ],
+    "notmuch": [
+      "dep:notmuch",
+      "maildir"
+    ],
+    "oauth2": [
+      "dep:oauth-lib"
+    ],
+    "pgp": [],
+    "pgp-commands": [
+      "mml-lib/pgp-commands",
+      "pgp"
+    ],
+    "pgp-gpg": [
+      "mml-lib/pgp-gpg",
+      "pgp"
+    ],
+    "pgp-native": [
+      "dep:pgp-lib",
+      "dep:keyring-lib",
+      "mml-lib/pgp-native",
+      "pgp"
+    ],
+    "rustls": [
+      "hickory-resolver?/dns-over-rustls",
+      "http-lib?/rustls",
+      "keyring-lib?/rustls",
+      "mml-lib/rustls",
+      "oauth-lib?/rustls",
+      "secret-lib/rustls"
+    ],
+    "sendmail": [],
+    "smtp": [
+      "dep:mail-send",
+      "tokio?/sync"
+    ],
+    "sync": [
+      "dep:advisory-lock",
+      "maildir"
+    ],
+    "thread": [
+      "dep:petgraph"
+    ],
+    "tokio": [
+      "dep:tokio",
+      "http-lib?/tokio",
+      "keyring-lib?/tokio",
+      "mml-lib/tokio",
+      "oauth-lib?/tokio",
+      "process-lib/tokio",
+      "secret-lib/tokio"
+    ],
+    "tokio-rustls": [
+      "dep:tokio-rustls",
+      "tokio",
+      "rustls"
+    ],
+    "watch": [
+      "tokio?/sync"
+    ]
+  },
+  "checksum": "011fef4aa31ad64083f32872766141e639b9edc8f2b33ad979b2b8263da9422c"
+}

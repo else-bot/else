@@ -1,0 +1,98 @@
+{
+  "a-390": {
+    "width": 390,
+    "contentHeight": 1204,
+    "capturedHeight": 1204,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"a\",\"providers\":6,\"width\":390,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 390,
+      "height": 1204
+    }
+  },
+  "a-728": {
+    "width": 728,
+    "contentHeight": 1167,
+    "capturedHeight": 1167,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"a\",\"providers\":6,\"width\":728,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 728,
+      "height": 1167
+    }
+  },
+  "b-390": {
+    "width": 390,
+    "contentHeight": 1115,
+    "capturedHeight": 1115,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"b\",\"providers\":6,\"width\":390,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 390,
+      "height": 1115
+    }
+  },
+  "b-728": {
+    "width": 728,
+    "contentHeight": 1100,
+    "capturedHeight": 1100,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"b\",\"providers\":6,\"width\":728,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 728,
+      "height": 1100
+    }
+  },
+  "c-390": {
+    "width": 390,
+    "contentHeight": 1008,
+    "capturedHeight": 1008,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"c\",\"providers\":6,\"width\":390,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 390,
+      "height": 1008
+    }
+  },
+  "c-728": {
+    "width": 728,
+    "contentHeight": 1008,
+    "capturedHeight": 1008,
+    "consoleMessages": [
+      {
+        "level": "log",
+        "text": "{\"result\":\"PASS\",\"variant\":\"c\",\"providers\":6,\"width\":728,\"checks\":\"auth,secret clearing,permissions,wake dependency,scope,event demo,pause,reconnect,overflow,cursors\"}"
+      }
+    ],
+    "screenshot": {
+      "mimeType": "image/png",
+      "width": 728,
+      "height": 1008
+    }
+  }
+}

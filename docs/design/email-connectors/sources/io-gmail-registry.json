@@ -1,0 +1,39 @@
+{
+  "name": "io-gmail",
+  "max_stable_version": "0.6.0",
+  "updated_at": "2026-11-04T12:39:08.471917Z",
+  "repository": "https://github.com/pimalaya/io-gmail",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.89",
+  "features": {
+    "client": [],
+    "default": [
+      "rustls-ring"
+    ],
+    "native-tls": [
+      "client",
+      "pimalaya-stream/native-tls",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "rustls-aws": [
+      "client",
+      "pimalaya-stream/rustls-aws",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "rustls-ring": [
+      "client",
+      "pimalaya-stream/rustls-ring",
+      "dep:anyhow",
+      "dep:pimalaya-stream"
+    ],
+    "schemars": [
+      "dep:schemars"
+    ],
+    "vendored": [
+      "pimalaya-stream?/vendored"
+    ]
+  },
+  "checksum": "8de29a10a00cb5eabc1dc610823a1614f43d1e4cfed88a92f4b274bac6bd4c33"
+}

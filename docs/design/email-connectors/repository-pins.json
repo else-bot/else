@@ -1,0 +1,126 @@
+[
+  {
+    "repository": "io-imap",
+    "commit": "f2d2687e1a36071330cdb09ab83dd0ad3a1fac2f",
+    "paths": [
+      "src/client.rs",
+      "src/rfc2177/idle.rs",
+      "src/send.rs",
+      "src/watch.rs"
+    ]
+  },
+  {
+    "repository": "io-gmail",
+    "commit": "8855f88929b1b39560f83d2667c2fe07a224591e",
+    "paths": [
+      "src/v1/client.rs",
+      "src/v1/history_poll.rs",
+      "src/v1/rest/drafts/send.rs",
+      "src/v1/rest/history.rs",
+      "src/v1/rest/history",
+      "src/v1/rest/history/list.rs",
+      "src/v1/rest/messages/send.rs",
+      "src/v1/rest/settings/forwarding_addresses.rs",
+      "src/v1/rest/settings/forwarding_addresses",
+      "src/v1/rest/settings/forwarding_addresses/create.rs",
+      "src/v1/rest/settings/forwarding_addresses/delete.rs",
+      "src/v1/rest/settings/forwarding_addresses/get.rs",
+      "src/v1/rest/settings/forwarding_addresses/list.rs",
+      "src/v1/rest/settings/get_auto_forwarding.rs",
+      "src/v1/rest/settings/send_as.rs",
+      "src/v1/rest/settings/send_as",
+      "src/v1/rest/settings/send_as/create.rs",
+      "src/v1/rest/settings/send_as/delete.rs",
+      "src/v1/rest/settings/send_as/get.rs",
+      "src/v1/rest/settings/send_as/list.rs",
+      "src/v1/rest/settings/send_as/patch.rs",
+      "src/v1/rest/settings/send_as/update.rs",
+      "src/v1/rest/settings/send_as/verify.rs",
+      "src/v1/rest/settings/update_auto_forwarding.rs",
+      "src/v1/rest/users/watch.rs",
+      "src/v1/send.rs"
+    ]
+  },
+  {
+    "repository": "io-msgraph",
+    "commit": "60cb3977d3e4264a5735abb226cc9553d4b2def8",
+    "paths": [
+      "src/v1/client.rs",
+      "src/v1/rest/users/contacts/delta.rs",
+      "src/v1/rest/users/events/delta.rs",
+      "src/v1/rest/users/messages/delta.rs",
+      "src/v1/rest/users/messages/send.rs",
+      "src/v1/rest/users/send_mail.rs",
+      "src/v1/send.rs"
+    ]
+  },
+  {
+    "repository": "io-jmap",
+    "commit": "13868b44a4b615e8a0398dd6ee0d3d3109e4a727",
+    "paths": [
+      "src/client.rs",
+      "src/rfc8620/push_subscription.rs",
+      "src/rfc8620/push_subscription",
+      "src/rfc8620/push_subscription/get.rs",
+      "src/rfc8620/push_subscription/set.rs",
+      "src/rfc8620/send.rs"
+    ]
+  },
+  {
+    "repository": "io-smtp",
+    "commit": "d9c18734367e218e952e6596a2308f2402e43ef4",
+    "paths": [
+      "src/client.rs",
+      "src/rfc5321/types/forward_path.rs",
+      "src/rfc5321/types/reply_code.rs",
+      "src/send.rs"
+    ]
+  },
+  {
+    "repository": "himalaya",
+    "commit": "8196891f891cf9aa0fb83cd859e1c4c86fa5abdb",
+    "paths": [
+      "src/gmail/client.rs",
+      "src/gmail/drafts/send.rs",
+      "src/gmail/history.rs",
+      "src/gmail/history",
+      "src/gmail/history/list.rs",
+      "src/gmail/messages/send.rs",
+      "src/gmail/settings/autoforwarding.rs",
+      "src/gmail/settings/autoforwarding",
+      "src/gmail/settings/autoforwarding/get.rs",
+      "src/gmail/settings/autoforwarding/set.rs",
+      "src/gmail/settings/forwarding_addresses.rs",
+      "src/gmail/settings/forwarding_addresses",
+      "src/gmail/settings/forwarding_addresses/create.rs",
+      "src/gmail/settings/forwarding_addresses/delete.rs",
+      "src/gmail/settings/forwarding_addresses/get.rs",
+      "src/gmail/settings/forwarding_addresses/list.rs",
+      "src/gmail/settings/sendas.rs",
+      "src/gmail/settings/sendas",
+      "src/gmail/settings/sendas/create.rs",
+      "src/gmail/settings/sendas/delete.rs",
+      "src/gmail/settings/sendas/get.rs",
+      "src/gmail/settings/sendas/list.rs",
+      "src/gmail/settings/sendas/update.rs",
+      "src/gmail/settings/sendas/verify.rs",
+      "src/imap/client.rs",
+      "src/jmap/client.rs",
+      "src/m2dir/client.rs",
+      "src/maildir/client.rs",
+      "src/mbox/client.rs",
+      "src/msgraph/client.rs",
+      "src/msgraph/messages/send.rs",
+      "src/msgraph/messages/send_draft.rs",
+      "src/pimdir/client.rs",
+      "src/pimdir/message/send.rs",
+      "src/shared/client.rs",
+      "src/shared/message/forward.rs",
+      "src/shared/message/reply.rs",
+      "src/shared/message/send.rs",
+      "src/sieve/client.rs",
+      "src/smtp/client.rs",
+      "src/smtp/send.rs"
+    ]
+  }
+]

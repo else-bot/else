@@ -1,0 +1,49 @@
+[package]
+name = "io-msgraph"
+description = "Microsoft Graph API client library for Rust"
+version = "0.7.0"
+authors = ["Clément DOUIN (soywod) <pimalaya.org@posteo.net>"]
+rust-version = "1.89"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+categories = ["api-bindings", "email", "no-std"]
+keywords = ["io-free", "no-std", "coroutine", "microsoft", "graph"]
+homepage = "https://pimalaya.org"
+documentation = "https://docs.rs/io-msgraph/latest/io_msgraph"
+repository = "https://github.com/pimalaya/io-msgraph"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["rustls-ring"]
+client = []
+rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
+rustls-aws = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalaya-stream"]
+native-tls = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:pimalaya-stream"]
+schemars = ["dep:schemars"]
+ical = ["dep:ical-rs", "dep:jiff"]
+vcard = ["dep:vcard-rs"]
+vendored = ["pimalaya-stream?/vendored"]
+
+[dev-dependencies]
+env_logger = "0.11"
+io-oauth = { version = "0.5", default-features = false, features = ["rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+secrecy = { version = "0.10", default-features = false }
+
+[dependencies]
+anyhow = { version = "1", optional = true }
+base64-codec = { version = "0.1", default-features = false, features = ["alloc"] }
+ical-rs = { version = "0.7", default-features = false, features = ["parser", "tzdb"], optional = true }
+io-http = { version = "0.6", default-features = false }
+jiff = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
+log = { version = "0.4", default-features = false }
+pimalaya-stream = { version = "0.3", default-features = false, optional = true }
+schemars = { version = "1", optional = true, default-features = false, features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+url = { version = "2.5", default-features = false, features = ["serde"] }
+vcard-rs = { version = "0.6", default-features = false, features = ["parser"], optional = true }

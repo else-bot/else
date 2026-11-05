@@ -1,0 +1,14 @@
+[package]
+name = "email-connector-dependency-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+io-gmail = { version = "=0.6.0", default-features = false }
+io-imap = { version = "=0.8.1", default-features = false }
+io-msgraph = { version = "=0.7.0", default-features = false }
+io-smtp = { version = "=0.7.1", default-features = false }
+io-jmap = { version = "=0.7.0", default-features = false }

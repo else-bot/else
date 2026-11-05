@@ -1,0 +1,40 @@
+{
+  "name": "jmap-client",
+  "max_stable_version": "0.4.3",
+  "updated_at": "2026-09-28T08:57:22.777248Z",
+  "repository": "https://github.com/stalwartlabs/jmap-client",
+  "license": "Apache-2.0 OR MIT",
+  "rust_version": null,
+  "features": {
+    "async": [
+      "futures-util",
+      "async-stream",
+      "reqwest/stream"
+    ],
+    "aws-lc-rs": [
+      "aws_lc_rs"
+    ],
+    "aws_lc_rs": [
+      "rustls/aws_lc_rs"
+    ],
+    "blocking": [
+      "reqwest/blocking",
+      "maybe-async/is_sync"
+    ],
+    "debug": [],
+    "default": [
+      "async",
+      "websockets",
+      "aws_lc_rs"
+    ],
+    "ring": [
+      "rustls/ring"
+    ],
+    "websockets": [
+      "tokio",
+      "tokio-tungstenite",
+      "rustls"
+    ]
+  },
+  "checksum": "f5b5bc66252cc8e779ef1238f40ab93971d54ad00b5d7afb5c1d447a9647ed62"
+}

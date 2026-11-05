@@ -1,0 +1,46 @@
+{
+  "name": "io-imap",
+  "max_stable_version": "0.8.1",
+  "updated_at": "2026-11-03T20:59:47.619453Z",
+  "repository": "https://github.com/pimalaya/io-imap",
+  "license": "MIT OR Apache-2.0",
+  "rust_version": "1.89",
+  "features": {
+    "client": [
+      "imap-codec/tag_generator"
+    ],
+    "default": [
+      "rustls-ring",
+      "scram"
+    ],
+    "native-tls": [
+      "client",
+      "url",
+      "pimalaya-stream/native-tls",
+      "dep:anyhow"
+    ],
+    "rustls-aws": [
+      "client",
+      "url",
+      "pimalaya-stream/rustls-aws",
+      "dep:anyhow"
+    ],
+    "rustls-ring": [
+      "client",
+      "url",
+      "pimalaya-stream/rustls-ring",
+      "dep:anyhow"
+    ],
+    "scram": [
+      "dep:rand",
+      "io-sasl/scram"
+    ],
+    "url": [
+      "dep:url"
+    ],
+    "vendored": [
+      "pimalaya-stream/vendored"
+    ]
+  },
+  "checksum": "3a2dce7ef04a2e48e6e65477a317cc95cf4ebea64fe4d3bcd2d25590916bb038"
+}
