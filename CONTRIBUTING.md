@@ -85,6 +85,8 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
+Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Changes require a pull request; force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
+
 Use a focused target while developing, for example:
 
 ```sh
@@ -169,6 +171,6 @@ scripts/release.sh patch
 
 Use `minor` or `major` for a larger bump. The script creates a release branch and PR without changing your checkout. CI builds or reuses the guest image, tests its VNC behavior, and commits the immutable digest to `infra/guest-image.json`.
 
-Review the version and image pin, wait for `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The tag workflow verifies the image, tags that commit, and publishes the GitHub release. Installers discover the update from the version tag.
+Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit. The tag workflow verifies the image, tags that commit, and publishes the GitHub release. Installers discover the update from the version tag.
 
 If the base pin is stale, publish it and update the release branch. If a build or image check fails, fix it and rerun the workflow. Keep published image digests available for old releases and rollback.

@@ -125,7 +125,9 @@ jobs:
             git commit -q -m "chore(release): pin guest image ${IMAGE##*@}" -- infra/guest-image.json
             git push -q origin "HEAD:refs/heads/$BRANCH"
           fi
-      - name: Run release-ready on the branch head
+      - name: Run required checks on the branch head
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run release-ready.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+        run: |
+          gh workflow run release-ready.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          gh workflow run cargo-test.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
