@@ -39,7 +39,7 @@ pub async fn snapshot(
     // Fetch one extra row to learn whether older history exists.
     let mut items: Vec<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
-         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2) AND i.kind <> 'routine'
+         WHERE i.conversation_id = ?1 AND (?2 IS NULL OR i.seq < ?2) AND i.kind NOT IN ('routine','connector')
          ORDER BY i.seq DESC LIMIT ?3"
     )))
     .bind(bot.conversation_id)

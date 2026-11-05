@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use else_api::config::{Config, ProcessEnv};
 use else_api::runtime_lock::RuntimeLock;
@@ -56,11 +57,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
         )
-        .with_writer(std::io::stderr)
+        .with(tracing_subscriber::filter::filter_fn(|metadata| {
+            !else_api::connectors::sensitive_log_target(metadata.target())
+        }))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -471,6 +475,7 @@ fn run_serve() -> anyhow::Result<()> {
         let (registry, summarizer) = else_api::providers::build(&config);
         // Reconcile interrupted work before the scheduler admits anything.
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
+        else_api::connectors::store::recover(&pool).await?;
         if requeued + uncertain > 0 {
             tracing::info!(requeued, uncertain, "reconciled unfinished turns");
         }
@@ -551,6 +556,10 @@ fn run_serve() -> anyhow::Result<()> {
             }
             _ => None,
         };
+        let connector_task = state
+            .connectors
+            .as_ref()
+            .map(|connectors| tokio::spawn(connectors.clone().run(stop_scheduler.clone())));
         let state = Arc::new(state);
         let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state).await;
@@ -562,6 +571,11 @@ fn run_serve() -> anyhow::Result<()> {
         let _ = tokio::join!(
             scheduler_task,
             compactor,
+            async {
+                if let Some(task) = connector_task {
+                    let _ = task.await;
+                }
+            },
             async {
                 if let Some(task) = computer_task {
                     let _ = task.await;

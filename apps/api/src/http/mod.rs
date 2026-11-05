@@ -5,6 +5,7 @@ pub mod auth;
 pub mod bots;
 pub mod categories;
 pub mod computers;
+pub mod connectors;
 pub mod conversation;
 mod desktop_stream;
 pub mod error;
@@ -41,7 +42,7 @@ use crate::credentials::OwnerToken;
 use crate::scheduler::Scheduler;
 use error::ApiError;
 
-/// Shared request state. Credentials are held only as digests.
+/// Shared request state and host-only services.
 pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: SqlitePool,
@@ -52,8 +53,9 @@ pub struct AppState {
     pub auth_failures: auth::FailureLimiter,
     /// Bot computers, when a runtime is available.
     pub computers: Option<Arc<crate::computers::ComputerManager>>,
-    /// The installation's master key, for task secrets (POC-026).
+    /// The installation key for encrypted task and connector credentials.
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
+    pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     /// Held while an update is prepared: the gate stays closed until exit.
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     desktop_streams: desktop_stream::Streams,
@@ -75,6 +77,7 @@ impl AppState {
             auth_failures: auth::FailureLimiter::default(),
             computers: None,
             secret_key: None,
+            connectors: None,
             update_hold: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
         }
@@ -88,6 +91,11 @@ impl AppState {
     }
 
     pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {
+        self.connectors = Some(Arc::new(crate::connectors::ConnectorManager::new(
+            self.db.clone(),
+            key.clone(),
+            self.scheduler.clone(),
+        )));
         self.secret_key = Some(key);
         self
     }
@@ -112,6 +120,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(ws::routes())
         .merge(memory::routes())
         .merge(computers::routes())
+        .merge(connectors::routes())
         .merge(settings::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())

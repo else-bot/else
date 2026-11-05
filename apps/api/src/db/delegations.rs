@@ -547,6 +547,7 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
     Ok(match source.as_deref() {
         Some("user") => Origin::OwnerRequest,
         Some("routine") => Origin::RoutineRun,
+        Some("connector") => Origin::ConnectorEvent,
         _ => Origin::Other,
     })
 }
@@ -590,7 +591,7 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         origin,
         delegated_task: false,
         delegated_by: None,
-        can_create_bot: main == Some(bot),
+        can_create_bot: main == Some(bot) && origin != Origin::ConnectorEvent,
         registry,
         remaining: (MAX_CHILDREN - used).max(0),
         outcomes: undelivered(conn, turn_id).await?,

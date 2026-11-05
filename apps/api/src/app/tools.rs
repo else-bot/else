@@ -19,6 +19,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "routine_list",
     "routine_update",
     "routine_delete",
+    "mail_accounts",
+    "mail_action",
+    "mail_action_status",
     "computer_run",
     "computer_job_start",
     "computer_job",
@@ -86,6 +89,10 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
     use serde_json::{Value, json};
 
     match name {
+        "mail_accounts" => json!({}),
+        "mail_action" => {
+            json!({ "account_id": args["account_id"], "action_id": args["action_id"], "operation": args["command"]["operation"] })
+        }
         "computer_input" => json!({
             "frame": args["frame"],
             "actions": summarize_input(args["actions"].as_array().map(Vec::as_slice).unwrap_or_default()),

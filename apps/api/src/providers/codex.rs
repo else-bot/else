@@ -13,6 +13,11 @@
 //! stored. A turn's tools are Codex's shell and file tools with full host
 //! access, never asking for approval, and else.bot's own (memory, delegation,
 //! and the bot's computer, over MCP, authorized by a per-turn task grant).
+//! Work an incoming connector event started gets no host tools: the shell
+//! is off, the sandbox is read-only, Codex runs on a model catalog without
+//! native tools (see `codex_home`), and any command or file change item
+//! still ends the turn as a policy failure, so it reaches only the else.bot
+//! tools its grant names.
 //! Any other tool, web, or native-agent item, and any approval or tool
 //! request, is refused and ends the turn as a policy failure. A memory
 //! summary gets no tools at all. Only skills installed in the bot's project
@@ -41,7 +46,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v15";
+const PROMPT_VERSION: &str = "else-codex-v16";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
@@ -74,6 +79,9 @@ const FORBIDDEN_ITEMS: &[&str] = &[
     "imageGeneration",
     "imageView",
 ];
+
+/// Thread items of the host tools, forbidden in a turn without them.
+const HOST_TOOL_ITEMS: &[&str] = &["commandExecution", "fileChange"];
 
 pub struct Codex {
     host: Option<Host>,
@@ -174,6 +182,7 @@ impl Codex {
     /// it unsafe or stale is part of the fingerprint.
     fn fingerprint(&self, profile: &Profile, input: &TurnInput, account: &str) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
         let registry = prompt::registry_text(input);
         let runtime = self
             .host
@@ -184,10 +193,11 @@ impl Codex {
             PROMPT_VERSION,
             &self.version,
             &runtime,
-            if self.tool_url.is_some() {
-                "tools:host+elsebot-v4"
-            } else {
-                "tools:host"
+            match (input.delegation.host_tools(), self.tool_url.is_some()) {
+                (true, true) => "tools:host+elsebot-v4",
+                (true, false) => "tools:host",
+                (false, true) => "tools:elsebot-only-v2",
+                (false, false) => "tools:none",
             },
             "agents:disabled",
             "skills:bot-project-only-v1",
@@ -354,7 +364,8 @@ impl Provider for Codex {
             Ok(dirs) => dirs,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
-        if let Err(err) = codex_home::prepare(&dirs, auth, self.tool_url.as_deref(), true) {
+        let host_tools = input.delegation.host_tools();
+        if let Err(err) = codex_home::prepare(&dirs, auth, self.tool_url.as_deref(), host_tools) {
             return failed("provider_unavailable", err.to_string());
         }
         if let Err(err) = super::attachments::stage(&dirs.project, &input.files).await {
@@ -364,7 +375,7 @@ impl Provider for Codex {
             );
         }
         let project = dirs.project.clone();
-        let spec = LaunchSpec {
+        let mut spec = LaunchSpec {
             turn_id: input.turn_id,
             program: program.clone(),
             args: vec![OsString::from("app-server")],
@@ -380,6 +391,19 @@ impl Provider for Codex {
             },
             dirs,
         };
+        if !host_tools {
+            let catalog = tokio::select! {
+                _ = cancel.cancelled() => return TurnOutcome::Interrupted,
+                catalog = codex_home::no_native_tools(host, &spec, &profile.model) => catalog,
+            };
+            match catalog {
+                Ok(mut args) => {
+                    args.append(&mut spec.args);
+                    spec.args = args;
+                }
+                Err(reason) => return failed("provider_unavailable", reason),
+            }
+        }
         let mut server = match AppServer::start(host, &spec).await {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
@@ -435,6 +459,17 @@ impl Codex {
         Ok(())
     }
 
+    async fn check_catalog(server: &AppServer, model: &str) -> Result<(), String> {
+        let listed = server
+            .request("model/list", json!({ "includeHidden": true }), RPC_TIMEOUT)
+            .await
+            .map_err(|err| err.to_string())?;
+        match listed["data"].as_array().map(Vec::as_slice) {
+            Some([only]) if only["model"] == model && listed["nextCursor"].is_null() => Ok(()),
+            _ => Err("Codex is not running on the catalog without native tools.".into()),
+        }
+    }
+
     fn allowed_tool(&self, item: &Value) -> bool {
         self.tool_url.is_some()
             && item["server"].as_str() == Some(crate::app::tools::SERVER_NAME)
@@ -488,7 +523,7 @@ impl Codex {
             "serviceTier": profile.service_tier,
             "cwd": server.cwd,
             "approvalPolicy": "never",
-            "sandbox": codex_home::sandbox_mode(true),
+            "sandbox": codex_home::sandbox_mode(input.delegation.host_tools()),
             "developerInstructions": prompt::instructions(input, &server.cwd),
             "config": config,
         });
@@ -538,6 +573,11 @@ impl Codex {
             Ok(account) => account,
             Err(outcome) => return outcome,
         };
+        if !input.delegation.host_tools()
+            && let Err(reason) = Self::check_catalog(server, &profile.model).await
+        {
+            return failed("policy_violation", reason);
+        }
         let fingerprint = self.fingerprint(profile, input, &account);
         let (thread_id, considered, reported) =
             match self.open_thread(server, input, profile, &fingerprint).await {
@@ -616,7 +656,7 @@ impl Codex {
         }
         let _ = sink.session(&state).await;
         let _ = sink.reported(&reported.to_json(), &native_turn).await;
-        self.drain(server, &thread_id, &native_turn, profile, sink, cancel)
+        self.drain(server, &thread_id, &native_turn, input, sink, cancel)
             .await
     }
 
@@ -625,10 +665,17 @@ impl Codex {
         server: &mut AppServer,
         thread_id: &str,
         native_turn: &str,
-        profile: &Profile,
+        input: &TurnInput,
         sink: &dyn TurnSink,
         cancel: CancellationToken,
     ) -> TurnOutcome {
+        let Some(profile) = &input.profile else {
+            return failed(
+                "provider_misconfigured",
+                "No execution profile was snapshotted.",
+            );
+        };
+        let host_tools = input.delegation.host_tools();
         let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
         // After a pending delegation the attempt must end; enforced here,
         // independently of the model.
@@ -717,7 +764,9 @@ impl Codex {
                 "item/started" => {
                     let item = &params["item"];
                     let kind = item["type"].as_str().unwrap_or_default();
-                    if FORBIDDEN_ITEMS.contains(&kind) {
+                    if FORBIDDEN_ITEMS.contains(&kind)
+                        || (!host_tools && HOST_TOOL_ITEMS.contains(&kind))
+                    {
                         flag("policy_violation", format!("Codex attempted a {kind} item"));
                     } else if kind == "mcpToolCall" && !self.allowed_tool(item) {
                         flag(
@@ -1074,21 +1123,72 @@ mod tests {
     }
 
     fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
+        fake_codex_with(dir, &json!([]), None)
+    }
+
+    fn fake_codex_with(
+        dir: &std::path::Path,
+        servers: &Value,
+        item_kind: Option<&str>,
+    ) -> (Codex, std::path::PathBuf) {
         let received = dir.join("received.jsonl");
         let inputs = dir.join("inputs.jsonl");
+        let threads = dir.join("threads.jsonl");
+        let launched = dir.join("launched-config.toml");
+        let launches = dir.join("launches.jsonl");
+        let loaded = dir.join("loaded-catalog.json");
+        let export_fails = dir.join("export-fails");
+        let ignore_catalog = dir.join("ignore-catalog");
+        let one_model = dir.join("one-model");
+        let catalog = json!({
+            "models": MODELS.iter().chain(&["hidden-model"]).map(|slug| json!({
+                "slug": slug,
+                "context_window": 272000,
+                "base_instructions": "kept",
+                "apply_patch_tool_type": "freeform",
+                "shell_type": "unified_exec",
+                "experimental_supported_tools": ["clock"],
+            })).collect::<Vec<_>>(),
+        });
+        let catalog = format!("{:?}", catalog.to_string());
+        let item = item_kind.map_or_else(
+            || "None".to_owned(),
+            |kind| format!("{:?}", json!({ "type": kind, "id": "item-1" }).to_string()),
+        );
+        let servers = format!("{:?}", servers.to_string());
         let script = format!(
-            r#"exec python3 -c '
-import json, sys
+            r#"python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> {launches:?}
+if [ "$1" = debug ]; then
+    [ -e {export_fails:?} ] && exit 1
+    exec python3 -c 'import json,os; data=json.loads({catalog}); data["models"]=data["models"][:1] if os.path.exists({one_model:?}) else data["models"]; print(json.dumps(data))'
+fi
+if [ "$1" = -c ] && [ "$3" = debug ]; then
+    exec python3 -c 'import json,os,sys; data=json.loads({catalog}) if os.path.exists({ignore_catalog:?}) else json.load(open(json.loads(sys.argv[1].split("=",1)[1]))); data["models"]=data["models"][:1] if os.path.exists({one_model:?}) else data["models"]; print(json.dumps(data))' "$2"
+fi
+cat "$CODEX_HOME/config.toml" > {launched:?}
+exec python3 -c '
+import json, os, sys
 def out(m): print(json.dumps(m), flush=True)
+item = {item}
+models = [m["slug"] for m in json.loads({catalog})["models"]]
+if os.path.exists({one_model:?}): models = models[:1]
+for flag, value in zip(sys.argv, sys.argv[1:]):
+    if flag == "-c" and value.startswith("model_catalog_json="):
+        catalog = open(json.loads(value.split("=", 1)[1])).read()
+        open({loaded:?}, "w").write(catalog)
+        if not os.path.exists({ignore_catalog:?}):
+            models = [m["slug"] for m in json.loads(catalog)["models"]]
 for line in sys.stdin:
     m = json.loads(line)
     if "id" not in m: continue
     method, p = m["method"], m.get("params") or {{}}
-    if method == "mcpServerStatus/list": r = {{"data": []}}
+    if method == "mcpServerStatus/list": r = {{"data": json.loads({servers})}}
     elif method == "skills/list": r = {{"data": [{{"skills": []}}]}}
     elif method == "account/read": r = {{"account": {{"type": "chatgpt", "email": "o@example.test"}}}}
-    elif method == "thread/resume": r = {{"thread": {{"id": p["threadId"]}}}}
-    elif method == "thread/start": r = {{"thread": {{"id": "fresh-thread"}}}}
+    elif method == "model/list": r = {{"data": [{{"id": s, "model": s}} for s in models], "nextCursor": None}}
+    elif method in ("thread/start", "thread/resume"):
+        with open({threads:?}, "a") as f: f.write(json.dumps(p) + "\n")
+        r = {{"thread": {{"id": p.get("threadId", "fresh-thread")}}}}
     elif method == "turn/start":
         with open({received:?}, "a") as f: f.write(json.dumps(p["input"][0]["text"]) + "\n")
         with open({inputs:?}, "a") as f: f.write(json.dumps(p["input"]) + "\n")
@@ -1096,9 +1196,12 @@ for line in sys.stdin:
     else: r = {{}}
     out({{"id": m["id"], "result": r}})
     if method == "turn/start":
+        if item:
+            out({{"method": "item/started", "params": {{"threadId": p["threadId"],
+                 "turnId": "native-turn", "item": json.loads(item)}}}})
         out({{"method": "turn/completed", "params": {{"threadId": p["threadId"],
              "turn": {{"id": "native-turn", "status": "completed"}}}}}})
-'"#
+' "$@""#
         );
         let codex = detect_with(
             dir,
@@ -1107,6 +1210,252 @@ for line in sys.stdin:
         );
         assert!(matches!(codex.availability(), Availability::Available));
         (codex, received)
+    }
+
+    const TOOL_URL: &str = "http://127.0.0.1:1/tools/v1/mcp";
+
+    fn elsebot_server() -> Value {
+        let tools: serde_json::Map<String, Value> = crate::app::tools::TOOL_NAMES
+            .iter()
+            .map(|t| ((*t).to_owned(), json!({})))
+            .collect();
+        json!([{ "name": crate::app::tools::SERVER_NAME, "tools": tools }])
+    }
+
+    fn turn_from(origin: crate::app::providers::Origin) -> TurnInput {
+        let mut turn = TurnInput {
+            profile: Some(Profile {
+                model: MODELS[0].into(),
+                reasoning_effort: "medium".into(),
+                service_tier: "default".into(),
+            }),
+            tool_grant: Some("tg_test".into()),
+            ..input(Vec::new())
+        };
+        turn.delegation.origin = origin;
+        turn
+    }
+
+    #[tokio::test]
+    async fn a_connector_event_launches_without_host_tools_but_keeps_elsebot_tools() {
+        use crate::app::providers::Origin;
+        for (origin, host_tools) in [
+            (Origin::ConnectorEvent, false),
+            (Origin::OwnerRequest, true),
+            (Origin::RoutineRun, true),
+            (Origin::Other, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), None);
+            let codex = codex.with_tools(TOOL_URL.into());
+            let sink = super::super::recording::Recorded::default();
+            let outcome = codex
+                .run(turn_from(origin), &sink, CancellationToken::new())
+                .await;
+            assert_eq!(outcome, TurnOutcome::Completed, "{origin:?}");
+            let launched =
+                std::fs::read_to_string(dir.path().join("launched-config.toml")).unwrap();
+            assert_eq!(
+                launched,
+                codex_home::config_toml(Some(TOOL_URL), host_tools),
+                "{origin:?}"
+            );
+            assert!(
+                launched.contains(&format!("shell_tool = {host_tools}\n")),
+                "{origin:?}"
+            );
+            assert!(launched.contains("code_mode_host = true\n"), "{origin:?}");
+            assert!(launched.contains("[mcp_servers.elsebot]"), "{origin:?}");
+            let thread: Value = serde_json::from_str(
+                std::fs::read_to_string(dir.path().join("threads.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .last()
+                    .unwrap(),
+            )
+            .unwrap();
+            let sandbox = if host_tools {
+                "danger-full-access"
+            } else {
+                "read-only"
+            };
+            assert_eq!(thread["sandbox"], sandbox, "{origin:?}");
+            assert_eq!(thread["approvalPolicy"], "never", "{origin:?}");
+            let launches = launches(dir.path());
+            if host_tools {
+                assert_eq!(launches, vec![vec!["app-server".to_owned()]], "{origin:?}");
+                assert!(!dir.path().join("loaded-catalog.json").exists());
+            } else {
+                assert_no_native_catalog(dir.path(), &launches, MODELS[0]);
+            }
+        }
+    }
+
+    fn launches(dir: &std::path::Path) -> Vec<Vec<String>> {
+        std::fs::read_to_string(dir.join("launches.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_no_native_catalog(dir: &std::path::Path, launches: &[Vec<String>], model: &str) {
+        let [export, verified, launch] = launches else {
+            panic!("{launches:?}");
+        };
+        assert_eq!(export, &["debug", "models"]);
+        assert_eq!(&verified[..2], &launch[..2]);
+        assert_eq!(&verified[2..], ["debug", "models"]);
+        assert_eq!(launch.len(), 3, "{launch:?}");
+        assert_eq!(launch[0], "-c");
+        assert!(launch[1].starts_with("model_catalog_json=\""), "{launch:?}");
+        assert_eq!(launch[2], "app-server");
+        let loaded: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("loaded-catalog.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            loaded,
+            json!({ "models": [{
+                "slug": model,
+                "context_window": 272000,
+                "base_instructions": "kept",
+                "apply_patch_tool_type": null,
+                "shell_type": "disabled",
+                "experimental_supported_tools": [],
+                "supports_search_tool":false,
+            }] })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connector_event_fails_before_its_turn_without_the_no_native_catalog() {
+        use crate::app::providers::Origin;
+        for (marker, one) in [
+            ("export-fails", false),
+            ("ignore-catalog", false),
+            ("ignore-catalog", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+            let codex = codex.with_tools(TOOL_URL.into());
+            std::fs::write(dir.path().join(marker), "").unwrap();
+            if one {
+                std::fs::write(dir.path().join("one-model"), "").unwrap();
+            }
+            let sink = super::super::recording::Recorded::default();
+            let outcome = codex
+                .run(
+                    turn_from(Origin::ConnectorEvent),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await;
+            let TurnOutcome::Failed { code, .. } = &outcome else {
+                panic!("{marker}: {outcome:?}");
+            };
+            let expected = "provider_unavailable";
+            assert_eq!(code, expected, "{marker}: {outcome:?}");
+            assert!(!dir.path().join("threads.jsonl").exists(), "{marker}");
+            assert!(!received.exists(), "{marker}");
+            if marker == "export-fails" {
+                assert_eq!(launches(dir.path()), vec![vec!["debug", "models"]]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, _) = fake_codex(dir.path());
+        let profile = turn_from(crate::app::providers::Origin::Other)
+            .profile
+            .unwrap();
+        let result = codex
+            .summarize_once(
+                Uuid::new_v4(),
+                &profile,
+                "summarize",
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(result, Err("Codex returned an empty summary".into()));
+        assert_no_native_catalog(dir.path(), &launches(dir.path()), &profile.model);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, _) = fake_codex(dir.path());
+        std::fs::write(dir.path().join("ignore-catalog"), "").unwrap();
+        let result = codex
+            .summarize_once(
+                Uuid::new_v4(),
+                &profile,
+                "summarize",
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.contains("catalog without native tools")),
+            "{result:?}"
+        );
+        assert!(!dir.path().join("threads.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn a_connector_event_fails_on_any_command_or_file_change() {
+        use crate::app::providers::Origin;
+        for kind in ["commandExecution", "fileChange", "webSearch"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind));
+            let codex = codex.with_tools(TOOL_URL.into());
+            let sink = super::super::recording::Recorded::default();
+            let outcome = codex
+                .run(
+                    turn_from(Origin::ConnectorEvent),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(
+                outcome,
+                failed("policy_violation", format!("Codex attempted a {kind} item")),
+            );
+        }
+        // An owner's turn keeps its host commands and file changes.
+        for kind in ["commandExecution", "fileChange"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind));
+            let codex = codex.with_tools(TOOL_URL.into());
+            let sink = super::super::recording::Recorded::default();
+            let outcome = codex
+                .run(
+                    turn_from(Origin::OwnerRequest),
+                    &sink,
+                    CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(outcome, TurnOutcome::Completed, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_connector_event_never_resumes_a_thread_with_host_tools() {
+        use crate::app::providers::Origin;
+        let codex = Codex::detect(None, None, None).with_tools(TOOL_URL.into());
+        let owner = turn_from(Origin::OwnerRequest);
+        let event = TurnInput {
+            delegation: crate::app::providers::DelegationContext {
+                origin: Origin::ConnectorEvent,
+                ..owner.delegation.clone()
+            },
+            ..owner.clone()
+        };
+        let profile = owner.profile.clone().unwrap();
+        assert_ne!(
+            codex.fingerprint(&profile, &owner, "a"),
+            codex.fingerprint(&profile, &event, "a")
+        );
     }
 
     #[tokio::test]

@@ -78,6 +78,7 @@ pub async fn endpoint(
         "tools/list" => {
             let mut tools = tool_list().as_array().cloned().unwrap_or_default();
             tools.extend(super::guest_tools::tool_list());
+            tools.extend(super::connectors::tool_list());
             Ok(json!({ "tools": tools }))
         }
         "tools/call" => {
@@ -88,6 +89,7 @@ pub async fn endpoint(
                 Some("ask_owner") | Some("ask_permission") => Tool::AskOwner,
                 Some(name) if name.starts_with("routine_") => Tool::Routines,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
+                Some("mail_accounts" | "mail_action" | "mail_action_status") => Tool::Mail,
                 _ => Tool::ReadMemory,
             };
             if let Err(err) = check(&state, &grant, needs).await {
@@ -410,6 +412,9 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "routine_list" => super::routines::list(state, grant).await,
         "routine_update" => super::routines::update(state, grant, args).await,
         "routine_delete" => super::routines::delete(state, grant, args).await,
+        "mail_accounts" | "mail_action" | "mail_action_status" => {
+            super::connectors::call(state, grant, name, args).await
+        }
         name if name.starts_with("computer_") => {
             super::guest_tools::call(state, grant, name, args).await
         }
