@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import urllib.parse
@@ -46,6 +47,8 @@ elif args[:2] == ["pr", "create"]:
     out = url
 elif args[:2] == ["workflow", "run"]:
     pass
+elif args[:1] == ["api"]:
+    status = int(os.environ.get("FAKE_GH_API_STATUS", "0"))
 elif args[:2] == ["release", "view"]:
     status = 0 if args[2] in state.get("releases", []) else 1
 elif args[:2] == ["release", "create"]:
@@ -831,13 +834,55 @@ class Lifecycle(unittest.TestCase):
             self.assertNotIn(heavy, thin, "release CI never runs APT or compiles packages")
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
             for line in workflow.read_text().splitlines():
-                if "uses:" in line:
-                    ref = line.split("uses:", 1)[1].split("#")[0].strip()
+                action = re.match(r"\s*(?:-\s+)?uses:\s*(.*)", line)
+                if action:
+                    ref = action.group(1).split("#")[0].strip()
                     self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", f"{workflow.name} pins actions by commit")
             self.assertNotIn("pull_request_target", workflow.read_text())
 
 
 class ReleaseReadinessWorkflow(unittest.TestCase):
+    def status_step(self, name):
+        workflow = (ROOT / ".github/workflows/release-ready.yml").read_text()
+        step = workflow.split(f"      - name: {name}\n", 1)[1].split("      - ", 1)[0]
+        block = re.search(r"(?m)^        run: \|\n((?:          .*\n|\n)+)", step)
+        self.assertIsNotNone(block)
+        return textwrap.dedent(block.group(1))
+
+    def test_readiness_reports_status_on_the_verified_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "gh").write_text(FAKE_GH)
+            (work / "gh").chmod(0o755)
+            env = {
+                **os.environ, "PATH": f"{work}{os.pathsep}{os.environ['PATH']}",
+                "FAKE_GH_STATE": str(work / "calls.json"),
+                "GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "else-bot/else",
+                "GITHUB_SHA": "a" * 40, "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_RUN_ID": "123",
+            }
+            for step, result, expected in (
+                ("Mark readiness pending", "", "pending"),
+                ("Report readiness", "success", "success"),
+                ("Report readiness", "failure", "failure"),
+                ("Report readiness", "cancelled", "error"),
+                ("Report readiness", "unknown", "failure"),
+            ):
+                with self.subTest(step=step, result=result):
+                    run = subprocess.run(["bash", "-e", "-c", self.status_step(step)],
+                                         env={**env, "RESULT": result}, capture_output=True, text=True)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    args = json.loads((work / "calls.json").read_text())["calls"][-1]
+                    self.assertEqual(args[:3], ["api", "--method", "POST"])
+                    self.assertIn("repos/else-bot/else/statuses/" + "a" * 40, args)
+                    self.assertIn(f"state={expected}", args)
+                    self.assertIn("context=release-ready", args)
+                    self.assertIn("target_url=https://github.com/else-bot/else/actions/runs/123", args)
+            failed = subprocess.run(["bash", "-e", "-c", self.status_step("Report readiness")],
+                                    env={**env, "RESULT": "success", "FAKE_GH_API_STATUS": "1"},
+                                    capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0, "a failed status publication must fail the workflow")
+
     def test_readiness_waits_for_the_post_pin_dispatch(self):
         workflow = (ROOT / ".github/workflows/release-ready.yml").read_text()
         triggers = re.search(r"(?m)^on:\n((?:[ \t].*\n|\n)*)", workflow)
@@ -848,6 +893,12 @@ class ReleaseReadinessWorkflow(unittest.TestCase):
         guest = (ROOT / ".github/workflows/guest-image.yml").read_text()
         self.assertIn("gh workflow run release-ready.yml", guest,
                       "guest-image must dispatch readiness after pinning")
+        self.assertIn("  statuses: write\n", workflow)
+        self.assertIn("  verify-release:\n", workflow)
+        self.assertNotIn("  release-ready:\n", workflow,
+                         "the workflow job must not conflict with the required commit status name")
+        self.assertIn("      - name: Report readiness\n        if: always()\n", workflow,
+                      "a failed gate must also report its outcome")
 
 
 if __name__ == "__main__":

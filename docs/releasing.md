@@ -5,7 +5,7 @@ Feature pull requests target `dev`, the default branch. `main` accepts release p
 ## Configure GitHub once
 
 1. Create `dev` from the current `main` and select it as the default branch.
-2. Protect `main` with required pull requests, merge commits, and the required `release-ready` check from GitHub Actions. Require the branch to be up to date. Prevent force pushes and deletion of `main` and `release/v*`. Allow normal pushes to release branches so Actions can commit the image pin.
+2. Protect `main` with required pull requests, merge commits, and the required `release-ready` status from GitHub Actions. Require the branch to be up to date. Prevent force pushes and deletion of `main` and `release/v*`. Allow normal pushes to release branches so Actions can commit the image pin.
 3. In the organization's Actions settings, allow GitHub Actions to create pull requests. Enable **Allow GitHub Actions to create and approve pull requests** in this repository's Actions workflow permissions. The release workflow uses this permission to open a sync PR if `main` cannot merge into `dev` automatically. It does not approve PRs.
 4. Allow this repository's Actions workflows to publish the `else-guest` container package. Images carry the repository source label so GHCR associates them with this repository.
 
@@ -81,7 +81,7 @@ For developer builds, keep using `scripts/build-guest-image.sh [DATA_DIR]`. It b
 - If a native build or test fails, fix the release branch and rerun `guest-image`. No version tag exists yet.
 - If planning reports a missing or stale base, publish it locally, commit the pin to the candidate, and rerun `guest-image`.
 - If the manifest pin cannot be pushed because the branch changed, rerun `guest-image` on its new head. The workflow never force pushes.
-- `release-ready` stays pending while guest images build. After Actions commits the pin, it dispatches `release-ready` explicitly on the branch head. Opening or updating the PR does not start a competing readiness run. A failed build or pin leaves the required check pending and blocks merging. PRs into `main` must come from `release/vX.Y.Z`; other branches leave this check pending.
+- `release-ready` stays pending while guest images build. After Actions commits the pin, it dispatches the readiness workflow on the branch head. Its `verify-release` job reports a `release-ready` commit status for that exact commit: pending before validation, then success, failure, or error. GitHub excludes job checks from `workflow_dispatch` runs from required PR checks, so the workflow reports the commit status through the API. Opening or updating the PR does not start a competing readiness run. A failed build or pin leaves readiness pending and blocks merging. PRs into `main` must come from `release/vX.Y.Z`; other branches leave this status pending.
 - If `main` advanced while the release was open, merge its changes into the release branch and rerun the checks.
 - If final image verification fails after merge, restore public registry access and rerun `release-tag` on `main`. The version remains unavailable until verification succeeds.
 - If tag creation succeeds but publishing the GitHub release fails, rerun `release-tag`. The image is already available to installers, and the rerun reuses the tag.
