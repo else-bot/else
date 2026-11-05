@@ -3,6 +3,7 @@
 ## Sub-features
 
 - Create and rename categories; reject duplicate names without regard to case.
+- Choose bots during category creation, with search, an Unassigned filter, and a live sidebar preview.
 - Assign and unassign a bot while keeping its selected conversation.
 - Delete a category and keep its bots under Unassigned.
 - Drag a bot between sidebar groups without changing its selected conversation.
@@ -22,9 +23,12 @@ checks the sidebar payload. Deleting the category must remove its grouping
 and preserve the bot with `category_id:null`. Run
 `verify.py --tests categories ws` for persistence and multi-client pushes.
 
-Follow the native Ctrl+Shift+G journey in SKILL.md. The focused placeholder is
-`Category name, e.g. Family`; Enter submits. Verify `Verification category`
-appears in the sidebar and `--probe native --path /v1/categories`. For picker
+Follow the native Ctrl+Shift+G journey in SKILL.md. The focused category-name placeholder is
+`e.g. Everyday`; Enter in that field submits. Search for a bot, select it, and clear the search.
+Verify that the selection stays in the preview and through the Unassigned filter.
+Enter in the search field must leave the dialog open. Create the category and check that its
+selected bots have the new category ID in `/v1/bots`. Also create an empty category.
+Verify `Verification category` appears in the sidebar and `--probe native --path /v1/categories`. For picker
 changes, also move via both mouse and Ctrl+Shift+M keyboard selection, check
 the bot ID/category in `/v1/bots`, and verify the selected bot and draft stay.
 For drag changes, capture the source group, drag over a different group,
