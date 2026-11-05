@@ -123,9 +123,7 @@ async fn connect(app: &TestApp, bot: &str, address: &str, send: bool) -> Uuid {
     )
     .await
     .unwrap();
-    if send {
-        permit(app, account.id, bot, true).await;
-    }
+    permit(app, account.id, bot, send).await;
     account.id
 }
 

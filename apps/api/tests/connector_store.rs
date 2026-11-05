@@ -508,7 +508,7 @@ async fn accounts_and_grants_are_bounded() {
 }
 
 #[tokio::test]
-async fn grants_isolate_bots_and_revocation_withdraws_pending_mail() {
+async fn explicit_permissions_restrict_bots_and_revocation_withdraws_pending_mail() {
     let db = TestDb::migrated().await;
     let (account, generation) = watched(&db, "inbox@example.test").await;
     let (waker, reader) = (bot(&db, "Waker").await, bot(&db, "Reader").await);
@@ -601,6 +601,25 @@ async fn grants_isolate_bots_and_revocation_withdraws_pending_mail() {
         .unwrap();
     let stranger = bot(&db, "Stranger").await;
     let stranger_turn = turn(&db, stranger, "running").await;
+    store::authorize(
+        &db.pool,
+        account,
+        generation,
+        stranger,
+        stranger_turn,
+        &read,
+    )
+    .await
+    .unwrap();
+    let defaults = store::permissions(&db.pool, account, stranger)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(defaults.read && defaults.write && defaults.send);
+    assert!(!defaults.wake);
+    store::set_permissions(&db.pool, account, stranger, &Permissions::default())
+        .await
+        .unwrap();
     assert!(matches!(
         store::authorize(
             &db.pool,
@@ -613,12 +632,6 @@ async fn grants_isolate_bots_and_revocation_withdraws_pending_mail() {
         .await,
         Err(StoreError::Forbidden)
     ));
-    assert!(
-        store::permissions(&db.pool, account, stranger)
-            .await
-            .unwrap()
-            .is_none()
-    );
 
     assert!(
         store::set_permissions(&db.pool, account, waker, &read_only())

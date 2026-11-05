@@ -102,6 +102,47 @@ async fn send(
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<SendBody>,
 ) -> Result<Response, ApiError> {
+    let accepted = accept_send(&state, bot_id, body, false).await?;
+    let status = if accepted.created {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((
+        status,
+        Json(json!({ "item": item_json(&accepted.item), "turn": turn_json(&accepted.turn) })),
+    )
+        .into_response())
+}
+
+pub(super) async fn introduce(
+    state: &AppState,
+    bot_id: Uuid,
+    request_id: Uuid,
+    text: String,
+) -> Result<turns::Accepted, ApiError> {
+    accept_send(
+        state,
+        bot_id,
+        SendBody {
+            request_id,
+            text,
+            parts: Vec::new(),
+            provider_id: None,
+            reaction: None,
+            open_draft: None,
+        },
+        true,
+    )
+    .await
+}
+
+async fn accept_send(
+    state: &AppState,
+    bot_id: Uuid,
+    body: SendBody,
+    hidden: bool,
+) -> Result<turns::Accepted, ApiError> {
     let request_id = body.request_id;
     let with_id = |err: ApiError| err.with_request_id(request_id);
     let parts = validate_text(&body.text)
@@ -127,6 +168,7 @@ async fn send(
         bot_id,
         request_id,
         text: &body.text,
+        hidden,
         parts: &parts,
         reaction: body.reaction,
         requested_provider: requested,
@@ -171,16 +213,7 @@ async fn send(
     if accepted.created {
         state.scheduler.wake();
     }
-    let status = if accepted.created {
-        StatusCode::ACCEPTED
-    } else {
-        StatusCode::OK
-    };
-    Ok((
-        status,
-        Json(json!({ "item": item_json(&accepted.item), "turn": turn_json(&accepted.turn) })),
-    )
-        .into_response())
+    Ok(accepted)
 }
 
 async fn by_request(

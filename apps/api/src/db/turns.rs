@@ -81,6 +81,7 @@ pub struct ItemRecord {
     pub seq: i64,
     pub turn_id: Uuid,
     pub kind: String,
+    pub hidden: bool,
     pub text: String,
     pub provider_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -95,7 +96,7 @@ pub struct ItemRecord {
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
-    i.provider_id, i.created_at,
+    i.provider_id, i.created_at, i.hidden,
     CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction,
     CASE WHEN i.kind = 'status' AND i.conversation_id <> t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name, 'prompt', d.task)
@@ -142,6 +143,7 @@ pub struct SendRequest<'a> {
     pub bot_id: Uuid,
     pub request_id: Uuid,
     pub text: &'a str,
+    pub hidden: bool,
     /// Canonical parts (see [`crate::app::messages::canonical_parts`]);
     /// empty for plain text.
     pub parts: &'a [MessagePart],
@@ -162,6 +164,9 @@ pub struct SendRequest<'a> {
 /// so messages without files keep the hashes saved before parts existed.
 pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
+    if req.hidden {
+        hasher.update(b"hidden-owner-setup\0");
+    }
     if let Some(draft) = req.open_draft {
         hasher.update(b"open-draft\0");
         hasher.update(serde_json::to_vec(draft).expect("draft attachment serializes"));
@@ -282,8 +287,8 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, reaction, parts)
-         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6, ?7)",
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, reaction, parts, hidden)
+         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6, ?7, ?8)",
     )
     .bind(item_id)
     .bind(conversation_id)
@@ -292,6 +297,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .bind(req.text)
     .bind(req.reaction.map(Json))
     .bind((!req.parts.is_empty()).then_some(Json(req.parts)))
+    .bind(req.hidden)
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
@@ -852,6 +858,7 @@ mod tests {
             bot_id: Uuid::nil(),
             request_id: Uuid::nil(),
             text: "Hello there",
+            hidden: false,
             parts: &[],
             reaction,
             requested_provider: Some("synthetic"),

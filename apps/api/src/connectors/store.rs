@@ -1,5 +1,5 @@
 //! Persistence for mail connectors: accounts, their encrypted credentials,
-//! per-bot grants, the arrival cursor, recorded mail events, and the
+//! per-bot permission overrides, the arrival cursor, recorded mail events, and the
 //! durable log of mail actions.
 //!
 //! A credential is age-encrypted with an identity derived from `SECRET_KEY`,
@@ -573,14 +573,12 @@ pub async fn set_permissions(
     .bind(bot_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let none = !p.read;
     let binding = match old {
         Some((_, read, write, send, wake))
             if (read, write, send, wake) == (p.read, p.write, p.send, p.wake) =>
         {
             return Ok(false);
         }
-        None if none => return Ok(false),
         None => {
             let total: i64 = sqlx::query_scalar("SELECT count(*) FROM connector_grants")
                 .fetch_one(&mut *tx)
@@ -606,29 +604,21 @@ pub async fn set_permissions(
             }
         }
     };
-    if none {
-        sqlx::query("DELETE FROM connector_grants WHERE account_id = ?1 AND bot_id = ?2")
-            .bind(account_id)
-            .bind(bot_id)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO connector_grants (account_id, bot_id, binding_id, can_read, can_write, can_send, can_wake)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (account_id, bot_id) DO UPDATE SET binding_id = ?3, can_read = ?4,
-                 can_write = ?5, can_send = ?6, can_wake = ?7, updated_at = {NOW}"
-        )))
-        .bind(account_id)
-        .bind(bot_id)
-        .bind(binding)
-        .bind(p.read)
-        .bind(p.write)
-        .bind(p.send)
-        .bind(p.wake)
-        .execute(&mut *tx)
-        .await?;
-    }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO connector_grants (account_id, bot_id, binding_id, can_read, can_write, can_send, can_wake)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (account_id, bot_id) DO UPDATE SET binding_id = ?3, can_read = ?4,
+             can_write = ?5, can_send = ?6, can_wake = ?7, updated_at = {NOW}"
+    )))
+    .bind(account_id)
+    .bind(bot_id)
+    .bind(binding)
+    .bind(p.read)
+    .bind(p.write)
+    .bind(p.send)
+    .bind(p.wake)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -642,7 +632,7 @@ fn permissions_of((read, write, send, wake): (bool, bool, bool, bool)) -> Permis
     }
 }
 
-/// One bot's grant on a connected account, if the bot is active.
+/// Effective access for an active bot, including workspace defaults.
 pub async fn permissions(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -658,9 +648,11 @@ async fn grant_in(
     bot_id: Uuid,
 ) -> Result<Option<Permissions>, sqlx::Error> {
     let row: Option<(bool, bool, bool, bool)> = sqlx::query_as(
-        "SELECT g.can_read, g.can_write, g.can_send, g.can_wake FROM connector_grants g
-         JOIN connector_accounts a ON a.id = g.account_id JOIN bots b ON b.id = g.bot_id
-         WHERE g.account_id = ?1 AND g.bot_id = ?2 AND a.state <> 'removed' AND b.status = 'active'",
+        "SELECT coalesce(g.can_read, 1), coalesce(g.can_write, 1),
+                coalesce(g.can_send, 1), coalesce(g.can_wake, 0)
+         FROM connector_accounts a CROSS JOIN bots b
+         LEFT JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = b.id
+         WHERE a.id = ?1 AND b.id = ?2 AND a.state <> 'removed' AND b.status = 'active'",
     )
     .bind(account_id)
     .bind(bot_id)
@@ -687,7 +679,7 @@ pub async fn grants(
         .collect())
 }
 
-/// The connected accounts one bot holds a grant on, with that grant.
+/// Connected accounts and the active bot's effective access.
 pub async fn bot_accounts(
     pool: &SqlitePool,
     bot_id: Uuid,
@@ -703,9 +695,12 @@ pub async fn bot_accounts(
     }
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT a.id, a.config, a.generation, a.state, a.health,
-                g.can_read, g.can_write, g.can_send, g.can_wake
-         FROM connector_grants g JOIN connector_accounts a ON a.id = g.account_id
-         WHERE g.bot_id = ?1 AND a.state <> 'removed' ORDER BY a.created_at, a.id",
+                coalesce(g.can_read, 1) AS can_read, coalesce(g.can_write, 1) AS can_write,
+                coalesce(g.can_send, 1) AS can_send, coalesce(g.can_wake, 0) AS can_wake
+         FROM connector_accounts a CROSS JOIN bots b
+         LEFT JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = b.id
+         WHERE b.id = ?1 AND b.status = 'active' AND a.state <> 'removed'
+         ORDER BY a.created_at, a.id",
     )
     .bind(bot_id)
     .fetch_all(pool)
