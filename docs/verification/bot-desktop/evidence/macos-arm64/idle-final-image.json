@@ -1,0 +1,30 @@
+{
+  "elapsed_seconds": 50.00185120804235,
+  "before": {
+    "bot_id": "6e312fbb-a855-4601-a060-a0153cd100d9",
+    "runtime_name": "elsebot-6e312fbb-a855-4601-a060-a0153cd100d9",
+    "image": "else-guest:3",
+    "cpus": 1,
+    "memory_mib": 2048,
+    "desired_state": "auto",
+    "state": "running",
+    "active_leases": 1,
+    "last_used_at": "2026-11-05T07:43:09.542Z",
+    "last_error": null,
+    "desktop_available": true
+  },
+  "after": {
+    "bot_id": "6e312fbb-a855-4601-a060-a0153cd100d9",
+    "runtime_name": "elsebot-6e312fbb-a855-4601-a060-a0153cd100d9",
+    "image": "else-guest:3",
+    "cpus": 1,
+    "memory_mib": 2048,
+    "desired_state": "auto",
+    "state": "running",
+    "active_leases": 1,
+    "last_used_at": "2026-11-05T07:43:09.542Z",
+    "last_error": null,
+    "desktop_available": true
+  },
+  "status": "passed"
+}

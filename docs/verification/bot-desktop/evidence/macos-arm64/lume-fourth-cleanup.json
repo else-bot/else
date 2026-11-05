@@ -1,0 +1,33 @@
+{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-05f2b55c-dee8783e176a",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "ee:02:70:94:bf:dc",
+      "machineIdentifier": "YnBsaXN0MDDRAQJURUNJRBQAAAAAAAAAAOud1GKWx/WpCAsQAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAACE=",
+      "locationName": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-arm64/lume-4/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T07:46:01Z",
+      "lume_get": "not found",
+      "directory": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-arm64/lume-4/vms/else-verify-05f2b55c-dee8783e176a",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-05T07:45:59Z",
+    "status": "collected",
+    "path": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-arm64/lume-4/guest"
+  },
+  "base_after": {
+    "at": "2026-11-05T07:46:01Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}

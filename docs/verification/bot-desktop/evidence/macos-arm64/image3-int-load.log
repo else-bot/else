@@ -1,0 +1,76 @@
+#0 building with "orbstack" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 3.77kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/15] FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+#4 resolve docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 557B done
+#5 DONE 0.0s
+
+#6 [14/15] RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n'       cargo chromium g++ gcc git jq make nodejs npm pkg-config python3 python3-pip       python3-venv rustc     | jq -R -s --arg tag "else-guest:3" --arg snapshot "20261101T000000Z"       '{image: $tag, debian_snapshot: $snapshot, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}'       > /etc/elsebot/image.json
+#6 CACHED
+
+#7 [ 9/15] COPY else-screenshot /usr/local/bin/else-screenshot
+#7 CACHED
+
+#8 [13/15] RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint       /usr/local/bin/else-capabilities /usr/local/bin/else-screenshot /usr/local/bin/else-input  && chmod 0755 /usr/local/lib/elsebot/cdp /usr/local/lib/elsebot/vnc  && chmod 0644 /usr/local/lib/elsebot/cdp/* /usr/local/lib/elsebot/vnc/*
+#8 CACHED
+
+#9 [10/15] COPY else-input /usr/local/bin/else-input
+#9 CACHED
+
+#10 [ 5/15] COPY else-browser /usr/local/bin/else-browser
+#10 CACHED
+
+#11 [ 2/15] RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\nTypes: deb\nURIs: http://snapshot.debian.org/archive/debian-security/%s\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' "20261101T000000Z" "20261101T000000Z" > /etc/apt/sources.list.d/debian.sources  && apt-get -o Acquire::Check-Valid-Until=false update  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       ca-certificates chromium curl fonts-dejavu-core novnc openbox procps       python3 python3-websocket supervisor websockify x11vnc xterm xvfb       bzip2 cargo g++ gcc git jq libc6-dev make nodejs npm pkg-config       python3-pip python3-venv rustc time unzip xz-utils zip  && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [ 3/15] RUN useradd --create-home --shell /bin/bash elsebot  && mkdir -p /var/lib/elsebot/jobs /home/elsebot/work  && chown -R elsebot:elsebot /var/lib/elsebot /home/elsebot
+#12 CACHED
+
+#13 [11/15] COPY cdp/ /usr/local/lib/elsebot/cdp/
+#13 CACHED
+
+#14 [ 4/15] COPY supervisord.conf /etc/elsebot/supervisord.conf
+#14 CACHED
+
+#15 [ 7/15] COPY else-checkpoint /usr/local/bin/else-checkpoint
+#15 CACHED
+
+#16 [ 8/15] COPY else-capabilities /usr/local/bin/else-capabilities
+#16 CACHED
+
+#17 [12/15] COPY vnc/else_vnc_targets.py /usr/local/lib/elsebot/vnc/
+#17 CACHED
+
+#18 [ 6/15] COPY else-init /usr/local/bin/else-init
+#18 CACHED
+
+#19 [15/15] WORKDIR /home/elsebot/work
+#19 CACHED
+
+#20 exporting to image
+#20 exporting layers done
+#20 exporting manifest sha256:a97ecfbbbc1a9616dd40897edb2a18e1cbbc81e8556a4d9bdf51e50e6a19d586 done
+#20 exporting config sha256:4b105c4e2788d3b5d4c05b5186a83274969e3cddce5a715c16fea0691d4ea311 done
+#20 exporting attestation manifest sha256:67ab67144a0ff286d3e0dca254e61ebb6a9e7152bd11e528ecd509c5540a7d25
+#20 exporting attestation manifest sha256:67ab67144a0ff286d3e0dca254e61ebb6a9e7152bd11e528ecd509c5540a7d25 0.0s done
+#20 exporting manifest list sha256:9c315d383f2d2b184ddb54c52437a97c5a0ea9aa90e3f224acbd2b6d59e045e2 done
+#20 naming to moby-dangling@sha256:9c315d383f2d2b184ddb54c52437a97c5a0ea9aa90e3f224acbd2b6d59e045e2 done
+#20 unpacking to moby-dangling@sha256:9c315d383f2d2b184ddb54c52437a97c5a0ea9aa90e3f224acbd2b6d59e045e2 done
+#20 DONE 0.1s
+  ✓ Loaded              else-guest:3
+Image ID: sha256:9c315d383f2d2b184ddb54c52437a97c5a0ea9aa90e3f224acbd2b6d59e045e2
+Loaded else-guest:3 into /private/tmp/else62-v2-fd6449/microsandbox (set ELSE_VM_IMAGE=else-guest:3).

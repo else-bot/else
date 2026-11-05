@@ -1,0 +1,23 @@
+127.0.0.1 - - [05/Nov/2026 07:32:45] "GET /desktop-login.html HTTP/1.1" 304 -
+127.0.0.1 - - [05/Nov/2026 07:32:45] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:32:45] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:35:11] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:35:11] "GET /key-event?key=Shift&shift=true&target=pass HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:35:11] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:35:11] "GET /key-event?key=Tab&shift=false&target=pass HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:35:11] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:35:11] "GET /key-event?key=Shift&shift=true&target=login HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:35:11] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:35:11] "GET /key-event?key=Shift&shift=true&target=login HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:33] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:33] "GET /key-event?key=Shift&shift=true&target=pass HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:33] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:33] "GET /key-event?key=Tab&shift=true&target=pass HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:33] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:33] "GET /key-event?key=Shift&shift=true&target=user HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:37] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:37] "GET /key-event?key=-&shift=false&target=user HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:37] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:37] "GET /key-event?key=2&shift=false&target=user HTTP/1.1" 404 -
+127.0.0.1 - - [05/Nov/2026 07:36:37] code 404, message File not found
+127.0.0.1 - - [05/Nov/2026 07:36:37] "GET /key-event?key=x&shift=false&target=user HTTP/1.1" 404 -

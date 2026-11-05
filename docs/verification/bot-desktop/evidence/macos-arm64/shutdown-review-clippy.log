@@ -1,0 +1,126 @@
+    Checking else-api v0.0.14 (/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/apps/api)
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> apps/api/src/computers/jobs/files.rs:72:30
+   |
+72 |         let checked = (|| -> std::io::Result<Result<(u64, Vec<u8>, Vec<u8>), String>> {
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+   = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> apps/api/src/db/delegations.rs:446:15
+    |
+446 |       let rows: Vec<(
+    |  _______________^
+447 | |         Uuid,
+448 | |         Uuid,
+449 | |         String,
+...   |
+453 | |         Option<String>,
+454 | |     )> = sqlx::query_as(
+    | |______^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> apps/api/src/db/delegations.rs:491:15
+    |
+491 |     let rows: Vec<(Uuid, Uuid, Uuid, String, String, Option<String>, Option<String>)> =
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> apps/api/src/db/memory.rs:226:14
+    |
+226 |     let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>, String)> = sqlx::query_as(
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+
+warning: the `Err`-variant returned from this function is very large
+   --> apps/api/src/http/auth.rs:165:69
+    |
+165 | pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
+    |                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `Err`-variant is at least 128 bytes
+    |
+    = help: try reducing the size of `axum::http::Response<axum::body::Body>`, for example by boxing large elements or replacing it with `Box<axum::http::Response<axum::body::Body>>`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#result_large_err
+    = note: `#[warn(clippy::result_large_err)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> apps/api/src/http/computers.rs:62:14
+   |
+62 |       let row: Option<(
+   |  ______________^
+63 | |         String,
+64 | |         String,
+65 | |         i32,
+...  |
+72 | |         bool,
+73 | |     )> = sqlx::query_as(
+   | |______^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+
+warning: this `if` statement can be collapsed
+   --> apps/api/src/http/mod.rs:210:5
+    |
+210 | /     if path == "/v1" || path.starts_with("/v1/") {
+211 | |         if let Err(response) = auth::authenticate(&state, request.headers()).await {
+212 | |             return response;
+213 | |         }
+214 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+210 ~     if (path == "/v1" || path.starts_with("/v1/")) {
+211 ~         && let Err(response) = auth::authenticate(&state, request.headers()).await {
+212 |             return response;
+213 ~         }
+    |
+
+warning: this `if` statement can be collapsed
+   --> apps/api/src/providers/codex.rs:712:21
+    |
+712 | /                     if let Some(delta) = params["delta"].as_str() {
+713 | |                         if sink.text(delta).await.is_err() {
+714 | |                             cancel.cancel();
+715 | |                         }
+716 | |                     }
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+712 ~                     if let Some(delta) = params["delta"].as_str()
+713 ~                         && sink.text(delta).await.is_err() {
+714 |                             cancel.cancel();
+715 ~                         }
+    |
+
+warning: this `if` statement can be collapsed
+   --> apps/api/src/providers/codex_rpc.rs:307:9
+    |
+307 | /         if let Ok(message) = serde_json::from_slice::<Value>(&line) {
+308 | |             if tx.try_send(message).is_err() {
+309 | |                 break;
+310 | |             }
+311 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+307 ~         if let Ok(message) = serde_json::from_slice::<Value>(&line)
+308 ~             && tx.try_send(message).is_err() {
+309 |                 break;
+310 ~             }
+    |
+
+warning: `else-api` (lib) generated 9 warnings (run `cargo clippy --fix --lib -p else-api -- ` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 2.62s

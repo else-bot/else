@@ -1,0 +1,30 @@
+{
+  "label": "final",
+  "upgrade_binary": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-upgrade/else-api-fixed-final",
+  "bot": "f5fa3733-03c3-4296-9b1d-5322fe75f6b3",
+  "from": {
+    "runtime_name": "elsebot-f5fa3733-03c3-4296-9b1d-5322fe75f6b3",
+    "image": "else-guest:2"
+  },
+  "from_stopsignal": "stopsignal=TERM\nelse-guest:2",
+  "before": {
+    "cookie": "login=final-1793851473",
+    "ls": "final-1793851473"
+  },
+  "api_stopped_s_after_cookie": 0.05,
+  "upgrade_exit": 0,
+  "upgrade_s_after_cookie": 1.94,
+  "to": {
+    "runtime_name": "elsebot-f5fa3733-03c3-4296-9b1d-5322fe75f6b3-54bfca7f0a87",
+    "image": "else-guest:3"
+  },
+  "to_stopsignal": "stopsignal=INT\nelse-guest:3",
+  "after": {
+    "cookie": "login=final-1793851473",
+    "ls": "final-1793851473"
+  },
+  "file": "v2 file sentinel",
+  "cookie_survived": true,
+  "localstorage_survived": true,
+  "file_survived": true
+}

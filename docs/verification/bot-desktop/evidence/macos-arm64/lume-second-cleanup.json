@@ -1,0 +1,35 @@
+{
+  "run_id": "3d613384dc8e48e5909dff6a25f2c7a9",
+  "created_at": "2026-11-05T04:40:47Z",
+  "phase": "cleaned",
+  "stop_reason": "guest session ended",
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-05f2b55c-3d613384dc8e",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "4a:8f:28:fb:d2:ec",
+      "machineIdentifier": "YnBsaXN0MDDRAQJURUNJRBQAAAAAAAAAAOBo0tslH5E+CAsQAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAACE=",
+      "locationName": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-arm64/lume-2/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T05:41:23Z",
+      "lume_get": "not found",
+      "directory": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-arm64/lume-2/vms/else-verify-05f2b55c-3d613384dc8e",
+      "exists": false
+    }
+  },
+  "base": {
+    "name": "else-verify-base",
+    "storage": "/Users/iam4x/.local/share/else-verify/lume-base",
+    "mac": "ca:c2:f2:3e:9d:72",
+    "machine_identifier": "YnBsaXN0MDDRAQJURUNJRBNv4O2LdvE2qwgLEAAAAAAAAAEBAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAZ",
+    "manifest_digest": "sha256:7cb23670cad48a6723cf667bc63c444b83dc0c73756c23b614897127d5ba22ba"
+  },
+  "base_after": {
+    "at": "2026-11-05T05:41:23Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}

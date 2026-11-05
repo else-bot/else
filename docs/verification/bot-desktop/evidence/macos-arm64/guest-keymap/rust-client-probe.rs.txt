@@ -1,0 +1,79 @@
+    #[tokio::test]
+    #[ignore]
+    async fn else62_keymap_probe() {
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let token = std::fs::read_to_string("/private/tmp/else62-arm64-fd6449/owner-token").unwrap();
+        let token = OwnerToken::parse(token.trim()).unwrap();
+        let origin = Origin::parse("http://127.0.0.1:64838").unwrap();
+        let client = Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
+        let bot: Uuid = std::env::var("PROBE_BOT").unwrap().parse().unwrap();
+        let steps: Vec<serde_json::Value> = serde_json::from_str(&std::env::var("PROBE_SCRIPT").unwrap()).unwrap();
+        let mut stream = client.desktop(bot, true);
+        let mode = |mode| DesktopCommand::Mode { mode };
+        assert!(stream.commands.send_or_disconnect(mode(DesktopMode::Control)));
+        loop {
+            match stream.events.recv().await.unwrap() {
+                DesktopEvent::Mode(DesktopMode::Control) => break,
+                DesktopEvent::Error(e) | DesktopEvent::Notice(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        let (mode_tx, mut mode_rx) = mpsc::unbounded_channel();
+        let drain = tokio::spawn(async move {
+            while let Some(event) = stream.events.recv().await {
+                if let DesktopEvent::Mode(m) = event { let _ = mode_tx.send((m, now())); }
+            }
+            let _ = mode_tx.send((DesktopMode::Watch, 0));
+        });
+        let commands = stream.commands.clone();
+        let mut report = serde_json::json!({"control_at": now()});
+        for step in steps {
+            if let Some(text) = step["text"].as_str() {
+                let gap = step["gap_ms"].as_u64().unwrap_or(0);
+                if step["per_char"].as_bool().unwrap_or(false) {
+                    for ch in text.chars() {
+                        assert!(commands.type_text(&ch.to_string()));
+                        tokio::time::sleep(Duration::from_millis(gap)).await;
+                    }
+                } else {
+                    let chars: Vec<char> = text.chars().collect();
+                    for chunk in chars.chunks(MAX_TEXT_CHARS) {
+                        assert!(commands.type_text(&chunk.iter().collect::<String>()));
+                    }
+                }
+            } else if let Some(keys) = step["chord"].as_array() {
+                let keys: Vec<u32> = keys.iter().map(|k| k.as_u64().unwrap() as u32).collect();
+                for &key in &keys { assert!(commands.send_or_disconnect(DesktopCommand::Key { key, down: true })); }
+                for &key in keys.iter().rev() { assert!(commands.send_or_disconnect(DesktopCommand::Key { key, down: false })); }
+            } else if let Some(key) = step["down"].as_u64() {
+                assert!(commands.send_or_disconnect(DesktopCommand::Key { key: key as u32, down: true }));
+            } else if let Some(ms) = step["sleep_ms"].as_u64() {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            } else if let Some(end) = step["end"].as_str() {
+                report["end"] = end.into();
+                report["end_at"] = now().into();
+                match end {
+                    "watch" => {
+                        assert!(commands.send_or_disconnect(mode(DesktopMode::Watch)));
+                        while let Some((m, at)) = mode_rx.recv().await {
+                            if m == DesktopMode::Watch { report["watch_ack_at"] = at.into(); break; }
+                        }
+                    }
+                    "disconnect" => {}
+                    other => panic!("unknown end {other}"),
+                }
+                break;
+            }
+        }
+        if report.get("end").is_none() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(commands.send_or_disconnect(DesktopCommand::Release));
+            assert!(commands.send_or_disconnect(mode(DesktopMode::Watch)));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        drop(commands);
+        drain.abort();
+        report["dropped_at"] = now().into();
+        println!("PROBE {report}");
+    }
+

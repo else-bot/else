@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running `/private/tmp/pr62-shutdown-review-proof-target/debug/else-pr62-commit-barrier-proof`
+barrier=false, cleanup saw 0, remaining leases=1

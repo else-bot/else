@@ -1,0 +1,38 @@
+{"type": "release"}
+{"type": "mode", "mode": "control"}
+{"type": "key", "key": 110, "down": true}
+{"type": "key", "key": 110, "down": false}
+{"type": "key", "key": 97, "down": true}
+{"type": "key", "key": 97, "down": false}
+{"type": "key", "key": 116, "down": true}
+{"type": "key", "key": 116, "down": false}
+{"type": "key", "key": 105, "down": true}
+{"type": "key", "key": 105, "down": false}
+{"type": "key", "key": 118, "down": true}
+{"type": "key", "key": 118, "down": false}
+{"type": "key", "key": 101, "down": true}
+{"type": "key", "key": 101, "down": false}
+{"type": "key", "key": 45, "down": true}
+{"type": "key", "key": 45, "down": false}
+{"type": "key", "key": 233, "down": true}
+{"type": "key", "key": 233, "down": false}
+{"type": "key", "key": 16805666, "down": true}
+{"type": "key", "key": 16805666, "down": false}
+{"type": "key", "key": 16800599, "down": true}
+{"type": "key", "key": 16800599, "down": false}
+{"type": "key", "key": 16789579, "down": true}
+{"type": "key", "key": 16789579, "down": false}
+{"type": "key", "key": 16789610, "down": true}
+{"type": "key", "key": 16789610, "down": false}
+{"type": "release"}
+{"type": "release"}
+{"type": "mode", "mode": "watch"}
+{"type": "release"}
+{"type": "mode", "mode": "control"}
+{"type": "key", "key": 233, "down": true}
+{"type": "key", "key": 233, "down": false}
+{"type": "release"}
+{"type": "release"}
+{"type": "mode", "mode": "watch"}
+{"type": "release"}
+{"type": "release"}

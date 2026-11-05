@@ -1,0 +1,10 @@
+{
+  "held_after_exit": {
+    "x": 714,
+    "y": 554,
+    "mask": 0,
+    "held_keycodes": []
+  },
+  "active_leases_after_exit": 0,
+  "status": "passed"
+}

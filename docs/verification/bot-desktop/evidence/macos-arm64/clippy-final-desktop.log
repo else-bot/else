@@ -1,0 +1,84 @@
+    Checking else-desktop v0.0.14 (/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/apps/desktop)
+warning: associated function `parse` is never used
+   --> apps/desktop/src/appearance.rs:104:8
+    |
+103 | impl Rgb {
+    | -------- associated function in this implementation
+104 |     fn parse(text: &str) -> Option<Self> {
+    |        ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: this `if` statement can be collapsed
+   --> apps/desktop/src/app/conversation.rs:199:25
+    |
+199 | /                         if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot) {
+200 | |                             if activity.is_some() {
+201 | |                                 entry.activity = activity;
+202 | |                             }
+203 | |                         }
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+199 ~                         if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot)
+200 ~                             && activity.is_some() {
+201 |                                 entry.activity = activity;
+202 ~                             }
+    |
+
+warning: this `if` statement can be collapsed
+   --> apps/desktop/src/app/message_row.rs:217:24
+    |
+217 |                   } else if !user && run.first {
+    |  ________________________^
+218 | |                     if let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
+219 | |                         column = column.child(
+220 | |                             h_flex()
+...   |
+229 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+217 ~                 } else if !user && run.first
+218 ~                     && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
+219 |                         column = column.child(
+...
+227 |                         );
+228 ~                     }
+    |
+
+warning: manual implementation of `.is_multiple_of()`
+    --> apps/desktop/src/app/settings.rs:1373:73
+     |
+1373 |         _ => number(field.strip_prefix("*/")?, 1, cycle - 1).filter(|n| cycle % n == 0),
+     |                                                                         ^^^^^^^^^^^^^^ help: replace with: `cycle.is_multiple_of(*n)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_is_multiple_of
+     = note: `#[warn(clippy::manual_is_multiple_of)]` on by default
+
+warning: this `if` statement can be collapsed
+   --> apps/desktop/src/model.rs:285:9
+    |
+285 | /         if let Some(old_seq) = self.seq_of.insert(item.id, item.seq) {
+286 | |             if old_seq != item.seq {
+287 | |                 self.items.remove(&old_seq);
+288 | |             }
+289 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+285 ~         if let Some(old_seq) = self.seq_of.insert(item.id, item.seq)
+286 ~             && old_seq != item.seq {
+287 |                 self.items.remove(&old_seq);
+288 ~             }
+    |
+
+warning: `else-desktop` (bin "else-desktop") generated 5 warnings (run `cargo clippy --fix --bin "else-desktop" -p else-desktop -- ` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 1.09s

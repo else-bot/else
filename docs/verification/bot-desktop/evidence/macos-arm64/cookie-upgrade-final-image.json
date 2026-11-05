@@ -1,0 +1,30 @@
+{
+  "label": "final-image",
+  "upgrade_binary": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/.build/debug/else-api",
+  "bot": "05748f2f-4d36-4e8b-9ddb-cba65ae24527",
+  "from": {
+    "runtime_name": "elsebot-05748f2f-4d36-4e8b-9ddb-cba65ae24527",
+    "image": "else-guest:2"
+  },
+  "from_stopsignal": "stopsignal=TERM\nelse-guest:2",
+  "before": {
+    "cookie": "login=final-image-1793863787",
+    "ls": "final-image-1793863787"
+  },
+  "api_stopped_s_after_cookie": 0.06,
+  "upgrade_exit": 0,
+  "upgrade_s_after_cookie": 11.97,
+  "to": {
+    "runtime_name": "elsebot-05748f2f-4d36-4e8b-9ddb-cba65ae24527-737e83aac607",
+    "image": "else-guest:3"
+  },
+  "to_stopsignal": "stopsignal=INT\nelse-guest:3",
+  "after": {
+    "cookie": "login=final-image-1793863787",
+    "ls": "final-image-1793863787"
+  },
+  "file": "v2 file sentinel",
+  "cookie_survived": true,
+  "localstorage_survived": true,
+  "file_survived": true
+}

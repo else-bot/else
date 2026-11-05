@@ -1,0 +1,16 @@
+    Checking gpui-base v0.9.0 (https://github.com/else-bot/gpui-kit?rev=5e412e4847cc0fb838f137c4c6b18fdc50e0f446#5e412e48)
+    Checking gpui-component v0.9.0
+    Checking gpui-kit v0.9.0
+    Checking else-desktop v0.0.14 (/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/apps/desktop)
+warning: associated function `parse` is never used
+   --> apps/desktop/src/appearance.rs:104:8
+    |
+103 | impl Rgb {
+    | -------- associated function in this implementation
+104 |     fn parse(text: &str) -> Option<Self> {
+    |        ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `else-desktop` (bin "else-desktop") generated 1 warning
+    Finished `dev` profile [unoptimized] target(s) in 7.12s

@@ -1,0 +1,11 @@
+{
+  "signal": "TERM",
+  "before": {
+    "cookie": "login=TERM-1793850556",
+    "ls": "TERM-1793850556"
+  },
+  "after": {
+    "ls": "TERM-1793850556"
+  },
+  "cookie_survived": false
+}

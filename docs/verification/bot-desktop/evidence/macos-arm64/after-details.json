@@ -1,0 +1,13 @@
+{
+  "active_leases": 0,
+  "bot_id": "d0e98efd-1dfa-4ef3-ae35-c1a5910d5328",
+  "cpus": 1,
+  "desired_state": "auto",
+  "desktop_available": true,
+  "image": "else-guest:3",
+  "last_error": null,
+  "last_used_at": "2026-11-05T03:49:38.644Z",
+  "memory_mib": 2048,
+  "runtime_name": "elsebot-d0e98efd-1dfa-4ef3-ae35-c1a5910d5328",
+  "state": "running"
+}

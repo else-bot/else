@@ -1,0 +1,13 @@
+{
+  "bot_id": "4e749169-b1f8-445a-81e0-80d713b3a40a",
+  "runtime_name": "elsebot-4e749169-b1f8-445a-81e0-80d713b3a40a",
+  "image": "else-guest:3",
+  "cpus": 1,
+  "memory_mib": 2048,
+  "desired_state": "auto",
+  "state": "running",
+  "active_leases": 0,
+  "last_used_at": "2026-11-05T04:01:40.484Z",
+  "last_error": null,
+  "desktop_available": true
+}

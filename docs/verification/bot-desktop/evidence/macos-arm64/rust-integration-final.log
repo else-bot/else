@@ -1,0 +1,65 @@
+   Compiling else-api v0.0.14 (/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/apps/api)
+    Finished `test` profile [unoptimized] target(s) in 1.53s
+     Running tests/computers.rs (.else-dev/.build/debug/deps/computers-96a45aced7f29353)
+
+running 16 tests
+test a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer ... ok
+test nothing_is_used_until_the_runtime_has_been_inspected ... ok
+test image_upgrades_fail_cleanly_and_keep_the_old_computer ... ok
+test computers_are_created_on_first_use_reused_and_kept_apart ... ok
+test computers_mount_their_bots_project_directory ... ok
+test a_failed_stop_keeps_its_reservation_and_is_retried ... ok
+test admission_queues_beyond_the_budget_and_paused_computers_keep_their_reservation ... ok
+test desktop_upgrades_close_chromium_with_sigint_before_the_stop ... ok
+test startup_inspects_without_waking_recreating_or_removing ... ok
+test deleting_a_bot_stops_its_computer_and_keeps_it ... ok
+test image_upgrades_keep_network_respect_budget_and_settle_offline ... ok
+test acquisition_racing_idle_stop_never_leaves_a_lease_on_a_stopped_computer ... ok
+test an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works ... ok
+test idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept ... ok
+test disk_operations_end_the_leases_of_finished_turns_and_jobs_only ... ok
+test a_bot_deleted_while_its_computer_starts_gets_no_lease_and_is_stopped ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running tests/desktop_stream.rs (.else-dev/.build/debug/deps/desktop_stream-9468ec84a2e8092b)
+
+running 10 tests
+test an_older_image_can_be_taken_over_but_not_watched ... ok
+test the_stream_authenticates_and_never_wakes_unless_asked ... ok
+test stopping_the_api_abandons_a_stream_waiting_for_boot ... ok
+test control_sends_input_releases_it_and_excludes_other_controllers ... ok
+test stopping_the_api_releases_held_input_and_refuses_new_streams ... ok
+test watching_sends_frames_and_no_input_reaches_the_desktop ... ok
+test stopping_the_api_while_taking_control_leaks_no_lease_or_control ... ok
+test stopping_the_api_releases_input_before_waiting_on_a_busy_database ... ok
+test streams_renew_their_lease_and_end_on_owner_stop_or_delete ... ok
+test stopping_the_api_releases_input_a_non_reading_client_holds ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.58s
+
+     Running tests/screens.rs (.else-dev/.build/debug/deps/screens-c8bcfd480a931664)
+
+running 3 tests
+test computers_without_a_desktop_say_so ... ok
+test screenshots_reach_the_model_as_images_with_explicit_refusals ... ok
+test input_batches_are_bounded_reported_and_never_logged_verbatim ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/ws.rs (.else-dev/.build/debug/deps/ws-ff2f63c89bc0fd04)
+
+running 10 tests
+test ended_channels_do_not_use_up_the_subscription_limit ... ok
+test cursor_errors_are_reported_per_channel ... ok
+test bots_channel_pushes_list_changes ... ok
+test bots_channel_carries_categories_to_every_client ... ok
+test upgrade_requires_the_owner_token_and_no_browser_origin ... ok
+test bots_channel_carries_background_replies_and_reads ... ok
+test one_socket_carries_several_channels_and_unsubscribe_stops_one ... ok
+test live_events_reconnect_and_replay_without_duplicates ... ok
+test snapshot_then_subscribe_replays_everything_in_between ... ok
+test deletion_ends_a_bot_channel_even_for_a_stalled_reader ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.85s
+

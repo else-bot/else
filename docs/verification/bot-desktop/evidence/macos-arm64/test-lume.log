@@ -1,0 +1,259 @@
+{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-3zg0lqka/worktree/.else-dev/lume/20261105-073459-7257dfa4",
+  "vm": "else-verify-309b7243-7257dfa4259e",
+  "guest": "http://192.168.250.10:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-3zg0lqka/worktree/.else-dev/lume/20261105-073459-7257dfa4 --name 01-initial
+ambiguous/before: 'else.bot' elements=2 capture=capture-1
+pixel/before: 'else.bot' elements=2 capture=capture-2
+{"tool": "click", "is_error": true, "text": "done"}
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-3zg0lqka/worktree/.else-dev/lume/20261105-073459-7257dfa4: cleaned; evidence kept
+.Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-ok9w7gc9/run-no-auth: cleaned; evidence kept
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-ok9w7gc9/run-start-fails: cleaned; evidence kept
+.{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db",
+  "vm": "else-verify-741c5092-5aee74dbf57f",
+  "guest": "http://192.168.250.10:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db --name 01-initial
+{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5",
+  "vm": "else-verify-f0b6ef8c-0896dbe51ee7",
+  "guest": "http://192.168.250.11:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5 --name 01-initial
+a1/snapshot: 'else.bot' elements=1 capture=capture-1
+b1/snapshot: 'else.bot' elements=1 capture=capture-2
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db: cleaned; evidence kept
+{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-741c5092-5aee74dbf57f",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "02:8f:10:9c:aa:b8",
+      "machineIdentifier": "XHrad2UOzpy39JFuyTJct2FfgIUcKJ54",
+      "locationName": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T03:35:06Z",
+      "lume_get": "not found",
+      "directory": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/vms/else-verify-741c5092-5aee74dbf57f",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-05T03:35:05Z",
+    "status": "collected",
+    "path": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/guest"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:06Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+b2/snapshot: 'else.bot' elements=1 capture=capture-3
+{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-741c5092-5aee74dbf57f",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "02:8f:10:9c:aa:b8",
+      "machineIdentifier": "XHrad2UOzpy39JFuyTJct2FfgIUcKJ54",
+      "locationName": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T03:35:06Z",
+      "lume_get": "not found",
+      "directory": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/vms/else-verify-741c5092-5aee74dbf57f",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-05T03:35:05Z",
+    "status": "collected",
+    "path": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-a/.else-dev/lume/20261105-073504-5aee74db/guest"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:06Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5: cleaned; evidence kept
+...{
+  "phase": "cleaned",
+  "stop_reason": "stop requested",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-f0b6ef8c-0896dbe51ee7",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "02:68:47:0e:b9:b4",
+      "machineIdentifier": "L9QfsWTF7BlTsdpeap7uZndxLG9pfzNm",
+      "locationName": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T03:35:07Z",
+      "lume_get": "not found",
+      "directory": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5/vms/else-verify-f0b6ef8c-0896dbe51ee7",
+      "exists": false
+    }
+  },
+  "cleanup_error": null,
+  "collected": {
+    "at": "2026-11-05T03:35:07Z",
+    "status": "collected",
+    "path": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-w8xgkdxx/worktree-b/.else-dev/lume/20261105-073505-0896dbe5/guest"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:07Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+{
+  "phase": "cleanup-failed",
+  "stop_reason": "down after coordinator exited",
+  "error": null,
+  "cleanup": null,
+  "cleanup_error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it",
+  "collected": {
+    "at": "2026-11-05T03:35:09Z",
+    "status": "failed",
+    "error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:09Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+{
+  "phase": "cleaned",
+  "stop_reason": "down after coordinator exited",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-60d768b9-945fc4c9824d",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "02:3e:54:d7:3d:5e",
+      "machineIdentifier": "oXAaKeHPG02c0HIFgWaFSWM4BoLG5cJh",
+      "locationName": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-xyvr_6zd/crashed/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T03:35:10Z",
+      "lume_get": "not found",
+      "directory": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-xyvr_6zd/crashed/vms/else-verify-60d768b9-945fc4c9824d",
+      "exists": false
+    }
+  },
+  "cleanup_error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it",
+  "collected": {
+    "at": "2026-11-05T03:35:09Z",
+    "status": "failed",
+    "error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:10Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+{
+  "phase": "cleaned",
+  "stop_reason": "down after coordinator exited",
+  "error": null,
+  "cleanup": {
+    "stopped": {
+      "name": "else-verify-60d768b9-945fc4c9824d",
+      "status": "stopped",
+      "ipAddress": null,
+      "vncUrl": null,
+      "macAddress": "02:3e:54:d7:3d:5e",
+      "machineIdentifier": "oXAaKeHPG02c0HIFgWaFSWM4BoLG5cJh",
+      "locationName": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-xyvr_6zd/crashed/vms"
+    },
+    "absent": {
+      "at": "2026-11-05T03:35:10Z",
+      "lume_get": "not found",
+      "directory": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-xyvr_6zd/crashed/vms/else-verify-60d768b9-945fc4c9824d",
+      "exists": false
+    }
+  },
+  "cleanup_error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it",
+  "collected": {
+    "at": "2026-11-05T03:35:09Z",
+    "status": "failed",
+    "error": "else-verify-60d768b9-945fc4c9824d identity changed since this run configured it"
+  },
+  "base_after": {
+    "at": "2026-11-05T03:35:10Z",
+    "status": "stopped",
+    "identity_unchanged": true
+  }
+}
+{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-awy5el6m/worktree/.else-dev/lume/20261105-073510-6b7b3058",
+  "vm": "else-verify-ce4abfd5-6b7b30584269",
+  "guest": "http://192.168.250.10:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-awy5el6m/worktree/.else-dev/lume/20261105-073510-6b7b3058 --name 01-initial
+send/before: 'else.bot' elements=1 capture=capture-1
+{"tool": "click", "is_error": false, "text": "done"}
+send/after: 'else.bot' elements=1 capture=capture-2
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-awy5el6m/worktree/.else-dev/lume/20261105-073510-6b7b3058: cleaned; evidence kept
+.{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-som43eu0/worktree/.else-dev/lume/20261105-073512-0dbe016e",
+  "vm": "else-verify-4f98e6cf-0dbe016ea7ea",
+  "guest": "http://192.168.250.10:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-som43eu0/worktree/.else-dev/lume/20261105-073512-0dbe016e --name 01-initial
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-som43eu0/worktree/.else-dev/lume/20261105-073512-0dbe016e: cleaned; evidence kept
+.{
+  "run": "/private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-h3biung5/worktree/.else-dev/lume/20261105-073514-b0822237",
+  "vm": "else-verify-2efbabda-b08222370c23",
+  "guest": "http://192.168.250.10:3211",
+  "session": "work",
+  "desktop_pid": 930,
+  "api_url_in_guest": "http://127.0.0.1:50000"
+}
+Ready. Drive with: lume.py snapshot --run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-h3biung5/worktree/.else-dev/lume/20261105-073514-b0822237 --name 01-initial
+{"bots": [], "probed": "192.168.250.10"}
+Run /private/var/folders/bk/2bnvkp4n28vfxycxgtltx0jh0000gn/T/lume-test-h3biung5/worktree/.else-dev/lume/20261105-073514-b0822237: cleaned; evidence kept
+.
+----------------------------------------------------------------------
+Ran 8 tests in 17.101s
+
+OK

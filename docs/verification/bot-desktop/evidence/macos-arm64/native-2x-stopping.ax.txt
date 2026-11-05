@@ -1,0 +1,96 @@
+- [0] AXWindow "PR62 arm64 computer verification" [actions=[raise]]
+  - [1] AXButton "Change server" [actions=[press]]
+  - [2] AXButton "Close" [actions=[press]]
+  - AXButton "Watching"
+  - AXButton "Take over"
+  - [3] AXButton [actions=[press]]
+  - [4] AXButton [help="this button also has an action to zoom the window" actions=[press,zoomwindow]]
+  - [5] AXButton [actions=[press]]
+- [6] AXMenuBar [actions=[cancel]]
+  - [7] AXMenuBarItem "Apple" [actions=[cancel,press,pick]]
+    - [8] AXMenu [actions=[cancel]]
+      - [9] AXMenuItem "About This Mac" [id=_aboutThisMacRequested: actions=[cancel,press,pick]]
+      - [10] AXMenuItem "System Information" [id=_systemInformationRequested: actions=[cancel,press,pick]]
+      - [11] AXMenuItem "System Settings…" [id=_systemSettingsRequested: actions=[cancel,press,pick]]
+      - [12] AXMenuItem "App Store" [id=_appStoreRequested: actions=[cancel,press,pick]]
+      - [13] AXMenuItem "Recent Items" [id=_recentsRequested: actions=[cancel,press,pick]]
+        - [14] AXMenu [actions=[cancel]]
+          - AXMenuItem "Applications"
+          - AXMenuItem "Documents"
+          - AXMenuItem "Servers"
+          - [15] AXMenuItem "Macintosh HD" [id=_recentItemRequested: actions=[cancel,press,pick]]
+          - [16] AXMenuItem "mnt" [id=_recentItemRequested: actions=[cancel,press,pick]]
+          - [17] AXMenuItem "Clear Menu" [id=_clearRecentItemsRequested: actions=[cancel,press,pick]]
+      - [18] AXMenuItem "Force Quit…" [id=_forceQuitPanelRequested: actions=[cancel,press,pick]]
+      - [19] AXMenuItem "Force Quit PR62 Verification" [id=_forceQuitRequested: actions=[cancel,press,pick]]
+      - [20] AXMenuItem "Sleep" [id=_sleepRequested: actions=[cancel,press,pick]]
+      - [21] AXMenuItem "Restart…" [id=_restartRequested: actions=[cancel,press,pick]]
+      - [22] AXMenuItem "Restart" [id=_restartNowRequested: actions=[cancel,press,pick]]
+      - [23] AXMenuItem "Shut Down…" [id=_shutDownRequested: actions=[cancel,press,pick]]
+      - [24] AXMenuItem "Shut Down" [id=_shutDownNowRequested: actions=[cancel,press,pick]]
+      - [25] AXMenuItem "Lock Screen" [id=_lockScreenRequested: actions=[cancel,press,pick]]
+      - [26] AXMenuItem "Log Out lume…" [id=_logOutRequested: actions=[cancel,press,pick]]
+      - [27] AXMenuItem "Log Out lume" [id=_logOutNowRequested: actions=[cancel,press,pick]]
+  - [28] AXMenuBarItem "PR62 Verification" [actions=[cancel,press,pick]]
+    - [29] AXMenu [actions=[cancel]]
+      - AXMenuItem "Bot details"
+      - [30] AXMenuItem "Quit else.bot" [id=handleGPUIMenuItem: actions=[cancel,press,pick]]
+  - [31] AXMenuBarItem "Edit" [actions=[cancel,press,pick]]
+    - [32] AXMenu [actions=[cancel]]
+      - AXMenuItem "Undo"
+      - AXMenuItem "Redo"
+      - AXMenuItem "Cut"
+      - [33] AXMenuItem "Copy" [id=copy: actions=[cancel,press,pick]]
+      - AXMenuItem "Paste"
+      - AXMenuItem "Select All"
+      - [34] AXMenuItem "AutoFill" [id=_NSMenuItemAutoFillIdentifier actions=[cancel,press,pick]]
+        - [35] AXMenu [actions=[cancel]]
+          - AXMenuItem "Contact…"
+          - AXMenuItem "Passwords…"
+          - AXMenuItem "Credit Card…"
+      - [36] AXMenuItem "Start Dictation…" [id=startDictation: actions=[cancel,press,pick]]
+      - [37] AXMenuItem "Emoji & Symbols" [id=orderFrontCharacterPalette: actions=[cancel,press,pick]]
+  - [38] AXMenuBarItem "Bot" [actions=[cancel,press,pick]]
+    - [39] AXMenu [actions=[cancel]]
+      - AXMenuItem "New Bot"
+      - AXMenuItem "New Category"
+      - AXMenuItem "Move to Category…"
+      - AXMenuItem "Load Older Messages"
+      - AXMenuItem "Stop Work"
+      - AXMenuItem "Delete Bot…"
+  - [40] AXMenuBarItem "Window" [actions=[cancel,press,pick]]
+    - [41] AXMenu [actions=[cancel]]
+      - [42] AXMenuItem "Fill" [id=_zoomFill: actions=[cancel,press,pick]]
+      - [43] AXMenuItem "Center" [id=_zoomCenter: actions=[cancel,press,pick]]
+      - [44] AXMenuItem "Enter Full Screen" [id=toggleFullScreen: actions=[cancel,press,pick]]
+      - [45] AXMenuItem "Move & Resize" [actions=[cancel,press,pick]]
+        - [46] AXMenu [actions=[cancel]]
+          - AXMenuItem "Halves"
+          - [47] AXMenuItem "Left" [id=_zoomLeft: actions=[cancel,press,pick]]
+          - [48] AXMenuItem "Right" [id=_zoomRight: actions=[cancel,press,pick]]
+          - [49] AXMenuItem "Top" [id=_zoomTop: actions=[cancel,press,pick]]
+          - [50] AXMenuItem "Bottom" [id=_zoomBottom: actions=[cancel,press,pick]]
+          - AXMenuItem "Quarters"
+          - [51] AXMenuItem "Top Left" [id=_zoomTopLeft: actions=[cancel,press,pick]]
+          - [52] AXMenuItem "Top Right" [id=_zoomTopRight: actions=[cancel,press,pick]]
+          - [53] AXMenuItem "Bottom Left" [id=_zoomBottomLeft: actions=[cancel,press,pick]]
+          - [54] AXMenuItem "Bottom Right" [id=_zoomBottomRight: actions=[cancel,press,pick]]
+          - AXMenuItem "Arrange"
+          - [55] AXMenuItem "Left & Right" [id=_zoomLeftAndRight: actions=[cancel,press,pick]]
+          - [56] AXMenuItem "Left & Quarters" [id=_zoomLeftThreeUp: actions=[cancel,press,pick]]
+          - [57] AXMenuItem "Right & Left" [id=_zoomRightAndLeft: actions=[cancel,press,pick]]
+          - [58] AXMenuItem "Right & Quarters" [id=_zoomRightThreeUp: actions=[cancel,press,pick]]
+          - [59] AXMenuItem "Top & Bottom" [id=_zoomTopAndBottom: actions=[cancel,press,pick]]
+          - [60] AXMenuItem "Top & Quarters" [id=_zoomTopThreeUp: actions=[cancel,press,pick]]
+          - [61] AXMenuItem "Bottom & Top" [id=_zoomBottomAndTop: actions=[cancel,press,pick]]
+          - [62] AXMenuItem "Bottom & Quarters" [id=_zoomBottomThreeUp: actions=[cancel,press,pick]]
+          - [63] AXMenuItem "Quarters" [id=_zoomQuarters: actions=[cancel,press,pick]]
+          - AXMenuItem "Return to Previous Size"
+      - [64] AXMenuItem "Full Screen Tile" [actions=[cancel,press,pick]]
+        - [65] AXMenu [actions=[cancel]]
+          - [66] AXMenuItem "Left of Screen" [id=_tileLeft: actions=[cancel,press,pick]]
+          - [67] AXMenuItem "Right of Screen" [id=_tileRight: actions=[cancel,press,pick]]
+      - AXMenuItem "Remove Window from Set"
+      - [68] AXMenuItem "Move to Apple Virtual" [id=_moveToDisplay: actions=[cancel,press,pick]]
+      - [69] AXMenuItem "Close Window" [id=handleGPUIMenuItem: actions=[cancel,press,pick]]
+      - [70] AXMenuItem "PR62 arm64 computer verification" [id=makeKeyAndOrderFront: actions=[cancel,press,pick]]

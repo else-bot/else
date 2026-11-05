@@ -1,0 +1,32 @@
+[
+  {
+    "created_at": "2026-11-05T07:29:29.661803+00:00",
+    "image": "else-guest:3",
+    "name": "elsebot-6e312fbb-a855-4601-a060-a0153cd100d9",
+    "status": "Running"
+  },
+  {
+    "created_at": "2026-11-05T07:08:08.675792+00:00",
+    "image": "else-guest:3",
+    "name": "elsebot-1cd65d62-f6e2-4020-829e-251ac29ed9da",
+    "status": "Stopped"
+  },
+  {
+    "created_at": "2026-11-05T05:10:18.211616+00:00",
+    "image": "else-guest:3",
+    "name": "elsebot-3d54093f-f74a-4616-a9ff-e9b1bc235664",
+    "status": "Stopped"
+  },
+  {
+    "created_at": "2026-11-05T04:01:00.533898+00:00",
+    "image": "else-guest:3",
+    "name": "elsebot-4e749169-b1f8-445a-81e0-80d713b3a40a",
+    "status": "Stopped"
+  },
+  {
+    "created_at": "2026-11-05T03:36:58.800327+00:00",
+    "image": "else-guest:3",
+    "name": "elsebot-d0e98efd-1dfa-4ef3-ae35-c1a5910d5328",
+    "status": "Stopped"
+  }
+]

@@ -1,0 +1,29 @@
+{
+  "label": "baseline",
+  "upgrade_binary": "/Users/iam4x/.t3/worktrees/else/t3-fd6449c7/.else-dev/pr62-upgrade/else-api-baseline",
+  "bot": "b2569964-1f6f-45c5-a3b6-89112021f277",
+  "from": {
+    "runtime_name": "elsebot-b2569964-1f6f-45c5-a3b6-89112021f277",
+    "image": "else-guest:2"
+  },
+  "from_stopsignal": "stopsignal=TERM\nelse-guest:2",
+  "before": {
+    "cookie": "login=baseline-1793851181",
+    "ls": "baseline-1793851181"
+  },
+  "api_stopped_s_after_cookie": 0.06,
+  "upgrade_exit": 0,
+  "upgrade_s_after_cookie": 1.64,
+  "to": {
+    "runtime_name": "elsebot-b2569964-1f6f-45c5-a3b6-89112021f277-9b5db0848c8e",
+    "image": "else-guest:3"
+  },
+  "to_stopsignal": "stopsignal=INT\nelse-guest:3",
+  "after": {
+    "ls": "baseline-1793851181"
+  },
+  "file": "v2 file sentinel",
+  "cookie_survived": false,
+  "localstorage_survived": true,
+  "file_survived": true
+}
