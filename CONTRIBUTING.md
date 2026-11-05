@@ -85,9 +85,11 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
-Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Changes require a pull request; force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
+Run `cargo test --workspace --locked` on your development machine and fix failures before committing or pushing. Ordinary pull requests skip the `cargo-test` job. Release pull requests from `release/v*` branches and manual workflow runs execute the full suite on Ubuntu with stable Rust. The required `cargo-test` check accepts the skipped job on ordinary pull requests and requires passing tests on release pull requests.
 
-`cargo-test` also runs on pushes to `main` to populate a build cache that future pull requests can restore. CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
+The `release-ready` check must also pass before merging. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
+
+CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for release tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
 
 Use a focused target while developing, for example:
 
