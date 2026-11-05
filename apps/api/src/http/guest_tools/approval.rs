@@ -10,9 +10,10 @@ const MAX_PREVIEW: usize = 2000;
 
 pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads, or changes only inside your \
     computer or project directory that are easy to undo); destructive (deletes, overwrites, \
-    or changes something hard to undo); external (sends a message or email, posts, edits, or \
-    publishes anything others can see, pays, or otherwise reaches people or services \
-    outside). Required; a missing effect is refused, never assumed local.";
+    or changes something hard to undo, here or on a remote service: deleting a remote git \
+    branch, repository, file, or record is destructive, not external); external (sends a \
+    message or email, posts, edits, or publishes anything others can see, pays, or otherwise \
+    reaches people or services outside). Required; a missing effect is refused, never assumed local.";
 
 /// What a computer tool call declares about its effects. The API cannot
 /// classify a command itself; it enforces the declaration: a destructive
@@ -148,13 +149,18 @@ async fn approve(
     args: &Value,
     kind: Kind,
 ) -> Result<Option<&'static str>, Outcome> {
-    use crate::app::questions::Spec;
+    use crate::app::questions::{Spec, Standing};
     use crate::db::owner_questions::{self, Gate};
     let (title, context) = approval_card(name, args);
     let spec = Spec::tool_approval(kind, name, args, title, context);
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
-        Ok(Gate::Run { standing: true }) => Ok(Some("standing destructive permission")),
-        Ok(Gate::Run { standing: false }) => Ok(Some("approved by the owner")),
+        Ok(Gate::Run {
+            standing: Some(Standing::Bot),
+        }) => Ok(Some("standing destructive permission")),
+        Ok(Gate::Run {
+            standing: Some(Standing::Routine),
+        }) => Ok(Some("standing destructive permission for this routine")),
+        Ok(Gate::Run { standing: None }) => Ok(Some("approved by the owner")),
         Ok(Gate::Pending(question)) => Err(crate::http::owner_tools::pending_approval(
             state,
             grant,

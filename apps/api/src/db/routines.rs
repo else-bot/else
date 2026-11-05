@@ -340,8 +340,10 @@ pub struct Patch {
 }
 
 /// Apply `patch`. Setting values a routine already has changes nothing, so
-/// a retry never postpones its schedule. Disabling stops future runs (one
-/// already admitted finishes); enabling or a new schedule counts from `now`.
+/// a retry never postpones its schedule. A new prompt is a new prompt
+/// revision, which ends the routine's destructive grant. Disabling stops
+/// future runs (one already admitted finishes); enabling or a new schedule
+/// counts from `now`.
 pub async fn update(
     pool: &SqlitePool,
     by: By,
@@ -396,7 +398,8 @@ pub async fn update(
     }
     let changed = sqlx::query(
         "UPDATE routines SET name = ?2, prompt = ?3, cron = ?4, timezone = ?5, enabled = ?6,
-             next_due_at = ?7, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             next_due_at = ?7, prompt_revision = prompt_revision + (prompt IS NOT ?3),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND (name IS NOT ?2 OR prompt IS NOT ?3 OR cron IS NOT ?4
              OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7)",
     )
@@ -548,6 +551,7 @@ struct Due {
     conversation_id: Uuid,
     name: String,
     prompt: String,
+    prompt_revision: i64,
     cron: String,
     timezone: String,
     due_at: String,
@@ -563,7 +567,7 @@ async fn admit(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
-        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.cron, r.timezone,
+        "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
                 r.next_due_at AS due_at, c.last_turn_no, c.last_item_seq
          FROM routines r JOIN bots b ON b.id = r.bot_id
          JOIN conversations c ON c.id = r.conversation_id
@@ -579,6 +583,7 @@ async fn admit(
         conversation_id,
         name,
         prompt,
+        prompt_revision,
         cron,
         timezone,
         due_at,
@@ -693,14 +698,15 @@ async fn admit(
         .execute(&mut *tx)
         .await?;
     sqlx::query(
-        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(run_id)
     .bind(id)
     .bind(&due_at)
     .bind(&name)
     .bind(turn_id)
+    .bind(prompt_revision)
     .execute(&mut *tx)
     .await?;
     events::turn_accepted(&mut tx, bot_id, turn_id).await?;

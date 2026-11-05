@@ -27,6 +27,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/permissions/{scope}",
             axum::routing::delete(revoke),
         )
+        .route(
+            "/bots/{bot_id}/permissions/routines/{routine_id}",
+            axum::routing::delete(revoke_routine),
+        )
 }
 
 #[derive(Deserialize)]
@@ -46,6 +50,11 @@ fn settle_error(err: SettleError) -> ApiError {
         SettleError::InvalidChoice => {
             ApiError::bad_request("invalid_choice", "Choose one of this question's options.")
         }
+        SettleError::RoutineChanged => ApiError::new(
+            StatusCode::CONFLICT,
+            "routine_changed",
+            SettleError::RoutineChanged.to_string(),
+        ),
         SettleError::Db(err) => err.into(),
     }
 }
@@ -73,8 +82,25 @@ async fn permissions(
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     active_bot(&state, bot_id).await?;
-    let permissions = owner_questions::permissions(&state.db, bot_id).await?;
-    Ok(Json(json!({ "permissions": permissions })))
+    let (permissions, routine_grants) = tokio::join!(
+        owner_questions::permissions(&state.db, bot_id),
+        owner_questions::routine_grants(&state.db, bot_id),
+    );
+    Ok(Json(
+        json!({ "permissions": permissions?, "routine_grants": routine_grants? }),
+    ))
+}
+
+async fn revoke_routine(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, routine_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    active_bot(&state, bot_id).await?;
+    if owner_questions::revoke_routine_grant(&state.db, bot_id, routine_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found())
+    }
 }
 
 async fn revoke(
