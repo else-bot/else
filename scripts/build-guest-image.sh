@@ -6,11 +6,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${ELSE_GUEST_TAG:-else-guest:3}"
+BASE="${ELSE_GUEST_BASE:-$(python3 scripts/guest-release.py --base pinned)}"
 DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.else}}"
 MSB="${ELSE_MSB_BIN:-$(command -v msb || echo "$HOME/.microsandbox/bin/msb")}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-docker build --pull=false --build-arg IMAGE_TAG="$TAG" --iidfile "$work/image.id" infra/guest
+docker build --pull=false --build-arg BASE="$BASE" --build-arg IMAGE_TAG="$TAG" --iidfile "$work/image.id" infra/guest
 image="$(cat "$work/image.id")"
 docker save "$image" -o "$work/else-guest.tar"
 mkdir -p "$DATA_DIR/microsandbox"

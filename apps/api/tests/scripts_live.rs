@@ -8,7 +8,7 @@
 //! work stops with Stop work; a job keeps running across an API restart
 //! without being launched twice. It consumes subscription quota and boots
 //! VMs, so it runs only with `ELSE_LIVE_SCRIPTS=1` (after
-//! `docker build --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest`):
+//! `docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest`):
 //!
 //! ELSE_LIVE_SCRIPTS=1 cargo test -p else-api --test scripts_live -- --nocapture
 
