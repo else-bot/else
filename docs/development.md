@@ -560,7 +560,7 @@ The workspace patches `gpui-base` to a fixed commit in the
 It carries the native link-preview hook and regression tests. Punctuation
 wrapping comes from the published GPUI 0.3.11 backend.
 The other toolkit crates retain their published versions. The fork's
-[patch notes](https://github.com/else-bot/gpui-kit/blob/5e412e4847cc0fb838f137c4c6b18fdc50e0f446/docs/else-bot-patches.md)
+[patch notes](https://github.com/else-bot/gpui-kit/blob/98855cad3610ba48fdf8a56729bd36b628b3d094/docs/else-bot-patches.md)
 describe the changes and when the patch can be removed.
 
 ## Run isolated development sessions
