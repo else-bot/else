@@ -1,36 +1,49 @@
 name: release-ready
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
   statuses: write
 
+env:
+  VERIFIED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   verify-release:
+    name: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && 'release-ready' || 'verify-release' }}
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'release/v')
     runs-on: ubuntu-24.04
     steps:
       - name: Mark readiness pending
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$VERIFIED_SHA" \
             -f state=pending -f context=release-ready \
             -f description="Verifying the release and pinned guest image" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.VERIFIED_SHA }}
           fetch-depth: 0
           persist-credentials: false
       - env:
-          BRANCH: ${{ github.ref_name }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           git fetch -q --tags origin +refs/heads/main:refs/remotes/origin/main
+          bash -n install.sh scripts/release.sh scripts/build-guest-image.sh scripts/build-guest-base.sh
           python3 scripts/test-release.py
+          python3 scripts/test-install-config.py
+          python3 scripts/e2e/test_installer_guest_image.py
+          python3 scripts/e2e/test_isolation.py
           python3 scripts/guest-release.py gate --branch "$BRANCH" --main-ref origin/main
       - name: Report readiness
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ job.status }}
@@ -40,7 +53,7 @@ jobs:
             cancelled) state=error ;;
             *) state=failure ;;
           esac
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$VERIFIED_SHA" \
             -f state="$state" -f context=release-ready \
             -f description="Release verification: $RESULT" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null

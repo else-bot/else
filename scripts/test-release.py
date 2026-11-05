@@ -298,7 +298,7 @@ class Lifecycle(unittest.TestCase):
         self.write_manifest(self.helper("hash").strip(), None)
         self.commit("bootstrap the guest image manifest")
         self.git(self.work, "tag", "-a", "v0.0.21", "-m", "else.bot 0.0.21")
-        self.git(self.work, "push", "-q", "origin", "main", "main:dev", "v0.0.21")
+        self.git(self.work, "push", "-q", "origin", "main", "v0.0.21")
 
 
     def git(self, cwd, *args, check=True):
@@ -392,7 +392,8 @@ class Lifecycle(unittest.TestCase):
     def merge_to_main(self, branch_repo):
         main = self.clone("main-ci", "main")
         self.git(main, "fetch", "-q", "origin", "release/v0.0.22")
-        self.git(main, "merge", "-q", "--no-ff", "-m", "Merge release/v0.0.22", "FETCH_HEAD")
+        self.git(main, "merge", "-q", "--squash", "FETCH_HEAD")
+        self.commit("chore(release): v0.0.22", repo=main)
         self.git(main, "push", "-q", "origin", "main")
         return main
 
@@ -539,7 +540,7 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('version = "0.0.22"', (branch / "Cargo.toml").read_text())
         self.assertIn('version = "0.0.22"', (branch / "Cargo.lock").read_text())
         self.assertEqual(self.git(branch, "log", "-1", "--format=%s"), "chore(release): v0.0.22")
-        self.assertEqual(self.git(branch, "rev-parse", "HEAD~1"), self.remote_ref("refs/heads/dev"))
+        self.assertEqual(self.git(branch, "rev-parse", "HEAD~1"), self.remote_ref("refs/heads/main"))
         self.assertEqual([p["base"] for p in self.gh()["prs"]], ["main"])
         self.assertEqual(self.git(self.work, "status", "--porcelain"), "", "the caller's checkout is untouched")
         head = self.remote_ref("refs/heads/release/v0.0.22")
@@ -549,13 +550,15 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(self.gh()["prs"]), 1, "a rerun opens no second pull request")
         self.assertEqual(self.git(self.work, "worktree", "list", "--porcelain").count("worktree "), 1)
 
-    def test_release_refuses_dev_without_main(self):
-        main = self.clone("main-hotfix", "main")
-        self.write("hotfix", "x", repo=main)
-        self.commit("hotfix", repo=main)
+    def test_release_starts_from_the_latest_main(self):
+        main = self.clone("main-feature", "main")
+        self.write("feature", "x", repo=main)
+        head = self.commit("feature", repo=main)
         self.git(main, "push", "-q", "origin", "main")
-        self.assertIn("dev does not contain main", self.release("-y", "patch", ok=False).stderr)
-        self.assertFalse(self.remote_ref("refs/heads/release/v0.0.22"))
+        self.release("-y", "patch")
+        branch = self.clone("release", "release/v0.0.22")
+        self.assertEqual(self.git(branch, "rev-parse", "HEAD~1"), head)
+        self.assertTrue((branch / "feature").exists())
 
     def test_release_refuses_an_existing_tag(self):
         self.git(self.work, "tag", "v0.0.22")
@@ -567,7 +570,7 @@ class Lifecycle(unittest.TestCase):
     def test_gate_passes_only_a_pinned_matching_release(self):
         branch, _ = self.cut_release()
         self.helper("gate", "--branch", "release/v0.0.22", cwd=branch)
-        self.assertIn("not a release branch", self.helper("gate", "--branch", "feature/x", cwd=branch, ok=False))
+        self.assertIn("only release/vX.Y.Z", self.helper("gate", "--branch", "feature/x", cwd=branch, ok=False))
         self.assertIn("not 0.0.23", self.helper("gate", "--branch", "release/v0.0.23", cwd=branch, ok=False))
         self.write("infra/guest/else-init", "#!/bin/sh\necho changed\n", repo=branch)
         self.commit("change the guest after pinning", repo=branch)
@@ -581,13 +584,13 @@ class Lifecycle(unittest.TestCase):
         self.git(main, "push", "-q", "origin", "main")
         self.git(branch, "fetch", "-q", "origin")
         self.assertIn("does not contain", self.helper("gate", "--branch", "release/v0.0.22", cwd=branch, ok=False))
-        self.git(branch, "merge", "-q", "origin/main")
+        self.git(branch, "rebase", "-q", "origin/main")
         self.helper("gate", "--branch", "release/v0.0.22", cwd=branch)
         self.git(branch, "tag", "v0.0.22")
         self.assertIn("already exists", self.helper("gate", "--branch", "release/v0.0.22", cwd=branch, ok=False))
 
 
-    def test_finalize_tags_last_and_merges_main_back_into_dev(self):
+    def test_finalize_tags_a_single_release_commit_without_changing_branches(self):
         branch, image = self.cut_release()
         main = self.merge_to_main(branch)
         out = self.helper("finalize", cwd=main)
@@ -596,13 +599,15 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.remote_ref("refs/tags/v0.0.22^{commit}"), head)
         message = self.git(self.tmp, "--git-dir", str(self.origin), "tag", "-l", "--format=%(contents)", "v0.0.22")
         self.assertIn(image, message)
-        dev = self.remote_ref("refs/heads/dev")
-        self.assertEqual(self.git(main, "merge-base", "--is-ancestor", head, dev, check=False), "")
-        self.assertEqual(self.git(main, "rev-list", "--count", f"{head}..{dev}"), "1", "dev gets one merge commit")
+        self.assertEqual(self.git(main, "rev-list", "--count", "v0.0.21..HEAD"), "1")
+        self.assertEqual(self.git(main, "rev-list", "--merges", "v0.0.21..HEAD"), "")
+        self.assertEqual(self.git(main, "rev-parse", "HEAD^{tree}"),
+                         self.git(branch, "rev-parse", "HEAD^{tree}"))
         again = self.helper("finalize", cwd=main)
         self.assertIn("already released", again)
-        self.assertIn("already contains", again)
-        self.assertEqual(self.remote_ref("refs/heads/dev"), dev, "a rerun changes nothing")
+        self.assertEqual(self.remote_ref("refs/heads/main"), head)
+        self.assertFalse(self.remote_ref("refs/heads/dev"), "finalization creates no sync branch")
+        self.assertEqual(len(self.gh()["prs"]), 1, "only the release PR exists")
         self.assertEqual(self.gh()["releases"], ["v0.0.22"], "a rerun publishes no second GitHub release")
 
     def test_finalize_retries_github_publication_without_replacing_the_tag(self):
@@ -631,20 +636,22 @@ class Lifecycle(unittest.TestCase):
         self.assertIn("hash to", self.helper("finalize", cwd=main, ok=False))
         self.assertFalse(self.remote_ref("refs/tags/v0.0.22"), "stale inputs leave no tag")
 
-    def test_finalize_opens_one_pull_request_when_dev_conflicts(self):
-        branch, _ = self.cut_release()
-        dev = self.clone("dev-work", "dev")
-        self.write("Cargo.toml", '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "0.1.0"\n', repo=dev)
-        self.commit("conflicting dev work", repo=dev)
-        self.git(dev, "push", "-q", "origin", "dev")
-        dev_head = self.remote_ref("refs/heads/dev")
-        main = self.merge_to_main(branch)
-        self.assertIn("could not be merged", self.helper("finalize", cwd=main))
-        self.assertTrue(self.remote_ref("refs/tags/v0.0.22"), "the release is tagged before the sync")
-        self.assertEqual(self.remote_ref("refs/heads/dev"), dev_head)
-        self.helper("finalize", cwd=main)
-        prs = [p for p in self.gh()["prs"] if p["base"] == "dev"]
-        self.assertEqual([(p["head"], p["title"]) for p in prs], [("main", "chore(release): merge v0.0.22 into dev")])
+    def test_feature_gate_allows_guest_changes_without_a_version_bump(self):
+        self.write("infra/guest/else-init", "#!/bin/sh\necho changed\n")
+        self.commit("feature with stale guest pin")
+        self.assertIn("no release to verify", self.helper("gate", "--branch", "feature/x"))
+        self.assertIn("not a release branch", self.helper("gate", "--branch", "release/typo", ok=False))
+
+    def test_feature_gate_compares_version_with_its_branch_point(self):
+        main = self.clone("new-release", "main")
+        self.write("Cargo.toml", (main / "Cargo.toml").read_text().replace("0.0.21", "0.0.22"), repo=main)
+        self.commit("chore(release): v0.0.22", repo=main)
+        self.git(main, "push", "-q", "origin", "main")
+        self.git(self.work, "fetch", "-q", "origin")
+        self.assertIn("no release to verify", self.helper("gate", "--branch", "feature/older"))
+        self.write("Cargo.toml", (self.work / "Cargo.toml").read_text().replace("0.0.21", "0.0.20"))
+        self.commit("feature changes the version")
+        self.assertIn("only release/vX.Y.Z", self.helper("gate", "--branch", "feature/older", ok=False))
 
     def test_finalize_ignores_main_pushes_without_a_new_version(self):
         out = self.helper("finalize", cwd=self.work)
@@ -858,7 +865,7 @@ class ReleaseReadinessWorkflow(unittest.TestCase):
                 **os.environ, "PATH": f"{work}{os.pathsep}{os.environ['PATH']}",
                 "FAKE_GH_STATE": str(work / "calls.json"),
                 "GH_TOKEN": "test-token", "GITHUB_REPOSITORY": "else-bot/else",
-                "GITHUB_SHA": "a" * 40, "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_SHA": "b" * 40, "VERIFIED_SHA": "a" * 40, "GITHUB_SERVER_URL": "https://github.com",
                 "GITHUB_RUN_ID": "123",
             }
             for step, result, expected in (
@@ -888,8 +895,16 @@ class ReleaseReadinessWorkflow(unittest.TestCase):
         triggers = re.search(r"(?m)^on:\n((?:[ \t].*\n|\n)*)", workflow)
         self.assertIsNotNone(triggers)
         events = re.findall(r"(?m)^  ([a-z_]+):", triggers.group(1))
-        self.assertEqual(events, ["workflow_dispatch"],
-                         "release-ready must wait for guest-image to dispatch it after pinning")
+        self.assertEqual(events, ["pull_request", "workflow_dispatch"])
+        self.assertIn("github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'release/v')", workflow,
+                      "release PRs wait for the image pin; feature PRs report readiness directly")
+        self.assertIn("github.event.pull_request.head.sha || github.sha", workflow)
+        self.assertIn("ref: ${{ env.VERIFIED_SHA }}", workflow,
+                      "verify the PR head rather than GitHub's temporary merge commit")
+        self.assertIn("&& 'release-ready' || 'verify-release'", workflow,
+                      "feature PRs use a normal check, including forks with read-only tokens")
+        self.assertIn("      - name: Mark readiness pending\n        if: github.event_name == 'workflow_dispatch'\n", workflow,
+                      "only the post-pin dispatch writes a commit status")
         guest = (ROOT / ".github/workflows/guest-image.yml").read_text()
         self.assertIn("gh workflow run release-ready.yml", guest,
                       "guest-image must dispatch readiness after pinning")
@@ -897,7 +912,7 @@ class ReleaseReadinessWorkflow(unittest.TestCase):
         self.assertIn("  verify-release:\n", workflow)
         self.assertNotIn("  release-ready:\n", workflow,
                          "the workflow job must not conflict with the required commit status name")
-        self.assertIn("      - name: Report readiness\n        if: always()\n", workflow,
+        self.assertIn("      - name: Report readiness\n        if: always() && github.event_name == 'workflow_dispatch'\n", workflow,
                       "a failed gate must also report its outcome")
 
 

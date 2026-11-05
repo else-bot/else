@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start an else.bot release: cut release/vX.Y.Z from dev and open its pull
+# Start an else.bot release: cut release/vX.Y.Z from main and open its pull
 # request to main.
 #
 #   scripts/release.sh [-y] patch|minor|major
@@ -22,16 +22,14 @@ done
 [ -n "$bump" ] || usage
 
 remote=origin
-git fetch -q --tags "$remote" "+refs/heads/main:refs/remotes/$remote/main" "+refs/heads/dev:refs/remotes/$remote/dev" ||
-	die "cannot fetch main and dev from $remote (create dev once with: git push $remote $remote/main:refs/heads/dev)"
-git merge-base --is-ancestor "$remote/main" "$remote/dev" ||
-	die "dev does not contain main; merge main into dev first"
+git fetch -q --tags "$remote" "+refs/heads/main:refs/remotes/$remote/main" ||
+	die "cannot fetch main from $remote"
 
 workspace_version() {
 	git show "$1:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' | head -1
 }
-current="$(workspace_version "$remote/dev")"
-[[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "cannot read the version in dev's Cargo.toml (found '$current')"
+current="$(workspace_version "$remote/main")"
+[[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || die "cannot read the version in main's Cargo.toml (found '$current')"
 major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
 case "$bump" in
 patch) version="$major.$minor.$((patch + 1))" ;;
@@ -49,10 +47,10 @@ ensure_pr() {
 	if [ -z "$url" ]; then
 		body="$(mktemp)"
 		cat >"$body" <<EOF
-Releases $tag from dev.
+Releases $tag from main.
 
-CI pins the guest image and reports release-ready. Merge with a merge commit.
-CI then verifies the pinned image, tags $tag, publishes the GitHub release, and syncs main back into dev.
+CI pins the guest image and reports release-ready. Squash and merge as chore(release): $tag.
+CI then verifies the pinned image, tags $tag, and publishes the GitHub release without adding commits to main.
 EOF
 		if ! url="$(gh pr create --base main --head "$branch" --title "chore(release): $tag" --body-file "$body")"; then
 			rm -f "$body"
@@ -69,7 +67,7 @@ if git ls-remote --exit-code -q --heads "$remote" "$branch" >/dev/null; then
 	exit 0
 fi
 
-echo "Cut $branch ($bump, was $current) from $remote/dev $(git rev-parse --short "$remote/dev"), push it, and open a pull request to main."
+echo "Cut $branch ($bump, was $current) from $remote/main $(git rev-parse --short "$remote/main"), push it, and open a pull request to main."
 if [ "$yes" = 0 ]; then
 	[ -t 0 ] || die "no terminal to confirm; pass -y"
 	printf 'Continue? [y/N] '
@@ -79,7 +77,7 @@ fi
 
 work="$(mktemp -d)"
 trap 'git worktree remove --force "$work" >/dev/null 2>&1 || rm -rf "$work"' EXIT
-git worktree add -q --detach "$work" "$remote/dev"
+git worktree add -q --detach "$work" "$remote/main"
 (
 	cd "$work"
 	sed -i.bak "/^\[workspace.package\]/,/^\[/s/^version = \".*\"/version = \"$version\"/" Cargo.toml

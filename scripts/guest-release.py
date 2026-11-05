@@ -26,7 +26,7 @@ fake registry.
     guest-release.py platform-digest REF --platform OS/ARCH
     guest-release.py digest REF
     guest-release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
-    guest-release.py finalize [--remote NAME] [--main BRANCH] [--dev BRANCH]
+    guest-release.py finalize [--remote NAME] [--main BRANCH]
 """
 
 import argparse
@@ -37,7 +37,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -415,15 +414,21 @@ def write_manifest(kind, source, image):
 
 
 def cmd_gate(branch, rev, main_ref):
-    match = re.match(r"^release/v([0-9]+\.[0-9]+\.[0-9]+)$", branch)
-    if not match:
-        raise Fail(f"{branch} is not a release branch (release/vX.Y.Z); main only takes release pull requests")
-    version = match.group(1)
     found = cargo_version(rev)
+    match = re.fullmatch(r"release/v([0-9]+\.[0-9]+\.[0-9]+)", branch)
+    if not match:
+        if branch.startswith("release/"):
+            raise Fail(f"{branch} is not a release branch (release/vX.Y.Z)")
+        base_version = cargo_version(git_out("merge-base", main_ref, rev))
+        if found != base_version:
+            raise Fail("only release/vX.Y.Z branches may change the workspace version")
+        print("workspace version unchanged; no release to verify")
+        return
+    version = match.group(1)
     if found != version:
         raise Fail(f"{branch} carries version {found} in Cargo.toml, not {version}")
     if not is_ancestor(main_ref, rev):
-        raise Fail(f"{branch} does not contain {main_ref}; merge main into dev and cut the release again")
+        raise Fail(f"{branch} does not contain {main_ref}; rebase the release branch onto main and rerun guest-image")
     main_version = cargo_version(main_ref)
     if version_key(version) <= version_key(main_version):
         raise Fail(f"version {version} is not newer than {main_ref}'s {main_version}")
@@ -433,59 +438,7 @@ def cmd_gate(branch, rev, main_ref):
     print(f"release v{version} is ready: guest image {data['image']}")
 
 
-def ensure_pr(base, head, title, body):
-    found = subprocess.run(
-        ["gh", "pr", "list", "--base", base, "--head", head, "--state", "open", "--json", "url", "--jq", ".[0].url // empty"],
-        capture_output=True, text=True,
-    )
-    if found.returncode:
-        raise Fail(f"gh pr list failed: {found.stderr.strip()}")
-    url = found.stdout.strip()
-    if not url:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md") as description:
-            description.write(body)
-            description.flush()
-            created = subprocess.run(
-                ["gh", "pr", "create", "--base", base, "--head", head, "--title", title, "--body-file", description.name],
-                capture_output=True, text=True,
-            )
-        if created.returncode:
-            raise Fail(f"gh pr create failed: {created.stderr.strip()}")
-        url = created.stdout.strip()
-    return url
-
-
-def sync_dev(remote, main, dev, head, tag):
-    if git("fetch", "-q", remote, f"+refs/heads/{dev}:refs/remotes/{remote}/{dev}", check=False).returncode:
-        git("push", "-q", remote, f"{head}:refs/heads/{dev}")
-        print(f"created {dev} from {main}")
-        return
-    if is_ancestor(head, f"{remote}/{dev}"):
-        print(f"{dev} already contains {main}")
-        return
-    work = tempfile.mkdtemp(prefix="else-sync-")
-    try:
-        git("worktree", "add", "-q", "--detach", work, f"{remote}/{dev}")
-        merged = subprocess.run(
-            ["git", "-C", work, "merge", "-q", "--no-ff", "-m", f"chore(release): merge {tag} into {dev}", head],
-            capture_output=True,
-        ).returncode == 0
-        pushed = merged and subprocess.run(
-            ["git", "-C", work, "push", "-q", remote, f"HEAD:refs/heads/{dev}"], capture_output=True
-        ).returncode == 0
-    finally:
-        git("worktree", "remove", "--force", work, check=False)
-    if pushed:
-        print(f"merged {main} into {dev}")
-        return
-    url = ensure_pr(
-        dev, main, f"chore(release): merge {tag} into {dev}",
-        f"Brings {tag} back into `{dev}`. Merge with a merge commit so both branches keep one history.",
-    )
-    print(f"{main} could not be merged into {dev} automatically; merge {url}")
-
-
-def cmd_finalize(remote, main, dev):
+def cmd_finalize(remote, main):
     head = git_out("rev-parse", "HEAD")
     git("fetch", "-q", remote, f"+refs/heads/{main}:refs/remotes/{remote}/{main}")
     if not is_ancestor(head, f"{remote}/{main}"):
@@ -515,7 +468,6 @@ def cmd_finalize(remote, main, dev):
             if result.returncode:
                 raise Fail(f"tag {tag} is ready, but publishing its GitHub release failed: {result.stderr.strip()}")
             print(f"published the GitHub release for {tag}")
-    sync_dev(remote, main, dev, head, tag)
 
 
 def main():
@@ -548,7 +500,6 @@ def main():
     p = sub.add_parser("finalize")
     p.add_argument("--remote", default="origin")
     p.add_argument("--main", default="main")
-    p.add_argument("--dev", default="dev")
     args = parser.parse_args()
     if args.base and args.command not in ("hash", "check", "pinned", "build-args", "pin"):
         parser.error(f"--base does not apply to {args.command}")
@@ -591,7 +542,7 @@ def main():
         elif args.command == "gate":
             cmd_gate(args.branch, args.rev, args.main_ref)
         elif args.command == "finalize":
-            cmd_finalize(args.remote, args.main, args.dev)
+            cmd_finalize(args.remote, args.main)
     except Fail as e:
         print(f"guest-release: {e}", file=sys.stderr)
         return 1
