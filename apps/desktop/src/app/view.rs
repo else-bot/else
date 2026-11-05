@@ -16,7 +16,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -310,7 +309,6 @@ impl ElseApp {
             Kind::Unavailable => Some(IconName::CircleOff),
             Kind::Deleting => Some(IconName::Trash),
         };
-        let tooltip = subtitle.text.clone();
         let subtitle = h_flex()
             .min_w_0()
             .gap_1()
@@ -343,13 +341,6 @@ impl ElseApp {
             .px_2()
             .py_1()
             .rounded(theme.radius)
-            .tooltip(move |window, cx| {
-                Tooltip::element({
-                    let text = tooltip.clone();
-                    move |_, _| div().max_w(rems(24.)).child(text.clone())
-                })
-                .build(window, cx)
-            })
             .child(avatar)
             .child(
                 v_flex()

@@ -353,12 +353,14 @@ impl ComputerView {
         self.send(DesktopCommand::Key { key, down }, cx);
     }
 
-    fn image_area(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn image_area(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let radius = rems(if self.expanded { 0.5 } else { 0.75 });
         let mut area = div()
             .id("computer-screen")
             .relative()
             .w_full()
             .h_full()
+            .rounded(radius)
             .overflow_hidden()
             .bg(rgb(0x111111));
         if let Some(image) = &self.image {
@@ -367,6 +369,7 @@ impl ComputerView {
                     .absolute()
                     .inset_0()
                     .size_full()
+                    .rounded(radius)
                     .object_fit(ObjectFit::Contain),
             );
         } else {
@@ -531,7 +534,6 @@ impl ComputerView {
             .inset_0()
             .size_full(),
         )
-        .into_any_element()
     }
 }
 
@@ -549,14 +551,10 @@ impl Render for ComputerView {
                 .gap_2()
                 .w_full()
                 .child(
-                    div()
-                        .w_full()
+                    self.image_area(cx)
                         .h(px(176.))
-                        .rounded_xl()
-                        .overflow_hidden()
                         .border_1()
-                        .border_color(theme.border)
-                        .child(self.image_area(cx)),
+                        .border_color(theme.border),
                 )
                 .child(
                     div()
@@ -644,15 +642,7 @@ impl Render for ComputerView {
                             .on_click(cx.listener(|view, _, _, cx| view.collapse(cx))),
                     ),
             )
-            .child(
-                div()
-                    .mx_6()
-                    .flex_1()
-                    .min_h_0()
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .child(self.image_area(cx)),
-            )
+            .child(div().mx_6().flex_1().min_h_0().child(self.image_area(cx)))
             .child(
                 h_flex()
                     .h(px(80.))
