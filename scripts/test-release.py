@@ -111,6 +111,20 @@ class Archives(unittest.TestCase):
                 binaries.package(VERSION, "linux-amd64", source, output)
             self.assertEqual(list(output.iterdir()), [])
 
+    def test_interrupted_packaging_preserves_the_previous_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = root / "bin", root / "dist"
+            make_binaries(source)
+            package_all(source, output)
+            archive = output / binaries.archive_name("else-api", VERSION, "linux-amd64")
+            previous = archive.read_bytes()
+            with patch.object(tarfile.TarFile, "addfile", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    binaries.package(VERSION, "linux-amd64", source, output)
+            self.assertEqual(archive.read_bytes(), previous)
+            self.assertEqual(len(list(output.iterdir())), 6)
+
 
 class Publication(unittest.TestCase):
     def setUp(self):

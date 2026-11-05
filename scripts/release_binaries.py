@@ -2,8 +2,8 @@
 """Package native release builds and collect the complete release asset set."""
 import argparse
 import hashlib
+import io
 from pathlib import Path
-import shutil
 import tarfile
 import tempfile
 import tomllib
@@ -26,22 +26,26 @@ def package(version, platform, binaries, output):
             raise ValueError(f"missing executable: {source}")
     for binary in BINARIES:
         archive = output / archive_name(binary, version, platform)
-        with tempfile.TemporaryDirectory() as directory:
-            stage = Path(directory)
-            if binary == "else-desktop" and platform == "macos-arm64":
-                app = stage / "else.bot.app"
-                executable = app / "Contents/MacOS" / binary
-                executable.parent.mkdir(parents=True)
-                (app / "Contents/Resources").mkdir()
-                (app / "Contents/Info.plist").write_bytes(macos_app.info(version))
-                root = app
-            else:
-                executable = stage / binary
-                root = executable
-            shutil.copy2(binaries / binary, executable)
-            executable.chmod(0o755)
-            with tarfile.open(archive, "w:gz") as tar:
-                tar.add(root, arcname=root.name)
+        with tempfile.TemporaryDirectory(dir=output) as directory:
+            staged = Path(directory) / archive.name
+            with tarfile.open(staged, "w:gz", dereference=True) as tar:
+                member = binary
+                if binary == "else-desktop" and platform == "macos-arm64":
+                    for name in ("else.bot.app", "else.bot.app/Contents", "else.bot.app/Contents/MacOS",
+                                 "else.bot.app/Contents/Resources"):
+                        info = tarfile.TarInfo(name)
+                        info.type, info.mode = tarfile.DIRTYPE, 0o755
+                        tar.addfile(info)
+                    plist = macos_app.info(version)
+                    info = tarfile.TarInfo("else.bot.app/Contents/Info.plist")
+                    info.size, info.mode = len(plist), 0o644
+                    tar.addfile(info, io.BytesIO(plist))
+                    member = "else.bot.app/Contents/MacOS/else-desktop"
+                info = tar.gettarinfo(binaries / binary, arcname=member)
+                info.mode = 0o755
+                with (binaries / binary).open("rb") as file:
+                    tar.addfile(info, file)
+            staged.replace(archive)
         print(archive)
 
 
