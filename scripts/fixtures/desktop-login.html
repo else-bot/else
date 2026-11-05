@@ -16,7 +16,7 @@ input, button { font: inherit; padding: 14px; margin: 12px 0; display: block; }
 <script>
 login.onclick = () => {
   localStorage.setItem('session', user.value);
-  document.cookie = 'session=' + encodeURIComponent(user.value) + '; SameSite=Strict';
+  document.cookie = 'session=' + encodeURIComponent(user.value) + '; SameSite=Strict; Max-Age=86400';
   result.innerText = 'Signed in as ' + user.value;
 };
 </script>

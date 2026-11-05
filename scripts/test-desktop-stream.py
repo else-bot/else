@@ -164,6 +164,7 @@ def main():
     guest('for attempt in $(seq 1 100); do curl -sf http://127.0.0.1:8421/desktop-login.html >/dev/null && break; sleep 0.1; done')
     browser('document.title', create=True)
     check('explicit wake preserves the Chromium login', browser("localStorage.getItem('session')") == 'stream-owner')
+    check('explicit wake preserves the login cookie', browser('document.cookie') == 'session=stream-owner')
     (args.output / 'results.json').write_text(json.dumps({'status': 'passed', 'checks': results}, indent=2) + '\n')
 
 

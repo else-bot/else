@@ -4,9 +4,11 @@
 //! never replace a disk or reset a profile, so a new image reaches only new
 //! bots until the owner upgrades an existing computer here. An upgrade runs
 //! under the bot's operation lock while nothing holds the computer and no
-//! guest job is active. It stops the computer through the normal stop (a
-//! desktop checkpoints Chromium), boots the stopped disk without its desktop
-//! services to archive the user's data (`/home/elsebot`, including projects,
+//! guest job is active. A running desktop first closes Chromium with SIGINT
+//! ([`CLOSE_BROWSER`]); the computer then stops through the normal stop (a
+//! desktop checkpoints Chromium), and the upgrade boots the stopped disk
+//! without its desktop services to archive the user's data
+//! (`/home/elsebot`, including projects,
 //! package environments, caches, and the browser profile, and the job
 //! records in `/var/lib/elsebot`) with numeric owners, verifies the copy on
 //! the host by size and SHA-256, creates a new computer from the new image
@@ -57,6 +59,25 @@ stat -c %s "$archive"
 sha256sum "$archive" | cut -d' ' -f1
 id -u elsebot 2>/dev/null || echo none
 trap - EXIT"#;
+
+/// Close a running Chromium gracefully before the normal stop. SIGINT makes
+/// it commit its cookie store; images before `else-guest:3` stop it with
+/// SIGTERM, which drops cookies set in the last 30 seconds. Supervisor may
+/// restart Chromium on the closed profile; the checkpoint that follows stops
+/// that instance, and the cookies already on disk stay. It fails if Chromium
+/// is still running 10 seconds after the signal.
+const CLOSE_BROWSER: &str = r#"set -e
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ -S /run/elsebot/supervisor.sock ] || exit 0
+pid=$(supervisorctl -c /etc/elsebot/supervisord.conf pid chromium 2>/dev/null || true)
+case "$pid" in ''|0|*[!0-9]*) exit 0 ;; esac
+kill -INT "$pid" 2>/dev/null || exit 0
+i=0
+while kill -0 "$pid" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -le 100 ] || { echo "Chromium did not exit within 10 seconds of SIGINT" >&2; exit 1; }
+    sleep 0.1
+done"#;
 
 /// Verify and unpack the archive on the new computer as the same user ID,
 /// then print the new image's description. It refuses unless the disk has
@@ -263,6 +284,54 @@ impl ComputerManager {
         }
     }
 
+    async fn close_browser(
+        &self,
+        bot_id: Uuid,
+        mut row: super::Row,
+    ) -> Result<super::Row, ComputerError> {
+        if !self.config.desktop || !matches!(row.observed_state.as_str(), "running" | "paused") {
+            return Ok(row);
+        }
+        let holders: Vec<String> = sqlx::query_scalar(
+            "SELECT holder FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL",
+        )
+        .bind(bot_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for holder in holders {
+            let finished = matches!(
+                holder.split_once(':'),
+                Some(("turn" | "job", id)) if id.parse::<Uuid>().is_ok()
+            ) && !self.holder_is_live(&holder).await?;
+            if !finished {
+                return Err(ComputerError::Busy("in use".into()));
+            }
+        }
+        if row.observed_state == "paused" {
+            self.runtime.resume(&row.runtime_name).await?;
+            let mut conn = self.pool.acquire().await?;
+            self.set_state(&mut conn, bot_id, "running", None, None)
+                .await?;
+            row.observed_state = "running".into();
+        }
+        let out = self
+            .runtime
+            .exec(
+                &row.runtime_name,
+                "/bin/sh",
+                &["-c", CLOSE_BROWSER],
+                Duration::from_secs(30),
+            )
+            .await?;
+        if out.status != Some(0) {
+            return Err(refused(format!(
+                "closing Chromium before the upgrade failed: {}",
+                super::bounded(out.stderr.trim(), 500)
+            )));
+        }
+        Ok(row)
+    }
+
     /// Move a bot's computer to `image`, keeping its data. See the module
     /// documentation for the steps and guarantees.
     ///
@@ -316,6 +385,7 @@ impl ComputerManager {
                 "a guest job is active; wait for it or cancel it first",
             ));
         }
+        let row = self.close_browser(bot_id, row).await?;
         self.stop_for_disk(bot_id, &row).await?;
 
         let id = Uuid::new_v4();
