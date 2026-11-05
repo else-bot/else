@@ -23,9 +23,8 @@ impl Global for Appearance {}
 /// readable. Without one, the system appearance applies until a valid
 /// palette appears.
 pub fn init(cx: &mut App) {
-    let shape = Shape::system();
-    let light = Rc::new(QUIET_LIGHT.config("Quiet Light", shape));
-    let dark = Rc::new(QUIET_DARK.config("Quiet Dark", shape));
+    let light = Rc::new(QUIET_LIGHT.config("Quiet Light", Style::SYSTEM));
+    let dark = Rc::new(QUIET_DARK.config("Quiet Dark", Style::SYSTEM));
     Theme::update(cx, |theme| {
         theme.light_theme = light;
         theme.dark_theme = dark;
@@ -60,41 +59,32 @@ fn install_omarchy(palette: Palette, cx: &mut App) {
     if matches!(&state.source, Source::Omarchy(current) if *current == palette) {
         return;
     }
-    let config = Rc::new(palette.config("Omarchy", Shape::OMARCHY));
+    let config = Rc::new(palette.config("Omarchy", Style::OMARCHY));
     state.source = Source::Omarchy(palette);
     Theme::update(cx, |theme| theme.apply_config(&config));
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Shape {
+struct Style {
     radius: u8,
     radius_lg: u8,
     shadow: bool,
+    border_strength: f32,
 }
 
-impl Shape {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    const OMARCHY: Self = Self {
-        radius: 3,
-        radius_lg: 4,
-        shadow: false,
+impl Style {
+    const SYSTEM: Self = Self {
+        radius: 7,
+        radius_lg: 12,
+        shadow: true,
+        border_strength: 1.,
     };
 
-    fn system() -> Self {
-        if cfg!(target_os = "macos") {
-            Self {
-                radius: 7,
-                radius_lg: 12,
-                shadow: true,
-            }
-        } else {
-            Self {
-                radius: 6,
-                radius_lg: 10,
-                shadow: true,
-            }
-        }
-    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    const OMARCHY: Self = Self {
+        border_strength: 0.5,
+        ..Self::SYSTEM
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,18 +217,19 @@ impl Palette {
     /// The component theme for this palette. Every role a view or control
     /// paints is set here, because a theme file resets whatever it leaves
     /// out to the library's defaults.
-    fn config(&self, name: &str, shape: Shape) -> ThemeConfig {
+    fn config(&self, name: &str, style: Style) -> ThemeConfig {
         let p = self;
         let dark = p.mode.is_dark();
         let hover = |base: Rgb| base.mix(p.foreground, if dark { 0.08 } else { 0.05 });
         let on = |fill: Rgb| text_on(fill, p.background, p.foreground);
         let popover = if dark { p.raised } else { p.background };
+        let border = p.background.mix(p.border, style.border_strength);
         let roles = [
             ("background", p.background),
             ("foreground", p.foreground),
-            ("border", p.border),
-            ("input.border", p.border),
-            ("window.border", p.border),
+            ("border", border),
+            ("input.border", border),
+            ("window.border", border),
             ("muted.background", p.raised),
             ("muted.foreground", p.muted_foreground),
             ("secondary.background", p.raised),
@@ -267,15 +258,15 @@ impl Palette {
             ("popover.foreground", p.foreground),
             ("sidebar.background", p.surface),
             ("sidebar.foreground", p.foreground),
-            ("sidebar.border", p.border),
+            ("sidebar.border", border),
             ("sidebar.accent.background", hover(p.surface)),
             ("sidebar.accent.foreground", p.foreground),
             ("sidebar.primary.background", p.accent),
             ("sidebar.primary.foreground", p.on_accent),
             ("title_bar.background", p.surface),
-            ("title_bar.border", p.border),
+            ("title_bar.border", border),
             ("status_bar.background", p.surface),
-            ("status_bar.border", p.border),
+            ("status_bar.border", border),
             ("scrollbar.thumb.background", p.border),
             ("scrollbar.thumb.hover.background", p.muted_foreground),
             ("switch.background", p.border),
@@ -303,9 +294,9 @@ impl Palette {
         serde_json::from_value(serde_json::json!({
             "name": name,
             "mode": if dark { "dark" } else { "light" },
-            "radius": shape.radius,
-            "radius.lg": shape.radius_lg,
-            "shadow": shape.shadow,
+            "radius": style.radius,
+            "radius.lg": style.radius_lg,
+            "shadow": style.shadow,
             "colors": colors,
         }))
         .expect("every palette projects onto a theme")
@@ -355,12 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn a_palette_projects_its_mode_shape_and_roles() {
-        let config = QUIET_DARK.config("Quiet Dark", Shape::OMARCHY);
+    fn a_palette_projects_its_mode_style_and_roles() {
+        let config = QUIET_DARK.config("Quiet Dark", Style::SYSTEM);
         assert_eq!(config.mode, ThemeMode::Dark);
-        assert_eq!((config.radius, config.radius_lg), (Some(3), Some(4)));
-        assert_eq!(config.shadow, Some(false));
+        assert_eq!((config.radius, config.radius_lg), (Some(7), Some(12)));
+        assert_eq!(config.shadow, Some(true));
         let colors = &config.colors;
+        assert_eq!(colors.border.as_deref(), Some("#3a3a3e"));
         assert_eq!(colors.primary.as_deref(), Some("#69a9ff"));
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#35445a"));

@@ -284,6 +284,7 @@ pub(super) fn follow(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::Style;
     use std::fs;
 
     const TOKYO: &str = r##"
@@ -342,6 +343,41 @@ color8 = "#555753"
         assert_eq!(flexoki.accent, Rgb(0x205ea6));
         let forced = parse(&TOKYO.replace("mode = \"dark\"", "mode = \"light\"")).unwrap();
         assert_eq!(forced.mode, ThemeMode::Light);
+    }
+
+    #[test]
+    fn rounded_chrome_softens_lines_without_fading_text_or_controls() {
+        for text in [TOKYO, FLEXOKI, ANSI] {
+            let palette = parse(text).unwrap();
+            let config = palette.config("Omarchy", Style::OMARCHY);
+            let colors = &config.colors;
+            let border = Rgb::parse(colors.border.as_deref().unwrap()).unwrap();
+            assert!(
+                palette.background.contrast(border) < palette.background.contrast(palette.border)
+            );
+            assert_eq!((config.radius, config.radius_lg), (Some(7), Some(12)));
+            assert_eq!(config.mode, palette.mode);
+            assert_eq!(
+                colors.foreground.as_deref(),
+                Some(palette.foreground.hex().as_str())
+            );
+            assert_eq!(
+                colors.primary.as_deref(),
+                Some(palette.accent.hex().as_str())
+            );
+            assert_eq!(
+                colors.selection.as_deref(),
+                Some(palette.selection.hex().as_str())
+            );
+            assert_eq!(
+                colors.switch.as_deref(),
+                Some(palette.border.hex().as_str())
+            );
+            assert_eq!(
+                colors.scrollbar_thumb.as_deref(),
+                Some(palette.border.hex().as_str())
+            );
+        }
     }
 
     #[test]
