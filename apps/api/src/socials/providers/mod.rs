@@ -7,20 +7,33 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub enum Session {
+    Telegram(teloxide_core::Bot),
+    Discord {
+        http: std::sync::Arc<twilight_http::Client>,
+        token: Token,
+    },
+}
+impl Session {
+    pub fn new(provider: Provider, token: Token) -> Self {
+        match provider {
+            Provider::Telegram => Self::Telegram(telegram::bot(&token)),
+            Provider::Discord => Self::Discord {
+                http: std::sync::Arc::new(discord::client(&token)),
+                token,
+            },
+        }
+    }
+}
+
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn identity(&self, provider: Provider, token: &Token) -> Result<Identity, Error>;
-    async fn destinations(&self, c: &Connection, token: &Token) -> Result<Vec<Destination>, Error>;
-    async fn execute(
-        &self,
-        c: &Connection,
-        token: &Token,
-        command: &Command,
-    ) -> Result<Value, Error>;
+    async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error>;
+    async fn execute(&self, session: &Session, command: &Command) -> Result<Value, Error>;
     async fn send(
         &self,
-        c: &Connection,
-        token: &Token,
+        session: &Session,
         destination: &str,
         body: &str,
         reply: Option<&str>,
@@ -28,7 +41,7 @@ pub trait Transport: Send + Sync {
     async fn listen(
         &self,
         c: &Connection,
-        token: &Token,
+        session: &Session,
         offset: i64,
         events: mpsc::Sender<Envelope>,
         stop: CancellationToken,
@@ -43,42 +56,41 @@ impl Transport for Native {
             Provider::Discord => discord::identity(t).await,
         }
     }
-    async fn destinations(&self, c: &Connection, t: &Token) -> Result<Vec<Destination>, Error> {
-        match c.provider {
-            Provider::Telegram => Ok(vec![]),
-            Provider::Discord => discord::destinations(t).await,
+    async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error> {
+        match session {
+            Session::Telegram(_) => Ok(vec![]),
+            Session::Discord { http, .. } => discord::destinations(http).await,
         }
     }
-    async fn execute(&self, c: &Connection, t: &Token, cmd: &Command) -> Result<Value, Error> {
-        match c.provider {
-            Provider::Telegram => telegram::execute(t, cmd).await,
-            Provider::Discord => discord::execute(t, cmd).await,
+    async fn execute(&self, session: &Session, cmd: &Command) -> Result<Value, Error> {
+        match session {
+            Session::Telegram(bot) => telegram::execute(bot, cmd).await,
+            Session::Discord { http, .. } => discord::execute(http, cmd).await,
         }
     }
     async fn send(
         &self,
-        c: &Connection,
-        t: &Token,
+        session: &Session,
         d: &str,
         b: &str,
         reply: Option<&str>,
     ) -> Result<Value, Error> {
-        match c.provider {
-            Provider::Telegram => telegram::send(t, d, b, reply).await,
-            Provider::Discord => discord::send(t, d, b, reply).await,
+        match session {
+            Session::Telegram(bot) => telegram::send(bot, d, b, reply).await,
+            Session::Discord { http, .. } => discord::send(http, d, b, reply).await,
         }
     }
     async fn listen(
         &self,
         c: &Connection,
-        t: &Token,
+        session: &Session,
         o: i64,
         e: mpsc::Sender<Envelope>,
         s: CancellationToken,
     ) -> Result<(), Error> {
-        match c.provider {
-            Provider::Telegram => telegram::listen(c, t, o, e, s).await,
-            Provider::Discord => discord::listen(c, t, e, s).await,
+        match session {
+            Session::Telegram(bot) => telegram::listen(c, bot, o, e, s).await,
+            Session::Discord { token, .. } => discord::listen(c, token, e, s).await,
         }
     }
 }

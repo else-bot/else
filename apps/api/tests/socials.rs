@@ -4,7 +4,12 @@ use async_trait::async_trait;
 use common::TestDb;
 use else_api::{
     credentials::SecretKey,
-    socials::{Manager, providers::Transport, store, types::*},
+    socials::{
+        Manager,
+        providers::{Session, Transport},
+        store,
+        types::*,
+    },
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -426,16 +431,15 @@ impl Transport for Fake {
             username: None,
         })
     }
-    async fn destinations(&self, _: &Connection, _: &Token) -> Result<Vec<Destination>, Error> {
+    async fn destinations(&self, _: &Session) -> Result<Vec<Destination>, Error> {
         Ok(vec![])
     }
-    async fn execute(&self, _: &Connection, _: &Token, _: &Command) -> Result<Value, Error> {
+    async fn execute(&self, _: &Session, _: &Command) -> Result<Value, Error> {
         Ok(json!({"ok":true}))
     }
     async fn send(
         &self,
-        _: &Connection,
-        _: &Token,
+        _: &Session,
         _: &str,
         body: &str,
         _: Option<&str>,
@@ -450,7 +454,7 @@ impl Transport for Fake {
     async fn listen(
         &self,
         _: &Connection,
-        _: &Token,
+        _: &Session,
         _: i64,
         _: mpsc::Sender<Envelope>,
         stop: CancellationToken,

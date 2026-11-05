@@ -50,11 +50,10 @@ pub async fn identity(t: &Token) -> Result<Identity, Error> {
         username: Some(me.name),
     })
 }
-pub async fn destinations(t: &Token) -> Result<Vec<Destination>, Error> {
+pub async fn destinations(c: &twilight_http::Client) -> Result<Vec<Destination>, Error> {
     use futures_util::{StreamExt, stream};
     use twilight_model::{channel::ChannelType, guild::Permissions};
     use twilight_util::permission_calculator::PermissionCalculator;
-    let c = client(t);
     let me = c
         .current_user()
         .await
@@ -152,21 +151,24 @@ pub async fn destinations(t: &Token) -> Result<Vec<Destination>, Error> {
     Ok(result)
 }
 
-pub async fn send(t: &Token, d: &str, body: &str, reply: Option<&str>) -> Result<Value, Error> {
+pub async fn send(
+    c: &twilight_http::Client,
+    d: &str,
+    body: &str,
+    reply: Option<&str>,
+) -> Result<Value, Error> {
     if body.chars().count() > 2000 {
         return Err(Error::Invalid(
             "Discord messages are limited to 2000 characters.",
         ));
     }
-    let c = client(t);
     let mut request = c.create_message(id(d)?).content(body);
     if let Some(reply) = reply {
         request = request.reply(id(reply)?);
     }
     model!(request)
 }
-pub async fn execute(t: &Token, cmd: &Command) -> Result<Value, Error> {
-    let c = client(t);
+pub async fn execute(c: &twilight_http::Client, cmd: &Command) -> Result<Value, Error> {
     match cmd {
         Command::History {
             destination,

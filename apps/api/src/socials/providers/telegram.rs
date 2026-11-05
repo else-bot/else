@@ -41,13 +41,12 @@ pub async fn identity(t: &Token) -> Result<Identity, Error> {
         username: me.username.clone(),
     })
 }
-pub async fn send(t: &Token, d: &str, body: &str, reply: Option<&str>) -> Result<Value, Error> {
+pub async fn send(b: &Bot, d: &str, body: &str, reply: Option<&str>) -> Result<Value, Error> {
     if body.chars().count() > 4096 {
         return Err(Error::Invalid(
             "Telegram messages are limited to 4096 characters.",
         ));
     }
-    let b = bot(t);
     let mut request = b.send_message(chat(d)?, body);
     if let Some(reply) = reply {
         request =
@@ -55,8 +54,7 @@ pub async fn send(t: &Token, d: &str, body: &str, reply: Option<&str>) -> Result
     }
     value(request.await.map_err(|_| Error::Platform)?)
 }
-pub async fn execute(t: &Token, cmd: &Command) -> Result<Value, Error> {
-    let b = bot(t);
+pub async fn execute(b: &Bot, cmd: &Command) -> Result<Value, Error> {
     match cmd {
         Command::Chat { destination } => value(
             b.get_chat(chat(destination)?)
@@ -132,12 +130,11 @@ pub async fn execute(t: &Token, cmd: &Command) -> Result<Value, Error> {
 }
 pub async fn listen(
     c: &Connection,
-    t: &Token,
+    b: &Bot,
     mut offset: i64,
     events: mpsc::Sender<Envelope>,
     stop: CancellationToken,
 ) -> Result<(), Error> {
-    let b = bot(t);
     loop {
         let updates = tokio::select! {biased;_ = stop.cancelled()=>return Ok(()),r=b.get_updates().offset(i32::try_from(offset).map_err(|_|Error::Platform)?).timeout(25)=>r.map_err(|_|Error::Platform)?};
         for update in updates {

@@ -59,9 +59,28 @@ struct Request {
     operation: Operation,
     reply: oneshot::Sender<Result<Value, Error>>,
 }
+enum WorkerRequest {
+    Action(Request),
+    Discover {
+        generation: i64,
+        reply: oneshot::Sender<Result<Vec<Destination>, Error>>,
+    },
+}
+impl WorkerRequest {
+    fn reject(self) {
+        match self {
+            Self::Action(request) => {
+                let _ = request.reply.send(Err(Error::Inactive));
+            }
+            Self::Discover { reply, .. } => {
+                let _ = reply.send(Err(Error::Inactive));
+            }
+        }
+    }
+}
 #[derive(Clone)]
 struct Worker {
-    commands: mpsc::Sender<Request>,
+    commands: mpsc::Sender<WorkerRequest>,
     changed: watch::Sender<u64>,
     stop: CancellationToken,
     done: watch::Receiver<bool>,
@@ -134,15 +153,35 @@ impl Manager {
             .await
             .map_err(|_| Error::Platform)?
     }
-    pub async fn discover(&self, id: Uuid) -> Result<Vec<Destination>, Error> {
+    pub async fn discover(self: &Arc<Self>, id: Uuid) -> Result<Vec<Destination>, Error> {
         let c = store::connection(&self.db, id).await?;
-        let t = store::credential(&self.db, &self.key, &c).await?;
-        let list =
-            tokio::time::timeout(Duration::from_secs(20), self.transport.destinations(&c, &t))
-                .await
-                .map_err(|_| Error::Platform)??;
-        store::save_destinations(&self.db, id, &list).await?;
-        store::destinations(&self.db, id).await
+        let worker = self.worker(id).await?;
+        let (reply, result) = oneshot::channel();
+        worker
+            .commands
+            .try_send(WorkerRequest::Discover {
+                generation: c.generation,
+                reply,
+            })
+            .map_err(|_| Error::Busy)?;
+        tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .map_err(|_| Error::Platform)?
+            .map_err(|_| Error::Inactive)?
+    }
+    async fn discover_session(
+        &self,
+        c: &Connection,
+        session: &providers::Session,
+    ) -> Result<Vec<Destination>, Error> {
+        let list = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.transport.destinations(session),
+        )
+        .await
+        .map_err(|_| Error::Platform)??;
+        store::save_destinations(&self.db, c.id, &list).await?;
+        store::destinations(&self.db, c.id).await
     }
     async fn request(
         self: &Arc<Self>,
@@ -179,7 +218,7 @@ impl Manager {
         };
         worker
             .commands
-            .try_send(Request {
+            .try_send(WorkerRequest::Action(Request {
                 cancel,
                 generation: c.generation,
                 bot,
@@ -187,7 +226,7 @@ impl Manager {
                 action,
                 operation,
                 reply: tx,
-            })
+            }))
             .map_err(|_| Error::Busy)?;
         tokio::time::timeout(Duration::from_secs(60), rx)
             .await
@@ -232,7 +271,7 @@ impl Manager {
     async fn worker_loop(
         self: Arc<Self>,
         id: Uuid,
-        mut requests: mpsc::Receiver<Request>,
+        mut requests: mpsc::Receiver<WorkerRequest>,
         mut changed: watch::Receiver<u64>,
         stop: CancellationToken,
     ) {
@@ -248,13 +287,15 @@ impl Manager {
                 Ok(pair) => pair,
                 Err(_) => break,
             };
+            let session = Arc::new(providers::Session::new(c.provider, token));
+            let listener_session = session.clone();
             let inbox_stop = stop.child_token();
             let running = inbox_stop.clone();
             let manager = self.clone();
             let account = c.clone();
             let inbox = tokio::spawn(async move {
                 if account.state == "active" {
-                    manager.inbox(account, running).await;
+                    manager.inbox(account, listener_session, running).await;
                 }
             });
             let reload = loop {
@@ -268,7 +309,25 @@ impl Manager {
                         break true;
                     },
                     request = requests.recv() => {
-                        let Some(request) = request else { break false };
+                        let Some(message) = request else { break false };
+                        let request = match message {
+                            WorkerRequest::Discover { generation, reply } => {
+                                if generation != c.generation {
+                                    let _ = reply.send(Err(Error::Inactive));
+                                    continue;
+                                }
+                                let (result, reload) = tokio::select! {
+                                    biased;
+                                    _ = stop.cancelled() => (Err(Error::Inactive), true),
+                                    _ = changed.changed() => (Err(Error::Inactive), true),
+                                    result = self.discover_session(&c, &session) => (result, false),
+                                };
+                                let _ = reply.send(result);
+                                if reload { break true; }
+                                continue;
+                            }
+                            WorkerRequest::Action(request) => request,
+                        };
                         if request.generation != c.generation || c.state != "active" {
                             let _ = request.reply.send(Err(Error::Inactive));
                             continue;
@@ -279,7 +338,7 @@ impl Manager {
                             _ = changed.changed() => (Err(Error::Inactive), true),
                             _ = request.cancel.cancelled() => (Err(Error::Inactive), false),
                             _ = self.revoked(&c, &request) => (Err(Error::Inactive), false),
-                            result = self.dispatch(&c, &token, &request) => (result, false),
+                            result = self.dispatch(&c, &session, &request) => (result, false),
                         };
                         if result.is_err()
                             && request.operation.mutates()
@@ -302,7 +361,7 @@ impl Manager {
             }
         }
         while let Ok(r) = requests.try_recv() {
-            let _ = r.reply.send(Err(Error::Inactive));
+            r.reject();
         }
     }
     async fn revoked(&self, c: &Connection, r: &Request) {
@@ -328,7 +387,12 @@ impl Manager {
             }
         }
     }
-    async fn dispatch(&self, c: &Connection, token: &Token, r: &Request) -> Result<Value, Error> {
+    async fn dispatch(
+        &self,
+        c: &Connection,
+        session: &providers::Session,
+        r: &Request,
+    ) -> Result<Value, Error> {
         let mut conn = self.db.acquire().await?;
         let access = store::authorize(
             &mut conn,
@@ -390,7 +454,7 @@ impl Manager {
                 row.map(|(author, body)| json!({"id":message_id,"author_id":author,"body":body}))
                     .ok_or(Error::NotFound)
             }
-            Operation::Command(cmd) => self.transport.execute(c, token, cmd).await,
+            Operation::Command(cmd) => self.transport.execute(session, cmd).await,
             Operation::Send {
                 destination,
                 body,
@@ -398,7 +462,7 @@ impl Manager {
             } => {
                 let result = self
                     .transport
-                    .send(c, token, destination, body, reply_to.as_deref())
+                    .send(session, destination, body, reply_to.as_deref())
                     .await;
                 if let Ok(value) = &result {
                     let remote = value
@@ -450,12 +514,17 @@ impl Manager {
         .await?;
         result
     }
-    async fn inbox(&self, c: Connection, stop: CancellationToken) {
+    async fn inbox(
+        &self,
+        c: Connection,
+        session: Arc<providers::Session>,
+        stop: CancellationToken,
+    ) {
         loop {
             if stop.is_cancelled() {
                 return;
             }
-            let result = self.inbox_once(&c, stop.clone()).await;
+            let result = self.inbox_once(&c, &session, stop.clone()).await;
             if stop.is_cancelled() {
                 return;
             }
@@ -475,15 +544,19 @@ impl Manager {
             tokio::select! {_=stop.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(10))=>{}}
         }
     }
-    async fn inbox_once(&self, c: &Connection, stop: CancellationToken) -> Result<(), Error> {
-        let token = store::credential(&self.db, &self.key, c).await?;
+    async fn inbox_once(
+        &self,
+        c: &Connection,
+        session: &providers::Session,
+        stop: CancellationToken,
+    ) -> Result<(), Error> {
         let offset: i64 =
             sqlx::query_scalar("SELECT poll_offset FROM social_connections WHERE id=?1")
                 .bind(c.id)
                 .fetch_one(&self.db)
                 .await?;
         let (tx, mut rx) = mpsc::channel::<Envelope>(16);
-        let listen = self.transport.listen(c, &token, offset, tx, stop.clone());
+        let listen = self.transport.listen(c, session, offset, tx, stop.clone());
         tokio::pin!(listen);
         sqlx::query(
             "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
