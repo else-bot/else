@@ -89,6 +89,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", SelectPrev, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("enter", FocusComposer, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("escape", FocusSidebar, Some(COMPOSER_CONTEXT)),
+        KeyBinding::new(
+            "escape",
+            gpui_kit::base::actions::Cancel,
+            Some(crate::profile_picker::CATALOG_CONTEXT),
+        ),
         KeyBinding::new(primary!("shift-n"), NewBot, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-x"), StopWork, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-d"), DeleteBot, Some(APP_CONTEXT)),
