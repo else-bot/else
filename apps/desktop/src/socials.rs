@@ -390,6 +390,11 @@ impl SocialsView {
         let (Some(connection), Some(bot)) = (&form.connection, form.selected_bot) else {
             return;
         };
+        if self.setup.is_some() && !form.permissions.read {
+            self.error = Some("Enable reading to complete this connection.".into());
+            cx.notify();
+            return;
+        }
         if form.permissions.read && form.selected.is_empty() {
             self.error = Some("Choose at least one destination.".into());
             cx.notify();
@@ -410,12 +415,9 @@ impl SocialsView {
         let revision = self.begin(window, cx);
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = match client.clone().bind_social(id, bot, access).await {
-                Ok(binding) => match setup {
-                    Some(setup) => client.complete_social_setup(setup, id).await.map(|()| binding),
-                    None => Ok(binding),
-                },
-                Err(error) => Err(error),
+            let result = match setup {
+                Some(setup) => client.complete_social_setup(setup, id, access).await.map(|()| None),
+                None => client.bind_social(id, bot, access).await.map(Some),
             };
             let _ = this.update_in(cx, |view, _, cx| {
                 if view.revision != revision { return; }
@@ -423,7 +425,7 @@ impl SocialsView {
                 match result {
                     Ok(binding) => {
                         view.notice = Some("Access saved. Your instructions guide the assistant within these permissions.".into());
-                        if let Some(form) = &mut view.form { form.bindings.insert(binding.bot_id, binding); }
+                        if let (Some(form), Some(binding)) = (&mut view.form, binding) { form.bindings.insert(binding.bot_id, binding); }
                         if view.setup.is_some()
                             && let Some(form) = &mut view.form
                         {

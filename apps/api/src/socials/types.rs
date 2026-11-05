@@ -92,7 +92,7 @@ pub struct Destination {
     pub kind: String,
     pub can_send: bool,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
     pub read: bool,
@@ -108,7 +108,7 @@ pub enum WakePolicy {
     Mentions,
     All,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BindingInput {
     pub destinations: Vec<String>,

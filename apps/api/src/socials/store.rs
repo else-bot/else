@@ -165,16 +165,27 @@ pub async fn bind(
     bot: Uuid,
     input: BindingInput,
 ) -> Result<Binding, Error> {
-    input.validate()?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b,social_connections c WHERE b.id=?1 AND b.status='active' AND c.id=?2 AND c.state<>'removed')").bind(bot).bind(id).fetch_one(&mut *tx).await?;
+    let binding = bind_in(&mut tx, id, bot, input).await?;
+    tx.commit().await?;
+    Ok(binding)
+}
+
+async fn bind_in(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    bot: Uuid,
+    input: BindingInput,
+) -> Result<Binding, Error> {
+    input.validate()?;
+    let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b,social_connections c WHERE b.id=?1 AND b.status='active' AND c.id=?2 AND c.state<>'removed')").bind(bot).bind(id).fetch_one(&mut *conn).await?;
     if !active {
         return Err(Error::NotFound);
     }
     let known: Vec<String> =
         sqlx::query_scalar("SELECT id FROM social_destinations WHERE connection_id=?1")
             .bind(id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?;
     if input.destinations.iter().any(|d| !known.contains(d)) {
         return Err(Error::Invalid(
@@ -182,13 +193,12 @@ pub async fn bind(
         ));
     }
     let bid = Uuid::new_v4();
-    sqlx::query("INSERT INTO social_bindings(id,connection_id,bot_id,access) VALUES(?1,?2,?3,?4) ON CONFLICT(connection_id,bot_id) DO UPDATE SET id=excluded.id,access=excluded.access").bind(bid).bind(id).bind(bot).bind(Json(&input)).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO social_bindings(id,connection_id,bot_id,access) VALUES(?1,?2,?3,?4) ON CONFLICT(connection_id,bot_id) DO UPDATE SET id=excluded.id,access=excluded.access").bind(bid).bind(id).bind(bot).bind(Json(&input)).execute(&mut *conn).await?;
     sqlx::query("UPDATE social_connections SET generation=generation+1 WHERE id=?1")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    sqlx::query("UPDATE social_deliveries SET status='revoked' WHERE connection_id=?1 AND bot_id=?2 AND status='pending'").bind(id).bind(bot).execute(&mut *tx).await?;
-    tx.commit().await?;
+    sqlx::query("UPDATE social_deliveries SET status='revoked' WHERE connection_id=?1 AND bot_id=?2 AND status='pending'").bind(id).bind(bot).execute(&mut *conn).await?;
     Ok(Binding {
         id: bid,
         connection_id: id,
@@ -455,7 +465,7 @@ pub async fn request_setup(
 pub async fn settle_setup(
     pool: &SqlitePool,
     id: Uuid,
-    connection: Option<Uuid>,
+    completion: Option<(Uuid, BindingInput)>,
 ) -> Result<Setup, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let setup: Setup = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -465,6 +475,7 @@ pub async fn settle_setup(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(Error::NotFound)?;
+    let connection = completion.as_ref().map(|(id, _)| *id);
     let wanted = if connection.is_some() {
         "connected"
     } else {
@@ -472,16 +483,36 @@ pub async fn settle_setup(
     };
     if setup.status != "pending" {
         return if setup.status == wanted && setup.connection_id == connection {
+            if let Some((cid, access)) = &completion {
+                let saved: Option<Json<BindingInput>> = sqlx::query_scalar(
+                    "SELECT access FROM social_bindings WHERE connection_id=?1 AND bot_id=?2",
+                )
+                .bind(cid)
+                .bind(setup.bot_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if saved.as_ref().map(|saved| &saved.0) != Some(access) {
+                    return Err(Error::Conflict);
+                }
+            }
             Ok(setup)
         } else {
             Err(Error::Conflict)
         };
     }
-    if let Some(cid) = connection {
-        let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_connections c JOIN social_bindings b ON b.connection_id=c.id WHERE c.id=?1 AND c.provider=?2 AND c.state='active' AND b.bot_id=?3 AND json_extract(b.access,'$.permissions.read') AND json_array_length(json_extract(b.access,'$.destinations'))>0)").bind(cid).bind(setup.provider).bind(setup.bot_id).fetch_one(&mut *tx).await?;
+    if let Some((cid, access)) = completion {
+        if !access.permissions.read || access.destinations.is_empty() {
+            return Err(Error::Invalid(
+                "Choose at least one destination and enable reading to complete setup.",
+            ));
+        }
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM social_connections WHERE id=?1 AND provider=?2 AND state='active')",
+        ).bind(cid).bind(setup.provider).fetch_one(&mut *tx).await?;
         if !valid {
             return Err(Error::Forbidden);
         }
+        bind_in(&mut tx, cid, setup.bot_id, access).await?;
     }
     let next = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE social_setups SET status=?2,connection_id=?3 WHERE id=?1 RETURNING {SETUP_COLUMNS}"

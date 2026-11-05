@@ -233,11 +233,12 @@ impl Client {
         self: Arc<Self>,
         id: Uuid,
         connection: Uuid,
+        access: BindingInput,
     ) -> Result<(), ClientError> {
         self.call::<serde_json::Value>(
             Method::POST,
             format!("/v1/connectors/socials/setups/{id}/complete"),
-            Some(json!({"connection_id": connection})),
+            Some(json!({"connection_id": connection, "access": access})),
         )
         .await
         .map(|_| ())

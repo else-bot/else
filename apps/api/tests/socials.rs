@@ -271,20 +271,20 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
         .unwrap();
     let c = account(&db, "setup").await;
     destinations(&db, c.id).await;
+    let mut invalid = access(&["100"]);
+    invalid.permissions = Permissions::default();
     assert!(
-        store::settle_setup(&db.pool, request.id, Some(c.id))
+        store::settle_setup(&db.pool, request.id, Some((c.id, invalid)))
             .await
             .is_err()
     );
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
+    assert!(store::bindings(&db.pool, c.id).await.unwrap().is_empty());
     sqlx::query("UPDATE turns SET status='waiting' WHERE id=?1")
         .bind(turn)
         .execute(&db.pool)
         .await
         .unwrap();
-    let done = store::settle_setup(&db.pool, request.id, Some(c.id))
+    let done = store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
         .await
         .unwrap();
     assert_eq!(done.status, "connected");
@@ -295,11 +295,19 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
         .unwrap();
     assert_eq!(status, "queued");
     assert_eq!(
-        store::settle_setup(&db.pool, request.id, Some(c.id))
+        store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
             .await
             .unwrap()
             .status,
         "connected"
+    );
+    let generation = store::connection(&db.pool, c.id).await.unwrap().generation;
+    store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
+        .await
+        .unwrap();
+    assert_eq!(
+        store::connection(&db.pool, c.id).await.unwrap().generation,
+        generation
     );
 }
 
@@ -749,4 +757,43 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     .unwrap();
     assert_eq!(body, "The owner's exact approved revision");
     stop.cancel();
+}
+
+#[tokio::test]
+async fn cancelled_setup_cannot_mutate_existing_access_or_pending_deliveries() {
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let c = account(&db, "cancelled-setup").await;
+    destinations(&db, c.id).await;
+    let original = store::bind(&db.pool, c.id, bot, access(&["100"]))
+        .await
+        .unwrap();
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
+        .bind(c.id).bind(bot).bind(original.id).execute(&db.pool).await.unwrap();
+    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Update access")
+        .await
+        .unwrap();
+    store::settle_setup(&db.pool, request.id, None)
+        .await
+        .unwrap();
+    assert!(
+        store::settle_setup(&db.pool, request.id, Some((c.id, access(&["200"]))))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store::connection(&db.pool, c.id).await.unwrap().generation,
+        c.generation
+    );
+    let bindings = store::bindings(&db.pool, c.id).await.unwrap();
+    assert_eq!(bindings[0].id, original.id);
+    assert_eq!(bindings[0].access.destinations, ["100"]);
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM social_deliveries WHERE event_id='pending'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "pending");
 }

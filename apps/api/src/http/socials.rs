@@ -192,15 +192,18 @@ async fn revoke(
 #[serde(deny_unknown_fields)]
 struct Complete {
     connection_id: Uuid,
+    access: BindingInput,
 }
 async fn complete(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    let setup = store::settle_setup(&s.db, id, Some(input.connection_id))
+    let m = manager(&s)?;
+    let setup = store::settle_setup(&s.db, id, Some((input.connection_id, input.access)))
         .await
         .map_err(error)?;
+    m.changed(input.connection_id).await;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }
