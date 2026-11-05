@@ -70,7 +70,7 @@ On Linux, agents checking the UI use `scripts/dev.py run`. It creates an isolate
 | `apps/desktop/src` | GPUI app and API client |
 | `infra/guest` | Bot computer image, desktop helpers, and browser tools |
 | `scripts` | Development launcher, installer checks, and release tools |
-| `.github/workflows` | Guest image builds and release gates |
+| `.github/workflows` | Guest image builds, native release binaries, and release gates |
 
 Both binaries use the workspace version in `Cargo.toml`. The workspace pins `gpui-base` to the else-bot fork for native link previews. Checkout builds omit debug information by default; use `CARGO_PROFILE_DEV_DEBUG=2` when debugging needs source lines and variables.
 
@@ -171,6 +171,21 @@ scripts/release.sh patch
 
 Use `minor` or `major` for a larger bump. The script creates a release branch and PR without changing your checkout. CI builds or reuses the guest image, tests its VNC behavior, and commits the immutable digest to `infra/guest-image.json`.
 
-Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit. The tag workflow verifies the image, tags that commit, and publishes the GitHub release. Installers discover the update from the version tag.
+Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit.
+
+After the merge, `release-tag` builds the desktop and API on native runners for Linux AMD64, Linux ARM64, and macOS ARM64. Linux builds use Debian 12 containers to support Debian 12+, Ubuntu 24.04+, and Arch Linux. macOS builds use the `macos-15` Apple silicon runner with Xcode and Metal. Windows is unsupported.
+
+All three builds must pass their binary version checks before the workflow verifies the guest image and tags the release commit. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
+
+Rerun a failed `release-tag` run to resume publication at the same commit. Ordinary pushes after a version is tagged skip the binary builds. The workflow builds before tagging because [tags pushed with `GITHUB_TOKEN` do not trigger another workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow). Installers still build from source and discover updates from the version tag.
+
+To package a local native release build, use the matching platform:
+
+```sh
+cargo build --release --locked --workspace --bins --target x86_64-unknown-linux-gnu
+python3 scripts/release_binaries.py --platform linux-amd64 --binaries target/x86_64-unknown-linux-gnu/release
+```
+
+Archives go under `target/release-assets`. To check packaging and publication retry behavior locally, run `python3 scripts/test-release.py`. This uses temporary repositories and a fake GitHub CLI without publishing a release.
 
 If the base pin is stale, publish it and update the release branch. If a build or image check fails, fix it and rerun the workflow. Keep published image digests available for old releases and rollback.

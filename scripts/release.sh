@@ -45,7 +45,8 @@ ensure_pr() {
 Releases $tag from main.
 
 CI pins the guest image and reports release-ready. Squash and merge as chore(release): $tag.
-CI then verifies the pinned image, tags $tag, and publishes the GitHub release without adding commits to main.
+CI then builds desktop and API binaries for Linux AMD64, Linux ARM64, and macOS ARM64 and verifies the pinned image.
+It publishes the tag and GitHub release with archives and checksums without adding commits to main.
 EOF
 		if ! url="$(gh pr create --base main --head "$branch" --title "chore(release): $tag" --body-file "$body")"; then
 			rm -f "$body"

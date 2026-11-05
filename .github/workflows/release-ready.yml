@@ -32,6 +32,8 @@ jobs:
           ref: ${{ env.VERIFIED_SHA }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Test release packaging and publication
+        run: python3 scripts/test-release.py
       - env:
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |

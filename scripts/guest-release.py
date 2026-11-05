@@ -22,7 +22,8 @@ until one is published. --base selects the base manifest.
     guest-release.py platform-digest REF --platform OS/ARCH
     guest-release.py digest REF
     guest-release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
-    guest-release.py finalize [--remote NAME] [--main BRANCH]
+    guest-release.py release-plan [--remote NAME] [--main BRANCH]
+    guest-release.py finalize --assets-dir DIR [--remote NAME] [--main BRANCH]
 """
 
 import argparse
@@ -30,6 +31,7 @@ import base64
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -38,6 +40,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+
+from release_binaries import BINARIES, PLATFORMS as BINARY_PLATFORMS, archive_name, release_assets
 
 CONTEXT = "infra/guest"
 PLATFORMS = ("linux/amd64", "linux/arm64")
@@ -434,7 +438,7 @@ def cmd_gate(branch, rev, main_ref):
     print(f"release v{version} is ready: guest image {data['image']}")
 
 
-def cmd_finalize(remote, main):
+def release_context(remote, main):
     head = git_out("rev-parse", "HEAD")
     git("fetch", "-q", remote, f"+refs/heads/{main}:refs/remotes/{remote}/{main}")
     if not is_ancestor(head, f"{remote}/{main}"):
@@ -445,25 +449,64 @@ def cmd_finalize(remote, main):
     if tag in tags:
         if not is_ancestor(tags[tag], head):
             raise Fail(f"{tag} already exists at {tags[tag]}, which is not on {main}")
-        print(f"{tag} is already released")
     else:
         newer = [t for t in tags if version_key(t[1:]) >= version_key(version)]
         if newer:
             raise Fail(f"{tag} is not newer than the existing {max(newer, key=lambda t: version_key(t[1:]))}")
+    return head, version, tag, tags
+
+
+def github_release(tag):
+    result = subprocess.run(["gh", "release", "view", tag, "--json", "isDraft,assets"], capture_output=True, text=True)
+    if result.returncode:
+        if "release not found" in result.stderr.lower() or "HTTP 404" in result.stderr:
+            return None
+        raise Fail(f"cannot look up release {tag}: {result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def complete_release(release, version):
+    expected = {archive_name(binary, version, platform) for platform in BINARY_PLATFORMS for binary in BINARIES}
+    expected.add("SHA256SUMS")
+    return (release is not None and not release["isDraft"]
+            and expected <= {asset["name"] for asset in release["assets"]})
+
+
+def cmd_release_plan(remote, main):
+    head, version, tag, tags = release_context(remote, main)
+    if tag in tags and (tags[tag] != head or complete_release(github_release(tag), version)):
+        print("state=skip")
+    else:
+        print("state=build")
+
+
+def cmd_finalize(remote, main, assets_dir):
+    head, version, tag, tags = release_context(remote, main)
+    if tag in tags and tags[tag] != head:
+        print(f"{tag} is already released at an earlier commit; nothing to publish")
+        return
+    assets = release_assets(version, assets_dir)
+    if tag not in tags:
         data = cmd_check(GUEST, head, allow_unpinned=False)
         git("tag", "-f", "-a", tag, "-m", f"else.bot {version}\n\nGuest image: {data['image']}", head)
         git("push", "-q", remote, f"refs/tags/{tag}")
         print(f"tagged {tag} at {head} with guest image {data['image']}")
-    if tags.get(tag, head) == head:
-        exists = subprocess.run(["gh", "release", "view", tag], capture_output=True).returncode == 0
-        if not exists:
-            result = subprocess.run(
-                ["gh", "release", "create", tag, "--verify-tag", "--title", f"else.bot {version}", "--generate-notes"],
-                capture_output=True, text=True,
-            )
-            if result.returncode:
-                raise Fail(f"tag {tag} is ready, but publishing its GitHub release failed: {result.stderr.strip()}")
-            print(f"published the GitHub release for {tag}")
+    release = github_release(tag)
+    if complete_release(release, version):
+        print(f"{tag} already has all release binaries")
+        return
+    if release is None:
+        command = ["gh", "release", "create", tag, *map(str, assets), "--draft", "--verify-tag",
+                   "--title", f"else.bot {version}", "--generate-notes"]
+    else:
+        command = ["gh", "release", "upload", tag, *map(str, assets), "--clobber"]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise Fail(f"tag {tag} is ready, but uploading its release binaries failed: {result.stderr.strip()}")
+    result = subprocess.run(["gh", "release", "edit", tag, "--draft=false", "--latest"], capture_output=True, text=True)
+    if result.returncode:
+        raise Fail(f"tag {tag} has binaries, but publishing its GitHub release failed: {result.stderr.strip()}")
+    print(f"published the GitHub release for {tag} with all release binaries")
 
 
 def main():
@@ -493,9 +536,12 @@ def main():
     p.add_argument("--branch", required=True)
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--main-ref", default="origin/main")
-    p = sub.add_parser("finalize")
-    p.add_argument("--remote", default="origin")
-    p.add_argument("--main", default="main")
+    for command in ("release-plan", "finalize"):
+        p = sub.add_parser(command)
+        p.add_argument("--remote", default="origin")
+        p.add_argument("--main", default="main")
+        if command == "finalize":
+            p.add_argument("--assets-dir", required=True, type=Path)
     args = parser.parse_args()
     if args.base and args.command not in ("hash", "check", "pinned", "build-args", "pin"):
         parser.error(f"--base does not apply to {args.command}")
@@ -537,9 +583,11 @@ def main():
             print(f"pinned {args.image} for {kind.name} source {source}")
         elif args.command == "gate":
             cmd_gate(args.branch, args.rev, args.main_ref)
+        elif args.command == "release-plan":
+            cmd_release_plan(args.remote, args.main)
         elif args.command == "finalize":
-            cmd_finalize(args.remote, args.main)
-    except Fail as e:
+            cmd_finalize(args.remote, args.main, args.assets_dir)
+    except (Fail, ValueError) as e:
         print(f"guest-release: {e}", file=sys.stderr)
         return 1
     return 0
