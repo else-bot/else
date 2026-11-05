@@ -43,7 +43,9 @@ git add infra/guest-base.json
 python3 scripts/guest-release.py --base check --rev "$(git write-tree)"
 ```
 
-Commit `infra/guest-base.json` and merge its PR into `dev` before cutting a release. The publisher never commits or creates an application release. Reruns reuse pushed platform tags for the same input hash. The first build still needs the Snapshot downloads; a Snapshot outage can delay it.
+Commit `infra/guest-base.json` and merge its PR into `dev` before cutting a release. The publisher never commits or creates an application release. Reruns reuse pushed platform tags for the same input hash.
+
+Fresh base builds resolve current trixie packages from the regular Debian CDN, so package versions can change between builds. Existing pins and reruns keep using the published image for their input hash. Installations use the immutable image digest.
 
 The final guest tests run in release CI after building on this base. Publication alone does not prove the guest passes them. Keep published base digests available for later builds.
 
