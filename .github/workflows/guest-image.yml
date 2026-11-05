@@ -1,0 +1,135 @@
+name: guest-image
+
+on:
+  push:
+    branches: ["release/v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: guest-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REPO: ghcr.io/else-bot/else-guest
+
+jobs:
+  plan:
+    if: startsWith(github.ref, 'refs/heads/release/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.plan.outputs.state }}
+      hash: ${{ steps.plan.outputs.hash }}
+      image: ${{ steps.plan.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        shell: bash
+        run: |
+          git fetch -q origin +refs/heads/main:refs/remotes/origin/main
+          python3 scripts/guest-release.py plan --main-ref origin/main | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.state == 'build'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HASH: ${{ needs.plan.outputs.hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: |
+          mapfile -t args < <(python3 scripts/guest-release.py build-args)
+          docker build --provenance=false --sbom=false --pull "${args[@]}" \
+            --label "bot.else.guest.source_sha256=$HASH" \
+            --label "org.opencontainers.image.source=https://github.com/else-bot/else" \
+            -t else-guest:candidate infra/guest
+      - name: Test keymap settling
+        run: docker run --rm --user elsebot -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/x11vnc/test_keymap_settle.py
+      - name: Test VNC targets
+        run: docker run --rm --user elsebot -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/vnc/test_else_vnc_targets.py
+      - name: Test APT downloads
+        run: docker run --rm --network none -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/test_apt_downloads.py
+      - name: Push
+        env:
+          ELSE_GUEST_REGISTRY_USER: ${{ github.actor }}
+          ELSE_GUEST_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$ELSE_GUEST_REGISTRY_PASSWORD" | docker login ghcr.io -u "$ELSE_GUEST_REGISTRY_USER" --password-stdin
+          ref="$IMAGE_REPO:src-$HASH-${{ matrix.arch }}"
+          docker tag else-guest:candidate "$ref"
+          docker push -q "$ref"
+          python3 scripts/guest-release.py platform-digest "$ref" --platform linux/${{ matrix.arch }} > digest-${{ matrix.arch }}
+          cat digest-${{ matrix.arch }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}
+          retention-days: 7
+
+  pin:
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+      actions: write
+    env:
+      HASH: ${{ needs.plan.outputs.hash }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.state == 'build'
+        with:
+          pattern: digest-*
+          merge-multiple: true
+      - name: Publish the index
+        id: image
+        env:
+          ELSE_GUEST_REGISTRY_USER: ${{ github.actor }}
+          ELSE_GUEST_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          PLANNED: ${{ needs.plan.outputs.image }}
+        run: |
+          if [ "${{ needs.plan.outputs.state }}" != build ]; then
+            echo "image=$PLANNED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "$ELSE_GUEST_REGISTRY_PASSWORD" | docker login ghcr.io -u "$ELSE_GUEST_REGISTRY_USER" --password-stdin
+          docker buildx imagetools create -t "$IMAGE_REPO:src-$HASH" \
+            "$IMAGE_REPO@$(cat digest-amd64)" "$IMAGE_REPO@$(cat digest-arm64)"
+          echo "image=$IMAGE_REPO@$(python3 scripts/guest-release.py digest "$IMAGE_REPO:src-$HASH")" >> "$GITHUB_OUTPUT"
+      - name: Pin it on the branch
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          python3 scripts/guest-release.py pin "$IMAGE"
+          if ! git diff --quiet -- infra/guest-image.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q -m "chore(release): pin guest image ${IMAGE##*@}" -- infra/guest-image.json
+            git push -q origin "HEAD:refs/heads/$BRANCH"
+          fi
+      - name: Run release-ready on the branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release-ready.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
