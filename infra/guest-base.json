@@ -1,5 +1,5 @@
 {
   "schema": 1,
   "source_sha256": "330934b436f03023b18283692d75137f626c4cb7e30a60fb90a1ed0d57086248",
-  "image": null
+  "image": "ghcr.io/else-bot/else-guest-base@sha256:3b06d0d13f7bd2e8413a0d3763c28aa97540830b883ee7e6fceb32fa7259561a"
 }
