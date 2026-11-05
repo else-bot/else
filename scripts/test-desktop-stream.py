@@ -17,6 +17,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from PIL import Image
 from websockets.sync.client import connect
@@ -97,7 +98,7 @@ def main():
         guest('printf %s ' + shlex.quote(encoded) + ' | base64 -d >' + shlex.quote(path))
 
     def browser(expression, create=False):
-        selection = "{create:'http://127.0.0.1:8421/desktop-login.html'}" if create else "{url:'http://127.0.0.1:8421/desktop-login.html'}"
+        selection = "{create:'http://127.0.0.1:8421/desktop-login.html'}" if create else "{urlPrefix:'http://127.0.0.1:8421/desktop-login.html'}"
         script = ("import {connect} from '/usr/local/lib/elsebot/cdp/cdp.mjs';"
                   "const b=await connect(); try {const p=await b.page(" + selection + ");"
                   "console.log(JSON.stringify(await p.read(" + json.dumps(expression) + ")));}"
@@ -121,6 +122,9 @@ def main():
     button = browser("(()=>{const r=document.querySelector('#login').getBoundingClientRect();"
                      "return {x:Math.floor(screenX+r.x+r.width/2),"
                      "y:Math.floor(screenY+outerHeight-innerHeight+r.y+r.height/2)}})()")
+    login_marker = '/login-observed-' + uuid.uuid4().hex
+    browser("document.querySelector('#login').addEventListener('click',()=>fetch("
+            + json.dumps(login_marker) + "+'?user='+encodeURIComponent(document.querySelector('#user').value)));true")
     with stream() as ws:
         until(ws, 'mode', 'watch')
         until(ws, 'frame')
@@ -145,6 +149,9 @@ def main():
             send(ws, 'key', key=ord(char), down=False)
         send(ws, 'pointer', x=button['x'], y=button['y'], buttons=1)
         send(ws, 'pointer', x=button['x'], y=button['y'], buttons=0)
+        check('guest consumes the login before hand-back', login_marker + '?user=stream-owner' in observed(
+            lambda: guest('cat /tmp/viewer-http.log'),
+            lambda log: login_marker + '?user=stream-owner' in log))
         send(ws, 'mode', mode='watch')
         until(ws, 'mode', 'watch')
         state = observed(lambda: browser("({user:document.querySelector('#user').value, cookie:document.cookie,session:localStorage.getItem('session')})"), lambda value: value["session"] == "stream-owner")
