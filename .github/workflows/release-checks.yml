@@ -17,7 +17,7 @@ jobs:
         with:
           persist-credentials: false
       - run: |
-          bash -n install.sh scripts/release.sh scripts/build-guest-image.sh
+          bash -n install.sh scripts/release.sh scripts/build-guest-image.sh scripts/build-guest-base.sh
           python3 scripts/test-release.py
           python3 scripts/test-install-config.py
           python3 scripts/e2e/test_installer_guest_image.py

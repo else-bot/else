@@ -3,8 +3,8 @@
 //! Microsandbox VMs with the desktop image, and the Compose S3 emulator; the
 //! scenario drives it only through the documented HTTP API and operator
 //! commands. It consumes subscription quota and boots VMs, so it runs only
-//! with `ELSE_LIVE_ACCEPTANCE=1` (and needs `docker build -t else-guest:1
-//! infra/guest` and `docker compose up -d --wait`):
+//! with `ELSE_LIVE_ACCEPTANCE=1` (and needs the guest image build from
+//! `docs/implementation/acceptance.md` and `docker compose up -d --wait`):
 //!
 //! ELSE_LIVE_ACCEPTANCE=1 cargo test -p else-api --test acceptance_live -- --nocapture
 

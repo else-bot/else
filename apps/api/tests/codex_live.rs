@@ -1075,7 +1075,7 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
 /// POC-018: a host Codex session uses its own guest computer through
 /// else.bot tools: runs a synthetic command, retrieves an artifact, and
 /// operates a local browser page. Needs ELSE_LIVE_CODEX=1, ELSE_LIVE_VM=1,
-/// and the guest image (`docker build -t else-guest:1 infra/guest`).
+/// and the guest image (`docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:1 infra/guest`).
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_uses_its_guest_computer_through_tools() {
     if !live() || std::env::var("ELSE_LIVE_VM").as_deref() != Ok("1") {

@@ -7,7 +7,7 @@ The assistant POC (POC-024) is first; the VM automation and categories milestone
 The repeatable scenario is `apps/api/tests/acceptance_live.rs`. It runs the real `else-api` binary with the owner's host Codex and Claude logins, real Microsandbox VMs with the desktop image, and the Compose S3 emulator, and drives it only through the documented HTTP API and operator commands (`setup`, `serve`, `backup`, `restore-remote`). It uses a throwaway database, data directory, and bucket, consumes subscription quota, and boots VMs, so it runs only on request:
 
 ```sh
-docker build -t else-guest:1 infra/guest
+docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:1 infra/guest
 docker compose up -d --wait
 ELSE_LIVE_ACCEPTANCE=1 cargo test -p else-api --test acceptance_live -- --nocapture
 ```
@@ -54,7 +54,7 @@ The extended assistant through the same UI, on another disposable installation w
 The repeatable scenario is `apps/api/tests/milestone_live.rs`. Like POC-024 it runs the real `else-api` binary (`setup`, `serve`, `backup`, `restore`) with the owner's host Codex and Claude logins and real Microsandbox VMs from `else-guest:2`, drives it only through the HTTP API and operator commands, and reads guest state directly through `msb exec` only to check results. Content is synthetic: a local mail capture fixture, a local search site, and a randomized local page. It runs only on request:
 
 ```sh
-docker build -t else-guest:2 infra/guest
+docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:2 infra/guest
 docker compose up -d --wait
 ELSE_LIVE_MILESTONE=1 cargo test -p else-api --test milestone_live -- --nocapture
 ```
