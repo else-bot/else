@@ -16,4 +16,4 @@ debug = 0
 
 # Native link previews, pinned until the hook lands upstream.
 [patch.crates-io]
-gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "5e412e4847cc0fb838f137c4c6b18fdc50e0f446" }
+gpui-base = { git = "https://github.com/else-bot/gpui-kit", rev = "98855cad3610ba48fdf8a56729bd36b628b3d094" }
