@@ -18,7 +18,7 @@ import release_binaries
 ROOT = Path(__file__).resolve().parents[1]
 VERSIONS = ("0.0.1", "0.0.2")
 
-HARNESS = r'''
+SETUP = r'''
 set -euo pipefail
 source "$TEST_INSTALLER"
 detect_platform() {
@@ -29,6 +29,9 @@ detect_platform() {
 }
 linux_packages() { apt_packages > "$TEST_PACKAGES"; }
 ensure_bootstrap_tools() { command -v git curl >/dev/null; }
+'''
+
+ACTION = r'''
 if [ "$TEST_ACTION" = main ]; then
     main "$@"
 else
@@ -39,6 +42,7 @@ else
 fi
 '''
 
+HARNESS = SETUP + ACTION
 TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi\n' + HARNESS
 
 
@@ -114,8 +118,8 @@ class Downloads(unittest.TestCase):
                 release_binaries.package(version, platform, source, output)
         release_binaries.release_assets(version, output)
 
-    def run_installer(self, *args, success=True, **environment):
-        result = subprocess.run(["bash", "-c", HARNESS, "installer-test", *args],
+    def run_installer(self, *args, success=True, before_action="", **environment):
+        result = subprocess.run(["bash", "-c", SETUP + before_action + ACTION, "installer-test", *args],
                                 env=dict(self.environment, **environment), capture_output=True, text=True)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -172,6 +176,27 @@ class Downloads(unittest.TestCase):
         self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.2"))
         self.assertTrue((self.installation / "versions/0.0.1/bin/else-desktop").is_file())
 
+    def test_failed_publication_never_exposes_an_incomplete_version(self):
+        self.run_installer(TEST_ACTION="release", ELSE_VERSION="0.0.1")
+        result = self.run_installer(success=False, before_action='mv() { return 74; }\n',
+                                    TEST_ACTION="release", ELSE_VERSION="0.0.2")
+        self.assertEqual(result.returncode, 74)
+        self.assertFalse((self.installation / "versions/0.0.2").exists())
+        self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.1"))
+
+    def test_new_version_appears_with_both_binaries_and_profile(self):
+        marker = self.root / "partial-version"
+        self.run_installer(before_action=r'''
+mv() {
+    command mv "$@"
+    if [ -d "$VERSIONS/0.0.2" ] &&
+       { [ ! -f "$VERSIONS/0.0.2/bin/else-desktop" ] || [ ! -f "$VERSIONS/0.0.2/.build-profile" ]; }; then
+        touch "$TEST_PARTIAL_VERSION"
+    fi
+}
+''', TEST_ACTION="release", ELSE_VERSION="0.0.2", TEST_PARTIAL_VERSION=str(marker))
+        self.assertFalse(marker.exists(), "a version must appear as a complete payload")
+
     def test_versioned_installer_handoff(self):
         (self.repo / "install.sh").write_text('''
 if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi
@@ -204,7 +229,7 @@ printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
                 self.run_installer(success=False, TEST_ACTION="release", ELSE_VERSION="0.0.2")
                 self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.1"))
                 self.assertFalse((self.installation / "versions/0.0.2").exists())
-                self.assertEqual(list((self.installation / "versions").glob(".download-*")), [])
+                self.assertEqual(list((self.installation / "versions").glob(".install-*")), [])
 
     def test_release_without_binaries_does_not_build_locally(self):
         (self.root / "releases/latest/download/SHA256SUMS").unlink()

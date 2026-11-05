@@ -476,15 +476,12 @@ source_version() {
 	sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1
 }
 
-download_release() (
-	local version="$1" platform base tmp pkg archive hash member actual
-	shift
+download_release() {
+	local version="$1" tmp="$2" output="$3" platform base pkg archive hash member actual
+	shift 3
 	platform="$(release_platform)"
 	base="$(releases_url)/download/v$version"
-	mkdir -p "$VERSIONS"
-	tmp="$(mktemp -d "$VERSIONS/.download-$version.XXXXXX")"
-	trap 'rm -rf "$tmp"' EXIT
-	mkdir -p "$tmp/bin"
+	mkdir -p "$tmp"
 	download "$base/SHA256SUMS" "$tmp/SHA256SUMS" ||
 		die "cannot download checksums for v$version; use --from-source if this release has no binaries"
 	for pkg in "$@"; do
@@ -502,22 +499,33 @@ download_release() (
 		if [ "$DISTRO" = macos ] && [ "$pkg" = else-desktop ]; then
 			member="else.bot.app/Contents/MacOS/else-desktop"
 		fi
-		tar -xOzf "$tmp/$archive" "$member" >"$tmp/bin/$pkg" || die "the archive has no $member"
-		chmod 755 "$tmp/bin/$pkg"
-		actual="$("$tmp/bin/$pkg" --version)" || die "cannot run $pkg on this host"
+		tar -xOzf "$tmp/$archive" "$member" >"$output/$pkg" || die "the archive has no $member"
+		chmod 755 "$output/$pkg"
+		actual="$("$output/$pkg" --version)" || die "cannot run $pkg on this host"
 		[ "$actual" = "$pkg $version" ] || die "$pkg reports '$actual', expected '$pkg $version'"
 	done
-	mkdir -p "$VERSIONS/$version/bin"
-	for pkg in "$@"; do
-		mv -f "$tmp/bin/$pkg" "$VERSIONS/$version/bin/$pkg"
-	done
-)
+}
 
-install_release() {
-	local version="$1" dest="$VERSIONS/$1" pkg missing=""
-	local built_profile output="$BUILD_PROFILE"
-	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
+build_release() {
+	local version="$1" destination="$2" pkg args="" output="$BUILD_PROFILE" log
+	shift 2
+	log="$LOGS/build-$version.log"
 	[ "$BUILD_PROFILE" != dev ] || output=debug
+	ensure_rust
+	info "Building $* ($BUILD_PROFILE); the first build takes several minutes"
+	for pkg in "$@"; do args="$args -p $pkg"; done
+	# shellcheck disable=SC2086
+	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
+		tail -20 "$log" >&2
+		die "the build failed; the full log is $log"
+	fi
+	for pkg in "$@"; do install -m 755 "$BUILD/$output/$pkg" "$destination/$pkg"; done
+}
+
+install_release() (
+	local version="$1" dest="$VERSIONS/$1" pkg missing=""
+	local built_profile stage payload
+	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
 	for pkg in $(want_server && echo else-api) $(want_app && echo else-desktop); do
 		if [ "$built_profile" != "$BUILD_PROFILE" ] || ! [ -x "$dest/bin/$pkg" ] ||
 			[ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
@@ -529,30 +537,28 @@ install_release() {
 		ok "already installed ($dest)"
 		return
 	fi
-	if [ "$FROM_SOURCE" = 0 ]; then
+	mkdir -p "$VERSIONS"
+	stage="$(mktemp -d "$VERSIONS/.install-$version.XXXXXX")"
+	trap 'rm -rf "$stage"' EXIT
+	payload="$stage/version"
+	mkdir -p "$payload/bin"
+	if [ "$FROM_SOURCE" = 1 ]; then
 		# shellcheck disable=SC2086
-		download_release "$version" $missing
-		printf '%s\n' release >"$dest/.build-profile"
-		ok "downloaded into $dest"
-		return
+		build_release "$version" "$payload/bin" $missing
+	else
+		# shellcheck disable=SC2086
+		download_release "$version" "$stage/downloads" "$payload/bin" $missing
 	fi
-	ensure_rust
-	info "Building${missing} ($BUILD_PROFILE); the first build takes several minutes"
-	local args="" log="$LOGS/build-$version.log"
-	for pkg in $missing; do args="$args -p $pkg"; done
-	# shellcheck disable=SC2086
-	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
-		tail -20 "$log" >&2
-		die "the build failed; the full log is $log"
+	printf '%s\n' "$BUILD_PROFILE" >"$payload/.build-profile"
+	if [ -d "$dest" ]; then
+		mkdir -p "$dest/bin"
+		for pkg in $missing; do mv -f "$payload/bin/$pkg" "$dest/bin/$pkg"; done
+		mv -f "$payload/.build-profile" "$dest/.build-profile"
+	else
+		mv "$payload" "$dest"
 	fi
-	mkdir -p "$dest/bin"
-	for pkg in $missing; do
-		install -m 755 "$BUILD/$output/$pkg" "$dest/bin/.$pkg.new"
-		mv -f "$dest/bin/.$pkg.new" "$dest/bin/$pkg"
-	done
-	printf '%s\n' "$BUILD_PROFILE" >"$dest/.build-profile"
-	ok "built into $dest"
-}
+	ok "installed into $dest"
+)
 
 switch_to() {
 	ln -sfn "versions/$1" "$ELSE_HOME/current.tmp"
