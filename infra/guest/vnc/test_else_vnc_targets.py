@@ -30,14 +30,31 @@ LOCK = else_vnc_targets.LOCK
 PORT = 6080
 
 
+SLOW = {"pause": 0.0, "close_after": None, "ack_delay": 0.0, "port_offset": 0, "received": []}
+
+
 def fake_vnc(port):
     server = socket.create_server(("127.0.0.1", port))
 
     def serve(conn):
         conn.sendall(b"PORT %d\n" % port)
-        while conn.recv(4096):
-            pass
+        control = port == 5900
+        slow = dict(SLOW) if control else {"pause": 0.0, "close_after": None, "ack_delay": None, "received": []}
+        peer = conn.getpeername()[1]
+        time.sleep(slow["pause"])
+        total = 0
+        try:
+            while chunk := conn.recv(65536):
+                total += len(chunk)
+        except ConnectionResetError:
+            total = -1
+        slow["received"].append(total)
+        if slow["close_after"]:
+            slow["close_after"].wait(30)
         conn.close()
+        if slow["ack_delay"] is not None:
+            time.sleep(slow["ack_delay"])
+            open(os.path.join(else_vnc_targets.ACKS, str(peer + slow["port_offset"])), "w").close()
 
     def accept():
         while True:
@@ -86,6 +103,7 @@ def refused(host):
 class Targets(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        os.makedirs(else_vnc_targets.ACKS, exist_ok=True)
         fake_vnc(5900)
         fake_vnc(5901)
         env = dict(os.environ, PYTHONPATH=HERE)
@@ -100,6 +118,7 @@ class Targets(unittest.TestCase):
         cls.proxy.wait(10)
 
     def tearDown(self):
+        SLOW.update(pause=0.0, close_after=None, ack_delay=0.0, port_offset=0, received=[])
         self.assertTrue(wait_until(lock_free), "the lock is free after each test")
 
     def test_watch_reaches_the_view_only_server_without_the_lock(self):
@@ -175,6 +194,66 @@ class Targets(unittest.TestCase):
         self.assertTrue(wait_until(lock_free), "the kernel releases the lock of a killed handler")
         ws.close()
 
+    def test_the_lock_waits_for_the_server_to_finish_the_input(self):
+        done = threading.Event()
+        SLOW.update(close_after=done, received=[])
+        ws, _ = open_ws("127.0.0.1", self)
+        ws.send_binary(b"k" * 64)
+        ws.close()
+        self.assertTrue(wait_until(lambda: SLOW["received"] == [64]), "the server read all input sent before the close")
+        time.sleep(0.5)
+        self.assertFalse(lock_free(), "the lock stays held while the server is still on the connection")
+        done.set()
+        self.assertTrue(wait_until(lock_free, 1.0), "the lock is released once the server acknowledges")
+
+    def test_the_lock_waits_for_the_acknowledgement_not_the_socket_close(self):
+        SLOW.update(ack_delay=1.0, received=[])
+        ws, _ = open_ws("127.0.0.1", self)
+        ws.close()
+        self.assertTrue(wait_until(lambda: SLOW["received"]), "the server saw end of input and closed")
+        time.sleep(0.6)
+        self.assertFalse(lock_free(), "a closed socket without the acknowledgement keeps the lock")
+        self.assertTrue(wait_until(lock_free, 2.0), "the acknowledgement releases it")
+
+    def test_without_an_acknowledgement_the_lock_stays_held(self):
+        done = threading.Event()
+        self.addCleanup(done.set)
+        SLOW.update(close_after=done, ack_delay=None, received=[])
+        ws, _ = open_ws("127.0.0.1", self)
+        ws.close()
+        time.sleep(else_vnc_targets.DRAIN_WAIT + 1.5)
+        try:
+            self.assertFalse(lock_free(), "unknown input state keeps the browser lock")
+        finally:
+            self.stop_waiting_handler()
+
+    def test_an_acknowledgement_for_another_connection_does_not_release(self):
+        SLOW.update(port_offset=1, received=[])
+        ws, _ = open_ws("127.0.0.1", self)
+        ws.close()
+        self.assertTrue(wait_until(lambda: SLOW["received"]))
+        time.sleep(0.5)
+        try:
+            self.assertFalse(lock_free(), "another port's acknowledgement is not this connection's")
+        finally:
+            self.stop_waiting_handler()
+
+    def stop_waiting_handler(self):
+        children = subprocess.run(["pgrep", "-P", str(self.proxy.pid)], capture_output=True, text=True).stdout.split()
+        for pid in children:
+            os.kill(int(pid), signal.SIGKILL)
+
+    def test_input_queued_past_the_server_socket_is_dropped_at_close(self):
+        SLOW.update(pause=2.0, received=[])
+        ws, _ = open_ws("127.0.0.1", self)
+        sent = 0
+        for _ in range(256):
+            ws.send_binary(b"k" * 65536)
+            sent += 65536
+        ws.close()
+        self.assertTrue(wait_until(lambda: SLOW["received"], 10), "the server reaches end of input")
+        self.assertLess(SLOW["received"][0], sent, "input websockify still queued at the close is dropped")
+        self.assertTrue(wait_until(lock_free, 1.0), "and the lock is released once the server acknowledges")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

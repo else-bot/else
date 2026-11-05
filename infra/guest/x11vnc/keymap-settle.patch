@@ -1,0 +1,315 @@
+Description: Settle and recycle added keysyms; release on viewer exit
+ add_keysym() mapped a missing keysym and the caller pressed it at once,
+ so a client could read the press before the new mapping and lose the
+ character. It now waits for the server (XSync) and a 20 ms settle before
+ the press. When no keycode is empty it recycles the least recently
+ mapped added keycode that is not held, instead of ignoring the
+ keystroke, and lookups that still name a recycled keycode are treated
+ as misses. A key release never adds a mapping.
+ .
+ Presses queued from a viewer that has hung up are dropped, so a long
+ commit cannot keep typing for seconds after the viewer left, while its
+ releases still apply. When a viewer goes, keys and buttons x11vnc still
+ holds for it are released and the server is synced before the -gone
+ command runs, so that command can acknowledge that the viewer's input
+ is finished; the connection's port is read at accept, since the socket is
+ closed before that command runs. Diagnostics never name keys.
+Author: else.bot
+Forwarded: not-needed
+Last-Update: 2026-11-05
+---
+--- a/src/keyboard.h
++++ b/src/keyboard.h
+@@ -46,6 +46,7 @@
+ extern void autorepeat(int restore, int bequiet);
+ extern void check_add_keysyms(void);
+ extern int add_keysym(KeySym keysym);
++extern void release_owner_input(rfbClientPtr client);
+ extern void delete_added_keycodes(int bequiet);
+ extern void initialize_remap(char *infile);
+ extern int sloppy_key_check(int key, rfbBool down, rfbKeySym keysym, int *new_kc);
+--- a/src/keyboard.c
++++ b/src/keyboard.c
+@@ -33,6 +33,10 @@
+ /* -- keyboard.c -- */
+ 
+ #include "x11vnc.h"
++#include <poll.h>
++#ifndef POLLRDHUP
++#define POLLRDHUP 0x2000
++#endif
+ #include "xwrappers.h"
+ #include "xrecord.h"
+ #include "xinerama.h"
+@@ -470,7 +474,77 @@
+ }
+ 
+ static KeySym added_keysyms[0x100];
++
++/*
++ * else.bot: a keycode mapped for a press must reach the focused client
++ * before the press, so add_keysym() waits for the server and then a
++ * measured settle.  A full table recycles the least recently mapped
++ * keycode that is not held, instead of ignoring the keystroke.  Presses
++ * still queued when the viewer hangs up are dropped (each settle would
++ * otherwise delay hand-back), while releases are still applied.
++ */
++#define KEYMAP_SETTLE_US 20000
++static unsigned long added_seq[0x100];
++static unsigned long add_counter;
++static rfbClientPtr input_client;
++
++static int peer_hung_up(rfbClientPtr client) {
++	struct pollfd pfd;
++
++	if (!client) {
++		return 0;
++	}
++	if (client->sock < 0) {
++		return 1;
++	}
++	pfd.fd = client->sock;
++	pfd.events = POLLRDHUP;
++	pfd.revents = 0;
++	if (poll(&pfd, 1, 0) <= 0) {
++		return 0;
++	}
++	return (pfd.revents & (POLLRDHUP|POLLHUP|POLLERR)) != 0;
++}
++
++static void note_dropped_press(rfbClientPtr client) {
++	static rfbClientPtr noted;
++	if (noted != client) {
++		noted = client;
++		fprintf(stderr, "x11vnc: viewer hung up, dropping its queued key presses\n");
++	}
++}
++
++static int added_keycode(KeySym keysym) {
++	int n;
++	for (n=0; n < 0x100; n++) {
++		if (added_keysyms[n] != NoSymbol && added_keysyms[n] == keysym) {
++			return n;
++		}
++	}
++	return 0;
++}
+ 
++/* a cached lookup may still name a keycode since recycled for another keysym */
++static KeyCode current_keycode(KeyCode kc, KeySym keysym) {
++	if (kc != NoSymbol && added_keysyms[kc] != NoSymbol && added_keysyms[kc] != keysym) {
++		return NoSymbol;
++	}
++	return kc;
++}
++
++static int recyclable_keycode(int minkey, int maxkey) {
++	int kc, best = 0;
++	for (kc = minkey+1; kc <= maxkey && kc < 0x100; kc++) {
++		if (added_keysyms[kc] == NoSymbol || keycode_state[kc]) {
++			continue;
++		}
++		if (!best || added_seq[kc] < added_seq[best]) {
++			best = kc;
++		}
++	}
++	return best;
++}
++
+ /* these are just for rfbLog messages: */
+ static KeySym alltime_added_keysyms[1024];
+ static int alltime_len = 1024;
+@@ -507,31 +581,37 @@
+ 		return 0;
+ 	}
+ 	/* there can be a race before MappingNotify */
+-	for (n=0; n < 0x100; n++) {
+-		if (added_keysyms[n] == keysym) {
+-			return n;
+-		}
++	if ((n = added_keycode(keysym))) {
++		return n;
+ 	}
+ 
+ 	XDisplayKeycodes(dpy, &minkey, &maxkey);
+ 	keymap = XGetKeyboardMapping(dpy, minkey, (maxkey - minkey + 1),
+ 	    &syms_per_keycode);
+ 
+-	for (kc = minkey+1; kc <= maxkey; kc++) {
++	for (kc = minkey+1; kc <= maxkey + 1; kc++) {
+ 		int i, j, didmsg = 0, is_empty = 1;
+ 		char *str;
+ 		KeySym newks[8];
+ 
+-		for (n=0; n < syms_per_keycode; n++) {
+-			if (keymap[ (kc-minkey) * syms_per_keycode + n]
+-			    != NoSymbol) {
+-				is_empty = 0;
++		if (kc > maxkey) {
++			kc = recyclable_keycode(minkey, maxkey);
++			if (!kc) {
++				fprintf(stderr, "x11vnc: keystroke ignored, every added keycode is held\n");
+ 				break;
+ 			}
++		} else {
++			for (n=0; n < syms_per_keycode; n++) {
++				if (keymap[ (kc-minkey) * syms_per_keycode + n]
++				    != NoSymbol) {
++					is_empty = 0;
++					break;
++				}
++			}
++			if (! is_empty) {
++				continue;
++			}
+ 		}
+-		if (! is_empty) {
+-			continue;
+-		}
+ 
+ 		for (i=0; i<8; i++) {
+ 			newks[i] = NoSymbol;
+@@ -568,12 +648,18 @@
+ 			}
+ 		}
+ 
+-		XFlush_wr(dpy);
++		XSync(dpy, False);
++		usleep(KEYMAP_SETTLE_US);
+ 		added_keysyms[kc] = keysym;
++		added_seq[kc] = ++add_counter;
+ 		ret = kc;
+ 		break;
+ 	}
+ 	XFree_wr(keymap);
++	if (ret && peer_hung_up(input_client)) {
++		note_dropped_press(input_client);
++		return 0;
++	}
+ 	return ret;
+ #endif	/* NO_X11 */
+ }
+@@ -1682,6 +1768,9 @@
+ 	    for (grp = 0; grp < grp_max+1; grp++) {
+ 		for (lvl = 0; lvl < lvl_max+1; lvl++) {
+ 			if (keysym != xkbkeysyms[kc][grp][lvl]) {
++				continue;
++			}
++			if (current_keycode(kc, keysym) == NoSymbol) {
+ 				continue;
+ 			}
+ 			/* got a keysym match */
+@@ -1754,7 +1843,7 @@
+ 	}
+ 
+ 	if (!found && add_keysyms && keysym && ! IsModifierKey(keysym)) {
+-		int new_kc = add_keysym(keysym);
++		int new_kc = down ? add_keysym(keysym) : added_keycode(keysym);
+ 		if (new_kc != 0) {
+ 			found = 1;
+ 			kc_f[0] = new_kc;
+@@ -2727,8 +2816,9 @@
+ 		k = XKeysymToKeycode(dpy, (KeySym) keysym);
+ 		X_UNLOCK;
+ 	}
++	k = current_keycode(k, keysym);
+ 	if (k == NoSymbol && add_keysyms && ! IsModifierKey(keysym)) {
+-		int new_kc = add_keysym(keysym);
++		int new_kc = down ? add_keysym(keysym) : added_keycode(keysym);
+ 		if (new_kc) {
+ 			k = new_kc;
+ 		}
+@@ -3061,7 +3151,48 @@
+  * running under -modtweak.
+  */
+ static rfbClientPtr last_keyboard_client = NULL;
++
++/*
++ * else.bot: when a viewer goes, release what x11vnc still holds for it,
++ * since its queued releases may never have arrived, then wait for the
++ * server, so the -gone command runs only once every event is applied.
++ */
++void release_owner_input(rfbClientPtr client) {
++	int k, b;
+ 
++	if (input_client == client) {
++		input_client = NULL;
++	}
++	if (view_only) {
++		return;
++	}
++	RAWFB_RET_VOID
++#if !NO_X11
++	X_LOCK;
++	if (client == last_keyboard_client || client == last_pointer_client) {
++		last_keyboard_client = NULL;
++		last_pointer_client = NULL;
++		mod_state = 0;
++		for (k = 0; simple_mods[k] != NoSymbol; k++) {
++			track_mod_state(simple_mods[k], False, True);
++		}
++		for (k = 0; k < 0x100; k++) {
++			if (keycode_state[k]) {
++				XTestFakeKeyEvent_wr(dpy, -1, (KeyCode) k, False, CurrentTime);
++			}
++		}
++		for (b = 1; b <= MAX_BUTTONS; b++) {
++			if (button_mask & (1 << (b-1))) {
++				do_button_mask_change(0, b, NULL);
++			}
++		}
++		button_mask = 0;
++	}
++	XSync(dpy, False);
++	X_UNLOCK;
++#endif
++}
++
+ void keyboard(rfbBool down, rfbKeySym keysym, rfbClientPtr client) {
+ 	KeyCode k;
+ 	int idx, isbutton = 0;
+@@ -3081,6 +3212,11 @@
+ 	if (threads_drop_input) {
+ 		return;
+ 	}
++	if (down && peer_hung_up(client)) {
++		note_dropped_press(client);
++		return;
++	}
++	input_client = client;
+ 
+ 	dtime0(&tnow);
+ 	got_keyboard_calls++;
+@@ -3407,10 +3543,10 @@
+ 
+ 	X_LOCK;
+ 
+-	k = XKeysymToKeycode(dpy, (KeySym) keysym);
++	k = current_keycode(XKeysymToKeycode(dpy, (KeySym) keysym), keysym);
+ 
+ 	if (k == NoSymbol && add_keysyms && ! IsModifierKey(keysym)) {
+-		int new_kc = add_keysym(keysym);
++		int new_kc = down ? add_keysym(keysym) : added_keycode(keysym);
+ 		if (new_kc) {
+ 			k = new_kc;
+ 		}
+--- a/src/connections.c
++++ b/src/connections.c
+@@ -821,6 +821,7 @@
+ 
+ 	rfbLog("client_count: %d\n", client_count);
+ 	last_client_gone = dnow();
++	release_owner_input(client);
+ 
+ 	if (unixpw_in_progress && unixpw_client) {
+ 		if (client == unixpw_client) {
+@@ -4008,6 +4009,9 @@
+ 		cd->ssl_helper_pid = openssl_last_helper_pid;
+ 		openssl_last_helper_pid = 0;
+ 	}
++	/* else.bot: -gone names the connection by its port, read now since
++	 * the socket is closed before that command runs */
++	client_set_net(client);
+ 
+ 	if (! accept_client(client)) {
+ 		rfbLog("denying client: %s local user rejected connection.\n",
