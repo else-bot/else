@@ -22,6 +22,7 @@ pub use backups::*;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
+pub mod socials;
 pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode, MAX_TEXT_CHARS};
 use serde_json::json;
 

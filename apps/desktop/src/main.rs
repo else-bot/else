@@ -11,6 +11,7 @@ mod model;
 mod preferences;
 mod profile_picker;
 mod sidebar;
+mod socials;
 mod updates;
 
 use gpui_kit::*;

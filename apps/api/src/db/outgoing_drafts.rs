@@ -566,14 +566,22 @@ pub async fn claim(
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
     match (draft.content.account(), delivery) {
-        (Some(bound), Delivery::Mail { account_id, .. }) if bound == *account_id => {}
+        (Some(bound), Delivery::Mail { account_id, .. })
+            if bound == *account_id && matches!(draft.content.0, Content::Email(_)) => {}
+        (Some(bound), Delivery::Social { account_id, .. })
+            if bound == *account_id && matches!(draft.content.0, Content::Message(_)) => {}
         (None, Delivery::Tool { .. } | Delivery::Host) => {}
         (Some(_), _) => return Err(DraftError::Connected),
-        (None, Delivery::Mail { .. }) => return Err(DraftError::NotConnected),
+        (None, Delivery::Mail { .. } | Delivery::Social { .. }) => {
+            return Err(DraftError::NotConnected);
+        }
     }
     if draft.status == Status::Sending
         && draft.send_turn_id == Some(turn_id)
-        && matches!(draft.delivery.as_deref(), Some(Delivery::Mail { .. }))
+        && matches!(
+            draft.delivery.as_deref(),
+            Some(Delivery::Mail { .. } | Delivery::Social { .. })
+        )
     {
         return Ok(draft);
     }
@@ -678,6 +686,29 @@ pub async fn after_mail_send(
     let draft = reload(&mut tx, draft_id).await?;
     tx.commit().await?;
     Ok(draft)
+}
+
+pub async fn after_social_send(
+    pool: &SqlitePool,
+    id: Uuid,
+    refused: Option<&str>,
+) -> Result<OutgoingDraft, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let draft = reload(&mut tx, id).await?;
+    if let (
+        Some(reason),
+        Some(Delivery::Social {
+            account_id,
+            action_id,
+        }),
+    ) = (refused, draft.delivery.as_deref())
+    {
+        sqlx::query("UPDATE outgoing_drafts SET status='failed',result_detail=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),settled_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1 AND status='sending' AND NOT EXISTS(SELECT 1 FROM social_actions WHERE connection_id=?3 AND action_id=?4)").bind(id).bind(reason).bind(account_id).bind(action_id).execute(&mut *tx).await?;
+    }
+    events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
+    let updated = reload(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(updated)
 }
 
 /// What a turn must know about drafts: owner decisions on its cards not yet

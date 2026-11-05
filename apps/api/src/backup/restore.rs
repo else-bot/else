@@ -436,6 +436,9 @@ async fn load_and_check(
         .map_err(|e| BackupError::Invalid(format!("connector restore: {e}")))?;
     sqlx::query("UPDATE turns SET status=CASE WHEN status IN ('queued','preparing') THEN 'interrupted' ELSE 'uncertain' END, effect_uncertain=effect_uncertain OR status NOT IN ('queued','preparing'), error_code='connector_restored', error_message='Restored email work will not resume automatically. Inspect action receipts for prior effects.', finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE status IN ('queued','preparing','sending','running','cancelling','waiting') AND EXISTS (SELECT 1 FROM connector_deliveries d WHERE d.turn_id=turns.id)")
         .execute(&mut conn).await?;
+    crate::socials::store::restore_passive(&mut conn)
+        .await
+        .map_err(|e| BackupError::Invalid(format!("social restore: {e}")))?;
     let profiles: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier FROM provider_profiles",
     )

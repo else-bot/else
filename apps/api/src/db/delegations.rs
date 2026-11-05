@@ -534,7 +534,19 @@ pub async fn origin(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Origin
     Ok(match source.as_deref() {
         Some("user") => Origin::OwnerRequest,
         Some("routine") => Origin::RoutineRun,
-        Some("connector") => Origin::ConnectorEvent,
+        Some("connector") => {
+            let social: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM social_deliveries WHERE turn_id=?1)",
+            )
+            .bind(turn_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if social {
+                Origin::SocialEvent
+            } else {
+                Origin::ConnectorEvent
+            }
+        }
         _ => Origin::Other,
     })
 }
@@ -578,7 +590,8 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         origin,
         delegated_task: false,
         delegated_by: None,
-        can_create_bot: main == Some(bot) && origin != Origin::ConnectorEvent,
+        can_create_bot: main == Some(bot)
+            && !matches!(origin, Origin::ConnectorEvent | Origin::SocialEvent),
         registry,
         remaining: (MAX_CHILDREN - used).max(0),
         outcomes: undelivered(conn, turn_id).await?,

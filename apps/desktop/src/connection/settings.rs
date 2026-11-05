@@ -14,6 +14,7 @@ use gpui_kit::component::{
 pub(super) enum SettingsSection {
     Server,
     Email,
+    Socials,
     Backups,
     Updates,
 }
@@ -106,13 +107,29 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if section != SettingsSection::Socials {
+            self.clear_socials(window, cx);
+        } else if self.socials.is_none()
+            && let Some(active) = &self.active
+        {
+            let (client, bots) = active.app.read(cx).social_context();
+            self.socials =
+                Some(cx.new(|cx| crate::socials::SocialsView::new(client, bots, None, window, cx)));
+            if !active.app.read(cx).social_network_available() {
+                self.socials
+                    .as_ref()
+                    .unwrap()
+                    .update(cx, |view, cx| view.set_available(false, window, cx));
+            }
+        }
         if let Some(setup) = &mut self.setup {
             setup.presentation = Presentation::Settings(section);
             setup.navigation_focus[match section {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
-                SettingsSection::Backups => 2,
-                SettingsSection::Updates => 3,
+                SettingsSection::Socials => 2,
+                SettingsSection::Backups => 3,
+                SettingsSection::Updates => 4,
             }]
             .focus(window, cx);
             cx.notify();
@@ -122,6 +139,12 @@ impl Shell {
         }
         if section == SettingsSection::Updates {
             self.update_action(super::updates::Action::RefreshWork, cx);
+        }
+    }
+
+    pub(super) fn clear_socials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.socials.take() {
+            view.update(cx, |view, cx| view.clear(window, cx));
         }
     }
 
@@ -187,22 +210,30 @@ impl Shell {
                 &setup.navigation_focus[1],
             ))
             .child(nav_item(
+                "settings-socials",
+                "Socials",
+                IconName::MessageSquare,
+                SettingsSection::Socials,
+                &setup.navigation_focus[2],
+            ))
+            .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[2],
+                &setup.navigation_focus[3],
             ))
             .child(nav_item(
                 "settings-updates",
                 "Updates",
                 IconName::RefreshCw,
                 SettingsSection::Updates,
-                &setup.navigation_focus[3],
+                &setup.navigation_focus[4],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
             SettingsSection::Email => email_settings(cx),
+            SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
@@ -268,6 +299,7 @@ impl Shell {
                             .id(match section {
                                 SettingsSection::Server => "settings-server-content",
                                 SettingsSection::Email => "settings-email-content",
+                                SettingsSection::Socials => "settings-socials-content",
                                 SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })

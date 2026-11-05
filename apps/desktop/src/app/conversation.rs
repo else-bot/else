@@ -16,6 +16,7 @@ pub(super) enum RowKey {
     SecretRequest(Uuid),
     Question(Uuid),
     Draft(Uuid),
+    SocialSetup(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for draft in &turn.outgoing_drafts {
                 turns.insert(RowKey::Draft(draft.id), turn.id);
             }
+            for setup in &turn.social_setups {
+                turns.insert(RowKey::SocialSetup(setup.id), turn.id);
+            }
         }
     }
     let turns: Vec<_> = rows
@@ -57,9 +61,10 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
-            RowKey::Question(_) | RowKey::SecretRequest(_) | RowKey::Draft(_) => {
-                turns.get(key).copied()
-            }
+            RowKey::Question(_)
+            | RowKey::SecretRequest(_)
+            | RowKey::Draft(_)
+            | RowKey::SocialSetup(_) => turns.get(key).copied(),
             RowKey::Pending(_) => None,
         })
         .collect();
@@ -126,6 +131,7 @@ pub(super) struct ConversationView {
     pub(super) answered: HashSet<Uuid>,
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
+    pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
@@ -149,6 +155,7 @@ impl ConversationView {
             answered: HashSet::new(),
             question_submits: HashMap::new(),
             draft_forms: HashMap::new(),
+            social_forms: HashMap::new(),
             expanded_drafts: HashSet::new(),
             latest_seen: false,
             reply_layout: None,
@@ -331,6 +338,12 @@ impl ElseApp {
                                 c.question_anchor(turn.id, question.settled_at),
                             )
                         }))
+                        .chain(turn.social_setups.iter().map(move |setup| {
+                            (
+                                RowKey::SocialSetup(setup.id),
+                                c.question_anchor(turn.id, None),
+                            )
+                        }))
                         .chain(
                             turn.outgoing_drafts
                                 .iter()
@@ -403,7 +416,10 @@ impl ElseApp {
                             (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_) | RowKey::Question(_) | RowKey::Draft(_) => (None, None),
+                RowKey::SecretRequest(_)
+                | RowKey::Question(_)
+                | RowKey::Draft(_)
+                | RowKey::SocialSetup(_) => (None, None),
             })
             .collect();
         let routines = routine_rows(&rows, conversation);
@@ -431,6 +447,7 @@ impl ElseApp {
                         )
                     }),
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
+                    RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
                     RowKey::Item(id) => c
                         .item(id)
                         .and_then(|i| c.turn(i.turn_id))
@@ -520,6 +537,7 @@ impl ElseApp {
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
         self.sync_draft_forms(window, cx);
+        self.sync_social_forms(window, cx);
         self.check_reading(window, cx);
         cx.notify();
     }

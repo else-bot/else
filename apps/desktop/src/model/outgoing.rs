@@ -75,6 +75,7 @@ impl DraftContent {
             Self::Message { platform, .. } => match platform.as_str() {
                 "x" => "X",
                 "telegram" => "Telegram",
+                "discord" => "Discord",
                 _ => platform,
             },
         }

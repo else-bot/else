@@ -18,9 +18,9 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::events;
+use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
+use crate::app::providers::{Origin, RoutineRun};
 use crate::app::routines::{InvalidRoutine, MAX_PER_BOT, RoutineName, RoutinePrompt, Schedule};
 use crate::providers::Registry;
 
@@ -514,37 +514,6 @@ impl Skip {
     }
 }
 
-async fn provider(
-    conn: &mut SqliteConnection,
-    registry: &Registry,
-    bot_id: Uuid,
-) -> Result<Option<(&'static str, Option<(i64, sqlx::types::Json<Profile>)>)>, sqlx::Error> {
-    let own: Option<String> =
-        sqlx::query_scalar("SELECT provider_id FROM bot_profiles WHERE bot_id = ?1")
-            .bind(bot_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    let chosen = match own {
-        Some(own) => Some(own),
-        None => super::bot_profiles::default_provider(conn).await?,
-    };
-    let id = chosen
-        .and_then(|id| registry.get(&id).map(|p| p.id()))
-        .or(registry.default_id());
-    let Some(provider) = id.and_then(|id| registry.get(id)) else {
-        return Ok(None);
-    };
-    if provider.availability() != Availability::Available {
-        return Ok(None);
-    }
-    if !provider.uses_profile() {
-        return Ok(Some((provider.id(), None)));
-    }
-    Ok(super::bot_profiles::effective(conn, bot_id, provider.id())
-        .await?
-        .map(|profile| (provider.id(), Some(profile))))
-}
-
 #[derive(sqlx::FromRow)]
 struct Due {
     bot_id: Uuid,
@@ -631,11 +600,14 @@ async fn admit(
     } else if queued >= MAX_QUEUED_TURNS {
         Err(Skip::QueueFull)
     } else {
-        provider(&mut tx, registry, bot_id)
+        bot_profiles::for_admission(&mut tx, registry, bot_id)
             .await?
             .ok_or(Skip::ProviderUnavailable)
     };
-    let (provider_id, profile) = match chosen {
+    let bot_profiles::TurnProvider {
+        provider_id,
+        profile,
+    } = match chosen {
         Ok(chosen) => chosen,
         Err(skip) => {
             sqlx::query(

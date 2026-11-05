@@ -2,7 +2,8 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use crate::app::providers::Profile;
+use crate::app::providers::{Availability, Profile};
+use crate::providers::Registry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BotProfile {
@@ -43,6 +44,46 @@ async fn own(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<BotProf
             revision,
         },
     ))
+}
+
+#[derive(Debug)]
+pub struct TurnProvider {
+    pub provider_id: &'static str,
+    pub profile: Option<(i64, Json<Profile>)>,
+}
+
+/// Resolve a runnable provider and its profile snapshot for scheduled work.
+/// A known but unavailable owner choice waits rather than switching providers.
+pub async fn for_admission(
+    conn: &mut SqliteConnection,
+    registry: &Registry,
+    bot_id: Uuid,
+) -> Result<Option<TurnProvider>, sqlx::Error> {
+    let chosen = match own(conn, bot_id).await? {
+        Some(own) => Some(own.provider_id),
+        None => default_provider(conn).await?,
+    };
+    let id = chosen
+        .and_then(|id| registry.get(&id).map(|p| p.id()))
+        .or(registry.default_id());
+    let Some(provider) = id.and_then(|id| registry.get(id)) else {
+        return Ok(None);
+    };
+    if provider.availability() != Availability::Available {
+        return Ok(None);
+    }
+    let profile = if provider.uses_profile() {
+        let Some(profile) = effective(conn, bot_id, provider.id()).await? else {
+            return Ok(None);
+        };
+        Some(profile)
+    } else {
+        None
+    };
+    Ok(Some(TurnProvider {
+        provider_id: provider.id(),
+        profile,
+    }))
 }
 
 /// Set an active bot's own profile (already validated by its provider's

@@ -51,6 +51,18 @@ Use Ctrl on Linux and Command on macOS for these shortcuts:
 | Ctrl/Command+Shift+M | Move a bot to a category |
 | Ctrl/Command+, | Open app settings |
 
+## Connect Telegram or Discord
+
+Ask your assistant to connect Telegram or Discord and say what you want it to do. For example, "Connect Telegram so you can summarize messages that mention you and draft replies." The assistant opens a private connection card in the conversation.
+
+For Telegram, create a bot with [@BotFather](https://t.me/BotFather) using `/newbot`. For Discord, create an application in the [Developer Portal](https://discord.com/developers/applications), copy its bot token, and install the bot in your server. Enter the token in the card's private field. Tokens authenticate the platform bot, and the API stores them encrypted. The assistant does not receive them. Keep tokens out of ordinary chat messages.
+
+Choose the conversations the assistant may access and describe its work in the instructions field. These instructions teach the assistant how to behave. They cannot grant access beyond the selected destinations and permissions. Sending a message still requires your approval of its draft.
+
+A Telegram bot receives messages in chats it joins, subject to Telegram's privacy settings. It does not connect your personal inbox or import arbitrary older chat history. Add the bot to a group and send a message to make that destination available. A Discord bot can access only channels allowed by its server permissions. Reading ordinary server message content also requires the Message Content Intent in the Developer Portal.
+
+Open **Settings → Socials** to manage connections, edit each bot's instructions and access, replace a token, pause a connection, or disconnect it.
+
 ## Connect to another machine
 
 The server listens on `127.0.0.1:7878`. Use an SSH tunnel to reach it from your app machine:

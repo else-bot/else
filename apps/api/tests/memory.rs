@@ -623,6 +623,8 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
                     | "routine_list"
                     | "mail_accounts"
                     | "mail_action_status"
+                    | "social_connections"
+                    | "social_action_status"
             );
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }

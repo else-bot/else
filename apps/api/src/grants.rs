@@ -42,6 +42,7 @@ pub enum Tool {
     /// including a task delegated for one; never a routine run or its tasks).
     Routines,
     Mail,
+    Social,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -23,3 +23,5 @@ pub mod providers;
 pub mod runtime_lock;
 pub mod scheduler;
 pub mod views;
+
+pub mod socials;
