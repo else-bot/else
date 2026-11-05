@@ -294,6 +294,11 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
         .expect("a waiting turn is in the snapshot")
         .clone();
     let shown = &waiting["secret_requests"][0];
+    let listed = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
+    assert_eq!(
+        listed.body["bot"]["sidebar_status"],
+        json!({ "kind": "needs_credentials", "preview": "Log in to the web server to deploy the site." })
+    );
     assert_eq!(shown["id"], request.to_string());
     assert_eq!(shown["status"], "pending");
     assert_eq!(shown["name"], "deploy");
@@ -310,6 +315,8 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     assert!(!stored.body.to_string().contains(CANARY));
     wait(&app, turn, "completed").await;
     assert_eq!(attempts(&app, turn).await, 2, "the same turn continued");
+    let listed = app.owner("GET", &format!("/v1/bots/{main}"), None).await;
+    assert_eq!(listed.body["bot"]["sidebar_status"], Value::Null);
     assert_eq!(
         request_status(&app, request).await,
         ("stored".into(), Some(2))

@@ -86,7 +86,7 @@ impl ReadRow {
     }
 }
 
-fn preview(text: &str) -> String {
+pub(super) fn preview(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() <= PREVIEW_CHARS {
         return line;

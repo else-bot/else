@@ -128,6 +128,25 @@ pub struct Cleanup {
     pub error: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SidebarStatus {
+    WaitingForAnswer {
+        preview: String,
+    },
+    NeedsApproval {
+        preview: String,
+    },
+    NeedsCredentials {
+        preview: String,
+    },
+    Failed,
+    Stopped,
+    Uncertain,
+    #[serde(other)]
+    Unknown,
+}
+
 /// An active bot, or a deletion receipt (`cleanup` set).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Bot {
@@ -160,6 +179,8 @@ pub struct Bot {
     /// Absent from older servers and on receipts.
     #[serde(default)]
     pub read_state: Option<ReadState>,
+    #[serde(default)]
+    pub sidebar_status: Option<SidebarStatus>,
 }
 
 /// A point in a bot's replies: the assistant item, then the UTF-8 bytes of

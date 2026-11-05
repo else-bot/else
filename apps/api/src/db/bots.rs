@@ -15,6 +15,8 @@ use super::installation::insert_bot;
 use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName};
 use crate::app::providers::Profile;
 
+mod sidebar;
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type, serde::Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -49,6 +51,8 @@ pub struct BotRecord {
     avatar_color: Option<AvatarColor>,
     #[sqlx(flatten)]
     pub read: super::reads::ReadRow,
+    #[sqlx(flatten)]
+    pub sidebar: sidebar::SidebarRow,
 }
 
 impl BotRecord {
@@ -69,6 +73,10 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         h.id AS head_item_id, h.turn_id AS head_turn_id, h.seq AS head_seq,
         length(CAST(h.text AS BLOB)) AS head_bytes, substr(h.text, 1, 240) AS head_preview,
         a.id AS active_turn_id, a.status AS active_turn_status,
+        question.kind AS question_kind, question.title AS question_title,
+        r.reason AS credential_reason,
+        (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
+            ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
             AND m.kind IN ('user', 'assistant') ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
@@ -77,6 +85,14 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
     LEFT JOIN items h ON h.id = (SELECT x.id FROM items x WHERE x.conversation_id = c.id
                                  AND x.kind = 'assistant' ORDER BY x.seq DESC LIMIT 1)
+    LEFT JOIN owner_questions question ON question.id = (
+        SELECT p.id FROM owner_questions p JOIN turns t ON t.id = p.turn_id
+        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        ORDER BY p.created_at, p.id LIMIT 1)
+    LEFT JOIN secret_requests r ON r.id = (
+        SELECT p.id FROM secret_requests p JOIN turns t ON t.id = p.turn_id
+        WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+        ORDER BY p.created_at, p.id LIMIT 1)
     LEFT JOIN turns a ON a.bot_id = b.id
         AND a.status IN ('preparing', 'sending', 'running', 'cancelling', 'waiting')
         AND a.id = (SELECT w.id FROM turns w WHERE w.bot_id = b.id

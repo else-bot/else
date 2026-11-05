@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 use crate::api::{Bot, Category};
 
+pub mod status;
+
 /// The comparison key the server uses for category names.
 pub fn fold(name: &str) -> String {
     name.to_uppercase().to_lowercase()
@@ -121,6 +123,7 @@ mod tests {
             created_at: None,
             last_message_at: None,
             read_state: None,
+            sidebar_status: None,
         }
     }
 
