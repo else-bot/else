@@ -1136,10 +1136,16 @@ main() {
 		ensure_bootstrap_tools
 		resolve_release
 		fetch_source
-		if [ "$FROM_SOURCE" = 0 ] && bash "$SRC/install.sh" --help 2>/dev/null | grep -q -- '--from-source'; then
-			export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
-			exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		if ! bash "$SRC/install.sh" --help 2>/dev/null | grep -q -- '--from-source'; then
+			[ "$FROM_SOURCE" = 1 ] || die "this release's installer requires --from-source"
+			local argument forwarded=()
+			for argument in ${ARGS[@]+"${ARGS[@]}"}; do
+				if [ "$argument" != --from-source ]; then forwarded+=("$argument"); fi
+			done
+			ARGS=(${forwarded[@]+"${forwarded[@]}"})
 		fi
+		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
+		exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
 	fi
 
 	mkdir -p "$LOGS"

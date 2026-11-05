@@ -39,6 +39,8 @@ else
 fi
 '''
 
+TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi\n' + HARNESS
+
 
 def executable(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +63,7 @@ class Downloads(unittest.TestCase):
         (self.repo / "scripts").mkdir()
         for name in ("elsebot", "macos_app.py"):
             shutil.copy2(ROOT / "scripts" / name, self.repo / "scripts" / name)
-        (self.repo / "install.sh").write_text('echo "legacy installer must not run" >&2; exit 99\n')
+        (self.repo / "install.sh").write_text(TAGGED_INSTALLER)
         for version in VERSIONS:
             (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
             self.git("add", "-A")
@@ -215,7 +217,7 @@ printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
         self.assertIn("Apple silicon", result.stderr)
         self.assertEqual(self.requests, [])
 
-    def test_source_build_is_explicit(self):
+    def source_toolchain(self):
         toolchain = self.installation / "toolchain/cargo/bin"
         executable(toolchain / "rustc", "#!/bin/sh\necho 'rustc 1.99.1'\n")
         executable(toolchain / "cargo", r'''#!/bin/bash
@@ -225,9 +227,34 @@ mkdir -p "$CARGO_TARGET_DIR/release"
 printf '#!/bin/sh\necho "else-desktop %s"\n' "$version" > "$CARGO_TARGET_DIR/release/else-desktop"
 echo compiled > "$CARGO_TARGET_DIR/compiled"
 ''')
+
+    def test_source_build_is_explicit(self):
+        self.source_toolchain()
         self.run_installer("--yes", "--app-only", "--from-source", "--version", "0.0.2")
         self.assertTrue((self.installation / "build/compiled").is_file())
         self.assertIn("build-essential", (self.root / "packages").read_text().split())
+        self.assertEqual(self.requests, [])
+
+    def test_source_install_runs_the_legacy_release_policy(self):
+        marker = self.root / "legacy-policy"
+        (self.repo / "install.sh").write_text('''
+if [ "${1:-}" = --help ]; then echo --server-only; exit 0; fi
+for argument in "$@"; do
+    if [ "$argument" = --from-source ]; then exit 77; fi
+done
+test "$ELSE_INSTALL_STAGE" = 2
+printf 'legacy database and service policy' > "$TEST_LEGACY_POLICY"
+''')
+        self.git("add", "install.sh")
+        self.git("commit", "-qm", "legacy release policy")
+        self.git("tag", "-f", "v0.0.2")
+        self.source_toolchain()
+        for arguments in (("--yes", "--app-only", "--from-source", "--version", "0.0.2"), ("--from-source",)):
+            with self.subTest(arguments=arguments):
+                marker.unlink(missing_ok=True)
+                self.run_installer(*arguments, ELSE_VERSION="0.0.2", TEST_LEGACY_POLICY=str(marker))
+                self.assertTrue(marker.is_file(), "the tagged installer's policy must run")
+                self.assertEqual(marker.read_text(), "legacy database and service policy")
         self.assertEqual(self.requests, [])
 
 
