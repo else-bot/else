@@ -891,7 +891,6 @@ impl ElseApp {
             .h(px(112.))
             .p_0()
             .rounded(px(28.))
-            .tooltip(editing)
             .accessibility_label(editing)
             .toggled(details.picking)
             .child(
@@ -1015,7 +1014,6 @@ impl ElseApp {
             .with_size(Size::Size(px(16.)))
             .w_full()
             .p_3()
-            .tooltip("Change model")
             .accessibility_label("Change model")
             .disabled(self.caps.is_none() || self.connection != Connection::Connected)
             .child(
@@ -1085,11 +1083,6 @@ impl ElseApp {
             .cursor_pointer()
             .checked(checked)
             .small()
-            .tooltip(if checked {
-                "Pause routine"
-            } else {
-                "Resume routine"
-            })
             .accessibility_label(format!("Run {}", routine.name))
             .disabled(busy || !connected)
             .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
@@ -1102,7 +1095,6 @@ impl ElseApp {
             .ghost()
             .xsmall()
             .loading(matches!(save, Some(RoutineSave::Deleting { .. })))
-            .tooltip("Delete routine")
             .accessibility_label(format!("Delete {}", routine.name))
             .disabled(busy || !connected)
             .on_click(cx.listener(move |app, _, window, cx| {

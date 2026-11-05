@@ -6,3 +6,6 @@
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
 - Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
 - Do not draw focus rings or decorative outlines on controls; use outlines only to indicate a selected state.
+- Add hover popovers, tooltips, or image descriptions only when they provide information beyond visible labels, familiar icons, or surrounding context.
+- Show keyboard shortcuts directly in labeled buttons.
+- Preserve accessibility labels when removing hover descriptions.

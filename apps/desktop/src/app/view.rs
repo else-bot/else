@@ -14,6 +14,7 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
@@ -70,7 +71,7 @@ impl ElseApp {
             .unwrap_or_else(|| id.to_owned())
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mut list = v_flex()
             .id("bot-list")
@@ -246,7 +247,18 @@ impl ElseApp {
                         .ghost()
                         .w_full()
                         .justify_start()
-                        .tooltip_with_action("New category", &NewCategory, Some(APP_CONTEXT))
+                        .children(
+                            Kbd::binding_for_action(&NewCategory, Some(APP_CONTEXT), window).map(
+                                |kbd| {
+                                    div()
+                                        .flex_none()
+                                        .ml_auto()
+                                        .pl_2()
+                                        .text_xs()
+                                        .child(kbd.appearance(false))
+                                },
+                            ),
+                        )
                         .disabled(!can_edit)
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.open_category_dialog(None, window, cx)
@@ -390,7 +402,12 @@ impl ElseApp {
         .into_any_element()
     }
 
-    fn render_header(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(
+        &self,
+        bot: &Bot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let activity = self
             .view
@@ -411,7 +428,10 @@ impl ElseApp {
                     .small()
                     .ghost()
                     .disabled(stopping)
-                    .tooltip_with_action("Stop work", &StopWork, Some(APP_CONTEXT))
+                    .children(
+                        Kbd::binding_for_action(&StopWork, Some(APP_CONTEXT), window)
+                            .map(|kbd| div().flex_none().text_xs().child(kbd.appearance(false))),
+                    )
                     .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
             );
         }
@@ -461,7 +481,12 @@ impl ElseApp {
             .child(actions)
     }
 
-    fn render_conversation(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_conversation(
+        &self,
+        bot: &Bot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
         let transcript: AnyElement = match view {
@@ -654,7 +679,6 @@ impl ElseApp {
                         .primary()
                         .small()
                         .accessibility_label("Send message")
-                        .tooltip("Send")
                         .disabled(!can_send)
                         .on_click(cx.listener(|app, _, window, cx| app.send(window, cx))),
                 ),
@@ -681,7 +705,7 @@ impl ElseApp {
         v_flex()
             .size_full()
             .min_w_0()
-            .child(self.render_header(bot, cx))
+            .child(self.render_header(bot, window, cx))
             .child(transcript)
             .child(footer)
     }
@@ -741,7 +765,6 @@ impl ElseApp {
                     .icon(IconName::Close)
                     .xsmall()
                     .ghost()
-                    .tooltip("Cancel reply")
                     .accessibility_label("Cancel reply")
                     .on_click(
                         cx.listener(move |app, _, window, cx| {
@@ -751,7 +774,7 @@ impl ElseApp {
             )
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() {
             return v_flex()
@@ -760,7 +783,7 @@ impl ElseApp {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                .child(self.render_conversation(&bot, cx))
+                .child(self.render_conversation(&bot, window, cx))
                 .into_any_element();
         }
         let message = match self.connection {
@@ -885,8 +908,8 @@ impl Render for ElseApp {
             )
             .size_full()
             .text_color(theme.foreground)
-            .children((!crowded).then(|| self.render_sidebar(cx)))
-            .child(self.render_main(cx))
+            .children((!crowded).then(|| self.render_sidebar(window, cx)))
+            .child(self.render_main(window, cx))
             .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
             .into_any_element()
     }

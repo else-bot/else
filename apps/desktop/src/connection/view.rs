@@ -4,11 +4,17 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Theme, h_flex};
 
 impl Shell {
-    pub(super) fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_bar(
+        &self,
+        active: &Active,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let app = active.app.read(cx);
         let (connected, (status, _)) = (app.connected(), app.status_text());
@@ -57,7 +63,10 @@ impl Shell {
                     .cursor_pointer()
                     .icon(IconName::Settings)
                     .label("Settings")
-                    .tooltip_with_action("Settings", &OpenAppSettings, Some(SHELL_CONTEXT))
+                    .children(
+                        Kbd::binding_for_action(&OpenAppSettings, Some(SHELL_CONTEXT), window)
+                            .map(|kbd| div().flex_none().text_xs().child(kbd.appearance(false))),
+                    )
                     .xsmall()
                     .ghost()
                     .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),
