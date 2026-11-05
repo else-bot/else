@@ -55,13 +55,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build
+      - name: Build on the pinned guest base
         run: |
-          mapfile -t args < <(python3 scripts/guest-release.py build-args)
-          docker build --provenance=false --sbom=false --pull "${args[@]}" \
-            --label "bot.else.guest.source_sha256=$HASH" \
-            --label "org.opencontainers.image.source=https://github.com/else-bot/else" \
-            -t else-guest:candidate infra/guest
+          described="$(python3 scripts/guest-release.py build-args)"
+          mapfile -t args <<<"$described"
+          docker build --provenance=false --sbom=false --pull "${args[@]}" -t else-guest:candidate infra/guest
       - name: Test keymap settling
         run: docker run --rm --user elsebot -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/x11vnc/test_keymap_settle.py
       - name: Test VNC targets

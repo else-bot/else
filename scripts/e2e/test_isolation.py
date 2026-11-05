@@ -118,6 +118,34 @@ class ReplicationRunnerTests(unittest.TestCase):
 
 
 class GuestImageExportTests(unittest.TestCase):
+    def test_pinned_base_lookup_selects_the_base_or_stops_before_docker(self):
+        fakes = Fakes(self)
+        checkout = fakes.work / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy2(ROOT / "scripts/build-guest-image.sh", checkout / "scripts")
+        (checkout / "scripts/guest-release.py").write_text(
+            'import os, sys\n'
+            'assert sys.argv[1:] == ["--base", "pinned"]\n'
+            'if os.environ["BASE_LOOKUP_STATUS"] != "0":\n'
+            '    sys.exit("no published guest base")\n'
+            'print("ghcr.io/else-bot/else-guest-base@sha256:" + "a" * 64)\n'
+        )
+        for status in ["0", "1"]:
+            env = fakes.env(BASE_LOOKUP_STATUS=status, ELSE_MSB_BIN="msb")
+            env.pop("ELSE_GUEST_BASE", None)
+            result = subprocess.run(["bash", str(checkout / "scripts/build-guest-image.sh"),
+                                     str(fakes.work / "data")], env=env,
+                                    capture_output=True, text=True, timeout=60)
+            calls = fakes.take()
+            if status == "0":
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([call["tool"] for call in calls], ["docker", "docker", "msb"])
+                self.assertIn("BASE=ghcr.io/else-bot/else-guest-base@sha256:" + "a" * 64, calls[0]["argv"])
+            else:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no published guest base", result.stderr)
+                self.assertEqual(calls, [], "a failed base lookup stops before Docker or Microsandbox")
+
     def test_each_build_exports_its_own_image_id_and_removes_its_archive(self):
         fakes = Fakes(self)
         checkout = fakes.work / "checkout"
@@ -131,12 +159,14 @@ class GuestImageExportTests(unittest.TestCase):
             tmp.mkdir()
             result = subprocess.run(["bash", str(checkout / "scripts/build-guest-image.sh"), str(data)],
                                     env=fakes.env(ELSE_GUEST_TAG="else-guest:9", ELSE_MSB_BIN="msb",
+                                                  ELSE_GUEST_BASE="else-guest-base:test",
                                                   MSB_STATUS=str(msb_status), TMPDIR=str(tmp)),
                                     capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, msb_status, result.stderr)
             build, save, load = fakes.take()
             self.assertNotIn("-t", build["argv"])
             self.assertNotIn("--tag", build["argv"])
+            self.assertIn("BASE=else-guest-base:test", build["argv"])
             self.assertEqual(save["argv"][1], build["iid"])
             self.assertEqual(load["archive"], "archive of " + build["iid"])
             self.assertEqual(load["argv"][-2:], ["--tag", "else-guest:9"])

@@ -6,7 +6,7 @@
 //! only with `ELSE_LIVE_VM=1`, after building both images:
 //!
 //! docker build -t else-guest:1 <POC-018 revision of infra/guest>
-//! docker build --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest
+//! docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest
 //! ELSE_LIVE_VM=1 cargo test -p else-api --test toolchain_live -- --nocapture --test-threads=1
 
 mod common;

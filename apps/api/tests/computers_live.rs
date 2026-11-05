@@ -180,7 +180,7 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
 
 /// POC-018: the desktop image, guest tools, jobs, artifacts, the browser,
 /// desktop access, isolation, and persistence across stop and start. Needs
-/// the image built: `docker build -t else-guest:2 infra/guest`.
+/// the image built: `docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:2 infra/guest`.
 #[tokio::test(flavor = "multi_thread")]
 async fn guest_tools_desktop_and_isolation() {
     if !live() {

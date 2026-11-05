@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """Pin, verify, and release the prebuilt else.bot guest image.
 
-infra/guest-image.json records which published image matches the guest
-build inputs at a commit:
+The guest is built in two layers, each recorded by a manifest that names the
+published image matching its build inputs at a commit:
 
-    {"schema": 1, "source_sha256": "<64 hex>", "image": "ghcr.io/else-bot/else-guest@sha256:<64 hex>"}
+    infra/guest-base.json   {"schema": 1, "source_sha256": "<64 hex>", "image": "ghcr.io/else-bot/else-guest-base@sha256:<64 hex>"}
+    infra/guest-image.json  {"schema": 1, "source_sha256": "<64 hex>", "image": "ghcr.io/else-bot/else-guest@sha256:<64 hex>"}
 
-`image` is null until a release publishes one. The release workflows in
-.github/workflows call this script; scripts/test-release.py exercises it
-against disposable repositories and a fake registry.
+The base holds the heavy packages and the patched x11vnc. An operator
+publishes it once per change with scripts/build-guest-base.sh. The guest
+image adds the helpers on top of the pinned base, and its inputs include the
+base manifest, so release CI rebuilds it without touching APT. `image` is null
+until one is published. --base selects the base manifest.
 
-    guest-release.py hash [--rev REV]
-    guest-release.py check [--rev REV] [--allow-unpinned]
+The release workflows in .github/workflows call this script;
+scripts/test-release.py exercises it against disposable repositories and a
+fake registry.
+
+    guest-release.py [--base] hash [--rev REV]
+    guest-release.py [--base] check [--rev REV] [--allow-unpinned]
+    guest-release.py [--base] pinned [--rev REV]
+    guest-release.py [--base] build-args
+    guest-release.py [--base] pin IMAGE [--rev REV]
     guest-release.py plan [--rev REV] [--main-ref REF]
-    guest-release.py build-args
     guest-release.py platform-digest REF --platform OS/ARCH
     guest-release.py digest REF
-    guest-release.py pin IMAGE [--rev REV]
     guest-release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
     guest-release.py finalize [--remote NAME] [--main BRANCH] [--dev BRANCH]
 """
@@ -34,20 +42,58 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
-MANIFEST = "infra/guest-image.json"
 CONTEXT = "infra/guest"
-IMAGE_REPO = os.environ.get("ELSE_GUEST_IMAGE_REPO", "ghcr.io/else-bot/else-guest")
-LABEL = "bot.else.guest.source_sha256"
 PLATFORMS = ("linux/amd64", "linux/arm64")
-BUILD_RECIPE_FILES = ("scripts/guest-release.py", ".github/workflows/guest-image.yml")
-RECIPE = {
-    "version": 1,
-    "context": CONTEXT,
-    "platforms": list(PLATFORMS),
-    "build_args": {"IMAGE_TAG": "else-guest:3"},
-    "label": LABEL,
-}
+SOURCE_URL = "https://github.com/else-bot/else"
+
+
+@dataclass(frozen=True)
+class Kind:
+    name: str
+    manifest: str
+    repo: str
+    label: str
+    dockerfile: str
+    inputs: tuple
+    build_args: dict
+    publisher: str
+    parent: "Kind | None" = None
+
+    def recipe(self):
+        return {
+            "version": 2,
+            "kind": self.name,
+            "context": CONTEXT,
+            "dockerfile": self.dockerfile,
+            "platforms": list(PLATFORMS),
+            "build_args": self.build_args,
+            "label": self.label,
+        }
+
+
+BASE = Kind(
+    name="guest base",
+    manifest="infra/guest-base.json",
+    repo=os.environ.get("ELSE_GUEST_BASE_REPO", "ghcr.io/else-bot/else-guest-base"),
+    label="bot.else.guest-base.source_sha256",
+    dockerfile=f"{CONTEXT}/base.Dockerfile",
+    inputs=(f"{CONTEXT}/base.Dockerfile", f"{CONTEXT}/apt-downloads.conf", f"{CONTEXT}/x11vnc/keymap-settle.patch"),
+    build_args={},
+    publisher="publish it once with scripts/build-guest-base.sh and commit the pin",
+)
+GUEST = Kind(
+    name="guest image",
+    manifest="infra/guest-image.json",
+    repo=os.environ.get("ELSE_GUEST_IMAGE_REPO", "ghcr.io/else-bot/else-guest"),
+    label="bot.else.guest.source_sha256",
+    dockerfile=f"{CONTEXT}/Dockerfile",
+    inputs=(CONTEXT, BASE.manifest, "scripts/guest-release.py", ".github/workflows/guest-image.yml"),
+    build_args={"IMAGE_TAG": "else-guest:3"},
+    publisher="the release workflow pins a new image",
+    parent=BASE,
+)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^([0-9]+)\.([0-9]+)\.([0-9]+)$")
 INDEX_TYPES = (
@@ -79,36 +125,36 @@ def is_ancestor(a, b):
     return git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
 
 
-def source_sha256(rev="HEAD"):
-    """Hash the tracked guest context and build recipe at REV."""
-    listing = git("ls-tree", "-r", "-z", "--full-tree", rev, "--", CONTEXT, *BUILD_RECIPE_FILES).stdout
+def source_sha256(kind, rev="HEAD"):
+    """Hash KIND's tracked build inputs and recipe at REV."""
+    listing = git("ls-tree", "-r", "-z", "--full-tree", rev, "--", *kind.inputs).stdout
     entries = []
     for item in filter(None, listing.split(b"\0")):
         meta, path = item.split(b"\t", 1)
-        mode, kind, oid = meta.decode().split(" ")
+        mode, type_, oid = meta.decode().split(" ")
         path = path.decode()
-        if kind != "blob":
-            raise Fail(f"{path} is a {kind}; the guest context must hold only files")
+        if type_ != "blob":
+            raise Fail(f"{path} is a {type_}; guest build inputs must be files")
         name = path.rsplit("/", 1)[-1]
         if name.startswith("test_") and name.endswith(".py"):
             continue
         content = git("cat-file", "blob", oid).stdout
         entries.append((path, mode, hashlib.sha256(content).hexdigest()))
     if not entries:
-        raise Fail(f"{CONTEXT} has no files at {rev}")
+        raise Fail(f"the {kind.name} build inputs have no files at {rev}")
     digest = hashlib.sha256()
     digest.update(b"else-guest-source\n")
-    digest.update(json.dumps(RECIPE, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+    digest.update(json.dumps(kind.recipe(), sort_keys=True, separators=(",", ":")).encode() + b"\n")
     for path, mode, sha in sorted(entries, key=lambda e: e[0].encode()):
         digest.update(f"{mode} {sha} {path}\n".encode())
     return digest.hexdigest()
 
 
-def image_pattern():
-    return re.compile("^" + re.escape(IMAGE_REPO) + r"@sha256:[0-9a-f]{64}$")
+def image_pattern(kind):
+    return re.compile("^" + re.escape(kind.repo) + r"@sha256:[0-9a-f]{64}$")
 
 
-def parse_manifest(text, where):
+def parse_manifest(kind, text, where):
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
@@ -118,16 +164,16 @@ def parse_manifest(text, where):
     if not isinstance(data.get("source_sha256"), str) or not HEX64.match(data["source_sha256"]):
         raise Fail(f"{where}: source_sha256 must be 64 lowercase hex characters")
     image = data.get("image", "missing")
-    if image is not None and (not isinstance(image, str) or not image_pattern().match(image)):
-        raise Fail(f"{where}: image must be null or {IMAGE_REPO}@sha256:<64 hex>")
+    if image is not None and (not isinstance(image, str) or not image_pattern(kind).match(image)):
+        raise Fail(f"{where}: image must be null or {kind.repo}@sha256:<64 hex>")
     return data
 
 
-def manifest_at(rev):
-    shown = git("show", f"{rev}:{MANIFEST}", check=False)
+def manifest_at(kind, rev):
+    shown = git("show", f"{rev}:{kind.manifest}", check=False)
     if shown.returncode:
-        raise Fail(f"{MANIFEST} is missing at {rev}")
-    return parse_manifest(shown.stdout.decode(), f"{MANIFEST} at {rev}")
+        raise Fail(f"{kind.manifest} is missing at {rev}")
+    return parse_manifest(kind, shown.stdout.decode(), f"{kind.manifest} at {rev}")
 
 
 class NotFound(Fail):
@@ -217,11 +263,12 @@ def content(body, digest):
     return json.loads(body)
 
 
-def verify(image, source):
-    """Confirm IMAGE is a multi-platform index whose platform images were
-    built from SOURCE. Returns {platform: manifest digest}."""
-    if not image_pattern().match(image):
-        raise Fail(f"{image} is not {IMAGE_REPO}@sha256:<64 hex>")
+def verify(kind, image, source):
+    """Confirm IMAGE is a public multi-platform index whose platform images
+    were all built from KIND's inputs hashing to SOURCE. Returns
+    {platform: manifest digest}."""
+    if not image_pattern(kind).match(image):
+        raise Fail(f"{image} is not {kind.repo}@sha256:<64 hex>")
     host, repo, digest = split_ref(image)
     registry = Registry(host, repo)
     try:
@@ -246,8 +293,8 @@ def verify(image, source):
             if f"{config.get('os')}/{config.get('architecture')}" != name:
                 raise Fail(f"{image}: the {name} entry is a {config.get('os')}/{config.get('architecture')} image")
             labels = (config.get("config") or {}).get("Labels") or {}
-            if labels.get(LABEL) != source:
-                raise Fail(f"{image}: the {name} image was built from {labels.get(LABEL)}, not {source}")
+            if labels.get(kind.label) != source:
+                raise Fail(f"{image}: the {name} image was built from {labels.get(kind.label)}, not {source}")
     except NotFound as e:
         raise Fail(f"{image} cannot be read anonymously ({e}); the package must exist and be public")
     return found
@@ -255,7 +302,7 @@ def verify(image, source):
 
 def try_verify(image, source):
     try:
-        verify(image, source)
+        verify(GUEST, image, source)
         return True
     except Fail as e:
         print(f"not reusing {image}: {e}", file=sys.stderr)
@@ -288,39 +335,68 @@ def remote_tags(remote):
     return {k: v for k, v in tags.items() if VERSION.match(k[1:])}
 
 
-def cmd_check(rev, allow_unpinned):
-    data = manifest_at(rev)
-    source = source_sha256(rev)
+def fresh(kind, rev, allow_unpinned=False):
+    data = manifest_at(kind, rev)
+    source = source_sha256(kind, rev)
     if data["source_sha256"] != source:
         raise Fail(
-            f"{MANIFEST} records guest source {data['source_sha256']}, but the guest build inputs at {rev} hash to {source}; "
-            "the release workflow pins a new image"
+            f"{kind.manifest} records {kind.name} source {data['source_sha256']}, but the {kind.name} build inputs "
+            f"at {rev} hash to {source}; {kind.publisher}"
         )
-    if data["image"] is None:
-        if allow_unpinned:
-            return data
-        raise Fail(f"{MANIFEST} has no published image yet; the release workflow pins one")
-    verify(data["image"], source)
+    if data["image"] is None and not allow_unpinned:
+        raise Fail(f"{kind.manifest} has no published image yet; {kind.publisher}")
     return data
 
 
+def cmd_check(kind, rev, allow_unpinned):
+    if kind.parent:
+        fresh(kind.parent, rev, allow_unpinned)
+    data = fresh(kind, rev, allow_unpinned)
+    if data["image"]:
+        verify(kind, data["image"], data["source_sha256"])
+    return data
+
+
+def pinned(kind, rev="HEAD"):
+    data = fresh(kind, rev)
+    verify(kind, data["image"], data["source_sha256"])
+    return data["image"]
+
+
+def require_clean(kind):
+    dirty = git_out("status", "--porcelain", "--untracked-files=all", "--", *kind.inputs)
+    if dirty:
+        raise Fail(f"the {kind.name} build inputs differ from HEAD; commit them first:\n{dirty}")
+
+
+def build_args(kind):
+    require_clean(kind)
+    args = [f"--file={kind.dockerfile}"]
+    if kind.parent:
+        args.append(f"--build-arg=BASE={pinned(kind.parent)}")
+    args += [f"--build-arg={key}={value}" for key, value in sorted(kind.build_args.items())]
+    args += [f"--label={kind.label}={source_sha256(kind)}", f"--label=org.opencontainers.image.source={SOURCE_URL}"]
+    return args
+
+
 def cmd_plan(rev, main_ref):
-    source = source_sha256(rev)
-    data = manifest_at(rev)
+    pinned(BASE, rev)
+    source = source_sha256(GUEST, rev)
+    data = manifest_at(GUEST, rev)
     candidates = []
     if data["source_sha256"] == source and data["image"]:
         candidates.append(("pinned", data["image"]))
     if main_ref:
         try:
-            main = manifest_at(main_ref)
+            main = manifest_at(GUEST, main_ref)
             if main["source_sha256"] == source and main["image"]:
                 candidates.append(("reuse", main["image"]))
         except Fail as e:
             print(f"ignoring {main_ref}: {e}", file=sys.stderr)
-    host, repo, _ = split_ref(IMAGE_REPO + ":x")
+    host, repo, _ = split_ref(GUEST.repo + ":x")
     try:
         body = Registry(host, repo).manifest(f"src-{source}")
-        candidates.append(("reuse", f"{IMAGE_REPO}@sha256:{hashlib.sha256(body).hexdigest()}"))
+        candidates.append(("reuse", f"{GUEST.repo}@sha256:{hashlib.sha256(body).hexdigest()}"))
     except NotFound:
         pass
     for state, image in candidates:
@@ -329,8 +405,8 @@ def cmd_plan(rev, main_ref):
     return "build", source, ""
 
 
-def write_manifest(source, image):
-    path = os.path.join(git_out("rev-parse", "--show-toplevel"), MANIFEST)
+def write_manifest(kind, source, image):
+    path = os.path.join(git_out("rev-parse", "--show-toplevel"), kind.manifest)
     text = json.dumps({"schema": 1, "source_sha256": source, "image": image}, indent=2) + "\n"
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -353,7 +429,7 @@ def cmd_gate(branch, rev, main_ref):
         raise Fail(f"version {version} is not newer than {main_ref}'s {main_version}")
     if git("rev-parse", "-q", "--verify", f"refs/tags/v{version}", check=False).returncode == 0:
         raise Fail(f"tag v{version} already exists")
-    data = cmd_check(rev, allow_unpinned=False)
+    data = cmd_check(GUEST, rev, allow_unpinned=False)
     print(f"release v{version} is ready: guest image {data['image']}")
 
 
@@ -425,7 +501,7 @@ def cmd_finalize(remote, main, dev):
         newer = [t for t in tags if version_key(t[1:]) >= version_key(version)]
         if newer:
             raise Fail(f"{tag} is not newer than the existing {max(newer, key=lambda t: version_key(t[1:]))}")
-        data = cmd_check(head, allow_unpinned=False)
+        data = cmd_check(GUEST, head, allow_unpinned=False)
         git("tag", "-f", "-a", tag, "-m", f"else.bot {version}\n\nGuest image: {data['image']}", head)
         git("push", "-q", remote, f"refs/tags/{tag}")
         print(f"tagged {tag} at {head} with guest image {data['image']}")
@@ -444,12 +520,15 @@ def cmd_finalize(remote, main, dev):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--base", action="store_true", help="act on the guest base manifest")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("hash")
     p.add_argument("--rev", default="HEAD")
     p = sub.add_parser("check")
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--allow-unpinned", action="store_true")
+    p = sub.add_parser("pinned")
+    p.add_argument("--rev", default="HEAD")
     p = sub.add_parser("plan")
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--main-ref")
@@ -471,18 +550,22 @@ def main():
     p.add_argument("--main", default="main")
     p.add_argument("--dev", default="dev")
     args = parser.parse_args()
+    if args.base and args.command not in ("hash", "check", "pinned", "build-args", "pin"):
+        parser.error(f"--base does not apply to {args.command}")
+    kind = BASE if args.base else GUEST
     try:
         if args.command == "hash":
-            print(source_sha256(args.rev))
+            print(source_sha256(kind, args.rev))
         elif args.command == "check":
-            data = cmd_check(args.rev, args.allow_unpinned)
-            print(f"{MANIFEST} matches the guest inputs; image {data['image']}")
+            data = cmd_check(kind, args.rev, args.allow_unpinned)
+            print(f"{kind.manifest} matches the {kind.name} inputs; image {data['image']}")
+        elif args.command == "pinned":
+            print(pinned(kind, args.rev))
         elif args.command == "plan":
             state, source, image = cmd_plan(args.rev, args.main_ref)
             print(f"state={state}\nhash={source}\nimage={image}")
         elif args.command == "build-args":
-            for key, value in sorted(RECIPE["build_args"].items()):
-                print(f"--build-arg={key}={value}")
+            print("\n".join(build_args(kind)))
         elif args.command in ("platform-digest", "digest"):
             host, repo, reference = split_ref(args.ref)
             user = os.environ.get("ELSE_GUEST_REGISTRY_USER")
@@ -501,10 +584,10 @@ def main():
                 digest = entries[0]["digest"]
             print(digest)
         elif args.command == "pin":
-            source = source_sha256(args.rev)
-            verify(args.image, source)
-            write_manifest(source, args.image)
-            print(f"pinned {args.image} for guest source {source}")
+            source = source_sha256(kind, args.rev)
+            verify(kind, args.image, source)
+            write_manifest(kind, source, args.image)
+            print(f"pinned {args.image} for {kind.name} source {source}")
         elif args.command == "gate":
             cmd_gate(args.branch, args.rev, args.main_ref)
         elif args.command == "finalize":

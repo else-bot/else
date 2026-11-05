@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Behavior tests for the release lifecycle: scripts/release.sh and
-scripts/guest-release.py against disposable git repositories, a fake OCI
-registry, and fake gh and cargo commands.
+"""Behavior tests for the release lifecycle: scripts/release.sh,
+scripts/guest-release.py, and scripts/build-guest-base.sh against disposable
+git repositories, a fake OCI registry, and fake gh, cargo, and docker
+commands. Nothing here builds or publishes a real image.
 
     python3 scripts/test-release.py
 """
@@ -16,11 +17,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LABEL = "bot.else.guest.source_sha256"
+BASE_LABEL = "bot.else.guest-base.source_sha256"
 INDEX = "application/vnd.oci.image.index.v1+json"
 MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 
@@ -58,6 +61,77 @@ if out:
 sys.exit(status)
 '''
 
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+import hashlib, json, os, sys, urllib.error, urllib.request
+args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+INDEX = "application/vnd.oci.image.index.v1+json"
+LOGIN = {"X-Fake-Login": "1"}
+
+def split(ref):
+    host, _, rest = ref.partition("/")
+    repo, _, reference = rest.partition("@") if "@" in rest else rest.rpartition(":")
+    return f"http://{host}/v2/{repo}", reference
+
+def get(base, kind, reference):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(f"{base}/{kind}/{reference}", headers=LOGIN)).read()
+    except urllib.error.HTTPError:
+        return None
+
+def put(base, kind, reference, body):
+    urllib.request.urlopen(urllib.request.Request(f"{base}/{kind}/{reference}", data=body, method="PUT", headers=LOGIN))
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+def opt(name):
+    return args[args.index(name) + 1]
+
+if args[:1] == ["version"]:
+    print(os.environ.get("FAKE_DOCKER_ARCH", "amd64"))
+    sys.exit(0)
+assert args[0] == "buildx", args
+args = args[1:]
+if args[0] == "--builder":
+    args = args[2:]
+if args[0] == "inspect":
+    print("Name: fake\nDriver: docker\nPlatforms: " + os.environ.get("FAKE_DOCKER_PLATFORMS", "linux/amd64*, linux/arm64"))
+elif args[0] == "build":
+    assert "--push" in args and args[-1] == "infra/guest", args
+    if os.environ.get("FAKE_DOCKER_CONTEXT_LOG"):
+        from pathlib import Path
+        dockerfile = next(a.split("=", 1)[1] for a in args if a.startswith("--file="))
+        with open(os.environ["FAKE_DOCKER_CONTEXT_LOG"], "a") as log:
+            log.write(json.dumps(Path(dockerfile).read_text()) + "\n")
+        Path(os.environ["FAKE_DOCKER_EDIT_INPUT"]).write_text("FROM scratch\n# edited during the build\n")
+    labels = dict(a.split("=", 1)[1].split("=", 1) for a in args if a.startswith("--label="))
+    os_, arch = opt("--platform").split("/")
+    base, tag = split(opt("--tag"))
+    config = json.dumps({"os": os_, "architecture": arch, "config": {"Labels": labels}}).encode()
+    digest = put(base, "blobs", "sha256:" + hashlib.sha256(config).hexdigest(), config)
+    put(base, "manifests", tag, json.dumps({"schemaVersion": 2, "mediaType": MANIFEST,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": digest}, "layers": []}).encode())
+elif args[:2] == ["imagetools", "create"]:
+    entries = []
+    for source in args[4:]:
+        base, reference = split(source)
+        body = get(base, "manifests", reference)
+        config = json.loads(get(base, "blobs", json.loads(body)["config"]["digest"]))
+        entries.append({"mediaType": MANIFEST, "digest": "sha256:" + hashlib.sha256(body).hexdigest(), "size": len(body),
+                        "platform": {"os": config["os"], "architecture": config["architecture"]}})
+    base, tag = split(opt("--tag"))
+    put(base, "manifests", tag, json.dumps({"schemaVersion": 2, "mediaType": INDEX, "manifests": entries}).encode())
+elif args[:2] == ["imagetools", "inspect"]:
+    body = get(*split(args[2])[:1], "manifests", split(args[2])[1])
+    if body is None:
+        sys.exit(1)
+    if "--format" in args:
+        print(json.dumps({"mediaType": json.loads(body)["mediaType"], "digest": "sha256:" + hashlib.sha256(body).hexdigest()}))
+else:
+    sys.exit("fake docker: unsupported " + " ".join(args))
+"""
+
 FAKE_CARGO = r'''#!/usr/bin/env python3
 import re, sys
 assert sys.argv[1:3] == ["update", "--workspace"], sys.argv
@@ -74,7 +148,7 @@ class FakeRegistry:
         self.objects = {}
         self.tags = {}
         self.private = False
-        self.token_status = 200
+        self.refused = set()
         self.transient_failures = 0
         self.auth_requests = []
         self.tamper = set()
@@ -84,12 +158,16 @@ class FakeRegistry:
             def do_GET(self):
                 if self.path.startswith("/token"):
                     registry.auth_requests.append(self.headers.get("Authorization"))
-                    return self.reply(registry.token_status, json.dumps({"token": "anon"}).encode())
-                if self.headers.get("Authorization") != "Bearer anon":
+                    scope = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["scope"][0]
+                    status = 403 if scope.split(":")[1] in registry.refused else 200
+                    return self.reply(status, json.dumps({"token": "anon"}).encode())
+                logged_in = self.headers.get("X-Fake-Login") == "1"
+                if not logged_in and self.headers.get("Authorization") != "Bearer anon":
+                    repo = "/".join(self.path.split("/")[2:-2])
                     return self.reply(401, b"{}", {
-                        "WWW-Authenticate": f'Bearer realm="http://{registry.host}/token",service="fake",scope="repository:else-bot/else-guest:pull"'
+                        "WWW-Authenticate": f'Bearer realm="http://{registry.host}/token",service="fake",scope="repository:{repo}:pull"'
                     })
-                if registry.private:
+                if registry.private and not logged_in:
                     return self.reply(403, b"{}")
                 if registry.transient_failures:
                     registry.transient_failures -= 1
@@ -103,6 +181,15 @@ class FakeRegistry:
                 if digest in registry.tamper:
                     body = body + b" "
                 self.reply(200, body)
+
+            def do_PUT(self):
+                assert self.headers.get("X-Fake-Login") == "1", "pushes come from a logged-in docker"
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                digest = registry.put_bytes(body)
+                reference = self.path.split("/")[-1]
+                if "/manifests/" in self.path and reference != digest:
+                    registry.tags[reference] = digest
+                self.reply(201, b"")
 
             def reply(self, status, body, headers=()):
                 self.send_response(status)
@@ -118,20 +205,24 @@ class FakeRegistry:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.host = f"127.0.0.1:{self.server.server_port}"
         self.repo = f"{self.host}/else-bot/else-guest"
+        self.base_repo = f"{self.host}/else-bot/else-guest-base"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def put(self, document):
-        body = json.dumps(document).encode()
+    def put_bytes(self, body):
         digest = "sha256:" + hashlib.sha256(body).hexdigest()
         self.objects[digest] = body
         return digest
 
-    def publish(self, source, platforms=("linux/amd64", "linux/arm64"), labels=None, tag=None):
+    def put(self, document):
+        return self.put_bytes(json.dumps(document).encode())
+
+    def publish(self, source, platforms=("linux/amd64", "linux/arm64"), labels=None, tag=None, base=False):
         entries = []
         for platform in platforms:
             os_, arch = platform.split("/")
             label = (labels or {}).get(platform, source)
-            config = self.put({"os": os_, "architecture": arch, "config": {"Labels": {LABEL: label}}})
+            config = self.put({"os": os_, "architecture": arch,
+                               "config": {"Labels": {BASE_LABEL if base else LABEL: label}}})
             manifest = self.put({"schemaVersion": 2, "mediaType": MANIFEST,
                                  "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config},
                                  "layers": []})
@@ -141,7 +232,7 @@ class FakeRegistry:
         index = self.put({"schemaVersion": 2, "mediaType": INDEX, "manifests": entries})
         if tag:
             self.tags[tag] = index
-        return f"{self.repo}@{index}"
+        return f"{self.base_repo if base else self.repo}@{index}"
 
 
 class Lifecycle(unittest.TestCase):
@@ -157,7 +248,7 @@ class Lifecycle(unittest.TestCase):
         self.registry.objects.clear()
         self.registry.tags.clear()
         self.registry.private = False
-        self.registry.token_status = 200
+        self.registry.refused.clear()
         self.registry.transient_failures = 0
         self.registry.auth_requests.clear()
         self.registry.tamper.clear()
@@ -165,7 +256,7 @@ class Lifecycle(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name, text in (("gh", FAKE_GH), ("cargo", FAKE_CARGO)):
+        for name, text in (("gh", FAKE_GH), ("cargo", FAKE_CARGO), ("docker", FAKE_DOCKER)):
             (bin_dir / name).write_text(text)
             (bin_dir / name).chmod(0o755)
         self.gh_state = self.tmp / "gh.json"
@@ -173,7 +264,9 @@ class Lifecycle(unittest.TestCase):
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_STATE": str(self.gh_state),
+            "FAKE_DOCKER_LOG": str(self.tmp / "docker.log"),
             "ELSE_GUEST_IMAGE_REPO": self.registry.repo,
+            "ELSE_GUEST_BASE_REPO": self.registry.base_repo,
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
@@ -188,11 +281,17 @@ class Lifecycle(unittest.TestCase):
         self.write("infra/guest/else-init", "#!/bin/sh\n", mode=0o755)
         self.write("infra/guest/vnc/else_vnc_targets.py", "TARGETS = 1\n")
         self.write("infra/guest/vnc/test_else_vnc_targets.py", "assert True\n")
+        self.write("infra/guest/base.Dockerfile", "FROM scratch\nCOPY apt-downloads.conf x11vnc/keymap-settle.patch /\n")
+        self.write("infra/guest/apt-downloads.conf", 'Acquire::Retries "5";\n')
+        self.write("infra/guest/x11vnc/keymap-settle.patch", "--- a\n+++ b\n")
         (self.work / "scripts").mkdir()
-        for name in ("release.sh", "guest-release.py"):
+        for name in ("release.sh", "guest-release.py", "build-guest-base.sh"):
             shutil.copy2(ROOT / "scripts" / name, self.work / "scripts" / name)
+        self.write_base_manifest("0" * 64, None)
         self.write("infra/guest-image.json", json.dumps({"schema": 1, "source_sha256": "0" * 64, "image": None}))
         self.commit("initial")
+        self.write_base_manifest(self.base_source(), self.publish_base())
+        self.commit("pin the guest base")
         self.write_manifest(self.helper("hash").strip(), None)
         self.commit("bootstrap the guest image manifest")
         self.git(self.work, "tag", "-a", "v0.0.21", "-m", "else.bot 0.0.21")
@@ -220,6 +319,33 @@ class Lifecycle(unittest.TestCase):
     def write_manifest(self, source, image, repo=None):
         self.write("infra/guest-image.json",
                    json.dumps({"schema": 1, "source_sha256": source, "image": image}, indent=2) + "\n", repo=repo)
+
+    def write_base_manifest(self, source, image, repo=None):
+        self.write("infra/guest-base.json",
+                   json.dumps({"schema": 1, "source_sha256": source, "image": image}, indent=2) + "\n", repo=repo)
+
+    def base_source(self, repo=None):
+        return self.helper("--base", "hash", cwd=repo).strip()
+
+    def publish_base(self, **kwargs):
+        return self.registry.publish(self.base_source(), base=True, **kwargs)
+
+    def base_manifest(self, repo=None):
+        return json.loads(((repo or self.work) / "infra/guest-base.json").read_text())
+
+    def publish_script(self, *args, ok=True, **env):
+        self.env.update(env)
+        try:
+            return self.run_tool(["bash", "scripts/build-guest-base.sh", *args], self.work, ok)
+        finally:
+            for key in env:
+                del self.env[key]
+
+    def docker_calls(self):
+        log = self.tmp / "docker.log"
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        log.unlink(missing_ok=True)
+        return calls
 
     def commit(self, message, repo=None):
         repo = repo or self.work
@@ -288,7 +414,7 @@ class Lifecycle(unittest.TestCase):
         self.assertNotEqual(self.source(), before_recipe, "the build workflow changes the hash")
 
     def test_plan_builds_when_the_registry_refuses_a_token_for_a_new_package(self):
-        self.registry.token_status = 403
+        self.registry.refused.add("else-bot/else-guest")
         plan = self.helper("plan", "--main-ref", "origin/main")
         self.assertIn("state=build", plan)
 
@@ -392,6 +518,7 @@ class Lifecycle(unittest.TestCase):
         self.assertIn("state=pinned", self.helper("plan"))
         self.registry.publish(source, labels={"linux/amd64": "c" * 64}, tag=f"src-{source}")
         self.registry.objects.clear()
+        self.publish_base()
         self.assertIn("state=build", self.helper("plan", "--main-ref", "origin/main"), "unverifiable images are rebuilt")
 
     def test_pin_refuses_an_image_built_from_other_inputs(self):
@@ -522,12 +649,186 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.remote_ref("refs/tags/v0.0.21^{commit}"), self.git(self.work, "rev-parse", "HEAD"))
 
 
+    def test_base_hash_covers_only_heavy_inputs(self):
+        base, guest = self.base_source(), self.source()
+        for path, text in (("infra/guest/else-init", "#!/bin/sh\necho thin\n"),
+                           ("infra/guest/Dockerfile", "FROM scratch\nCOPY else-init /usr/local/bin/\n"),
+                           ("scripts/guest-release.py", (self.work / "scripts/guest-release.py").read_text() + "\n"),
+                           (".github/workflows/guest-image.yml", "name: changed-guest-recipe\n")):
+            with self.subTest(path):
+                self.write(path, text)
+                self.commit(f"thin change to {path}")
+                self.assertEqual(self.base_source(), base, f"{path} is not a base input")
+                self.assertNotEqual(self.source(), guest, f"{path} is a guest input")
+                guest = self.source()
+        for path in ("infra/guest/base.Dockerfile", "infra/guest/apt-downloads.conf", "infra/guest/x11vnc/keymap-settle.patch"):
+            with self.subTest(path):
+                self.write(path, (self.work / path).read_text() + "# changed\n")
+                self.commit(f"heavy change to {path}")
+                self.assertNotEqual(self.base_source(), base, f"{path} is a base input")
+                self.assertNotEqual(self.source(), guest, "a heavy change also changes the guest")
+                base, guest = self.base_source(), self.source()
+        self.write_base_manifest(base, self.publish_base())
+        self.commit("pin the new base")
+        self.assertEqual(self.base_source(), base, "pinning the base is not a base input")
+        self.assertNotEqual(self.source(), guest, "the guest is rebuilt on a newly pinned base")
+
+    def test_guest_build_args_select_the_pinned_base(self):
+        base = self.base_manifest()["image"]
+        args = self.helper("build-args").splitlines()
+        self.assertIn(f"--build-arg=BASE={base}", args)
+        self.assertIn("--file=infra/guest/Dockerfile", args)
+        self.assertIn(f"--label={LABEL}={self.source()}", args)
+        base_args = self.helper("--base", "build-args").splitlines()
+        self.assertIn("--file=infra/guest/base.Dockerfile", base_args)
+        self.assertIn(f"--label={BASE_LABEL}={self.base_source()}", base_args)
+        self.assertFalse([a for a in base_args if a.startswith("--build-arg=BASE=")], "the base is built from Debian")
+        self.assertIn(base, self.helper("--base", "pinned"))
+        self.helper("--base", "check")
+
+    def test_guest_builds_refuse_a_missing_or_stale_base(self):
+        self.write_base_manifest(self.base_source(), None)
+        self.commit("base never published")
+        for args in (("build-args",), ("plan", "--main-ref", "origin/main"), ("check",), ("--base", "pinned")):
+            with self.subTest(state="unpublished", command=args[0]):
+                error = self.helper(*args, ok=False)
+                self.assertIn("infra/guest-base.json has no published image", error)
+                self.assertIn("scripts/build-guest-base.sh", error)
+        self.write_base_manifest(self.base_source(), self.publish_base())
+        self.commit("publish the base")
+        self.helper("build-args")
+        self.write("infra/guest/apt-downloads.conf", 'Acquire::Retries "9";\n')
+        self.commit("change a heavy input without publishing")
+        for args in (("build-args",), ("plan", "--main-ref", "origin/main"), ("check", "--allow-unpinned")):
+            with self.subTest(state="stale", command=args[0]):
+                error = self.helper(*args, ok=False)
+                self.assertIn("guest base build inputs at HEAD hash to", error)
+                self.assertIn("scripts/build-guest-base.sh", error)
+        self.write("infra/guest/apt-downloads.conf", 'Acquire::Retries "5";\n')
+        self.commit("restore the heavy input")
+        self.registry.objects.clear()
+        self.assertIn("cannot be read anonymously", self.helper("build-args", ok=False), "a vanished base is refused")
+
+    def test_release_gate_refuses_a_stale_base(self):
+        branch, _ = self.cut_release()
+        self.write("infra/guest/base.Dockerfile", "FROM scratch\n", repo=branch)
+        self.commit("heavy change after pinning", repo=branch)
+        self.assertIn("guest base build inputs", self.helper("gate", "--branch", "release/v0.0.22", cwd=branch, ok=False))
+
+    def test_base_pin_requires_both_platforms_public_and_base_labels(self):
+        source = self.base_source()
+        before = self.base_manifest()
+        broken = {
+            "missing arm64": self.publish_base(platforms=("linux/amd64",)),
+            "arm64 built elsewhere": self.publish_base(labels={"linux/arm64": "e" * 64}),
+            "guest label instead of base label": self.registry.publish(source).replace(self.registry.repo, self.registry.base_repo),
+            "guest repository": self.registry.publish(source),
+        }
+        for name, image in broken.items():
+            with self.subTest(name):
+                self.helper("--base", "pin", image, ok=False)
+                self.assertEqual(self.base_manifest(), before)
+        good = self.publish_base()
+        self.registry.private = True
+        self.assertIn("public", self.helper("--base", "pin", good, ok=False))
+        self.registry.private = False
+        self.helper("--base", "pin", good)
+        self.assertEqual(self.base_manifest(), {"schema": 1, "source_sha256": source, "image": good})
+
+    def test_base_publisher_builds_both_platforms_and_pins_without_committing(self):
+        self.write("infra/guest/base.Dockerfile", "FROM scratch\n# new packages\n")
+        head = self.commit("change the base")
+        source = self.base_source()
+        out = self.publish_script().stdout
+        calls = self.docker_calls()
+        builds = [c for c in calls if c[1:2] == ["build"]]
+        self.assertEqual([c[c.index("--platform") + 1] for c in builds], ["linux/amd64", "linux/arm64"])
+        for call in builds:
+            self.assertIn(f"--label={BASE_LABEL}={source}", call)
+            self.assertIn("--file=infra/guest/base.Dockerfile", call)
+        self.assertIn("under emulation", out, "an emulated build says so")
+        self.assertFalse([c for c in calls if "--use" in c or c[1:2] in (["create"], ["use"])], "the global builder is untouched")
+        image = self.base_manifest()["image"]
+        self.assertIn(f"Pinned {image}", out)
+        self.assertEqual(self.base_manifest()["source_sha256"], source)
+        self.assertEqual(self.git(self.work, "rev-parse", "HEAD"), head, "nothing is committed")
+        self.assertEqual(self.git(self.work, "status", "--porcelain"), "M infra/guest-base.json")
+        self.assertEqual(self.git(self.work, "tag", "-l"), "v0.0.21", "nothing is tagged")
+        self.commit("pin the base")
+        self.helper("--base", "check")
+        self.assertIn(f"--build-arg=BASE={image}", self.helper("build-args"))
+        again = self.publish_script().stdout
+        self.assertFalse([c for c in self.docker_calls() if c[1:2] == ["build"]], "a rerun builds nothing")
+        self.assertIn(f"Pinned {image}", again)
+        self.assertEqual(self.git(self.work, "status", "--porcelain"), "", "a rerun pins the same index")
+
+    def test_base_publisher_joins_platforms_built_on_two_machines(self):
+        self.write("infra/guest/base.Dockerfile", "FROM scratch\n# two machines\n")
+        self.commit("change the base")
+        before = self.base_manifest()
+        out = self.publish_script("--platform", "linux/amd64").stdout
+        self.assertIn("still needs: linux/arm64", out)
+        self.assertIn("scripts/build-guest-base.sh --platform linux/arm64", out)
+        self.assertEqual(self.base_manifest(), before, "one platform pins nothing")
+        self.assertEqual([c[c.index("--platform") + 1] for c in self.docker_calls() if c[1:2] == ["build"]], ["linux/amd64"])
+        out = self.publish_script("--platform", "linux/arm64", FAKE_DOCKER_ARCH="arm64",
+                                  FAKE_DOCKER_PLATFORMS="linux/arm64*").stdout
+        self.assertNotIn("under emulation", out)
+        self.assertEqual([c[c.index("--platform") + 1] for c in self.docker_calls() if c[1:2] == ["build"]], ["linux/arm64"])
+        image = self.base_manifest()["image"]
+        self.assertIn(f"Pinned {image}", out)
+        self.publish_script("--skip-build")
+        self.assertFalse([c for c in self.docker_calls() if c[1:2] == ["build"]])
+        self.assertEqual(self.base_manifest()["image"], image)
+
+    def test_base_publisher_builds_committed_inputs_while_the_checkout_changes(self):
+        dockerfile = "FROM scratch\n# committed base\n"
+        self.write("infra/guest/base.Dockerfile", dockerfile)
+        self.commit("freeze the base inputs")
+        captured = self.work / "build-contexts.jsonl"
+        self.publish_script(FAKE_DOCKER_CONTEXT_LOG=str(captured),
+                            FAKE_DOCKER_EDIT_INPUT=str(self.work / "infra/guest/base.Dockerfile"))
+        self.assertEqual([json.loads(line) for line in captured.read_text().splitlines()], [dockerfile, dockerfile])
+        self.assertNotEqual((self.work / "infra/guest/base.Dockerfile").read_text(), dockerfile)
+        self.assertEqual(self.base_manifest()["source_sha256"], self.base_source())
+
+    def test_base_publisher_refuses_before_building_what_it_cannot_publish(self):
+        self.write("infra/guest/base.Dockerfile", "FROM scratch\n# refused\n")
+        self.commit("change the base")
+        before = self.base_manifest()
+        error = self.publish_script(ok=False, FAKE_DOCKER_PLATFORMS="linux/amd64*").stderr
+        self.assertIn("cannot build linux/arm64", error)
+        self.assertIn("--platform linux/arm64", error)
+        self.assertFalse([c for c in self.docker_calls() if c[1:2] == ["build"]], "no partial build")
+        self.write("infra/guest/apt-downloads.conf", "uncommitted\n")
+        self.assertIn("differ from HEAD", self.publish_script(ok=False).stderr)
+        self.assertEqual(self.docker_calls(), [], "dirty inputs never reach docker")
+        self.git(self.work, "checkout", "--", "infra/guest/apt-downloads.conf")
+        self.registry.private = True
+        error = self.publish_script(ok=False).stderr
+        self.assertIn("make the package public", error)
+        self.assertEqual(self.base_manifest(), before, "a private base is not pinned")
+        self.registry.private = False
+        self.docker_calls()
+        self.assertIn("Pinned", self.publish_script("--skip-build").stdout)
+        self.assertFalse([c for c in self.docker_calls() if c[1:2] == ["build"]], "the pushed platforms are reused")
+
+
     def test_repository_manifest_and_workflows(self):
         manifest = json.loads((ROOT / "infra/guest-image.json").read_text())
         self.assertEqual(set(manifest), {"schema", "source_sha256", "image"})
         if manifest["image"] is not None:
             self.assertRegex(manifest["image"], r"^ghcr\.io/else-bot/else-guest@sha256:[0-9a-f]{64}$")
         self.assertRegex(manifest["source_sha256"], r"^[0-9a-f]{64}$")
+        base = json.loads((ROOT / "infra/guest-base.json").read_text())
+        self.assertEqual(set(base), {"schema", "source_sha256", "image"})
+        self.assertRegex(base["source_sha256"], r"^[0-9a-f]{64}$")
+        if base["image"] is not None:
+            self.assertRegex(base["image"], r"^ghcr\.io/else-bot/else-guest-base@sha256:[0-9a-f]{64}$")
+        thin = (ROOT / "infra/guest/Dockerfile").read_text()
+        self.assertRegex(thin, r"(?m)^FROM \$BASE$", "the guest builds on the pinned base")
+        for heavy in ("apt-get", "snapshot.debian.org", "dpkg-buildpackage"):
+            self.assertNotIn(heavy, thin, "release CI never runs APT or compiles packages")
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
             for line in workflow.read_text().splitlines():
                 if "uses:" in line:
