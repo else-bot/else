@@ -226,8 +226,9 @@ def bots(api):
     require(api.request("DELETE", f"/v1/bots/{main}", expected=409)["error"]["code"] == "main_bot",
             "main bot deletion must be refused")
     bot = create_bot(api)
-    edited = api.request("PATCH", f"/v1/bots/{bot['id']}", {"name": "Renamed", "role": "Edited role"})["bot"]
-    require(edited["name"] == "Renamed" and edited["role"] == "Edited role", "bot settings did not persist")
+    avatar = {"shape": "bean", "color": "green"}
+    edited = api.request("PATCH", f"/v1/bots/{bot['id']}", {"name": "Renamed", "avatar": avatar})["bot"]
+    require(edited["name"] == "Renamed" and edited["avatar"] == avatar, "bot settings did not persist")
     api.request("PATCH", f"/v1/bots/{bot['id']}", {"name": ""}, expected=400)
     api.request("DELETE", f"/v1/bots/{bot['id']}", expected=(200, 202))
     until(lambda: api.request("GET", f"/v1/bots/{bot['id']}"),
