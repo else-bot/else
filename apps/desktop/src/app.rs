@@ -8,6 +8,7 @@ mod attachments;
 mod bot_mention;
 mod bot_menu;
 mod categories;
+mod computer;
 mod conversation;
 mod create_bot;
 mod delete_dialog;
@@ -82,6 +83,7 @@ macro_rules! primary {
 }
 
 pub fn bind_keys(cx: &mut App) {
+    computer::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("down", SelectNext, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("up", SelectPrev, Some(SIDEBAR_CONTEXT)),
@@ -226,6 +228,9 @@ pub struct ElseApp {
     preferences: crate::preferences::Preferences,
     _save_preferences: Option<Task<()>>,
     settings_open: bool,
+    details_tab: computer::DetailsTab,
+    computer: Option<Entity<computer::ComputerView>>,
+    _computer_layout: Option<Subscription>,
     settings: HashMap<Uuid, BotSettings>,
     sidebar_focus: FocusHandle,
     live: Option<crate::api::LiveCommands>,
@@ -301,6 +306,9 @@ impl ElseApp {
             preferences,
             _save_preferences: None,
             settings_open: false,
+            details_tab: Default::default(),
+            computer: None,
+            _computer_layout: None,
             settings: HashMap::new(),
             sidebar_focus,
             live: None,
@@ -479,6 +487,8 @@ impl ElseApp {
         if let Some(previous) = self.selected {
             self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
         }
+        self.computer = None;
+        self._computer_layout = None;
         self.selected = id;
         self.mentions = Default::default();
         let draft = id

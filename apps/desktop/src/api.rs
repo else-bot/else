@@ -19,6 +19,8 @@ use uuid::Uuid;
 mod attachments;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
+mod desktop;
+pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode, MAX_TEXT_CHARS};
 use serde_json::json;
 
 use crate::avatar::Avatar;

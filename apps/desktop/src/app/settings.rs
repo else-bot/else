@@ -18,6 +18,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _, h_flex,
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 use uuid::Uuid;
@@ -214,6 +215,10 @@ impl ElseApp {
         } else {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
         }
+        if !self.settings_open {
+            self.computer = None;
+            self._computer_layout = None;
+        }
         self.ensure_settings(window, cx);
         cx.notify();
     }
@@ -239,6 +244,20 @@ impl ElseApp {
         let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
             return;
         };
+        if self.settings_open
+            && self.details_tab == super::computer::DetailsTab::Computer
+            && self.computer.is_none()
+        {
+            let client = self.client.clone();
+            let computer =
+                cx.new(|cx| super::computer::ComputerView::new(client, &bot, window, cx));
+            self._computer_layout = Some(
+                cx.subscribe(&computer, |_, _, _: &super::computer::LayoutChanged, cx| {
+                    cx.notify()
+                }),
+            );
+            self.computer = Some(computer);
+        }
         if self.settings.contains_key(&bot.id) {
             return;
         }
@@ -678,14 +697,18 @@ impl ElseApp {
             .overflow_y_scroll()
             .p_4()
             .gap_6();
-        match self.settings.get(&bot.id) {
-            Some(entry) => {
+        if let Some(computer) = &self.computer {
+            body = body.child(computer.clone());
+        }
+        if self.details_tab == super::computer::DetailsTab::Details {
+            if let Some(entry) = self.settings.get(&bot.id) {
                 body = body
                     .child(self.render_details(bot.id, &entry.details, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx));
+            } else {
+                body = body.child(muted("Loading…", cx));
             }
-            None => body = body.child(muted("Loading…", cx)),
         }
         let mut panel = v_flex()
             .id("bot-settings")
@@ -699,6 +722,45 @@ impl ElseApp {
             .border_l_1()
             .border_color(theme.sidebar_border)
             .child(header)
+            .child(
+                h_flex()
+                    .px_4()
+                    .pb_2()
+                    .gap_2()
+                    .child(
+                        Button::new("details-tab")
+                            .cursor_pointer()
+                            .label("Details")
+                            .small()
+                            .ghost()
+                            .when(
+                                self.details_tab == super::computer::DetailsTab::Details,
+                                |button| button.primary(),
+                            )
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.details_tab = super::computer::DetailsTab::Details;
+                                app.computer = None;
+                                app._computer_layout = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("computer-tab")
+                            .cursor_pointer()
+                            .label("Computer")
+                            .small()
+                            .ghost()
+                            .when(
+                                self.details_tab == super::computer::DetailsTab::Computer,
+                                |button| button.primary(),
+                            )
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.details_tab = super::computer::DetailsTab::Computer;
+                                app.ensure_settings(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(body)
             .child(self.sidebar_handle(super::layout::SidebarEdge::Right, cx));
         if self.default_bot_id != Some(bot.id) {

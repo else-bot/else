@@ -28,6 +28,8 @@ struct Fake {
     create_delay: Mutex<Duration>,
     /// An image upgrade's unpack step fails in the new computer.
     fail_unpack: std::sync::atomic::AtomicBool,
+    /// An image upgrade's SIGINT close of Chromium fails.
+    fail_close: std::sync::atomic::AtomicBool,
     /// Every created computer's spec, in order.
     specs: Mutex<Vec<Spec>>,
 }
@@ -144,6 +146,12 @@ impl ComputerRuntime for Fake {
         args: &[&str],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
+        let close = program == "/bin/sh" && args[1].contains("kill -INT");
+        if close {
+            self.log(format!("close-browser {name}"));
+        } else if program == else_api::computers::GUEST_CHECKPOINT {
+            self.log(format!("checkpoint {name}"));
+        }
         let mut computers = self.computers.lock().unwrap();
         let (state, files) = computers.get_mut(name).expect("exists");
         assert_eq!(
@@ -164,6 +172,14 @@ impl ComputerRuntime for Fake {
                 files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
                 use sha2::Digest;
                 format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")))
+            }
+            "/bin/sh" if close && self.fail_close.load(std::sync::atomic::Ordering::SeqCst) => {
+                return Ok(ExecOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "Chromium did not exit within 10 seconds of SIGINT".into(),
+                    truncated: false,
+                });
             }
             "/bin/sh" if args[1].contains("sha256sum -c") => {
                 if self.fail_unpack.load(std::sync::atomic::Ordering::SeqCst) {
@@ -993,4 +1009,85 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
         .await
         .unwrap();
     assert_eq!(ended(live_turn).await.as_deref(), Some("expired"));
+}
+
+/// PR 62: images before else-guest:3 stop Chromium with SIGTERM, which drops
+/// cookies set in its last 30 seconds. A desktop upgrade closes Chromium with
+/// SIGINT first, only when nothing holds the computer, resumes a paused one
+/// to do so, and refuses the upgrade, leaving the computer as it was, when
+/// the close fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Desk").await.parse().unwrap();
+    let (lease, old_name) = ready(&manager, bot, &format!("desktop:{}", Uuid::new_v4())).await;
+    let closes = |fake: &Fake| {
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with("close-browser"))
+            .count()
+    };
+
+    // A live desktop session holds it: refused before the browser closes.
+    assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
+    assert_eq!(closes(&fake), 0);
+    manager.release(lease).await.unwrap();
+
+    // The close fails: refused, nothing stopped or recorded.
+    fake.fail_close
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failed = manager.upgrade_image(bot, "img:new", None).await;
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("closing Chromium")),
+        "{failed:?}"
+    );
+    assert_eq!(observed(&app, bot).await, "running");
+    assert_eq!(
+        fake.computers.lock().unwrap()[&old_name].0,
+        RuntimeState::Running
+    );
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM computer_upgrades WHERE bot_id = ?1")
+            .bind(bot)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 0);
+    fake.fail_close
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // A paused desktop is resumed, closed with SIGINT, then checkpointed and stopped.
+    fake.set(&old_name, RuntimeState::Paused).unwrap();
+    sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    fake.calls.lock().unwrap().clear();
+    manager.upgrade_image(bot, "img:new", None).await.unwrap();
+    let calls = fake.calls();
+    let at = |step: &str| {
+        let call = format!("{step} {old_name}");
+        calls
+            .iter()
+            .position(|c| *c == call)
+            .unwrap_or_else(|| panic!("{call} in {calls:?}"))
+    };
+    assert!(
+        at("resume") < at("close-browser")
+            && at("close-browser") < at("checkpoint")
+            && at("checkpoint") < at("stop"),
+        "{calls:?}"
+    );
+    assert_eq!(closes(&fake), 1, "only the old computer's browser closes");
 }

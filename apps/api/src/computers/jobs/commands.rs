@@ -95,22 +95,12 @@ impl ComputerManager {
                 ));
             }
         }
-        if exclusive_of_owner {
-            let owner: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM computer_leases WHERE bot_id = ?1 AND holder = ?2
-                                AND released_at IS NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
-            )
-            .bind(bot)
-            .bind(format!("desktop:{bot}"))
-            .fetch_one(&self.pool)
-            .await?;
-            if owner {
-                return Err(ComputerError::Refused(
-                    "OWNER_USING_DESKTOP: the owner has your desktop open; nothing was done. \
-                     Wait until they close it."
-                        .into(),
-                ));
-            }
+        if exclusive_of_owner && self.owner_controls(bot, true).await? {
+            return Err(ComputerError::Refused(
+                "OWNER_USING_DESKTOP: the owner has your desktop open; nothing was done. \
+                 Wait until they close it."
+                    .into(),
+            ));
         }
         let run_id = Uuid::new_v4();
         let dir = format!("{RUNS_DIR}/{run_id}");

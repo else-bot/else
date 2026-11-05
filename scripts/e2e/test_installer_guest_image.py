@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
 TOOLS = ["bash", "sed", "awk", "grep", "mktemp", "cat", "chmod", "mv", "tail", "mkdir",
          "rm", "ln", "env", "sort", "head", "tr", "touch", "basename"]
-TAG = "else-guest:2"
+TAG = "else-guest:3"
 
 STUBS = {
     "sudo": 'case "$1" in -*) exit 0 ;; esac\nexec "$@"',

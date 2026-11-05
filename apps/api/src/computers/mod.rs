@@ -25,6 +25,9 @@ pub mod runtime;
 pub mod screens;
 mod snapshot;
 pub mod upgrade;
+pub mod viewer;
+
+pub use desktop::{ViewerLease, ViewerRefusal, ViewerTarget};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -251,6 +254,8 @@ pub struct ComputerManager {
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     /// Input batches per turn (POC-029), to bound unattended iterations.
     input_batches: Actor<HashMap<Uuid, u32>>,
+    /// The stream that controls each bot's desktop (at most one).
+    controllers: Actor<HashMap<Uuid, Uuid>>,
 }
 
 impl ComputerManager {
@@ -269,6 +274,7 @@ impl ComputerManager {
             killing: Actor::default(),
             secret_key: None,
             input_batches: Actor::default(),
+            controllers: Actor::default(),
         }
     }
 

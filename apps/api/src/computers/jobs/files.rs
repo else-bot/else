@@ -135,6 +135,20 @@ impl ComputerManager {
 
     /// Run the guest browser helper (`else-browser`).
     pub async fn browser(&self, lease: Uuid, args: &[&str]) -> Result<ExecOutput, ComputerError> {
+        let bot: Option<Uuid> =
+            sqlx::query_scalar("SELECT bot_id FROM computer_leases WHERE id = ?1")
+                .bind(lease)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some(bot) = bot
+            && self.owner_controls(bot, false).await?
+        {
+            return Err(ComputerError::Refused(
+                "OWNER_USING_DESKTOP: the owner took over your desktop; nothing was done. \
+                 Wait until they hand it back."
+                    .into(),
+            ));
+        }
         self.guest(
             lease,
             r#"DISPLAY=:99 exec /usr/local/bin/else-browser "$@""#,
