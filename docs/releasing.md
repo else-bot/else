@@ -44,7 +44,7 @@ For developer builds, keep using `scripts/build-guest-image.sh [DATA_DIR]`. Dock
 
 - If a native build or test fails, fix the release branch and rerun `guest-image`. No version tag exists yet.
 - If the manifest pin cannot be pushed because the branch changed, rerun `guest-image` on its new head. The workflow never force pushes.
-- After Actions commits the pin, it dispatches `release-ready` explicitly. GitHub may also show a PR workflow awaiting approval for the bot commit. The dispatched check validates that same branch head.
+- `release-ready` stays pending while guest images build. After Actions commits the pin, it dispatches `release-ready` explicitly on the branch head. Opening or updating the PR does not start a competing readiness run. A failed build or pin leaves the required check pending and blocks merging. PRs into `main` must come from `release/vX.Y.Z`; other branches leave this check pending.
 - If `main` advanced while the release was open, merge its changes into the release branch and rerun the checks.
 - If final image verification fails after merge, restore public registry access and rerun `release-tag` on `main`. The version remains unavailable until verification succeeds.
 - If tag creation succeeds but publishing the GitHub release fails, rerun `release-tag`. The image is already available to installers, and the rerun reuses the tag.

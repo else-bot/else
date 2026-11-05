@@ -544,6 +544,9 @@ class ReleaseReadinessWorkflow(unittest.TestCase):
         events = re.findall(r"(?m)^  ([a-z_]+):", triggers.group(1))
         self.assertEqual(events, ["workflow_dispatch"],
                          "release-ready must wait for guest-image to dispatch it after pinning")
+        guest = (ROOT / ".github/workflows/guest-image.yml").read_text()
+        self.assertIn("gh workflow run release-ready.yml", guest,
+                      "guest-image must dispatch readiness after pinning")
 
 
 if __name__ == "__main__":
