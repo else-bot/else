@@ -9,6 +9,7 @@ registry, and fake gh and cargo commands.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -533,6 +534,19 @@ class Lifecycle(unittest.TestCase):
                     ref = line.split("uses:", 1)[1].split("#")[0].strip()
                     self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$", f"{workflow.name} pins actions by commit")
             self.assertNotIn("pull_request_target", workflow.read_text())
+
+
+class ReleaseReadinessWorkflow(unittest.TestCase):
+    def test_readiness_waits_for_the_post_pin_dispatch(self):
+        workflow = (ROOT / ".github/workflows/release-ready.yml").read_text()
+        triggers = re.search(r"(?m)^on:\n((?:[ \t].*\n|\n)*)", workflow)
+        self.assertIsNotNone(triggers)
+        events = re.findall(r"(?m)^  ([a-z_]+):", triggers.group(1))
+        self.assertEqual(events, ["workflow_dispatch"],
+                         "release-ready must wait for guest-image to dispatch it after pinning")
+        guest = (ROOT / ".github/workflows/guest-image.yml").read_text()
+        self.assertIn("gh workflow run release-ready.yml", guest,
+                      "guest-image must dispatch readiness after pinning")
 
 
 if __name__ == "__main__":
