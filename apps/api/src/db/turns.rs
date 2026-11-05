@@ -121,6 +121,8 @@ pub enum AcceptError {
     InvalidAttachment,
     #[error("work is still stopping")]
     CancellationPending,
+    #[error("the bot has unfinished work")]
+    Busy,
     #[error("no saved profile for provider {0}")]
     ProfileMissing(String),
     #[error("the open draft: {0}")]
@@ -254,6 +256,18 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     }
     if cancel_pending {
         return Err(AcceptError::CancellationPending);
+    }
+    if req.hidden {
+        let busy: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM turns WHERE bot_id = ?1
+             AND status IN ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting'))",
+        )
+        .bind(req.bot_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if busy {
+            return Err(AcceptError::Busy);
+        }
     }
     let profile: Option<(i64, Json<Profile>)> = if req.uses_profile {
         Some(

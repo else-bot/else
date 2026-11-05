@@ -70,6 +70,12 @@ impl From<AcceptError> for ApiError {
                 "Work is still stopping. Try again when it has stopped.",
             )
             .retryable(),
+            AcceptError::Busy => ApiError::new(
+                StatusCode::CONFLICT,
+                "bot_busy",
+                "This bot has unfinished work. Start the email conversation after it finishes.",
+            )
+            .retryable(),
             AcceptError::ProfileMissing(provider) => ApiError::unavailable(
                 "provider_unavailable",
                 format!("Provider {provider} has no saved execution profile; run else-api setup."),

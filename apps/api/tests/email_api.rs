@@ -79,6 +79,9 @@ async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() 
     let created = app.owner("POST","/v1/connectors/email/accounts",Some(json!({"config":config,"credential":{"kind":"password","password":"private-app-password"}}))).await;
     assert_eq!(created.status, StatusCode::OK, "{}", created.body);
     assert!(!created.body.to_string().contains("private-app-password"));
+    let duplicate = app.owner("POST", "/v1/connectors/email/accounts", Some(json!({"config":config,"credential":{"kind":"password","password":"private-app-password"}}))).await;
+    assert_eq!(duplicate.status, StatusCode::CONFLICT);
+    assert_eq!(duplicate.body["error"]["code"], "mail_account_exists");
     let path = format!(
         "/v1/connectors/email/accounts/{}",
         created.body["account"]["id"].as_str().unwrap()
@@ -208,6 +211,21 @@ async fn accounts_are_available_to_bots_created_later_without_waking_them() {
     assert_eq!(listed.result["accounts"][0]["id"], json!(account.id));
     assert_eq!(listed.result["accounts"][0]["permissions"]["wake"], false);
     assert!(
+        !store::set_permissions(
+            &h.app.db.pool,
+            account.id,
+            bot.parse().unwrap(),
+            &Permissions {
+                read: true,
+                write: true,
+                send: true,
+                wake: false
+            }
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
         store::grants(&h.app.db.pool, account.id)
             .await
             .unwrap()
@@ -228,6 +246,43 @@ async fn accounts_are_available_to_bots_created_later_without_waking_them() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn introduction_leaves_busy_work_running_and_can_be_retried_when_idle() {
+    let h = recorder::harness(4).await;
+    let bot = h.app.main_bot().await;
+    let account = account(&h.app).await;
+    let (running, _) = h.running(&bot, GATE).await;
+    let body = json!({"bot_id":bot,"request_id":Uuid::new_v4()});
+    let path = format!("/v1/connectors/email/accounts/{}/introduction", account.id);
+    let refused = h.app.owner("POST", &path, Some(body.clone())).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(refused.body["error"]["code"], "bot_busy");
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    let turn = snapshot.body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == running.to_string())
+        .unwrap();
+    assert_eq!(turn["status"], "running");
+    assert!(
+        !snapshot.body["items"]
+            .to_string()
+            .contains("[else.bot email setup]")
+    );
+    h.release(running).await;
+    h.app.wait_turn(&running.to_string(), &["completed"]).await;
+    let accepted = h.app.owner("POST", &path, Some(body.clone())).await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    assert_eq!(
+        h.app.owner("POST", &path, Some(body)).await.body,
+        accepted.body
     );
 }
 

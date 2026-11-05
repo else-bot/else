@@ -408,7 +408,13 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
+        let unshown_status = self
+            .view
+            .as_ref()
+            .and_then(|view| view.conversation.as_ref())
+            .and_then(|conversation| conversation.latest_unshown_turn())
+            .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
         let activity = self
             .view
             .as_ref()
@@ -427,7 +433,6 @@ impl ElseApp {
                 .small()
                 .ghost()
                 .accessibility_label("Connect email")
-                .tooltip("Connect email")
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::connection::OpenEmailSettings), cx)
                 }),
@@ -491,6 +496,7 @@ impl ElseApp {
                             .child(subtitle(bot, main)),
                     ),
             )
+            .children(unshown_status)
             .child(actions)
     }
 

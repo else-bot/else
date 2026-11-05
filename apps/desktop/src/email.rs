@@ -61,6 +61,7 @@ impl EmailSettings {
     fn load(&mut self, initial_bot: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
         self.busy = true;
         self.error = None;
+        self.feedback = None;
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let (accounts, presets, bots) = tokio::join!(
@@ -186,34 +187,36 @@ impl Render for EmailSettings {
                     .child("Connect an inbox for any of your bots to use when you ask."),
             );
         for account in &self.accounts {
-            content =
-                content.child(
-                    h_flex()
-                        .gap_3()
-                        .justify_between()
-                        .p_3()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary)
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().font_semibold().child(account.config.address.clone()))
-                                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                    format!("{} · All bots", account.config.provider.label()),
-                                )),
-                        )
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(
-                            if account.state == "paused" {
-                                "Paused"
-                            } else {
-                                match account.health.as_str() {
-                                    "connected" => "Connected",
-                                    "unknown" => "Checking connection…",
-                                    _ => "Check credentials and server settings",
-                                }
-                            },
-                        )),
-                );
+            content = content.child(
+                h_flex()
+                    .gap_3()
+                    .justify_between()
+                    .p_3()
+                    .rounded(theme.radius)
+                    .bg(theme.secondary)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child(account.config.address.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(account.config.provider.label()),
+                            ),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if account.state == "paused" {
+                            "Paused"
+                        } else {
+                            match account.health.as_str() {
+                                "connected" => "Connected",
+                                "unknown" => "Checking connection…",
+                                _ => "Check credentials and server settings",
+                            }
+                        },
+                    )),
+            );
         }
         if let Some(form) = &self.form {
             content = content.child(form.render(self.busy, cx));

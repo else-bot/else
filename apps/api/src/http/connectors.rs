@@ -58,6 +58,11 @@ fn manager(state: &AppState) -> Result<&Arc<ConnectorManager>, ApiError> {
 fn unavailable(error: store::StoreError) -> ApiError {
     match error {
         store::StoreError::NotFound => ApiError::not_found(),
+        store::StoreError::AddressTaken => ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "mail_account_exists",
+            "This email address is already connected.",
+        ),
         store::StoreError::Forbidden
         | store::StoreError::NotRunning
         | store::StoreError::Inactive => ApiError::new(

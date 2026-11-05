@@ -95,7 +95,7 @@ impl ElseApp {
             .into_any_element()
     }
 
-    fn render_turn_status(
+    pub(super) fn render_turn_status(
         &self,
         turn: &crate::model::Turn,
         bot: uuid::Uuid,

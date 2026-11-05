@@ -540,7 +540,7 @@ pub async fn remove(pool: &SqlitePool, id: Uuid) -> Result<bool, StoreError> {
     Ok(true)
 }
 
-/// Set what one bot may do with one account; all false removes the grant.
+/// Set one bot's permission override; all false persists a denial of access.
 /// Withdrawing read or wake replaces the grant's identity and revokes its
 /// undelivered events, so they never reach a later grant. A grant only
 /// covers mail that arrives after it. Returns whether anything changed.
@@ -574,6 +574,7 @@ pub async fn set_permissions(
     .fetch_optional(&mut *tx)
     .await?;
     let binding = match old {
+        None if p.read && p.write && p.send && !p.wake => return Ok(false),
         Some((_, read, write, send, wake))
             if (read, write, send, wake) == (p.read, p.write, p.send, p.wake) =>
         {

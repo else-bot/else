@@ -27,6 +27,9 @@ pub(super) enum Presentation {
 
 impl Shell {
     pub(super) fn open_email_from_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_section().is_none() {
+            return;
+        }
         let bot = self
             .active
             .as_ref()
@@ -173,8 +176,6 @@ impl Shell {
         }
         if section == SettingsSection::Email && self.email.is_none() {
             self.open_email(None, window, cx);
-        } else if section != SettingsSection::Email {
-            self.email = None;
         }
         if section == SettingsSection::Updates {
             self.update_action(super::updates::Action::RefreshWork, cx);

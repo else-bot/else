@@ -79,7 +79,7 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         (SELECT count(*) FROM turns q WHERE q.bot_id = b.id AND q.status = 'queued') AS queued_count,
         (SELECT m.created_at FROM items m WHERE m.conversation_id = c.id
-            AND m.kind IN ('user', 'assistant') ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
+            AND m.kind IN ('user', 'assistant') AND NOT m.hidden ORDER BY m.seq DESC LIMIT 1) AS last_message_at,
         coalesce((SELECT e.seq FROM bot_events e WHERE e.bot_id = b.id
             AND e.kind = 'bot.updated' ORDER BY e.seq DESC LIMIT 1), 0) AS metadata_revision
     FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'

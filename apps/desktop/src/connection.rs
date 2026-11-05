@@ -575,6 +575,9 @@ impl Render for Shell {
                     shell.open_settings(window, cx)
                 }))
                 .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        return;
+                    }
                     shell.open_settings(window, cx);
                     shell.open_email_from_chat(window, cx);
                 }))
