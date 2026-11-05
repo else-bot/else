@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${ELSE_GUEST_TAG:-else-guest:3}"
-BASE="${ELSE_GUEST_BASE:-$(python3 scripts/guest-release.py --base pinned)}"
+BASE="${ELSE_GUEST_BASE:-$(python3 scripts/guest_release.py --base pinned)}"
 DATA_DIR="${1:-${ELSE_DATA_DIR:-$HOME/.else}}"
 MSB="${ELSE_MSB_BIN:-$(command -v msb || echo "$HOME/.microsandbox/bin/msb")}"
 work="$(mktemp -d)"

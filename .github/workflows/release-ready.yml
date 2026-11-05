@@ -32,12 +32,17 @@ jobs:
           ref: ${{ env.VERIFIED_SHA }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Test release packaging and publication
+        run: python3 scripts/test-release.py
+      - name: Test prebuilt installer
+        run: python3 scripts/test-install-downloads.py
       - env:
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           git fetch -q --tags origin +refs/heads/main:refs/remotes/origin/main
-          bash -n install.sh scripts/release.sh scripts/build-guest-image.sh scripts/build-guest-base.sh
-          python3 scripts/guest-release.py gate --branch "$BRANCH" --main-ref origin/main
+          bash -n install.sh scripts/release.sh scripts/build-guest-image.sh scripts/build-guest-base.sh \
+            scripts/test-install.sh scripts/e2e/install-scenario.sh
+          python3 scripts/guest_release.py gate --branch "$BRANCH" --main-ref origin/main
       - name: Report readiness
         if: always() && github.event_name == 'workflow_dispatch'
         env:

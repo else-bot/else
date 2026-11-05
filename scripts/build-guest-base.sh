@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
 done
 [ ${#platforms[@]} -gt 0 ] || platforms=("${required[@]}")
 
-helper() { python3 scripts/guest-release.py --base "$@"; }
+helper() { python3 scripts/guest_release.py --base "$@"; }
 buildx=(docker buildx)
 [ -z "$builder" ] || buildx+=(--builder "$builder")
 

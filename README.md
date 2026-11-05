@@ -6,7 +6,7 @@ The server stores your data on your machine. Provider CLIs run as your user and 
 
 ## Install
 
-Supported hosts are Linux with Debian 12+, Ubuntu 24.04+, or Arch Linux / Omarchy, and macOS on Apple silicon. On macOS, install Xcode and its Metal toolchain before installing the desktop app. Linux bot computers need access to `/dev/kvm`.
+Supported hosts are Linux with Debian 12+, Ubuntu 24.04+, or Arch Linux / Omarchy on AMD64 or ARM64, and macOS on Apple silicon. macOS installations need Git and, for the app bundle, Python 3. Linux bot computers need access to `/dev/kvm`.
 
 Run as your normal user:
 
@@ -22,7 +22,7 @@ Choose what this machine runs:
 
 To choose without the prompt, append `-s -- --both`, `-s -- --server-only`, or `-s -- --app-only` to `bash`.
 
-The installer builds the release under `~/.else` with a private Rust toolchain. It asks before installing missing system packages and whether to start the server automatically. It also installs Microsandbox and downloads the bot computer image for server installations. App-only installations do not need the VM runtime or provider CLIs.
+The installer downloads the selected release binaries into `~/.else` and verifies their SHA256 checksums and versions. It asks before installing missing runtime packages and whether to start the server automatically. It also installs Microsandbox and downloads the bot computer image for server installations. App-only installations do not need the VM runtime or provider CLIs. Rust, compiler packages, and Xcode's Metal toolchain are needed only with `--from-source`, including when installing an older release without prebuilt binaries.
 
 Install the Codex CLI or Claude Code on the server and sign in as the user who runs else.bot. For Codex, run `codex login`. For Claude Code, run `claude` and finish sign-in. The installer checks for these CLIs but does not install them.
 

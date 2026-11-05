@@ -46,6 +46,9 @@ git ls-files -z -c -o --exclude-standard |
 	cd "$work/tree"
 	commit() { git -c user.name=test -c user.email=test@example.invalid commit -q -m "$1"; }
 	git init -q -b main
+	sed -i '/^\[workspace.package\]/,/^\[/s/^version = ".*"/version = "0.0.1"/' Cargo.toml
+	awk '/^name = "else-(api|desktop)"$/{print; getline; print "version = \"0.0.1\""; next} {print}' Cargo.lock >Cargo.lock.new
+	mv Cargo.lock.new Cargo.lock
 	git add -A
 	commit "release 0.0.1"
 	git tag v0.0.1
@@ -101,7 +104,7 @@ if sudo bash /src/install.sh --yes >/tmp/root.log 2>&1; then fail "ran as root";
 grep -q "not as root" /tmp/root.log || fail "no root refusal"
 
 echo "--- install v0.0.1 through a pipe"
-cat /src/install.sh | ELSE_VERSION=0.0.1 bash -s -- --yes --skip-guest-image 2>&1 | tee /tmp/install.log
+cat /src/install.sh | ELSE_VERSION=0.0.1 bash -s -- --yes --from-source --skip-guest-image 2>&1 | tee /tmp/install.log
 [ "$(readlink $H/current)" = versions/0.0.1 ] || fail "current is $(readlink $H/current)"
 for f in $H/versions/0.0.1/bin/else-api $H/versions/0.0.1/bin/else-desktop $H/bin/elsebot \
 	$H/microsandbox/bin/msb $H/toolchain/cargo/bin/cargo $H/data/owner-token; do
@@ -136,7 +139,7 @@ wait_health 0.0.1
 bot="$(api -X POST $URL/v1/bots -d "{\"request_id\":\"$(uuid)\",\"name\":\"Worker\"}" | jq -r .bot.id)"
 busy="$(send '[synthetic:hang]')"
 wait_status "$busy" running
-if ~/.local/bin/elsebot update --yes --skip-guest-image >/tmp/refused.log 2>&1; then
+if ~/.local/bin/elsebot update --yes --from-source --skip-guest-image >/tmp/refused.log 2>&1; then
 	cat /tmp/refused.log
 	fail "updated while busy"
 fi
@@ -154,7 +157,7 @@ api -X POST "$URL/v1/bots/$bot/cancel" -d "{\"request_id\":\"$(uuid)\"}" >/dev/n
 wait_status "$busy" interrupted
 done_before="$(send 'before the update')"
 wait_status "$done_before" completed
-~/.local/bin/elsebot update --yes --skip-guest-image 2>&1 | tee /tmp/update.log
+~/.local/bin/elsebot update --yes --from-source --skip-guest-image 2>&1 | tee /tmp/update.log
 [ "$(readlink $H/current)" = versions/0.0.2 ] || fail "current is $(readlink $H/current)"
 wait_health 0.0.2
 [ -d $H/versions/0.0.1 ] || fail "the previous release was not kept"
@@ -167,9 +170,9 @@ wait_status "$after" completed
 check_db
 
 echo "--- running it again changes nothing"
-~/.local/bin/elsebot update --yes --skip-guest-image 2>&1 | tee /tmp/again.log
+~/.local/bin/elsebot update --yes --from-source --skip-guest-image 2>&1 | tee /tmp/again.log
 grep -q "0.0.2 is installed; checking" /tmp/again.log || fail "not detected as current"
-grep -q "already built" /tmp/again.log || fail "rebuilt"
+grep -q "already installed" /tmp/again.log || fail "rebuilt"
 grep -q "all present" /tmp/again.log || fail "installed packages again"
 wait_health 0.0.2
 ~/.local/bin/elsebot stop

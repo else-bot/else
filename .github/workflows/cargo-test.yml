@@ -1,6 +1,8 @@
 name: cargo-test
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -37,7 +39,9 @@ jobs:
           rustup update stable --no-self-update
           rustup default stable
           echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Restore Cargo build cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -46,5 +50,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rust.outputs.version }}-
+      - name: Build workspace tests
+        run: cargo test --workspace --locked --jobs 2 --no-run
+      - name: Save Cargo build cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
       - name: Run workspace tests
         run: cargo test --workspace --locked --jobs 2

@@ -70,7 +70,7 @@ On Linux, agents checking the UI use `scripts/dev.py run`. It creates an isolate
 | `apps/desktop/src` | GPUI app and API client |
 | `infra/guest` | Bot computer image, desktop helpers, and browser tools |
 | `scripts` | Development launcher, installer checks, and release tools |
-| `.github/workflows` | Guest image builds and release gates |
+| `.github/workflows` | Guest image builds, native release binaries, and release gates |
 
 Both binaries use the workspace version in `Cargo.toml`. The workspace pins `gpui-base` to the else-bot fork for native link previews. Checkout builds omit debug information by default; use `CARGO_PROFILE_DEV_DEBUG=2` when debugging needs source lines and variables.
 
@@ -86,6 +86,8 @@ cargo test --workspace --locked
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
 Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Changes require a pull request; force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
+
+`cargo-test` also runs on pushes to `main` to populate a build cache that future pull requests can restore. CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
 
 Use a focused target while developing, for example:
 
@@ -107,7 +109,7 @@ S3 replication checks need Docker with Compose. This command owns and removes it
 scripts/test-replication.py
 ```
 
-For installer coverage on Linux, run `scripts/test-install.sh` with a distribution such as `debian-12`, `ubuntu-24.04`, or `arch`. It installs and updates disposable containers. Native ARM64 application and installer lanes run with:
+For prebuilt installer coverage, run `python3 scripts/test-install-downloads.py`. It serves disposable release archives locally and checks platform selection, checksums, updates, and source-build opt-in without installing system packages. For source-build installer coverage on Linux, run `scripts/test-install.sh` with a distribution such as `debian-12`, `ubuntu-24.04`, or `arch`. It installs and updates disposable containers with `--from-source`. Native ARM64 application and installer lanes run with:
 
 ```sh
 python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64
@@ -171,6 +173,23 @@ scripts/release.sh patch
 
 Use `minor` or `major` for a larger bump. The script creates a release branch and PR without changing your checkout. CI builds or reuses the guest image, tests its VNC behavior, and commits the immutable digest to `infra/guest-image.json`.
 
-Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit. The tag workflow verifies the image, tags that commit, and publishes the GitHub release. Installers discover the update from the version tag.
+Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit.
+
+After the merge, `release-tag` builds the desktop and API on native runners for Linux AMD64, Linux ARM64, and macOS ARM64. Linux builds use Debian 12 containers to support Debian 12+, Ubuntu 24.04+, and Arch Linux. macOS builds use the `macos-15` Apple silicon runner with Xcode and Metal. Windows is unsupported.
+
+`scripts/release.py` coordinates native publication, `scripts/release_binaries.py` owns archive creation, and `scripts/guest_release.py` owns guest-image pins and verification. Native publication edits do not invalidate the guest-image build fingerprint.
+
+All three builds must pass their binary version checks before the workflow verifies the guest image and tags the release commit. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
+
+Rerun a failed `release-tag` run to resume publication at the same commit. Ordinary pushes after a version is tagged skip the binary builds. The workflow builds before tagging because [tags pushed with `GITHUB_TOKEN` do not trigger another workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow). The installer discovers the latest published binary release through `releases/latest/download/SHA256SUMS`, so a tag with unfinished uploads is not installed. It downloads only the selected components, verifies the checksums and executable versions, and keeps the existing backup and rollback flow. `--from-source` uses version tags and a private Rust toolchain instead; use it for older releases without binary assets. `ELSE_RELEASES_URL` overrides the repository's GitHub releases URL for local fixtures or another release server.
+
+To package a local native release build, use the matching platform:
+
+```sh
+cargo build --release --locked --workspace --bins --target x86_64-unknown-linux-gnu
+python3 scripts/release_binaries.py --platform linux-amd64 --binaries target/x86_64-unknown-linux-gnu/release
+```
+
+Archives go under `target/release-assets`. To check packaging and publication retry behavior locally, run `python3 scripts/test-release.py`. This uses temporary repositories and a fake GitHub CLI without publishing a release.
 
 If the base pin is stale, publish it and update the release branch. If a build or image check fails, fix it and rerun the workflow. Keep published image digests available for old releases and rollback.
