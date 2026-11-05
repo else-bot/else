@@ -1,10 +1,14 @@
+use super::view::{missing_local, notice};
 use super::*;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogEntrance, DialogTitle};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Icon, Selectable as _, Sizable as _, h_flex};
+use gpui_kit::component::{
+    Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _, Theme, h_flex,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettingsSection {
@@ -64,8 +68,8 @@ impl Shell {
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
             dialog
-                .w(viewport.width - px(64.))
-                .h(viewport.height - px(64.))
+                .w((viewport.width - px(64.)).min(px(1040.)))
+                .h((viewport.height - px(64.)).min(px(560.)))
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
@@ -76,10 +80,10 @@ impl Shell {
                 .on_close(move |_, window, cx| {
                     let _ = shell_close.update(cx, |shell, cx| shell.cancel(window, cx));
                 })
-                .content(move |content, _, cx| {
+                .content(move |content, window, cx| {
                     content.size_full().min_h_0().overflow_hidden().children(
                         shell
-                            .update(cx, |shell, cx| shell.render_app_settings(cx))
+                            .update(cx, |shell, cx| shell.render_app_settings(window, cx))
                             .ok(),
                     )
                 })
@@ -104,7 +108,7 @@ impl Shell {
         }
     }
 
-    fn render_app_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_app_settings(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(setup) = &self.setup else {
             return div().into_any_element();
@@ -114,6 +118,7 @@ impl Shell {
         };
         let nav_item = |id, label, icon, target, focus: &FocusHandle| {
             Button::new(id)
+                .focus_ring(false)
                 .track_focus(focus)
                 .cursor_pointer()
                 .label(label)
@@ -129,7 +134,7 @@ impl Shell {
         };
         let navigation = v_flex()
             .flex_none()
-            .w(px(156.))
+            .w(px(170.))
             .h_full()
             .p_3()
             .gap_1()
@@ -160,7 +165,7 @@ impl Shell {
                 &setup.navigation_focus[1],
             ));
         let body = match section {
-            SettingsSection::Server => self.render_server_settings(setup, cx),
+            SettingsSection::Server => self.render_server_settings(setup, window, cx),
             SettingsSection::Email => email_settings(cx),
         };
         v_flex()
@@ -197,6 +202,7 @@ impl Shell {
                     )
                     .child(
                         Button::new("app-settings-close")
+                            .focus_ring(false)
                             .cursor_pointer()
                             .icon(IconName::Close)
                             .ghost()
@@ -224,87 +230,338 @@ impl Shell {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(div().p_6().w_full().max_w(px(720.)).child(body))
+                            .child(div().p_8().w_full().child(body))
                             .overflow_y_scrollbar(),
                     ),
             )
             .into_any_element()
     }
 
-    fn render_server_settings(&self, setup: &Setup, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mut content = v_flex().gap_5().child(section_heading(
-            "Server",
-            "Choose where your bots run and connect this app to their server.",
-            cx,
-        ));
-        if let Some(active) = &self.active {
+    fn render_server_settings(
+        &self,
+        setup: &Setup,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let stacked = window.viewport_size().width < px(800.);
+        let busy = setup.draft.busy();
+        let origin = match &setup.page {
+            Page::Welcome => self
+                .launch
+                .local
+                .as_ref()
+                .ok()
+                .map(|local| local.origin().clone()),
+            Page::Remote(form) => Origin::parse(&form.origin.read(cx).value()).ok(),
+        };
+        let active = self.active.as_ref().filter(|active| {
+            let local = self
+                .launch
+                .local
+                .as_ref()
+                .is_ok_and(|local| local.origin() == &active.profile.origin);
+            local == matches!(setup.page, Page::Welcome)
+                && Some(&active.profile.origin) == origin.as_ref()
+        });
+        let connected = active.is_some_and(|active| active.app.read(cx).connected());
+        let status = active
+            .map(|active| active.app.read(cx).status_text().0)
+            .unwrap_or_else(|| "Not connected".into());
+        let status_color = if connected {
+            theme.success
+        } else if active.is_some() {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
+        let status = h_flex()
+            .gap_1p5()
+            .text_xs()
+            .text_color(status_color)
+            .child(div().size_1p5().rounded_full().bg(status_color))
+            .child(status);
+        let location = h_flex()
+            .p_1()
+            .gap_1()
+            .rounded(theme.radius)
+            .bg(theme.secondary.opacity(0.45))
+            .when(self.launch.local.is_ok(), |row| {
+                row.child(
+                    Button::new("settings-local-server")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label("This machine")
+                        .ghost()
+                        .small()
+                        .flex_1()
+                        .min_w_0()
+                        .selected(matches!(setup.page, Page::Welcome))
+                        .toggled(matches!(setup.page, Page::Welcome))
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            if shell
+                                .setup
+                                .as_ref()
+                                .is_some_and(|setup| !matches!(setup.page, Page::Welcome))
+                            {
+                                shell.back_to_welcome(window, cx);
+                            }
+                        })),
+                )
+            })
+            .child(
+                Button::new("settings-remote-server")
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .label("Remote server")
+                    .ghost()
+                    .small()
+                    .flex_1()
+                    .min_w_0()
+                    .selected(matches!(setup.page, Page::Remote(_)))
+                    .toggled(matches!(setup.page, Page::Remote(_)))
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        if shell
+                            .setup
+                            .as_ref()
+                            .is_some_and(|setup| !matches!(setup.page, Page::Remote(_)))
+                        {
+                            let profile =
+                                shell.active.as_ref().map(|active| active.profile.clone());
+                            shell.open_remote(profile.as_ref(), window, cx);
+                        }
+                    })),
+            );
+        let mut content = v_flex()
+            .child(section_heading(
+                "Server",
+                "Connection settings for your workspace.",
+                cx,
+            ))
+            .child(div().h_6())
+            .child(settings_row(
+                "Run bots on",
+                "Choose a location",
+                location,
+                stacked,
+                theme,
+            ));
+        let failure = match &setup.draft.check {
+            Check::Failed(err) => Some(err.as_str()),
+            _ => setup.error.as_deref(),
+        };
+        let action = match &setup.page {
+            Page::Welcome => match &self.launch.local {
+                Err(why) => {
+                    let (title, text) = missing_local(why);
+                    content = content.child(div().pt_4().child(notice(title, &text, theme)));
+                    None
+                }
+                Ok(local) => {
+                    let key = self.key.as_ref().unwrap_or(&KeyState::Missing);
+                    let shown_key = match key {
+                        KeyState::Loaded => "••••••••••••",
+                        KeyState::Missing => "Not found",
+                        KeyState::Unreadable(_) => "Cannot be read",
+                    };
+                    content = content
+                        .child(settings_row(
+                            "Server address",
+                            "Local connection",
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(local.origin().as_str().to_owned()),
+                                )
+                                .child(status),
+                            stacked,
+                            theme,
+                        ))
+                        .child(settings_row(
+                            "Owner key",
+                            "On this device",
+                            h_flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(shown_key),
+                                )
+                                .when(*key == KeyState::Loaded, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Loaded"),
+                                    )
+                                }),
+                            stacked,
+                            theme,
+                        ));
+                    let incomplete = match key {
+                        KeyState::Loaded => None,
+                        KeyState::Missing => Some(
+                            "No local key was found. Finish installing the local server, then try again. \
+                             You can also connect to a remote server.",
+                        ),
+                        KeyState::Unreadable(err) => Some(err.as_str()),
+                    };
+                    content = content.when_some(
+                        incomplete.filter(|_| failure.is_none()),
+                        |content, err| {
+                            content.child(notice("Local setup is incomplete", err, theme))
+                        },
+                    );
+                    let label = match busy {
+                        Some(Phase::Connecting) => "Connecting…",
+                        Some(Phase::Starting) => "Starting local server…",
+                        Some(Phase::Waiting) => "Waiting for the local server…",
+                        None if failure.is_some() || *key != KeyState::Loaded => "Try local again",
+                        None if local.manages_service() => "Start local server",
+                        None => "Connect locally",
+                    };
+                    (!connected || busy.is_some()).then(|| {
+                        Button::new("connection-start")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label(label)
+                            .primary()
+                            .loading(busy.is_some())
+                            .disabled(busy.is_some())
+                            .on_click(
+                                cx.listener(|shell, _, window, cx| shell.start_local(window, cx)),
+                            )
+                    })
+                }
+            },
+            Page::Remote(form) => {
+                content = content
+                    .child(settings_row(
+                        "Server address",
+                        "HTTPS or a local SSH tunnel",
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Input::new(&form.origin)
+                                    .focus_ring(false)
+                                    .aria_label("Server address"),
+                            )
+                            .when(active.is_some(), |column| column.child(status)),
+                        stacked,
+                        theme,
+                    ))
+                    .child(settings_row(
+                        "Owner key",
+                        "From your remote server",
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Input::new(&form.token)
+                                    .focus_ring(false)
+                                    .aria_label("Owner key")
+                                    .mask_toggle(),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("On your server, open ~/.else/data/owner-token."),
+                            ),
+                        stacked,
+                        theme,
+                    ));
+                Some(
+                    Button::new("connection-connect")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label(if busy.is_some() {
+                            "Connecting…"
+                        } else {
+                            "Save connection"
+                        })
+                        .primary()
+                        .loading(busy.is_some())
+                        .disabled(busy.is_some())
+                        .on_click(
+                            cx.listener(|shell, _, window, cx| shell.connect_remote(window, cx)),
+                        ),
+                )
+            }
+        };
+        if let Some(active) = self.active.as_ref().filter(|_| active.is_none()) {
             let (status, _) = active.app.read(cx).status_text();
             content = content.child(
-                v_flex()
-                    .p_4()
-                    .gap_2()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Current server"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(active.profile.origin.as_str().to_owned()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if active.app.read(cx).connected() {
-                                theme.success
-                            } else {
-                                theme.warning
-                            })
-                            .child(status),
-                    ),
+                div()
+                    .pt_4()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "Current connection: {} · {status}",
+                        active.profile.origin.as_str()
+                    )),
             );
         }
         content
-            .when(self.launch.local.is_ok(), |content| {
-                content.child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("settings-local-server")
-                                .cursor_pointer()
-                                .label("This machine")
-                                .selected(matches!(setup.page, Page::Welcome))
-                                .toggled(matches!(setup.page, Page::Welcome))
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.back_to_welcome(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("settings-remote-server")
-                                .cursor_pointer()
-                                .label("Remote server")
-                                .selected(matches!(setup.page, Page::Remote(_)))
-                                .toggled(matches!(setup.page, Page::Remote(_)))
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    let profile =
-                                        shell.active.as_ref().map(|active| active.profile.clone());
-                                    shell.open_remote(profile.as_ref(), window, cx);
-                                })),
-                        ),
-                )
+            .when_some(failure, |content, err| {
+                content.child(div().pt_4().child(notice("Could not connect", err, theme)))
             })
-            .child(match &setup.page {
-                Page::Welcome => self.render_welcome(setup, &theme, cx),
-                Page::Remote(form) => self.render_remote(setup, form, &theme, cx),
-            })
+            .child(h_flex().justify_end().gap_2().pt_5().children(action).when(
+                matches!(setup.page, Page::Welcome) && connected,
+                |row| {
+                    row.child(
+                        Button::new("app-settings-done")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label("Done")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.cancel(window, cx);
+                                window.close_dialog(cx);
+                            })),
+                    )
+                },
+            ))
             .into_any_element()
     }
+}
+
+fn settings_row(
+    label: &'static str,
+    hint: &'static str,
+    value: impl IntoElement,
+    stacked: bool,
+    theme: &Theme,
+) -> Div {
+    h_flex()
+        .items_center()
+        .when(stacked, |row| row.flex_col().items_start().gap_3())
+        .py_5()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            v_flex()
+                .when(stacked, |label| label.w_full())
+                .when(!stacked, |label| label.flex_none().w(relative(0.43)).pr_6())
+                .gap_1()
+                .child(div().text_sm().child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(hint),
+                ),
+        )
+        .child(
+            div()
+                .when(stacked, |value| value.w_full())
+                .when(!stacked, |value| value.flex_1())
+                .min_w_0()
+                .child(value),
+        )
 }
 
 fn section_heading(title: &'static str, description: &'static str, cx: &App) -> Div {
