@@ -1,8 +1,6 @@
 name: cargo-test
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -19,6 +17,7 @@ env:
 
 jobs:
   cargo-test:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

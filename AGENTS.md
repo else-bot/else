@@ -4,5 +4,6 @@
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
+- Run `cargo test --workspace --locked` on the development machine and fix failures before committing or pushing.
 - Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
 - Do not draw focus rings or decorative outlines on controls; use outlines only to indicate a selected state.
