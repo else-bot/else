@@ -190,12 +190,6 @@ impl ElseApp {
             || submit.is_some_and(QuestionSubmit::locks)
             || self.connection != Connection::Connected;
         let approval = question.is_approval();
-        let routine = view.conversation.as_ref().and_then(|c| {
-            c.turns_in_order()
-                .into_iter()
-                .find(|t| t.questions.iter().any(|q| q.id == id))
-                .and_then(|t| t.routine.as_ref())
-        });
         let mut card = v_flex()
             .w_full()
             .gap_2()
@@ -204,7 +198,6 @@ impl ElseApp {
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
-            .children(routine.map(|run| super::message_row::routine_banner(run, cx)))
             .child(note(heading(question, &bot_name)))
             .child(div().font_semibold().child(question.title.clone()));
         if let Some(context) = &question.context {
@@ -296,10 +289,7 @@ impl ElseApp {
         if !pending {
             card = card.child(note(outcome(question, &bot_name)));
         }
-        super::view::reading_column()
-            .py_1p5()
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 }
 

@@ -276,7 +276,7 @@ impl ElseApp {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let row = super::view::reading_column().py_1p5();
+        let row = v_flex().w_full();
         let form = view.secret_forms.get(&id);
         let (Some(form), true) = (form, request.is_pending()) else {
             let text = match request.status.as_str() {

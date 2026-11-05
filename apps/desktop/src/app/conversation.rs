@@ -25,7 +25,59 @@ pub(super) enum RowKey {
 pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
+    pub(super) routine: Option<RoutineRow>,
+    routine_status: Option<(String, bool)>,
     state: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RoutineRow {
+    pub(super) turn: Uuid,
+    pub(super) first: bool,
+    pub(super) last: bool,
+    pub(super) tail: bool,
+}
+
+fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<RoutineRow>> {
+    let mut turns = HashMap::new();
+    for turn in conversation.into_iter().flat_map(|c| c.turns_in_order()) {
+        if turn.routine.is_some() {
+            for question in &turn.questions {
+                turns.insert(RowKey::Question(question.id), turn.id);
+            }
+            for request in &turn.secret_requests {
+                turns.insert(RowKey::SecretRequest(request.id), turn.id);
+            }
+        }
+    }
+    let turns: Vec<_> = rows
+        .iter()
+        .map(|key| match *key {
+            RowKey::Item(id) => conversation
+                .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
+                .filter(|turn| turn.routine.is_some())
+                .map(|turn| turn.id),
+            RowKey::Question(_) | RowKey::SecretRequest(_) => turns.get(key).copied(),
+            RowKey::Pending(_) => None,
+        })
+        .collect();
+    let tails: HashMap<_, _> = turns
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, turn)| turn.map(|turn| (turn, ix)))
+        .collect();
+    turns
+        .iter()
+        .enumerate()
+        .map(|(ix, turn)| {
+            turn.map(|turn| RoutineRow {
+                turn,
+                first: ix == 0 || turns[ix - 1] != Some(turn),
+                last: turns.get(ix + 1) != Some(&Some(turn)),
+                tail: tails.get(&turn) == Some(&ix),
+            })
+        })
+        .collect()
 }
 
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
@@ -330,7 +382,12 @@ impl ElseApp {
                     conversation
                         .and_then(|c| c.item(id))
                         .map_or((None, None), |item| {
-                            let author = Author::of(&item.kind).filter(|_| item.reaction.is_none());
+                            let author = Author::of(&item.kind).filter(|_| {
+                                item.reaction.is_none()
+                                    && conversation
+                                        .and_then(|c| c.turn(item.turn_id))
+                                        .is_none_or(|turn| turn.routine.is_none())
+                            });
                             (author, item.created_at)
                         })
                 }
@@ -344,10 +401,22 @@ impl ElseApp {
                 RowKey::SecretRequest(_) | RowKey::Question(_) => (None, None),
             })
             .collect();
+        let routines = routine_rows(&rows, conversation);
         let rows: Vec<TranscriptRow> = rows
             .into_iter()
             .zip(burst_tail_stamps(&senders, &Local))
-            .map(|(key, footer_stamp)| {
+            .zip(routines)
+            .map(|((key, footer_stamp), routine)| {
+                let routine_turn = routine.and_then(|r| conversation?.turn(r.turn));
+                let routine_status = routine_turn.map(super::message_row::turn_label);
+                let footer_stamp = if let Some(routine) = routine {
+                    conversation
+                        .filter(|_| routine.tail)
+                        .and_then(|c| c.items().rev().find(|item| item.turn_id == routine.turn))
+                        .and_then(|item| item.created_at)
+                } else {
+                    footer_stamp
+                };
                 let state = conversation.and_then(|c| match key {
                     RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
@@ -360,6 +429,8 @@ impl ElseApp {
                 TranscriptRow {
                     key,
                     footer_stamp,
+                    routine,
+                    routine_status,
                     state,
                 }
             })
@@ -385,10 +456,7 @@ impl ElseApp {
         }
         let previous: HashMap<_, _> = old.iter().map(|row| (row.key, row)).collect();
         for (ix, row) in rows.iter().enumerate() {
-            if previous
-                .get(&row.key)
-                .is_some_and(|old| old.footer_stamp != row.footer_stamp || old.state != row.state)
-            {
+            if previous.get(&row.key).is_some_and(|old| *old != row) {
                 view.list.remeasure_items(ix..ix + 1);
             }
         }
@@ -450,9 +518,140 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::burst_tail_stamps;
+    use super::{RoutineRow, RowKey, burst_tail_stamps, routine_rows};
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
+
+    use crate::model::{Conversation, Snapshot};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn routine_conversation() -> Conversation {
+        let turn = |id: u128| {
+            json!({
+                "id": Uuid::from_u128(id), "request_id": Uuid::from_u128(id + 100),
+                "turn_no": id, "provider_id": "codex", "status": "waiting",
+                "error": null, "effect_uncertain": false,
+                "routine": { "routine_id": Uuid::from_u128(99), "name": "Cleanup",
+                             "due_at": "2026-11-05T04:00:00Z" },
+                "questions": [{ "id": Uuid::from_u128(id + 200), "kind": "external",
+                                "title": "Approve cleanup?", "choices": [], "status": "pending" }],
+                "secret_requests": [{ "id": Uuid::from_u128(id + 300), "name": "Access",
+                                      "reason": "Read branches", "env": ["TOKEN"], "status": "pending" }]
+            })
+        };
+        let items: Vec<_> = [(1, 10), (2, 10), (3, 11), (4, 12), (5, 10)]
+            .into_iter()
+            .map(|(id, turn)| {
+                json!({
+                    "id": Uuid::from_u128(id), "seq": id, "turn_id": Uuid::from_u128(turn),
+                    "kind": "assistant", "text": "Reply", "provider_id": "codex"
+                })
+            })
+            .collect();
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": items, "turns": [turn(10), turn(11)],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        })).unwrap();
+        Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    fn item(id: u128) -> RowKey {
+        RowKey::Item(Uuid::from_u128(id))
+    }
+
+    #[test]
+    fn routine_card_contains_messages_and_requests_once() {
+        let c = routine_conversation();
+        let rows = [
+            item(1),
+            item(2),
+            RowKey::Question(Uuid::from_u128(210)),
+            RowKey::SecretRequest(Uuid::from_u128(310)),
+        ];
+        let groups = routine_rows(&rows, Some(&c));
+        assert_eq!(
+            groups,
+            [
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: true,
+                    last: false,
+                    tail: false
+                }),
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: false,
+                    last: false,
+                    tail: false
+                }),
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: false,
+                    last: false,
+                    tail: false
+                }),
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: false,
+                    last: true,
+                    tail: true
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn separate_occurrences_and_chat_rows_keep_separate_cards() {
+        let c = routine_conversation();
+        let rows = [
+            item(1),
+            item(3),
+            item(4),
+            item(5),
+            RowKey::Pending(Uuid::from_u128(90)),
+        ];
+        let groups = routine_rows(&rows, Some(&c));
+        assert_eq!(
+            groups,
+            [
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: true,
+                    last: true,
+                    tail: false
+                }),
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(11),
+                    first: true,
+                    last: true,
+                    tail: true
+                }),
+                None,
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: true,
+                    last: true,
+                    tail: true
+                }),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_a_new_message_moves_the_routine_footer() {
+        let c = routine_conversation();
+        let before = routine_rows(&[item(1)], Some(&c));
+        let after = routine_rows(&[item(1), item(2)], Some(&c));
+        assert!(before[0].unwrap().last && before[0].unwrap().tail);
+        assert!(after[0].unwrap().first);
+        assert!(!after[0].unwrap().last && !after[0].unwrap().tail);
+        assert!(!after[1].unwrap().first);
+        assert!(after[1].unwrap().last && after[1].unwrap().tail);
+    }
 
     fn at(text: &str) -> DateTime<Utc> {
         format!("2026-11-04T{text}Z").parse().unwrap()
