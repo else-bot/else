@@ -34,6 +34,11 @@ const EXPLICIT: &[&str] = &[
 
 const INSTALLED_BIND: &str = "127.0.0.1:7878";
 
+const EXPLICIT_UPDATES: &str =
+    "This development or test session names its own server; update its checkout instead.";
+const NOT_INSTALLED: &str =
+    "No else.bot installation was found; install one with the installer to update from here.";
+
 pub struct Launch {
     /// Where the profile lives; an error is shown on the welcome screen.
     pub store: Result<ProfileStore, String>,
@@ -41,6 +46,38 @@ pub struct Launch {
     pub local: Result<LocalServer, NoLocal>,
     /// The remote form's starting values, from an explicit launcher only.
     pub remote_seed: Option<RemoteSeed>,
+    /// The installation this app may update and relaunch, or why there is
+    /// none. Development and test sessions never have one.
+    pub updates: Result<Installation, String>,
+}
+
+/// A trusted installation: its own `bin/elsebot` updates it, and its local
+/// server, when it has one, answers whether bots are working.
+#[derive(Debug, Clone)]
+pub struct Installation {
+    home: PathBuf,
+    server: Option<LocalServer>,
+}
+
+impl Installation {
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    /// The installed server; `None` for an app-only installation.
+    pub fn server(&self) -> Option<&LocalServer> {
+        self.server.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(home: PathBuf, server: Option<(Origin, OwnerToken)>) -> Self {
+        let server = server.map(|(origin, token)| LocalServer {
+            origin,
+            key: KeySource::Given(token),
+            service: Some(Service { home: home.clone() }),
+        });
+        Self { home, server }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,23 +229,29 @@ impl Launch {
                 home.join("config/elsebot.env").is_file().then_some(home)
             });
         match home {
-            Some(home) if home.is_absolute() => Self {
-                store: Ok(ProfileStore::at(home.join("config/desktop.json"))),
-                local: installed(&home),
-                remote_seed: None,
-            },
-            Some(home) => Self {
-                store: ProfileStore::from_env(&get),
-                local: Err(NoLocal::Refused(format!(
-                    "ELSE_HOME ({}) must be an absolute path.",
-                    home.display()
-                ))),
-                remote_seed: None,
-            },
+            Some(home) if home.is_absolute() => {
+                let local = installed(&home);
+                Self {
+                    store: Ok(ProfileStore::at(home.join("config/desktop.json"))),
+                    updates: updatable(&home, &local),
+                    local,
+                    remote_seed: None,
+                }
+            }
+            Some(home) => {
+                let why = format!("ELSE_HOME ({}) must be an absolute path.", home.display());
+                Self {
+                    store: ProfileStore::from_env(&get),
+                    local: Err(NoLocal::Refused(why.clone())),
+                    remote_seed: None,
+                    updates: Err(why),
+                }
+            }
             None => Self {
                 store: ProfileStore::from_env(&get),
                 local: Err(NoLocal::NotInstalled),
                 remote_seed: None,
+                updates: Err(NOT_INSTALLED.into()),
             },
         }
     }
@@ -236,6 +279,7 @@ impl Launch {
                     service: None,
                 }),
                 remote_seed: None,
+                updates: Err(EXPLICIT_UPDATES.into()),
             };
         }
         let token = key.and_then(|key| match key {
@@ -247,6 +291,7 @@ impl Launch {
             store,
             local: Err(NoLocal::Explicit),
             remote_seed: seeded.then_some(RemoteSeed { origin: raw, token }),
+            updates: Err(EXPLICIT_UPDATES.into()),
         }
     }
 }
@@ -312,6 +357,30 @@ fn installed(home: &Path) -> Result<LocalServer, NoLocal> {
         service: Some(Service {
             home: home.to_owned(),
         }),
+    })
+}
+
+/// An installed server was checked by `installed`; an app-only one is
+/// checked here the same way before its `bin/elsebot` may run.
+fn updatable(home: &Path, local: &Result<LocalServer, NoLocal>) -> Result<Installation, String> {
+    let server = match local {
+        Ok(server) => Some(server.clone()),
+        Err(NoLocal::AppOnly) => {
+            let config = home.join("config");
+            let checked = trusted(&config, Kind::PrivateDir)
+                .and_then(|()| trusted(&config.join("elsebot.env"), Kind::File))
+                .and_then(|()| trusted(&home.join("bin/elsebot"), Kind::Program));
+            if let Err(NoLocal::Refused(why)) = checked {
+                return Err(why);
+            }
+            None
+        }
+        Err(NoLocal::Refused(why)) => return Err(why.clone()),
+        Err(NoLocal::NotInstalled | NoLocal::Explicit) => return Err(NOT_INSTALLED.into()),
+    };
+    Ok(Installation {
+        home: home.to_owned(),
+        server,
     })
 }
 
@@ -552,7 +621,7 @@ impl Drop for Starter {
     }
 }
 
-fn service_env(
+pub(crate) fn service_env(
     vars: impl Iterator<Item = (OsString, OsString)>,
     home: &Path,
 ) -> Vec<(OsString, OsString)> {
@@ -653,8 +722,37 @@ mod tests {
                 "{name}: {:?}",
                 store_path(&launch)
             );
+            assert!(
+                launch.updates.is_err(),
+                "{name}: never updates an installation"
+            );
             assert_eq!(launch.local.unwrap_err(), NoLocal::Explicit, "{name}");
         }
+    }
+
+    #[test]
+    fn updates_need_a_trusted_installation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let get = env(&[("ELSE_HOME", home.to_str().unwrap().into())]);
+        installation(&home, false, "#!/bin/sh\n");
+        let app_only = Launch::discover(&get, None).updates.unwrap();
+        assert_eq!(app_only.home(), home);
+        assert!(app_only.server().is_none());
+        std::fs::set_permissions(
+            home.join("bin/elsebot"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let refused = Launch::discover(&get, None).updates.unwrap_err();
+        assert!(refused.contains("executable you own"), "{refused}");
+
+        installation(&home, true, "#!/bin/sh\n");
+        let server = Launch::discover(&get, None).updates.unwrap();
+        assert!(server.server().unwrap().manages_service());
+        let absent = dir.path().join("absent");
+        let none = Launch::discover(env(&[("ELSE_HOME", absent.to_str().unwrap().into())]), None);
+        assert!(none.updates.is_err());
     }
 
     #[test]

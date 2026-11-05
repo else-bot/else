@@ -89,7 +89,7 @@ impl Gate {
 pub fn allowed(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     if path.ends_with("/maintenance/update") {
-        return matches!(*method, Method::POST | Method::DELETE);
+        return matches!(*method, Method::GET | Method::POST | Method::DELETE);
     }
     if matches!(*method, Method::GET | Method::HEAD) {
         return !path.ends_with("/desktop");

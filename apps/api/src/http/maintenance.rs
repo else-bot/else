@@ -10,8 +10,11 @@
 //!   computers are reported: they keep running across a restart.
 //! - `DELETE /v1/maintenance/update` reopens the gate (an update that was
 //!   abandoned after preparing).
+//! - `GET /v1/maintenance/update` reports the same work counts without
+//!   touching the gate, so the desktop can say whether an update would be
+//!   refused. Only the installer's `POST` decides.
 //!
-//! Both bypass the gate themselves (see `maintenance::allowed`).
+//! All three bypass the gate themselves (see `maintenance::allowed`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +23,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::get;
 use serde_json::{Value, json};
 
 use super::AppState;
@@ -30,7 +33,21 @@ use super::error::ApiError;
 const ADMITTED_GRACE: Duration = Duration::from_secs(10);
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/maintenance/update", post(prepare).delete(reopen))
+    Router::new().route(
+        "/maintenance/update",
+        get(report).post(prepare).delete(reopen),
+    )
+}
+
+async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let work = work(&state).await?;
+    Ok(Json(json!({
+        "version": crate::VERSION,
+        "active_turns": work.turns,
+        "running_commands": work.commands,
+        "queued_turns": work.queued,
+        "background_jobs": work.jobs,
+    })))
 }
 
 async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
