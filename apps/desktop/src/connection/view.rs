@@ -490,7 +490,7 @@ fn note(text: &'static str, theme: &Theme) -> Div {
         .child(text)
 }
 
-fn notice(title: &str, text: &str, theme: &Theme) -> Div {
+pub(super) fn notice(title: &str, text: &str, theme: &Theme) -> Div {
     v_flex()
         .gap(px(3.))
         .mb(px(17.))
@@ -513,7 +513,7 @@ fn notice(title: &str, text: &str, theme: &Theme) -> Div {
         )
 }
 
-fn missing_local(why: &NoLocal) -> (&'static str, String) {
+pub(super) fn missing_local(why: &NoLocal) -> (&'static str, String) {
     let here = this_machine();
     match why {
         NoLocal::AppOnly => (
