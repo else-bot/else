@@ -415,7 +415,7 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         },
         arrivals: vec![Arrival {
             message: MessageRef {
-                folder: "INBOX".into(),
+                folder: format!("INBOX {GATE}"),
                 uid_validity: 1,
                 uid: 9,
             },
@@ -496,6 +496,9 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         .unwrap();
     let visible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bot_events WHERE kind='item.upsert' AND json_extract(data,'$.item.kind')='connector')").fetch_one(&mut *conn).await.unwrap();
     assert!(!visible);
+    drop(conn);
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
 }
 
 #[tokio::test]
