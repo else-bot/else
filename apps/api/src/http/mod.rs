@@ -55,6 +55,7 @@ pub struct AppState {
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     /// Held while an update is prepared: the gate stays closed until exit.
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
+    desktop_streams: desktop_stream::Streams,
 }
 
 impl AppState {
@@ -74,7 +75,15 @@ impl AppState {
             computers: None,
             secret_key: None,
             update_hold: crate::actor::Actor::default(),
+            desktop_streams: desktop_stream::Streams::default(),
         }
+    }
+
+    /// Refuse new desktop viewer streams and end open ones; resolves once
+    /// each has released its held input, control, and lease. Call before
+    /// HTTP shutdown: upgraded connections are not part of axum's drain.
+    pub fn stop_desktop_streams(&self) -> impl Future<Output = ()> + '_ {
+        self.desktop_streams.stop()
     }
 
     pub fn with_secret_key(mut self, key: Arc<crate::credentials::SecretKey>) -> Self {

@@ -5,6 +5,7 @@
 mod common;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +28,8 @@ type Socket =
 struct Runtime {
     computers: Mutex<HashMap<String, RuntimeState>>,
     calls: Mutex<Vec<String>>,
+    /// Guest commands never finish, like a first boot's service setup.
+    hang_exec: AtomicBool,
 }
 
 impl Runtime {
@@ -65,11 +68,15 @@ impl ComputerRuntime for Runtime {
     }
     async fn exec(
         &self,
-        _: &str,
+        name: &str,
         _: &str,
         _: &[&str],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
+        if self.hang_exec.load(Ordering::SeqCst) {
+            self.calls.lock().unwrap().push(format!("Setup {name}"));
+            std::future::pending::<()>().await;
+        }
         Ok(ExecOutput {
             status: Some(0),
             stdout: String::new(),
@@ -657,4 +664,245 @@ async fn an_older_image_can_be_taken_over_but_not_watched() {
         next_json(&mut socket).await,
         json!({"type":"mode","mode":"watch"})
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_releases_held_input_and_refuses_new_streams() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=control").await;
+    next_json(&mut socket).await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    send(
+        &mut socket,
+        json!({"type":"pointer","x":3,"y":4,"buttons":1}),
+    )
+    .await;
+    send(&mut socket, json!({"type":"key","key":0xff53,"down":true})).await;
+    s.wait_log("control key 65363 1").await;
+    assert_eq!(s.leases("desktop-control:%").await, 1);
+    assert_eq!(s.live_viewer_leases().await, 1);
+
+    tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
+        .await
+        .expect("streams stop promptly");
+    assert_eq!(
+        s.leases("desktop-control:%").await,
+        0,
+        "bot input and browser actions are no longer deferred"
+    );
+    assert_eq!(
+        s.leases("desktop-stream:%").await,
+        0,
+        "viewer lease released"
+    );
+    s.wait_log("control key 65363 0").await;
+    s.wait_log("control pointer 0 3 4").await;
+    let lines = s.log.lines();
+    let released = lines.iter().position(|l| l == "control key 65363 0");
+    let closed = lines.iter().position(|l| l == "control closed");
+    assert!(
+        released.is_some() && closed.is_some() && released < closed,
+        "held input is released before the control connection closes: {lines:?}"
+    );
+    ends_with(&mut socket, "server_stopping").await;
+
+    let opened = s.log.lines().len();
+    assert_eq!(
+        s.connect("mode=control", Some(TOKEN)).await.err(),
+        Some(503)
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        s.log.lines().len(),
+        opened,
+        "nothing reaches the desktop after the drain"
+    );
+    assert_eq!(s.leases("desktop-%").await, 0, "no lease after the drain");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_abandons_a_stream_waiting_for_boot() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let bot_id: Uuid = s.bot.parse().unwrap();
+    s.manager.owner_stop(bot_id).await.unwrap();
+    s.manager.owner_resume(bot_id).await.unwrap();
+    s.runtime.hang_exec.store(true, Ordering::SeqCst);
+    let mut socket = s.open("mode=control&wake=true").await;
+    for _ in 0..200 {
+        if s.runtime
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("Setup"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        s.runtime
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("Setup")),
+        "the stream waits for the boot"
+    );
+    assert_eq!(
+        s.leases("desktop-stream:%").await,
+        1,
+        "the boot granted a lease"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
+        .await
+        .expect("a pending boot does not hold the API open");
+    ends_with(&mut socket, "server_stopping").await;
+    assert_eq!(s.leases("desktop-%").await, 0);
+    assert!(s.log.lines().is_empty(), "{:?}", s.log.lines());
+}
+
+/// Longer than the stream's one-second lease check.
+const LEASE_TICK: Duration = Duration::from_millis(1500);
+
+/// Hold the right arrow in control mode and wait until the guest has it.
+async fn hold_key(s: &Setup, socket: &mut Socket) {
+    while next_json(socket).await != json!({"type":"mode","mode":"control"}) {}
+    send(socket, json!({"type":"key","key":0xff53,"down":true})).await;
+    s.wait_log("control key 65363 1").await;
+}
+
+fn key_released(s: &Setup) -> bool {
+    s.log
+        .input("control")
+        .iter()
+        .any(|l| l == "control key 65363 0")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_releases_input_a_non_reading_client_holds() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    // A tiny receive buffer, set before connecting, so the server's
+    // replies back up into the stream's queue once the client stops reading.
+    let tcp = tokio::net::TcpSocket::new_v4().unwrap();
+    tcp.set_recv_buffer_size(1024).unwrap();
+    let tcp = tcp.connect(s.addr.parse().unwrap()).await.unwrap();
+    let mut request = format!(
+        "ws://{}/v1/bots/{}/desktop/stream?mode=control",
+        s.addr, s.bot
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
+    let (mut socket, _) =
+        tokio_tungstenite::client_async(request, tokio_tungstenite::MaybeTlsStream::Plain(tcp))
+            .await
+            .unwrap();
+    hold_key(&s, &mut socket).await;
+
+    let (mut sink, unread) = socket.split();
+    let flood =
+        tokio::spawn(
+            async move { while sink.send(Message::Text("not json".into())).await.is_ok() {} },
+        );
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert!(!key_released(&s));
+
+    let drained = tokio::time::timeout(Duration::from_secs(5), s.app.state.stop_desktop_streams())
+        .await
+        .is_ok();
+    flood.abort();
+    drop(unread);
+    assert!(
+        key_released(&s),
+        "a client that stops reading cannot keep a key held"
+    );
+    assert!(drained, "the stream does not wait on its client");
+    assert_eq!(s.leases("desktop-%").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_releases_input_before_waiting_on_a_busy_database() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=control").await;
+    hold_key(&s, &mut socket).await;
+    let pool = &s.app.db.pool;
+    let mut held = Vec::new();
+    while let Ok(Ok(connection)) =
+        tokio::time::timeout(Duration::from_millis(200), pool.acquire()).await
+    {
+        held.push(connection);
+    }
+    assert!(!held.is_empty());
+    tokio::time::sleep(LEASE_TICK).await;
+
+    let mut drain = Box::pin(s.app.state.stop_desktop_streams());
+    for _ in 0..150 {
+        if key_released(&s) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        key_released(&s),
+        "no database wait precedes the input release"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut drain)
+            .await
+            .is_err(),
+        "leases are still released, once the database answers"
+    );
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .expect("streams finish once the database answers");
+    assert_eq!(s.leases("desktop-%").await, 0);
+    ends_with(&mut socket, "server_stopping").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let bot_id: Uuid = s.bot.parse().unwrap();
+    let mut socket = s.open("mode=watch").await;
+    while next_json(&mut socket).await != json!({"type":"mode","mode":"watch"}) {}
+    // Another writer holds SQLite's lock: reads go on, the control lease waits.
+    let mut writer = s.app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("UPDATE bots SET name = name WHERE id = ?1")
+        .bind(bot_id)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    send(&mut socket, json!({"type":"mode","mode":"control"})).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut drain = Box::pin(s.app.state.stop_desktop_streams());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut drain)
+            .await
+            .is_err(),
+        "an abandoned control lease is looked up behind the writer"
+    );
+    writer.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .expect("the abandoned admission is cleaned up");
+    assert_eq!(
+        s.leases("desktop-%").await,
+        0,
+        "no lease outlives the drain"
+    );
+    assert!(
+        s.manager.claim_control(bot_id, Uuid::new_v4()).await,
+        "control ownership was released"
+    );
+    assert!(s.log.input("control").is_empty());
+    ends_with(&mut socket, "server_stopping").await;
 }

@@ -23,7 +23,9 @@
 //! connection to the controlling server, which makes the bot's pointer and
 //! keyboard batches fail with `OWNER_USING_DESKTOP` until control ends; at
 //! most one stream controls a bot. Leaving control, `release`, and every way
-//! a stream normally ends release what it pressed. In watch mode input is dropped.
+//! a stream ends release what it pressed. In watch mode input is dropped.
+//! API shutdown signals streams with `server_stopping` and waits for input,
+//! control, and lease cleanup within the configured shutdown grace period.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -40,6 +42,9 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::{TaskTrackerToken, TaskTrackerWaitFuture};
 use uuid::Uuid;
 
 use super::AppState;
@@ -59,6 +64,42 @@ const MAX_HELD_KEYS: usize = 32;
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
 /// One write to a guest connection; a stuck guest ends the stream.
 const GUEST_WRITE_LIMIT: Duration = Duration::from_secs(5);
+const STOPPING: &str = "else.bot is stopping; reconnect in a moment.";
+
+/// The API's open streams. Upgraded connections outlive axum's graceful
+/// shutdown, so the API stops them here before the runtime is dropped.
+#[derive(Default)]
+pub(crate) struct Streams {
+    stop: CancellationToken,
+    tasks: TaskTracker,
+}
+
+/// A stream counted by [`Streams`] from its upgrade request until it has
+/// released everything.
+struct Admission {
+    stop: CancellationToken,
+    _tracked: TaskTrackerToken,
+}
+
+impl Streams {
+    fn admit(&self) -> Option<Admission> {
+        // Taken before the check: both touch the tracker's one atomic, so
+        // either `stop` sees this token or this sees the tracker closed.
+        let tracked = self.tasks.token();
+        (!self.tasks.is_closed()).then(|| Admission {
+            stop: self.stop.clone(),
+            _tracked: tracked,
+        })
+    }
+
+    /// Refuse new streams and end open ones now; the future resolves once
+    /// every stream has released its input, control, and lease.
+    pub(crate) fn stop(&self) -> TaskTrackerWaitFuture<'_> {
+        self.stop.cancel();
+        self.tasks.close();
+        self.tasks.wait()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,9 +134,13 @@ pub(super) async fn stream(
     let Query(params) = params
         .map_err(|_| ApiError::bad_request("invalid_mode", "mode must be watch or control."))?;
     let computers = super::computers::manager(&state)?.clone();
+    let Some(admission) = state.desktop_streams.admit() else {
+        return Err(ApiError::unavailable("server_stopping", STOPPING));
+    };
+    let db = state.db.clone();
     Ok(ws
         .max_message_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| session(computers, bot_id, params, socket)))
+        .on_upgrade(move |socket| session(computers, db, bot_id, params, socket, admission)))
 }
 
 /// Why a stream ended, sent to the client before the close.
@@ -119,42 +164,107 @@ fn error_message(code: &str, message: &str) -> Message {
     )
 }
 
-async fn session(computers: Arc<ComputerManager>, bot: Uuid, params: Params, socket: WebSocket) {
+async fn session(
+    computers: Arc<ComputerManager>,
+    db: sqlx::SqlitePool,
+    bot: Uuid,
+    params: Params,
+    socket: WebSocket,
+    admission: Admission,
+) {
+    let stop = &admission.stop;
     let (sink, mut incoming) = socket.split();
     let (out, out_rx) = mpsc::channel(16);
     let frame_queued = Arc::new(AtomicBool::new(false));
     let writer = tokio::spawn(write(sink, out_rx, frame_queued.clone()));
     let stream_id = Uuid::new_v4();
     let holder = format!("desktop-stream:{stream_id}");
-    let ended = match computers.viewer(bot, &holder, params.wake).await {
-        Ok(Ok(target)) => {
+    let viewer = tokio::select! {
+        biased;
+        _ = stop.cancelled() => None,
+        viewer = computers.viewer(bot, &holder, params.wake) => Some(viewer),
+    };
+    let ended = match viewer {
+        None => {
+            release_abandoned(&computers, &db, &holder).await;
+            end("server_stopping", STOPPING)
+        }
+        Some(Ok(Ok(target))) => {
             let lease = target.lease_id;
             let mut session = Session::new(
                 computers.clone(),
+                db.clone(),
                 bot,
                 stream_id,
                 target,
                 out.clone(),
                 frame_queued,
+                stop.clone(),
             );
             let ended = session.run(params.mode, &mut incoming).await;
             session.shutdown().await;
+            let ended = session.reason(ended).await;
             if let Err(err) = computers.release(lease).await {
                 tracing::warn!(bot = %bot, error = %err, "releasing a desktop viewer lease");
             }
             ended
         }
-        Ok(Err(refusal)) => Some(refused(refusal)),
-        Err(err) => {
+        Some(Ok(Err(refusal))) => Some(refused(refusal)),
+        Some(Err(err)) => {
             tracing::warn!(bot = %bot, error = %err, "desktop viewer");
             end("computer_unavailable", "The computer is not available now.")
         }
     };
     if let Some(End { code, message }) = ended {
-        let _ = out.send(error_message(code, &message)).await;
+        if let Err(mpsc::error::TrySendError::Full(message)) =
+            out.try_send(error_message(code, &message))
+        {
+            let _ = stop.run_until_cancelled(out.send(message)).await;
+        }
     }
     drop(out);
-    let _ = tokio::time::timeout(WRITE_LIMIT + CLOSE_LIMIT, writer).await;
+    let mut writer = writer;
+    let flush = tokio::time::timeout(WRITE_LIMIT + CLOSE_LIMIT, &mut writer);
+    let stopped = async {
+        stop.cancelled().await;
+        tokio::time::sleep(CLOSE_LIMIT).await;
+    };
+    tokio::select! {
+        _ = flush => {}
+        _ = stopped => {}
+    }
+    writer.abort();
+}
+
+/// Release a lease an abandoned `viewer` or control admission may have
+/// taken for `holder`.
+async fn release_abandoned(computers: &ComputerManager, db: &sqlx::SqlitePool, holder: &str) {
+    let leases = async {
+        // A cancelled SQLite COMMIT may still run on its worker. Take the
+        // writer before reading so that commit cannot appear after cleanup.
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+        let leases: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM computer_leases WHERE holder = ?1 AND released_at IS NULL",
+        )
+        .bind(holder)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(leases)
+    }
+    .await;
+    let leases = match leases {
+        Ok(leases) => leases,
+        Err(err) => {
+            tracing::warn!(error = %err, "finding an abandoned desktop lease");
+            return;
+        }
+    };
+    for lease in leases {
+        if let Err(err) = computers.release(lease).await {
+            tracing::warn!(error = %err, "releasing an abandoned desktop lease");
+        }
+    }
 }
 
 fn refused(refusal: ViewerRefusal) -> End {
@@ -233,6 +343,7 @@ async fn close(
 
 struct Session {
     computers: Arc<ComputerManager>,
+    db: sqlx::SqlitePool,
     bot: Uuid,
     stream_id: Uuid,
     target: ViewerTarget,
@@ -259,19 +370,24 @@ struct Session {
     held_keys: BTreeSet<u32>,
     buttons: u8,
     pointer: (u16, u16),
+    stop: CancellationToken,
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         computers: Arc<ComputerManager>,
+        db: sqlx::SqlitePool,
         bot: Uuid,
         stream_id: Uuid,
         target: ViewerTarget,
         out: mpsc::Sender<Message>,
         frame_queued: Arc<AtomicBool>,
+        stop: CancellationToken,
     ) -> Self {
         Self {
             computers,
+            db,
             bot,
             stream_id,
             target,
@@ -291,14 +407,42 @@ impl Session {
             held_keys: BTreeSet::new(),
             buttons: 0,
             pointer: (0, 0),
+            stop,
         }
     }
 
     async fn send(&self, message: Message) -> Option<End> {
-        self.out.send(message).await.err().map(|_| End {
-            code: "client_gone",
-            message: String::new(),
-        })
+        match self.stop.run_until_cancelled(self.out.send(message)).await {
+            Some(Ok(())) => None,
+            Some(Err(_)) => end("client_gone", ""),
+            None => end("server_stopping", STOPPING),
+        }
+    }
+
+    /// The viewer lease's state, unless the API stops first. Dropping the
+    /// check is safe: it reads, and a renewal only extends a live lease.
+    async fn lease_state(&self, renew: bool) -> Option<Result<ViewerLease, String>> {
+        self.stop
+            .run_until_cancelled(self.computers.viewer_lease(self.target.lease_id, renew))
+            .await
+            .map(|state| state.map_err(|err| err.to_string()))
+    }
+
+    async fn reason(&self, ended: Option<End>) -> Option<End> {
+        if self.stop.is_cancelled() {
+            return end("server_stopping", STOPPING);
+        }
+        match self.lease_state(false).await {
+            None => end("server_stopping", STOPPING),
+            Some(Ok(ViewerLease::OwnerStopped)) => {
+                end("computer_stopped", "The owner stopped this computer.")
+            }
+            Some(Ok(ViewerLease::BotInactive)) => end("bot_deleted", "This bot was deleted."),
+            Some(Ok(ViewerLease::NotRunning)) => {
+                end("computer_not_running", "The computer stopped running.")
+            }
+            _ => ended.filter(|end| end.code != "client_gone"),
+        }
     }
 
     async fn send_mode(&self) -> Option<End> {
@@ -337,8 +481,10 @@ impl Session {
         let mut renewed = Instant::now();
         let mut pinged = Instant::now();
         let mut seen = Instant::now();
+        let stop = self.stop.clone();
         loop {
             let ended = tokio::select! {
+                _ = stop.cancelled() => end("server_stopping", STOPPING),
                 message = incoming.next() => {
                     seen = Instant::now();
                     match message {
@@ -378,25 +524,27 @@ impl Session {
                         end("client_gone", "")
                     } else {
                         let renew = renewed.elapsed() >= renew_every;
-                        let checked = match self.computers.viewer_lease(self.target.lease_id, renew).await {
-                            Ok(ViewerLease::Live) => {
+                        let checked = match self.lease_state(renew).await {
+                            None => end("server_stopping", STOPPING),
+                            Some(Ok(ViewerLease::Live)) => {
                                 if renew {
                                     renewed = Instant::now();
                                     if let Some(lease) = self.control_lease {
-                                        let _ = self.computers.renew(lease).await;
+                                        let renewal = self.computers.renew(lease);
+                                        let _ = self.stop.run_until_cancelled(renewal).await;
                                     }
                                 }
                                 None
                             }
-                            Ok(ViewerLease::OwnerStopped) => {
+                            Some(Ok(ViewerLease::OwnerStopped)) => {
                                 end("computer_stopped", "The owner stopped this computer.")
                             }
-                            Ok(ViewerLease::BotInactive) => end("bot_deleted", "This bot was deleted."),
-                            Ok(ViewerLease::NotRunning) => {
+                            Some(Ok(ViewerLease::BotInactive)) => end("bot_deleted", "This bot was deleted."),
+                            Some(Ok(ViewerLease::NotRunning)) => {
                                 end("computer_not_running", "The computer stopped running.")
                             }
-                            Ok(ViewerLease::Ended) => end("lease_ended", "The desktop session ended."),
-                            Err(err) => {
+                            Some(Ok(ViewerLease::Ended)) => end("lease_ended", "The desktop session ended."),
+                            Some(Err(err)) => {
                                 tracing::warn!(bot = %self.bot, error = %err, "checking a desktop viewer lease");
                                 end("computer_unavailable", "The computer is not available now.")
                             }
@@ -411,40 +559,30 @@ impl Session {
                 }
             };
             if ended.is_some() {
-                return match self
-                    .computers
-                    .viewer_lease(self.target.lease_id, false)
-                    .await
-                {
-                    Ok(ViewerLease::OwnerStopped) => {
-                        end("computer_stopped", "The owner stopped this computer.")
-                    }
-                    Ok(ViewerLease::BotInactive) => end("bot_deleted", "This bot was deleted."),
-                    Ok(ViewerLease::NotRunning) => {
-                        end("computer_not_running", "The computer stopped running.")
-                    }
-                    _ => ended.filter(|end| end.code != "client_gone"),
-                };
+                return ended;
             }
         }
     }
 
     async fn client(&mut self, text: &str) -> Option<End> {
-        match self
-            .computers
-            .viewer_lease(self.target.lease_id, false)
-            .await
-        {
-            Ok(ViewerLease::Live) => {}
-            Ok(ViewerLease::OwnerStopped) => {
+        match self.lease_state(false).await {
+            None => return end("server_stopping", STOPPING),
+            Some(Ok(ViewerLease::Live)) => {}
+            Some(Ok(ViewerLease::OwnerStopped)) => {
                 return end("computer_stopped", "The owner stopped this computer.");
             }
-            Ok(ViewerLease::BotInactive) => return end("bot_deleted", "This bot was deleted."),
-            Ok(ViewerLease::NotRunning) => {
+            Some(Ok(ViewerLease::BotInactive)) => {
+                return end("bot_deleted", "This bot was deleted.");
+            }
+            Some(Ok(ViewerLease::NotRunning)) => {
                 return end("computer_not_running", "The computer stopped running.");
             }
-            Ok(ViewerLease::Ended) => return end("lease_ended", "The desktop session ended."),
-            Err(_) => return end("computer_unavailable", "The computer is not available now."),
+            Some(Ok(ViewerLease::Ended)) => {
+                return end("lease_ended", "The desktop session ended.");
+            }
+            Some(Err(_)) => {
+                return end("computer_unavailable", "The computer is not available now.");
+            }
         }
         let Ok(message) = serde_json::from_str::<ClientMessage>(text) else {
             return self
@@ -508,7 +646,12 @@ impl Session {
     }
 
     async fn enter_control(&mut self) -> Option<End> {
-        if !self.computers.claim_control(self.bot, self.stream_id).await {
+        let claim = self.computers.claim_control(self.bot, self.stream_id);
+        let Some(claimed) = self.stop.run_until_cancelled(claim).await else {
+            // An accepted claim still lands; `shutdown` ends it after.
+            return end("server_stopping", STOPPING);
+        };
+        if !claimed {
             return self
                 .send(error_message(
                     "control_in_use",
@@ -517,13 +660,18 @@ impl Session {
                 .await;
         }
         let holder = format!("desktop-control:{}:{}", self.bot, self.stream_id);
-        let lease = match self.computers.control_lease(self.bot, &holder).await {
-            Ok(Ok(lease)) => lease,
-            Ok(Err(refusal)) => {
+        let attach = self.computers.control_lease(self.bot, &holder);
+        let lease = match self.stop.run_until_cancelled(attach).await {
+            None => {
+                release_abandoned(&self.computers, &self.db, &holder).await;
+                return end("server_stopping", STOPPING);
+            }
+            Some(Ok(Ok(lease))) => lease,
+            Some(Ok(Err(refusal))) => {
                 self.computers.end_control(self.bot, self.stream_id).await;
                 return Some(refused(refusal));
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 tracing::warn!(bot = %self.bot, error = %err, "desktop control lease");
                 self.computers.end_control(self.bot, self.stream_id).await;
                 return self
@@ -535,7 +683,7 @@ impl Session {
             }
         };
         self.control_lease = Some(lease);
-        match connect(&self.target, Target::Control).await {
+        match connect(&self.target, Target::Control, &self.stop).await {
             Ok(connection) => {
                 let drain = tokio::spawn(viewer::read_events(
                     connection.reader,
@@ -616,7 +764,7 @@ impl Session {
             close(view.writer, view.reader, view.bridge).await;
         }
         let target = wanted?;
-        let connection = match connect(&self.target, target).await {
+        let connection = match connect(&self.target, target, &self.stop).await {
             Ok(connection) => connection,
             Err(err) => {
                 tracing::warn!(bot = %self.bot, error = %err, "desktop viewer connection");
@@ -703,8 +851,12 @@ impl Session {
             return None;
         }
         let request = viewer::update_request(!self.full, self.fb.width, self.fb.height);
-        if !write_guest(&mut view.writer, &request).await {
-            return end("desktop_disconnected", "The desktop connection closed.");
+        // A cut request is safe: a stopping stream closes this view.
+        let written = write_guest(&mut view.writer, &request);
+        match self.stop.run_until_cancelled(written).await {
+            None => return end("server_stopping", STOPPING),
+            Some(false) => return end("desktop_disconnected", "The desktop connection closed."),
+            Some(true) => {}
         }
         self.requested = true;
         self.full = false;
@@ -720,10 +872,11 @@ impl Session {
         self.frame_request().await
     }
 
+    /// Release held input, then control, then the view. Control writes
+    /// finish rather than being cut, so the guest never sees a partial
+    /// message; the database waits follow the release.
     async fn shutdown(&mut self) {
-        if self.control.is_some() {
-            self.leave_control().await;
-        }
+        self.leave_control().await;
         if let Some(view) = self.view.take() {
             close(view.writer, view.reader, view.bridge).await;
         }
@@ -781,8 +934,13 @@ async fn encoded(task: &mut Option<JoinHandle<Vec<u8>>>) -> Option<Vec<u8>> {
     png
 }
 
-async fn connect(target: &ViewerTarget, to: Target) -> Result<viewer::Connection, String> {
-    match tokio::time::timeout(CONNECT_LIMIT, async {
+/// Abandoned when the API stops: a half-open connection carries no input.
+async fn connect(
+    target: &ViewerTarget,
+    to: Target,
+    stop: &CancellationToken,
+) -> Result<viewer::Connection, String> {
+    let connecting = tokio::time::timeout(CONNECT_LIMIT, async {
         loop {
             match viewer::connect(target.port, &target.password, to).await {
                 Ok(connection) => return Ok(connection),
@@ -790,9 +948,13 @@ async fn connect(target: &ViewerTarget, to: Target) -> Result<viewer::Connection
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
-    })
-    .await
-    {
+    });
+    let connected = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Err("the API is stopping".into()),
+        connected = connecting => connected,
+    };
+    match connected {
         Ok(Ok(connection)) => Ok(connection),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err("timed out".into()),

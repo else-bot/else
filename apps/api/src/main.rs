@@ -586,7 +586,7 @@ async fn serve(
 ) -> anyhow::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
-    let app = http::router(config, state);
+    let app = http::router(config, state.clone());
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(async move {
         let mut stop_rx = stop_rx;
@@ -605,8 +605,18 @@ async fn serve(
 
     }
     tracing::info!("shutdown requested; draining connections");
+    // Upgraded desktop streams are outside axum's drain and would otherwise
+    // be dropped with the runtime, leaving keys held in the guest.
+    let streams = state.stop_desktop_streams();
     let _ = stop_tx.send(true);
-    match tokio::time::timeout(config.shutdown_grace, &mut server).await {
+    let deadline = tokio::time::Instant::now() + config.shutdown_grace;
+    if tokio::time::timeout_at(deadline, streams).await.is_err() {
+        tracing::warn!(
+            grace_secs = config.shutdown_grace.as_secs(),
+            "grace period elapsed before every desktop stream released its input"
+        );
+    }
+    match tokio::time::timeout_at(deadline, &mut server).await {
         Ok(result) => result.context("server task")?.context("serving HTTP")?,
         Err(_) => {
             // Long-lived streams may not finish on their own. Dropping the
