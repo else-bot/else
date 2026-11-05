@@ -888,15 +888,36 @@ setup_service() {
 	fi
 }
 
-api_running() { curl -fsS --max-time 3 "http://127.0.0.1:$API_PORT/healthz" >/dev/null 2>&1; }
+# The API as the app reaches it: the saved bind, with a wildcard bind on
+# loopback, and $API_PORT before any configuration is saved.
+api_url() {
+	local bind=""
+	[ -f "$ENV_FILE" ] && bind="$(env_value ELSE_API_BIND)"
+	bind="${bind:-127.0.0.1:$API_PORT}"
+	case "$bind" in
+	0.0.0.0:*) bind="127.0.0.1:${bind#0.0.0.0:}" ;;
+	"[::]:"*) bind="[::1]:${bind#"[::]:"}" ;;
+	esac
+	printf 'http://%s' "$bind"
+}
+owner_token_file() {
+	local file="" data=""
+	if [ -f "$ENV_FILE" ]; then
+		file="$(env_value OWNER_TOKEN_FILE)"
+		data="$(env_value ELSE_DATA_DIR)"
+	fi
+	printf '%s' "${file:-${data:-$DATA}/owner-token}"
+}
+
+api_running() { curl -gfsS --max-time 3 "$(api_url)/healthz" >/dev/null 2>&1; }
 
 start_api() {
 	step "Start the API"
 	elsebot start >/dev/null 2>&1 || true
 	local _
 	for _ in $(seq 1 60); do
-		if curl -fsS --max-time 2 "http://127.0.0.1:$API_PORT/readyz" >/dev/null 2>&1; then
-			ok "running on http://127.0.0.1:$API_PORT"
+		if curl -gfsS --max-time 2 "$(api_url)/readyz" >/dev/null 2>&1; then
+			ok "running on $(api_url)"
 			return 0
 		fi
 		sleep 1
@@ -907,10 +928,10 @@ start_api() {
 # Ask the running API to stop taking work; refuse the update if bots work.
 prepare_running_api() {
 	local token response status
-	token="$(cat "$DATA/owner-token")"
+	token="$(cat "$(owner_token_file)")"
 	response="$(printf 'Authorization: Bearer %s\n' "$token" |
-		curl -sS --max-time 30 -X POST -H @- -w '\n%{http_code}' \
-			"http://127.0.0.1:$API_PORT/v1/maintenance/update" 2>&1)" || response=$'\n000'
+		curl -gsS --max-time 30 -X POST -H @- -w '\n%{http_code}' \
+			"$(api_url)/v1/maintenance/update" 2>&1)" || response=$'\n000'
 	status="${response##*$'\n'}"
 	response="${response%$'\n'*}"
 	case "$status" in
