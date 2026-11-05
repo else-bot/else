@@ -1008,21 +1008,25 @@ mod tests {
     #[tokio::test]
     async fn an_update_installed_elsewhere_still_offers_restart() {
         let home = Home::new("exit 1");
-        git(Path::new(&home.repo), &["tag", "v0.0.21"]);
-        std::fs::create_dir_all(home.home().join("versions/0.0.21/bin")).unwrap();
+        let major: u64 = env!("CARGO_PKG_VERSION")
+            .split('.')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let version = format!("{}.0.0", major + 1);
+        let tag = format!("v{version}");
+        let target = PathBuf::from("versions").join(version);
+        git(Path::new(&home.repo), &["tag", &tag]);
+        std::fs::create_dir_all(home.home().join(&target).join("bin")).unwrap();
         std::fs::remove_file(home.home().join("current")).unwrap();
-        std::os::unix::fs::symlink("versions/0.0.21", home.home().join("current")).unwrap();
+        std::os::unix::fs::symlink(target, home.home().join("current")).unwrap();
         let (commands, mut state) = home.start(None);
         let ready = until(&mut state, "external update detected", |snapshot| {
             matches!(snapshot.operation, Operation::Ready { .. })
         })
         .await;
-        assert_eq!(
-            ready.operation,
-            Operation::Ready {
-                version: "v0.0.21".into()
-            }
-        );
+        assert_eq!(ready.operation, Operation::Ready { version: tag });
         assert!(commands.install().is_err());
         assert!(
             home.calls().is_empty(),
