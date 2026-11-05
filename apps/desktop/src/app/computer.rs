@@ -374,6 +374,7 @@ impl ComputerView {
                 Screen::Loading => ("Checking computer…", ""),
                 Screen::Asleep => ("Computer is asleep", "Click to wake up"),
                 Screen::Waking => ("Waking up…", "Your desktop will appear here"),
+                Screen::Failed(error) if self.expanded => (error.as_str(), "Click to try again"),
                 Screen::Failed(_) => ("Connection interrupted", "Click to try again"),
                 Screen::Unavailable => (
                     "Computer unavailable",
@@ -391,7 +392,12 @@ impl ComputerView {
                     .child(div().opacity(0.55).child(
                         crate::avatar::bot_avatar("computer-avatar", self.avatar, px(56.)).still(),
                     ))
-                    .child(div().text_sm().text_color(rgb(0xf5f5f5)).child(text))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xf5f5f5))
+                            .child(text.to_owned()),
+                    )
                     .child(div().text_xs().child(hint)),
             );
         }
@@ -403,14 +409,13 @@ impl ComputerView {
                 area = area
                     .cursor_pointer()
                     .on_click(cx.listener(|view, _, window, cx| {
-                        if matches!(view.screen, Screen::Live) {
-                            view.expanded = true;
-                            view.focus.focus(window, cx);
-                            cx.emit(LayoutChanged);
-                            cx.notify();
-                        } else {
+                        if !matches!(view.screen, Screen::Live) {
                             view.monitor(true, cx);
                         }
+                        view.expanded = true;
+                        view.focus.focus(window, cx);
+                        cx.emit(LayoutChanged);
+                        cx.notify();
                     }));
             }
             if matches!(self.screen, Screen::Live) {
@@ -731,6 +736,7 @@ fn screen_point(
 fn keysym(stroke: &Keystroke) -> Option<u32> {
     let named = match stroke.key.as_str() {
         "backspace" => 0xff08,
+        "tab" if stroke.modifiers.shift => 0xfe20,
         "tab" => 0xff09,
         "enter" => 0xff0d,
         "escape" => 0xff1b,
@@ -789,6 +795,11 @@ mod tests {
         assert_eq!(
             keysym(&Keystroke::parse("ctrl-l").unwrap()),
             Some('l' as u32)
+        );
+        assert_eq!(keysym(&Keystroke::parse("tab").unwrap()), Some(0xff09));
+        assert_eq!(
+            keysym(&Keystroke::parse("shift-tab").unwrap()),
+            Some(0xfe20)
         );
         assert_eq!(keysym(&Keystroke::parse("enter").unwrap()), Some(0xff0d));
         assert_eq!(keysym(&Keystroke::parse("f12").unwrap()), Some(0xffc9));
