@@ -5,6 +5,7 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -254,6 +255,7 @@ impl ElseApp {
             };
             let choice_id = choice.id.clone();
             let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
+                .focus_ring(false)
                 .cursor_pointer()
                 .label(label)
                 .small()
@@ -264,9 +266,9 @@ impl ElseApp {
             let button = match (approval, choice.id.as_str(), chosen) {
                 (true, APPROVE, _) => button.primary(),
                 (true, DENY, _) => button.ghost(),
-                (true, _, _) => button.outline(),
+                (true, _, _) => button.ghost(),
                 (false, _, true) => button.primary(),
-                (false, _, false) => button.outline(),
+                (false, _, false) => button.ghost(),
             };
             let button = if approval {
                 button

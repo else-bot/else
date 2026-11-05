@@ -5,9 +5,11 @@ use std::collections::HashSet;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
+    h_flex, v_flex,
 };
 use gpui_kit::*;
 
@@ -56,7 +58,7 @@ impl ProfilePicker {
             }
         });
         Self {
-            browsing: choice.is_none(),
+            browsing: false,
             expanded_providers: HashSet::new(),
             choice,
             providers,
@@ -148,17 +150,17 @@ impl ProfilePicker {
                 let model_id = model.clone();
                 groups = groups.child(
                     Button::new(SharedString::from(format!("model-{provider_id}-{model}")))
+                        .focus_ring(false)
                         .cursor_pointer()
                         .ghost()
                         .selected(selected)
                         .toggled(selected)
-                        .with_size(Size::Size(px(14.)))
+                        .small()
                         .w_full()
                         .px_3()
                         .py_2()
                         .disabled(self.disabled || !provider.cli_available)
                         .accessibility_label(format!("{} · {}", model_label(model), provider.label))
-                        .tooltip(model.clone())
                         .child(
                             div()
                                 .flex_1()
@@ -195,6 +197,7 @@ impl ProfilePicker {
                 let provider_id = provider.id.clone();
                 groups = groups.child(
                     Button::new(SharedString::from(format!("more-models-{provider_id}")))
+                        .focus_ring(false)
                         .cursor_pointer()
                         .ghost()
                         .small()
@@ -235,13 +238,14 @@ impl ProfilePicker {
             );
         }
         v_flex()
-            .border_1()
-            .border_color(theme.border)
+            .w(px(360.))
+            .bg(theme.popover)
             .rounded(theme.radius)
             .overflow_hidden()
             .child(
                 div().p_2().border_b_1().border_color(theme.border).child(
                     Input::new(&self.search)
+                        .focus_ring(false)
                         .small()
                         .prefix(Icon::new(IconName::Search).size_3())
                         .aria_label("Find a model")
@@ -263,11 +267,16 @@ impl ProfilePicker {
             let value = effort.clone();
             let selected = choice.reasoning_effort == *effort;
             Button::new(SharedString::from(format!("effort-{effort}")))
+                .focus_ring(false)
                 .cursor_pointer()
                 .ghost()
                 .small()
                 .selected(selected)
                 .toggled(selected)
+                .flex_1()
+                .flex_basis(px(0.))
+                .min_w_0()
+                .px_0()
                 .label(effort_label(effort).to_owned())
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .disabled(self.disabled)
@@ -284,7 +293,7 @@ impl ProfilePicker {
                     .child(div().text_xs().child("Reasoning"))
                     .child(
                         h_flex()
-                            .flex_wrap()
+                            .w_full()
                             .gap_1()
                             .p_1()
                             .bg(theme.muted.opacity(0.3))
@@ -319,6 +328,7 @@ impl ProfilePicker {
                     )
                     .child(
                         Switch::new("pick-fast")
+                            .focus_ring(false)
                             .cursor_pointer()
                             .accessibility_label("Fast mode")
                             .checked(choice.service_tier == FAST)
@@ -493,32 +503,49 @@ impl Render for ProfilePicker {
                                     .child(provider.label.clone())
                             })),
                     )
-                    .children(choice.map(|_| {
-                        Button::new("pick-change")
-                            .cursor_pointer()
-                            .link()
-                            .small()
-                            .label(if self.browsing { "Done" } else { "Change" })
-                            .accessibility_label(if self.browsing {
-                                "Close model browser"
-                            } else {
-                                "Change model"
-                            })
-                            .track_focus(&self.change_focus)
-                            .disabled(self.disabled)
-                            .on_click(cx.listener(|picker, _, window, cx| {
-                                picker.browsing = !picker.browsing;
-                                if picker.browsing {
+                    .child(
+                        Popover::new("model-browser")
+                            .anchor(Anchor::TopRight)
+                            .p_0()
+                            .open(self.browsing)
+                            .track_focus(&self.search.read(cx).focus_handle(cx))
+                            .on_open_change(cx.listener(|picker, open, window, cx| {
+                                picker.browsing = *open;
+                                if *open {
                                     picker
                                         .search
                                         .update(cx, |search, cx| search.set_value("", window, cx));
-                                    picker.search.read(cx).focus_handle(cx).focus(window, cx);
-                                } else {
-                                    picker.change_focus.focus(window, cx);
                                 }
                                 cx.notify();
                             }))
-                    })),
+                            .trigger(
+                                Button::new("pick-change")
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .link()
+                                    .small()
+                                    .label(if self.browsing {
+                                        "Done"
+                                    } else if choice.is_some() {
+                                        "Change"
+                                    } else {
+                                        "Choose"
+                                    })
+                                    .accessibility_label(if self.browsing {
+                                        "Close model browser"
+                                    } else {
+                                        "Change model"
+                                    })
+                                    .track_focus(&self.change_focus)
+                                    .disabled(self.disabled),
+                            )
+                            .content({
+                                let picker = cx.entity();
+                                move |_, _, cx| {
+                                    picker.update(cx, |picker, cx| picker.render_catalog(cx))
+                                }
+                            }),
+                    ),
             )
             .children(choice.map(|choice| {
                 h_flex()
@@ -536,9 +563,6 @@ impl Render for ProfilePicker {
                     ))
             }));
         let mut body = v_flex().gap_3().child(summary);
-        if self.browsing {
-            body = body.child(self.render_catalog(cx));
-        }
         if !self.any_available() {
             body = body.child(
                 div()
@@ -550,6 +574,7 @@ impl Render for ProfilePicker {
         if choice.is_some() {
             body = body.child(
                 Button::new("pick-customize")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .ghost()
                     .small()

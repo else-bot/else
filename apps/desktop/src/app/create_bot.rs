@@ -2,6 +2,7 @@ use super::ElseApp;
 use crate::api::{Category, CreateBotRequest};
 use crate::avatar::{Avatar, AvatarColor, AvatarPicker, AvatarShape, bot_avatar};
 use crate::profile_picker::ProfilePicker;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::SearchableListItem;
@@ -173,6 +174,7 @@ impl ElseApp {
                     .child(field_label("Bot name", cx))
                     .child(
                         Input::new(&form.name)
+                            .focus_ring(false)
                             .aria_label("Bot name")
                             .disabled(locked),
                     )
@@ -187,6 +189,7 @@ impl ElseApp {
                 details = details.child(
                     v_flex().gap_1().child(field_label("Category", cx)).child(
                         Select::new(&form.category)
+                            .focus_ring(false)
                             .cursor_pointer()
                             .accessibility_label("Category")
                             .disabled(locked),
@@ -255,6 +258,7 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("create-cancel")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
@@ -262,6 +266,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("create-submit")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Create bot")
                                 .primary()

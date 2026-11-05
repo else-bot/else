@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::FocusableExt as _;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -54,6 +55,7 @@ impl Shell {
             .child(div().flex_1())
             .child(
                 Button::new("server-change")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label("Change server")
                     .xsmall()
@@ -89,6 +91,7 @@ impl Shell {
         if self.active.is_some() {
             panel = panel.child(
                 Button::new("connection-cancel")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label("Cancel")
                     .ghost()
@@ -142,6 +145,7 @@ impl Shell {
                     .child(notice(title, &text, theme))
                     .child(
                         Button::new("connection-edit")
+                            .focus_ring(false)
                             .cursor_pointer()
                             .label("Connect to a remote server")
                             .primary()
@@ -283,6 +287,7 @@ impl Shell {
             .child(card)
             .child(
                 Button::new("connection-start")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label(label)
                     .primary()
@@ -294,6 +299,7 @@ impl Shell {
             )
             .child(
                 Button::new("connection-edit")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label("Edit configuration")
                     .w_full()
@@ -339,6 +345,7 @@ impl Shell {
             .child(
                 div().pb(px(16.)).child(
                     Button::new("connection-back")
+                        .focus_ring(false)
                         .cursor_pointer()
                         .label("Back to local setup")
                         .icon(IconName::ChevronLeft)
@@ -356,12 +363,17 @@ impl Shell {
             ))
             .child(field(
                 "Server address",
-                Input::new(&form.origin).into_any_element(),
+                Input::new(&form.origin)
+                    .focus_ring(false)
+                    .into_any_element(),
                 "Use an HTTPS address, or a local SSH tunnel.",
             ))
             .child(field(
                 "Owner key",
-                Input::new(&form.token).mask_toggle().into_any_element(),
+                Input::new(&form.token)
+                    .focus_ring(false)
+                    .mask_toggle()
+                    .into_any_element(),
                 "On your server, open ~/.else/data/owner-token.",
             ))
             .when_some(failure, |panel, err| {
@@ -369,6 +381,7 @@ impl Shell {
             })
             .child(
                 Button::new("connection-connect")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label(if busy {
                         "Connecting…"

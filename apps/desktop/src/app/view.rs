@@ -12,6 +12,7 @@ use crate::api::Bot;
 use crate::avatar::bot_avatar;
 use crate::sidebar::status::{Kind, Subtitle};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
@@ -221,6 +222,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("new-bot")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .icon(IconName::SquarePen)
                     .small()
@@ -239,6 +241,7 @@ impl ElseApp {
                 .border_color(theme.sidebar_border)
                 .child(
                     Button::new("new-category")
+                        .focus_ring(false)
                         .cursor_pointer()
                         .icon(IconName::FolderPlus)
                         .label("New category")
@@ -413,10 +416,11 @@ impl ElseApp {
         if busy || stopping {
             actions = actions.child(
                 Button::new("stop-work")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label(if stopping { "Stopping…" } else { "Stop work" })
                     .small()
-                    .outline()
+                    .ghost()
                     .disabled(stopping)
                     .tooltip_with_action("Stop work", &StopWork, Some(APP_CONTEXT))
                     .on_click(cx.listener(|app, _, window, cx| app.stop_work(window, cx))),
@@ -425,6 +429,7 @@ impl ElseApp {
         if !self.settings_open {
             actions = actions.child(
                 Button::new("toggle-settings")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .icon(IconName::PanelRightOpen)
                     .small()
@@ -467,12 +472,7 @@ impl ElseApp {
             .child(actions)
     }
 
-    fn render_conversation(
-        &self,
-        bot: &Bot,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_conversation(&self, bot: &Bot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let view = self.view.as_ref().filter(|v| v.bot_id == bot.id);
         let transcript: AnyElement = match view {
@@ -500,6 +500,7 @@ impl ElseApp {
                             column.child(
                                 h_flex().justify_center().py_1().child(
                                     Button::new("load-older")
+                                        .focus_ring(false)
                                         .cursor_pointer()
                                         .label(if loading {
                                             "Loading…"
@@ -538,6 +539,7 @@ impl ElseApp {
                                 .justify_center()
                                 .child(
                                     Button::new("jump-to-latest")
+                                        .focus_ring(false)
                                         .cursor_pointer()
                                         .label("New messages")
                                         .icon(IconName::ArrowDown)
@@ -584,7 +586,6 @@ impl ElseApp {
             .unwrap_or_default();
         let preview_files = files.clone();
         let bot_id = bot.id;
-        let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let can_send = self.connection == Connection::Connected
             && !self.composer.read(cx).value().trim().is_empty()
             && self.composer.read(cx).tokens().iter().all(|span| {
@@ -630,7 +631,7 @@ impl ElseApp {
             .pb_2()
             .rounded(theme.radius_lg)
             .border_1()
-            .border_color(if focused { theme.ring } else { theme.border })
+            .border_color(theme.border)
             .bg(theme.popover);
         if let Some(reference) = self.drafts.get(&bot.id).and_then(|d| d.reply_to.as_ref()) {
             frame = frame.child(
@@ -660,6 +661,7 @@ impl ElseApp {
             .child(
                 h_flex().gap_2().items_center().child(div().flex_1()).child(
                     Button::new("send")
+                        .focus_ring(false)
                         .when(can_send, |button| button.cursor_pointer())
                         .icon(IconName::ArrowUp)
                         .primary()
@@ -746,6 +748,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("cancel-reply")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .flex_none()
                     .icon(IconName::Close)
@@ -761,7 +764,7 @@ impl ElseApp {
             )
     }
 
-    fn render_main(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() {
             return v_flex()
@@ -770,7 +773,7 @@ impl ElseApp {
                 .h_full()
                 .overflow_hidden()
                 .bg(theme.background)
-                .child(self.render_conversation(&bot, window, cx))
+                .child(self.render_conversation(&bot, cx))
                 .into_any_element();
         }
         let message = match self.connection {
@@ -791,6 +794,7 @@ impl ElseApp {
         if self.connection == Connection::Connected {
             body = body.child(
                 Button::new("empty-create")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label("Create bot")
                     .primary()
@@ -894,7 +898,7 @@ impl Render for ElseApp {
             .size_full()
             .text_color(theme.foreground)
             .children((!crowded).then(|| self.render_sidebar(cx)))
-            .child(self.render_main(window, cx))
+            .child(self.render_main(cx))
             .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
             .into_any_element()
     }

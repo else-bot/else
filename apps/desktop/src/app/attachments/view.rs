@@ -1,6 +1,7 @@
 use super::{DraftFile, UploadState};
 use crate::app::ElseApp;
 use crate::attachments::{Attachment, file_size};
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::InlineTokenContext;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
@@ -117,6 +118,7 @@ pub(in crate::app) fn chip(
     if let Some(owner) = owner {
         chip = chip.child(
             Button::new("remove-file")
+                .focus_ring(false)
                 .cursor_pointer()
                 .ghost()
                 .xsmall()

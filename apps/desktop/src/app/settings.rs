@@ -1,6 +1,7 @@
 use super::delete_dialog::DeleteTarget;
 use super::view::HEADER_HEIGHT;
 use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
+use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
 use crate::api::{Bot, BotProfile, ProfileChoice};
@@ -567,13 +568,13 @@ impl ElseApp {
                         .justify_end()
                         .gap_2()
                         .child(
-                            Button::new("model-cancel").cursor_pointer()
+                            Button::new("model-cancel").focus_ring(false).cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("model-apply").cursor_pointer()
+                            Button::new("model-apply").focus_ring(false).cursor_pointer()
                                 .label("Apply")
                                 .primary()
                                 .loading(saving)
@@ -661,6 +662,7 @@ impl ElseApp {
             )
             .child(
                 Button::new("close-settings")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .icon(IconName::PanelRightClose)
                     .small()
@@ -710,6 +712,7 @@ impl ElseApp {
                     .border_color(theme.sidebar_border)
                     .child(
                         Button::new("delete-bot")
+                            .focus_ring(false)
                             .cursor_pointer()
                             .label("Delete bot")
                             .danger()
@@ -736,6 +739,7 @@ impl ElseApp {
                 .on_mouse_down_out(cx.listener(move |app, _, _, cx| app.commit_name(bot, cx)))
                 .child(
                     Input::new(&details.name)
+                        .focus_ring(false)
                         .text_center()
                         .font_weight(FontWeight::SEMIBOLD),
                 )
@@ -771,10 +775,11 @@ impl ElseApp {
                 .child(note(format!("Couldn't save. {err}"), true, cx))
                 .child(
                     Button::new("retry-details")
+                        .focus_ring(false)
                         .cursor_pointer()
                         .label("Retry")
                         .xsmall()
-                        .outline()
+                        .ghost()
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
         });
@@ -820,6 +825,7 @@ impl ElseApp {
                 Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(14.))),
             );
         let hero = Button::new("edit-avatar")
+            .focus_ring(false)
             .cursor_pointer()
             .ghost()
             .w(px(112.))
@@ -878,10 +884,11 @@ impl ElseApp {
                     .child(
                         h_flex().child(
                             Button::new("retry-model")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Retry")
                                 .small()
-                                .outline()
+                                .ghost()
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     app.load_profile(bot, window, cx)
                                 })),
@@ -943,8 +950,9 @@ impl ElseApp {
         };
         // Button centers and nowraps its content; the card reads as a left-aligned block.
         Button::new("change-model")
+            .focus_ring(false)
             .cursor_pointer()
-            .outline()
+            .ghost()
             .with_size(Size::Size(px(16.)))
             .w_full()
             .p_3()
@@ -1014,6 +1022,7 @@ impl ElseApp {
             _ => routine.enabled,
         };
         let switch = Switch::new(ElementId::Name(format!("routine-{id}").into()))
+            .focus_ring(false)
             .cursor_pointer()
             .checked(checked)
             .small()
@@ -1028,6 +1037,7 @@ impl ElseApp {
                 app.set_routine(bot, id, *enabled, window, cx)
             }));
         let delete = Button::new(ElementId::Name(format!("routine-delete-{id}").into()))
+            .focus_ring(false)
             .cursor_pointer()
             .icon(gpui_kit::assets::IconName::Trash)
             .ghost()

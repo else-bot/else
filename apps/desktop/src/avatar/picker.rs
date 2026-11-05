@@ -1,4 +1,5 @@
 use super::{Avatar, AvatarColor, AvatarShape, bot_avatar};
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -51,6 +52,7 @@ impl RenderOnce for AvatarPicker {
             };
             let pick = self.on_change.clone();
             Button::new(ElementId::Name(format!("avatar-shape-{shape:?}").into()))
+                .focus_ring(false)
                 .cursor_pointer()
                 .ghost()
                 .w(size)
@@ -88,6 +90,7 @@ impl RenderOnce for AvatarPicker {
                 .bg(theme.border)
                 .child(div().size_full().rounded_full().bg(color.fill()));
             Button::new(ElementId::Name(format!("avatar-color-{color:?}").into()))
+                .focus_ring(false)
                 .cursor_pointer()
                 .ghost()
                 .w(px(30.))
@@ -124,6 +127,7 @@ impl RenderOnce for AvatarPicker {
                     )
                     .child(
                         Button::new("reset-avatar")
+                            .focus_ring(false)
                             .cursor_pointer()
                             .label("Reset")
                             .xsmall()

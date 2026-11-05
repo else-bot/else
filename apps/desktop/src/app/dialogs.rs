@@ -4,6 +4,7 @@ use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities};
 use crate::profile_picker::ProfilePicker;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
@@ -133,7 +134,7 @@ impl ElseApp {
                             .text_color(theme.muted_foreground)
                             .child("Name"),
                     )
-                    .child(Input::new(&welcome.name)),
+                    .child(Input::new(&welcome.name).focus_ring(false)),
             )
             .child(welcome.picker.clone());
         if let Some(error) = &welcome.error {
@@ -147,6 +148,7 @@ impl ElseApp {
         card = card.child(
             h_flex().justify_end().child(
                 Button::new("welcome-start")
+                    .focus_ring(false)
                     .cursor_pointer()
                     .label("Get started")
                     .primary()
