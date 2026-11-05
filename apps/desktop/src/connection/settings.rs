@@ -126,13 +126,18 @@ impl Shell {
                 .focus_ring(false)
                 .track_focus(focus)
                 .cursor_pointer()
-                .label(label)
-                .icon(icon)
+                .accessibility_label(label)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(Icon::new(icon).size_4())
+                        .child(label),
+                )
                 .ghost()
                 .selected(section == target)
                 .toggled(section == target)
                 .w_full()
-                .justify_start()
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     shell.select_settings(target, window, cx)
                 }))
