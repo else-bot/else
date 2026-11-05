@@ -87,6 +87,8 @@ Database tests create temporary SQLite files. Live provider and VM tests require
 
 Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Changes require a pull request; force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
 
+`cargo-test` also runs on pushes to `main` to populate a build cache that future pull requests can restore. CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
+
 Use a focused target while developing, for example:
 
 ```sh
