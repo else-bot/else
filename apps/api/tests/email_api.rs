@@ -441,7 +441,7 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
     .fetch_one(&h.app.db.pool)
     .await
     .unwrap();
-    let token = h.grant(turn).await;
+    let (_, token) = h.started(turn).await;
     let grant = h.app.scheduler.grants().resolve(&token).await.unwrap();
     assert!(grant.allows(Tool::Mail));
     for forbidden in [
