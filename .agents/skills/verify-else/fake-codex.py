@@ -2,6 +2,8 @@
 """Offline Codex protocol fixture for native desktop journeys, never contacts a model."""
 import json
 import os
+import re
+import urllib.request
 from pathlib import Path
 import sys
 import threading
@@ -33,8 +35,74 @@ def finish(turn, stopped, status):
         print(json.dumps({'jsonrpc': '2.0', 'method': 'turn/completed', 'params': {'threadId': thread_id, 'turn': {'id': turn, 'status': status}}}), flush=True)
 
 
-def stream(turn, hang, stopped):
-    if hang:
+def email_tool(name, args):
+    config = tomllib.loads((Path(os.environ['CODEX_HOME']) / 'config.toml').read_text())
+    server = next(iter(config['mcp_servers'].values()))
+    body = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': name, 'arguments': args}}
+    request = urllib.request.Request(server['url'], data=json.dumps(body).encode(),
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ' + os.environ[server['bearer_token_env_var']]})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.load(response)['result']
+    if result.get('isError'):
+        raise RuntimeError(result['content'][0]['text'])
+    return json.loads(result['content'][0]['text'])
+
+
+def email_reply(turn, latest, packet, stopped):
+    for example in ('[ui:email]', 'Go ahead.', 'Please ask for a screenshot.', '[ui:email-fail]', '[ui:email-uncertain]'):
+        if packet.rstrip().endswith(example):
+            latest = example
+    blocks = re.findall(r'<email_draft ([^>]+)>(.*?)</email_draft>', packet, re.S)
+    current = None
+    if blocks:
+        attributes, content = blocks[-1]
+        current = (dict(re.findall(r'(\w+)="([^"]*)"', attributes)), content.strip())
+    approved = current and current[0]['status'] == 'approved'
+    if not (latest == '[ui:email]' or current):
+        return False
+    if approved or latest in {'Go ahead.', '[ui:email-fail]', '[ui:email-uncertain]'}:
+        draft_id = current[0]['id']
+        if not approved:
+            email_tool('confirm_email_approval', {'draft_id': draft_id})
+        claimed = email_tool('start_email_send', {'draft_id': draft_id})
+        if stopped.wait(3):
+            return True
+        outcome = {'[ui:email-fail]': 'failed', '[ui:email-uncertain]': 'uncertain'}.get(latest, 'sent')
+        outbox = Path(os.environ['CODEX_HOME']) / 'fixture-outbox'
+        outbox.mkdir(exist_ok=True)
+        (outbox / (draft_id + '.json')).write_text(json.dumps(claimed) + '\n')
+        email_tool('report_email_send', {'draft_id': draft_id, 'status': outcome,
+                   'detail': 'Offline fixture result. No external email was sent.'})
+    elif current and latest == 'Please ask for a screenshot.':
+        attributes, content = current
+        headers, body = content.split('\n\n', 1)
+        subject = headers.split('Subject: ', 1)[1]
+        email_tool('draft_email', {'from': 'proliquid@example.invalid', 'to': ['ji.long@example.invalid'],
+            'subject': subject, 'body': body + '\n\nCould you also send us a screenshot?',
+            'replaces': attributes['id']})
+    elif current and current[0]['status'] == 'discarded':
+        pass
+    elif latest == '[ui:email]':
+        email_tool('draft_email', {'from': 'proliquid@example.invalid', 'to': ['ji.long@example.invalid'],
+            'subject': 'Your Proliquid feedback on chart candles',
+            'body': "Hi Ji Long,\n\nThanks for your support and for reporting this!\n\nWhich exchange and market did you see the spikes on?\n\nOur recent candle update follows the order book and last traded price more closely. That may explain the phantom wicks. We'll get it fixed.\n\nThanks again,\nProliquid"})
+    else:
+        return False
+    finish(turn, stopped, 'completed')
+    return True
+
+
+def stream(turn, latest, packet, stopped):
+    try:
+        if email_reply(turn, latest, packet, stopped):
+            return
+    except Exception as error:
+        print('Email fixture failed: ' + str(error), file=sys.stderr, flush=True)
+        finish(turn, stopped, 'failed')
+        return
+    if latest == '[ui:hang]':
         return
     for text in ['Fixture ', 'reply ', '✓ ', 'from ', 'the ', 'desktop ', 'composer.']:
         if stopped.wait(1.0):
@@ -72,6 +140,6 @@ for line in sys.stdin:
     if method == 'turn/start':
         text = '\n'.join(item.get('text', '') for item in params.get('input', []))
         latest = text.rsplit("Owner's latest message:\n", 1)[-1].strip()
-        threading.Thread(target=stream,args=(turn_id, latest == '[ui:hang]', stopped),daemon=True).start()
+        threading.Thread(target=stream,args=(turn_id, latest, text, stopped),daemon=True).start()
     elif method == 'turn/interrupt':
         finish(params['turnId'], stopped, 'interrupted')

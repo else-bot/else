@@ -44,6 +44,7 @@ struct SinkState {
     delivered_secrets: Vec<Uuid>,
     /// Owner question answers this attempt's input carried.
     delivered_questions: Vec<Uuid>,
+    delivered_drafts: Vec<Uuid>,
 }
 
 pub struct SqliteSink {
@@ -69,6 +70,12 @@ impl SqliteSink {
                 delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
+                delivered_drafts: input
+                    .email_drafts
+                    .iter()
+                    .filter(|n| n.decided)
+                    .map(|n| n.id)
+                    .collect(),
             }),
             flush_wanted,
         }
@@ -430,6 +437,7 @@ impl SinkState {
                 if !self.delivered.is_empty()
                     || !self.delivered_secrets.is_empty()
                     || !self.delivered_questions.is_empty()
+                    || !self.delivered_drafts.is_empty()
                 {
                     let marked = async {
                         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -452,6 +460,13 @@ impl SinkState {
                             self.turn_id,
                             self.attempt,
                             &self.delivered_questions,
+                        )
+                        .await?;
+                        crate::db::email_drafts::mark_delivered(
+                            &mut tx,
+                            self.turn_id,
+                            self.attempt,
+                            &self.delivered_drafts,
                         )
                         .await?;
                         tx.commit().await

@@ -8,6 +8,8 @@ pub mod computers;
 pub mod connectors;
 pub mod conversation;
 mod desktop_stream;
+pub mod email_drafts;
+pub(crate) mod email_tools;
 pub mod error;
 pub mod guest_tools;
 pub mod maintenance;
@@ -124,6 +126,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(settings::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
+        .merge(email_drafts::routes())
         .merge(routines::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())

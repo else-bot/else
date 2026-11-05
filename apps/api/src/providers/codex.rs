@@ -869,6 +869,7 @@ mod tests {
             delegation: Default::default(),
             secrets: Vec::new(),
             questions: Vec::new(),
+            email_drafts: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
             routine: None,

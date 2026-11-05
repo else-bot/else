@@ -386,6 +386,7 @@ impl ElseApp {
             }
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
             RowKey::Question(id) => self.render_question_card(id, cx),
+            RowKey::Email(id) => self.render_email_card(id, cx),
             RowKey::Pending(request_id) => {
                 let Some(pending) = self
                     .selected
@@ -530,6 +531,14 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
             "Waiting for you to answer the secret request…".into(),
             false,
         ),
+        "waiting"
+            if turn
+                .email_drafts
+                .iter()
+                .any(|d| d.status == crate::model::EmailStatus::Pending) =>
+        {
+            ("Waiting for your approval…".into(), false)
+        }
         "waiting"
             if turn
                 .questions

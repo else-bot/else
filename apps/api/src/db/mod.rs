@@ -7,6 +7,7 @@ pub mod bots;
 pub mod categories;
 pub mod conversation;
 pub mod delegations;
+pub mod email_drafts;
 pub mod events;
 pub mod handoffs;
 pub mod installation;

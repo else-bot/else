@@ -1,0 +1,491 @@
+use gpui_kit::assets::IconName;
+use gpui_kit::component::FocusableExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use uuid::Uuid;
+
+use super::{Connection, ElseApp, RowKey};
+use crate::api::ClientError;
+use crate::model::{EmailAttachment, EmailDraft, EmailEdit, EmailStatus};
+
+#[derive(Clone)]
+enum Operation {
+    Approve(EmailEdit),
+    Discard,
+}
+
+pub(super) struct EmailForm {
+    subject: Entity<InputState>,
+    body: Entity<TextareaState>,
+    baseline: EmailEdit,
+    operation: Option<Operation>,
+    retryable: bool,
+    error: Option<String>,
+    _changes: Vec<Subscription>,
+}
+
+impl EmailForm {
+    fn new(draft: &EmailDraft, window: &mut Window, cx: &mut Context<ElseApp>) -> Self {
+        let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
+        subject.update(cx, |input, cx| {
+            input.set_value(draft.subject.clone(), window, cx)
+        });
+        let body = cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 30));
+        body.update(cx, |input, cx| {
+            input.set_value(draft.body.clone(), window, cx)
+        });
+        let id = draft.id;
+        let subject_change = cx.subscribe_in(
+            &subject,
+            window,
+            move |app, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    app.remeasure_row(RowKey::Email(id), cx);
+                }
+            },
+        );
+        let body_change =
+            cx.subscribe_in(&body, window, move |app, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    app.remeasure_row(RowKey::Email(id), cx);
+                }
+            });
+        Self {
+            subject,
+            body,
+            baseline: draft.edit(),
+            operation: None,
+            retryable: false,
+            error: None,
+            _changes: vec![subject_change, body_change],
+        }
+    }
+
+    fn edit(&self, cx: &App) -> EmailEdit {
+        EmailEdit {
+            version: self.baseline.version,
+            subject: self.subject.read(cx).value().to_string(),
+            body: self.body.read(cx).value().to_string(),
+        }
+    }
+}
+
+impl ElseApp {
+    pub(super) fn sync_email_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let drafts: Vec<_> = view
+            .conversation
+            .iter()
+            .flat_map(|c| c.turns_in_order())
+            .flat_map(|t| &t.email_drafts)
+            .filter(|d| d.status == EmailStatus::Pending)
+            .cloned()
+            .collect();
+        view.email_forms
+            .retain(|id, _| drafts.iter().any(|d| d.id == *id));
+        for draft in drafts {
+            match view.email_forms.get_mut(&draft.id) {
+                Some(form) if form.baseline.version != draft.version => {
+                    let local = form.edit(cx);
+                    if local == form.baseline
+                        || (local.subject == draft.subject && local.body == draft.body)
+                    {
+                        *form = EmailForm::new(&draft, window, cx);
+                    } else {
+                        form.error = Some("This draft changed elsewhere. Your edits are still here. Load the latest draft before approving.".into());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    view.email_forms
+                        .insert(draft.id, EmailForm::new(&draft, window, cx));
+                }
+            }
+        }
+    }
+
+    pub(super) fn email_attachment(&self, cx: &App) -> Option<EmailAttachment> {
+        let view = self.view.as_ref()?;
+        let draft = view.conversation.as_ref()?.open_email()?;
+        if view
+            .email_forms
+            .get(&draft.id)
+            .is_some_and(|form| form.operation.is_some())
+        {
+            return None;
+        }
+        let edit = view
+            .email_forms
+            .get(&draft.id)
+            .map_or_else(|| draft.edit(), |form| form.edit(cx));
+        Some(EmailAttachment { id: draft.id, edit })
+    }
+
+    fn email_in_flight(&self, id: Uuid) -> bool {
+        self.selected
+            .and_then(|bot| self.pending.get(&bot))
+            .is_some_and(|list| {
+                list.iter().any(|pending| {
+                    pending.rejected.is_none()
+                        && pending.email_draft.as_ref().is_some_and(|a| a.id == id)
+                })
+            })
+    }
+
+    fn act_on_email(
+        &mut self,
+        id: Uuid,
+        approve: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let operation = match view.email_forms.get(&id) {
+            Some(form) if form.retryable => form.operation.clone(),
+            Some(form) if form.operation.is_none() => Some(if approve {
+                Operation::Approve(form.edit(cx))
+            } else {
+                Operation::Discard
+            }),
+            None if !approve => Some(Operation::Discard),
+            _ => None,
+        };
+        let Some(operation) = operation else { return };
+        let bot = view.bot_id;
+        if let Some(form) = self.view.as_mut().and_then(|v| v.email_forms.get_mut(&id)) {
+            form.operation = Some(operation.clone());
+            form.retryable = false;
+            form.error = None;
+        }
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match operation {
+                Operation::Approve(edit) => client.approve_email(bot, id, edit).await,
+                Operation::Discard => client.discard_email(bot, id).await,
+            };
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.email_acted(bot, id, result, window, cx)
+            });
+        })
+        .detach();
+        self.remeasure_row(RowKey::Email(id), cx);
+    }
+
+    fn email_acted(
+        &mut self,
+        bot: Uuid,
+        id: Uuid,
+        result: Result<EmailDraft, ClientError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&result, Err(ClientError::Unauthorized)) {
+            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+        }
+        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+            return;
+        };
+        match result {
+            Ok(draft) => {
+                if let Some(conversation) = view.conversation.as_mut() {
+                    conversation.update_email(draft);
+                }
+                self.sync_rows(window, cx);
+            }
+            Err(err) => {
+                if let Some(form) = view.email_forms.get_mut(&id) {
+                    form.retryable = err.outcome_unknown();
+                    if !form.retryable {
+                        form.operation = None;
+                    }
+                    form.error = Some(err.to_string());
+                } else {
+                    self.notice = Some(err.to_string());
+                }
+                self.remeasure_row(RowKey::Email(id), cx);
+            }
+        }
+    }
+
+    fn reload_email_form(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self
+            .view
+            .as_ref()
+            .and_then(|v| v.conversation.as_ref())
+            .and_then(|c| c.email_draft(id))
+            .cloned();
+        if let (Some(draft), Some(view)) = (draft, self.view.as_mut()) {
+            view.email_forms
+                .insert(id, EmailForm::new(&draft, window, cx));
+        }
+        self.remeasure_row(RowKey::Email(id), cx);
+    }
+
+    pub(super) fn render_email_card(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.view.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(draft) = view.conversation.as_ref().and_then(|c| c.email_draft(id)) else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().clone();
+        let row = super::view::reading_column().py_1p5();
+        let muted = |text: String| {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let mut card = v_flex()
+            .w_full()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .overflow_hidden();
+        let expanded = view.expanded_emails.contains(&id);
+        if draft.status != EmailStatus::Pending {
+            let color = match draft.status {
+                EmailStatus::Sent => theme.success,
+                EmailStatus::Failed => theme.danger,
+                EmailStatus::Uncertain => theme.warning,
+                _ => theme.muted_foreground,
+            };
+            let header = h_flex()
+                .id(SharedString::from(format!("email-receipt-{id}")))
+                .p_3()
+                .gap_2()
+                .cursor_pointer()
+                .child(
+                    Icon::new(if draft.status == EmailStatus::Sent {
+                        IconName::Check
+                    } else {
+                        IconName::Mail
+                    })
+                    .size_4()
+                    .text_color(color),
+                )
+                .child(div().text_sm().font_medium().child("Mail"))
+                .child(muted(draft.status.label().into()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(draft.to.join(", ")),
+                )
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_3()
+                    .text_color(theme.muted_foreground),
+                )
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if let Some(view) = app.view.as_mut() {
+                        if !view.expanded_emails.remove(&id) {
+                            view.expanded_emails.insert(id);
+                        }
+                    }
+                    app.remeasure_row(RowKey::Email(id), cx);
+                }));
+            card = card.child(header);
+            if expanded {
+                card = card.child(
+                    v_flex()
+                        .p_4()
+                        .gap_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(div().text_sm().font_semibold().child(draft.subject.clone()))
+                        .child(muted(format!("From {}", draft.from)))
+                        .child(muted(format!("To {}", draft.to.join(", "))))
+                        .when(!draft.cc.is_empty(), |el| {
+                            el.child(muted(format!("Cc {}", draft.cc.join(", "))))
+                        })
+                        .when(!draft.bcc.is_empty(), |el| {
+                            el.child(muted(format!("Bcc {}", draft.bcc.join(", "))))
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(draft.body.clone()),
+                        ),
+                );
+            }
+            if matches!(draft.status, EmailStatus::Failed | EmailStatus::Uncertain) {
+                card = card.child(
+                    v_flex()
+                        .px_4()
+                        .pb_3()
+                        .gap_1()
+                        .child(muted(draft.result_detail.clone().unwrap_or_default()))
+                        .child(muted(
+                            if draft.status == EmailStatus::Uncertain {
+                                "Check whether it arrived before asking the bot to retry."
+                            } else {
+                                "Reply in chat to revise or try again."
+                            }
+                            .into(),
+                        )),
+                );
+            }
+            return row.child(card).into_any_element();
+        }
+        let Some(form) = view.email_forms.get(&id) else {
+            return row.into_any_element();
+        };
+        let connected = self.connection == Connection::Connected;
+        let busy = form.operation.is_some() || self.email_in_flight(id);
+        let conflict = form.baseline.version != draft.version;
+        let approve_enabled = connected && !busy && !conflict && draft.can_approve;
+        card = card
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_3()
+                    .pb_2()
+                    .gap_2()
+                    .child(Icon::new(IconName::Mail).size_4())
+                    .child(div().text_xs().font_medium().child("Mail"))
+                    .child(div().flex_1())
+                    .child(muted(if draft.revision > 1 {
+                        format!("Needs approval · v{}", draft.revision)
+                    } else {
+                        "Needs approval".into()
+                    })),
+            )
+            .child(
+                v_flex()
+                    .px_3()
+                    .gap_1()
+                    .child(
+                        Input::new(&form.subject)
+                            .appearance(false)
+                            .disabled(busy)
+                            .aria_label("Email subject")
+                            .font_semibold(),
+                    )
+                    .child(
+                        h_flex().px_1().gap_2().child(muted("To".into())).child(
+                            div()
+                                .text_xs()
+                                .whitespace_normal()
+                                .child(draft.to.join(", ")),
+                        ),
+                    )
+                    .child(
+                        h_flex().px_1().gap_2().child(muted("From".into())).child(
+                            div()
+                                .text_xs()
+                                .whitespace_normal()
+                                .child(draft.from.clone()),
+                        ),
+                    )
+                    .when(!draft.cc.is_empty(), |el| {
+                        el.child(muted(format!("Cc {}", draft.cc.join(", "))))
+                    })
+                    .when(!draft.bcc.is_empty(), |el| {
+                        el.child(muted(format!("Bcc {}", draft.bcc.join(", "))))
+                    })
+                    .child(div().mt_2().border_t_1().border_color(theme.border))
+                    .child(
+                        Textarea::new(&form.body)
+                            .appearance(false)
+                            .disabled(busy)
+                            .aria_label("Email body"),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_2()
+                    .pb_3()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(muted(
+                        if draft.can_approve {
+                            "Waiting for your approval"
+                        } else {
+                            "Reply in chat to continue this draft"
+                        }
+                        .into(),
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(SharedString::from(format!("email-discard-{id}")))
+                            .focus_ring(false)
+                            .label("Discard")
+                            .small()
+                            .ghost()
+                            .disabled(!connected || busy)
+                            .when(connected && !busy, |b| b.cursor_pointer())
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.act_on_email(id, false, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("email-approve-{id}")))
+                            .focus_ring(false)
+                            .label(if busy { "Saving…" } else { "Approve & send" })
+                            .small()
+                            .primary()
+                            .disabled(!approve_enabled)
+                            .when(approve_enabled, |b| b.cursor_pointer())
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.act_on_email(id, true, window, cx)
+                            })),
+                    ),
+            );
+        if let Some(error) = &form.error {
+            card = card.child(
+                div()
+                    .px_4()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(error.clone()),
+            );
+        }
+        if form.retryable || conflict {
+            let retry = form.retryable;
+            card = card.child(
+                h_flex().px_4().pb_3().justify_end().child(
+                    Button::new(SharedString::from(format!("email-recover-{id}")))
+                        .focus_ring(false)
+                        .label(if retry {
+                            "Retry same action"
+                        } else {
+                            "Load latest draft"
+                        })
+                        .small()
+                        .ghost()
+                        .disabled(!connected)
+                        .when(connected, |b| b.cursor_pointer())
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            if retry {
+                                app.act_on_email(id, true, window, cx);
+                            } else {
+                                app.reload_email_form(id, window, cx);
+                            }
+                        })),
+                ),
+            );
+        }
+        row.child(card).into_any_element()
+    }
+}

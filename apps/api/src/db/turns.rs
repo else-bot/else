@@ -44,6 +44,9 @@ pub struct TurnRecord {
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
     pub routine: Option<Json<crate::app::providers::RoutineRun>>,
+    /// The email draft revisions shown under this turn.
+    #[sqlx(skip)]
+    pub email_drafts: Vec<crate::db::email_drafts::EmailDraft>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -117,6 +120,8 @@ pub enum AcceptError {
     CancellationPending,
     #[error("no saved profile for provider {0}")]
     ProfileMissing(String),
+    #[error("the open email draft: {0}")]
+    EmailDraft(crate::db::email_drafts::DraftError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -144,6 +149,9 @@ pub struct SendRequest<'a> {
     /// The provider the turn is bound to.
     pub provider_id: &'a str,
     pub uses_profile: bool,
+    /// The email draft open in the app when the owner sent this message,
+    /// with their unsaved edits (part of the request hash).
+    pub email_draft: Option<&'a crate::db::email_drafts::Attachment>,
 }
 
 /// Text holds no NUL, so it is always the tail after the last separator.
@@ -152,6 +160,11 @@ pub struct SendRequest<'a> {
 /// so messages without files keep the hashes saved before parts existed.
 pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
+    if let Some(draft) = req.email_draft {
+        hasher.update(b"email-draft\0");
+        hasher.update(serde_json::to_vec(draft).expect("draft attachment serializes"));
+        hasher.update(b"\0");
+    }
     if !req.parts.is_empty() {
         hasher.update(b"parts\0");
         hasher.update(serde_json::to_vec(req.parts).expect("parts serialize"));
@@ -291,6 +304,14 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         .bind(req.provider_id)
         .execute(&mut *tx)
         .await?;
+    if let Some(draft) = req.email_draft {
+        crate::db::email_drafts::attach_to_message(&mut tx, req.bot_id, turn_id, draft)
+            .await
+            .map_err(|err| match err {
+                crate::db::email_drafts::DraftError::Db(err) => AcceptError::Db(err),
+                err => AcceptError::EmailDraft(err),
+            })?;
+    }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
     sqlx::query(
@@ -364,9 +385,11 @@ pub async fn attach_owner_requests(
     let ids: Vec<Uuid> = turns.iter().map(|t| t.id).collect();
     let mut secrets = crate::db::secret_requests::for_turns(conn, &ids).await?;
     let mut questions = crate::db::owner_questions::for_turns(conn, &ids).await?;
+    let mut drafts = crate::db::email_drafts::for_turns(conn, &ids).await?;
     for turn in turns {
         turn.secret_requests = secrets.remove(&turn.id).unwrap_or_default();
         turn.questions = questions.remove(&turn.id).unwrap_or_default();
+        turn.email_drafts = drafts.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
 }
@@ -673,6 +696,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
+        email_drafts: crate::db::email_drafts::notes(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         routine: crate::db::routines::run_of(&mut conn, turn_id).await?,
@@ -839,7 +863,30 @@ mod tests {
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
             uses_profile: false,
+            email_draft: None,
         }
+    }
+
+    #[test]
+    fn an_open_email_draft_is_part_of_the_request_hash() {
+        use crate::db::email_drafts::Attachment;
+        let draft = |version, body: Option<&str>| Attachment {
+            id: Uuid::nil(),
+            version,
+            subject: None,
+            body: body.map(str::to_owned),
+        };
+        let hash = |draft: &Attachment| {
+            request_hash(&SendRequest {
+                email_draft: Some(draft),
+                ..request(None)
+            })
+        };
+        let plain = request_hash(&request(None));
+        assert_ne!(hash(&draft(1, None)), plain);
+        assert_eq!(hash(&draft(1, None)), hash(&draft(1, None)));
+        assert_ne!(hash(&draft(1, None)), hash(&draft(2, None)));
+        assert_ne!(hash(&draft(1, None)), hash(&draft(1, Some("Hi"))));
     }
 
     #[test]

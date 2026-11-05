@@ -42,6 +42,7 @@ gpui_kit::assets::icon_assets!(
         Eye,
         EyeOff,
         Cpu,
+        Mail,
         SlidersHorizontal,
         Settings,
         Server,

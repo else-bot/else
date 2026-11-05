@@ -467,6 +467,7 @@ impl Client {
         provider_id: Option<String>,
         reaction: Option<Reaction>,
         parts: Vec<crate::attachments::MessagePart>,
+        email_draft: Option<crate::model::EmailAttachment>,
     ) -> Result<Sent, ClientError> {
         let mut body =
             json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
@@ -476,9 +477,50 @@ impl Client {
         if !parts.is_empty() {
             body["parts"] = json!(parts);
         }
+        if let Some(draft) = email_draft {
+            body["email_draft"] = json!(draft);
+        }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await
             .map(|(_, sent)| sent)
+    }
+
+    pub async fn approve_email(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+        edit: crate::model::EmailEdit,
+    ) -> Result<crate::model::EmailDraft, ClientError> {
+        self.email_action(bot, draft, "approve", Some(json!(edit)))
+            .await
+    }
+
+    pub async fn discard_email(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+    ) -> Result<crate::model::EmailDraft, ClientError> {
+        self.email_action(bot, draft, "discard", None).await
+    }
+
+    async fn email_action(
+        self: Arc<Self>,
+        bot: Uuid,
+        draft: Uuid,
+        action: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<crate::model::EmailDraft, ClientError> {
+        #[derive(Deserialize)]
+        struct Envelope {
+            draft: crate::model::EmailDraft,
+        }
+        self.call::<Envelope>(
+            Method::POST,
+            format!("/v1/bots/{bot}/email-drafts/{draft}/{action}"),
+            body,
+        )
+        .await
+        .map(|(_, response)| response.draft)
     }
 
     /// Resolve a send whose response was lost. `Ok(None)` means the server

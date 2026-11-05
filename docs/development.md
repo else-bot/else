@@ -414,6 +414,14 @@ The owner answers through `POST /v1/bots/{id}/questions/{question_id}/answer` wi
 
 Approval cards offer `approve` and `deny`. Destructive cards also offer `approve_forever`, a standing permission for that bot. External actions always need fresh approval. Owner routes list permissions with `GET /v1/bots/{id}/permissions` and revoke the destructive permission with `DELETE /v1/bots/{id}/permissions/destructive`.
 
+### Email drafts
+
+`draft_email` shows the owner a native email card: `from`, `to`, optional `cc` and `bcc`, `subject`, and `body`, stored as one `email_drafts` row per revision (migration `0011`, see `docs/decisions/0003-email-drafts.md`). It parks the attempt like `ask_owner`. Each turn in snapshots and `turn.updated` events lists `email_drafts`.
+
+The owner edits the subject and body with `PUT /v1/bots/{id}/email-drafts/{draft_id}` (`{"version", "subject"?, "body"?}`), approves with `POST .../approve` (same body, edits applied atomically), and discards with `POST .../discard`. Every edit bumps `version`; a stale version returns `409 draft_changed`, a settled draft `409 draft_settled`, and approving a draft whose request ended `409 draft_inactive`. A message sent with `POST /v1/bots/{id}/turns` may carry `email_draft: {"id", "version", "subject"?, "body"?}`: the edits are saved and that version is bound to the new request in the same transaction, or the whole message is refused.
+
+In that request the bot revises with `draft_email` and `replaces` (the old revision becomes `superseded`), or, when the owner's words approve it, calls `confirm_email_approval`, which works only for the bound, unchanged version. An approved draft is sent once by the approving request: an external computer tool call with `email_draft` (no second approval card), or `start_email_send` before a host send. `report_email_send` settles it as `sent`, `failed`, or `uncertain`. When the request ends, an unreported claim becomes `uncertain` and an unused approval `failed`.
+
 A new owner message skips a pending card without granting permission. Stop, deletion, failure, and recovery of an interrupted attempt withdraw pending cards. Waiting cards survive a restart. Native cards stay disabled after settlement and remain before the continuation they authorized.
 
 `owner_questions` stores decisions. The `turn_holds` view defines pending work and undelivered results for questions, secrets, and delegations. Scheduling, settlement, and delegation triggers use that same view. See [decision 0002](decisions/0002-owner-questions.md).
