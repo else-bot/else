@@ -362,6 +362,15 @@ pub async fn record(
         }
     }
     sqlx::query("DELETE FROM social_messages WHERE connection_id=?1 AND rowid NOT IN (SELECT rowid FROM social_messages WHERE connection_id=?1 ORDER BY created_at DESC LIMIT 5000)").bind(c.id).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE social_deliveries SET status='expired',settled_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') \
+         WHERE connection_id=?1 AND status='pending' AND NOT EXISTS (\
+           SELECT 1 FROM social_messages m WHERE m.connection_id=social_deliveries.connection_id \
+           AND m.event_id=social_deliveries.event_id)",
+    )
+    .bind(c.id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE social_connections SET poll_offset=max(poll_offset,?2) WHERE id=?1 AND generation=?3").bind(c.id).bind(next_offset).bind(c.generation).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())

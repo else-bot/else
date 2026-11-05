@@ -797,3 +797,61 @@ async fn cancelled_setup_cannot_mutate_existing_access_or_pending_deliveries() {
             .unwrap();
     assert_eq!(status, "pending");
 }
+
+#[tokio::test]
+async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_messages() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "retention").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let binding = store::bind(&db.pool, c.id, bot, access(&["100"]))
+        .await
+        .unwrap();
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    sqlx::query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000) INSERT INTO social_messages(connection_id,destination,message_id,author_id,body,event_id,created_at) SELECT ?1,'100',CAST(x AS TEXT),'human','backlog',CAST(x AS TEXT),printf('2020-01-01T00:%05d',x) FROM n")
+        .bind(c.id).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) SELECT connection_id,event_id,?2,?3,destination,message_id FROM social_messages WHERE connection_id=?1")
+        .bind(c.id).bind(bot).bind(binding.id).execute(&db.pool).await.unwrap();
+    let unavailable = else_api::providers::Registry::new(vec![]);
+    assert_eq!(
+        else_api::socials::delivery::admit_pending(&db.pool, &unavailable, 1)
+            .await
+            .unwrap(),
+        0
+    );
+    let event = Incoming {
+        event_id: "new".into(),
+        destination: Destination {
+            id: "100".into(),
+            name: "Team".into(),
+            kind: "group".into(),
+            can_send: true,
+        },
+        message_id: "5001".into(),
+        author_id: "human".into(),
+        body: "New message".into(),
+        mentioned: true,
+        direct: false,
+        from_bot: false,
+    };
+    store::record(&db.pool, &c, &event, 5002).await.unwrap();
+    let orphan_pending: i64 = sqlx::query_scalar("SELECT count(*) FROM social_deliveries d WHERE d.status='pending' AND NOT EXISTS(SELECT 1 FROM social_messages m WHERE m.connection_id=d.connection_id AND m.event_id=d.event_id)")
+        .fetch_one(&db.pool).await.unwrap();
+    assert_eq!(orphan_pending, 0);
+    let expired: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM social_deliveries WHERE status='expired' AND settled_at IS NOT NULL",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(expired, 1);
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    assert_eq!(
+        else_api::socials::delivery::admit_pending(&db.pool, &registry, 1)
+            .await
+            .unwrap(),
+        1
+    );
+}
