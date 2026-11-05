@@ -593,7 +593,7 @@ impl Render for Shell {
         let Some(active) = &self.active else {
             return root;
         };
-        root.child(self.render_bar(active, cx))
+        root.child(self.render_bar(active, window, cx))
             .child(div().flex_1().min_h_0().w_full().child(active.app.clone()))
     }
 }

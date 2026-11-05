@@ -244,12 +244,6 @@ impl Shell {
                             .child("Settings"),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Esc"),
-                    )
-                    .child(
                         Button::new("app-settings-close")
                             .focus_ring(false)
                             .cursor_pointer()
@@ -257,7 +251,6 @@ impl Shell {
                             .ghost()
                             .small()
                             .accessibility_label("Close settings")
-                            .tooltip("Close settings")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.cancel(window, cx);
                                 window.close_dialog(cx);
