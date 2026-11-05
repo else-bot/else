@@ -201,6 +201,18 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
         .unwrap();
     let external = turn(&db, bot, "connector").await;
     sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id,status,turn_id) VALUES(?1,'e',?2,?3,'100','1','delivered',?4)").bind(c.id).bind(bot).bind(binding.id).bind(external).execute(&db.pool).await.unwrap();
+    let scoped = store::authorize(
+        &mut *db.pool.acquire().await.unwrap(),
+        &c,
+        bot,
+        external,
+        None,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(scoped.destinations, ["100"]);
     store::authorize(
         &mut *db.pool.acquire().await.unwrap(),
         &c,

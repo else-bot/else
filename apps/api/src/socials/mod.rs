@@ -330,7 +330,7 @@ impl Manager {
     }
     async fn dispatch(&self, c: &Connection, token: &Token, r: &Request) -> Result<Value, Error> {
         let mut conn = self.db.acquire().await?;
-        let mut access = store::authorize(
+        let access = store::authorize(
             &mut conn,
             c,
             r.bot,
@@ -340,15 +340,6 @@ impl Manager {
             r.operation.sends(),
         )
         .await?;
-        let external: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_deliveries WHERE turn_id=?1)")
-                .bind(r.turn)
-                .fetch_one(&mut *conn)
-                .await?;
-        if external {
-            let allowed:Vec<String>=sqlx::query_scalar("SELECT DISTINCT destination FROM social_deliveries WHERE turn_id=?1 AND connection_id=?2").bind(r.turn).bind(c.id).fetch_all(&mut *conn).await?;
-            access.destinations.retain(|d| allowed.contains(d));
-        }
         drop(conn);
         if r.operation.mutates() {
             let id = r

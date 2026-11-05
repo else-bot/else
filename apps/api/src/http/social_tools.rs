@@ -43,50 +43,165 @@ struct Status {
     action_id: Uuid,
 }
 pub async fn call(s: &AppState, g: &Grant, name: &str, args: &Value) -> Outcome {
-    let result=async{match name{
-        "social_connect"=>{
-            let input:Connect=serde_json::from_value(args.clone()).map_err(|_|Error::Invalid("Use provider and reason only. Never pass a token."))?;
-            let setup=store::request_setup(&s.db,g.turn_id,input.provider,&input.reason).await?;
-            let pending=setup.status=="pending";if pending{s.scheduler.grants().park(g.turn_id).await;}
-            Ok(tool_result(json!({"setup":setup,"parked":pending,"next":if pending{"The owner sees the native connection card. Explain what the token connects and the intended access, then end this attempt. Never request a token in chat."}else{"The owner settled this setup. Discover social_connections to inspect current access and instructions."}})))
-        },
-        "social_connections"=>{
-            if !args.as_object().is_some_and(|a|a.is_empty()){return Err(Error::Invalid("social_connections takes no arguments."))}
-            let mut list=Vec::new();for c in store::connections(&s.db).await?{
-                let mut conn=s.db.acquire().await?;let access=match store::authorize(&mut conn,&c,g.bot_id,g.turn_id,None,false,false).await{Ok(a)=>a,Err(_)=>continue};
-                let external:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items i JOIN turns t ON t.owner_item_id=i.id WHERE t.id=?1 AND i.kind='connector')").bind(g.turn_id).fetch_one(&mut *conn).await?;
-                let scoped:Vec<String>=if external{sqlx::query_scalar("SELECT DISTINCT destination FROM social_deliveries WHERE turn_id=?1 AND connection_id=?2 AND binding_id IN (SELECT id FROM social_bindings WHERE bot_id=?3)").bind(g.turn_id).bind(c.id).bind(g.bot_id).fetch_all(&mut *conn).await?}else{access.destinations.clone()};drop(conn);
-                let destinations=store::destinations(&s.db,c.id).await?.into_iter().filter(|d|scoped.contains(&d.id)).collect::<Vec<_>>();
-                let capabilities=OPERATIONS.iter().map(|op|{let supported=c.provider.supports(op);let read=matches!(*op,"conversations"|"history"|"search"|"message"|"chat"|"members");json!({"operation":op,"supported":supported,"granted":supported&&if read{access.permissions.read}else{access.permissions.write&&(*op!="poll"||access.permissions.send)},"approval_required":!read,"platform_permissions":"checked_by_provider_at_execution"})}).collect::<Vec<_>>();
-                list.push(json!({"connection":c,"destinations":destinations,"permissions":access.permissions,"instructions":access.instructions,"wake_policy":access.wake_policy,"capabilities":capabilities,"limitations":c.provider.limitations(),"sending":"draft_message with account_id then exact approved send_draft"}));
-            }Ok(tool_result(json!({"connections":list})))
-        },
-        "social_action"=>{
-            let a:Action=serde_json::from_value(args.clone()).map_err(|_|Error::Invalid("Use connection_id, command, and action_id for a mutation."))?;a.command.validate()?;
-            let m=s.socials.as_ref().ok_or(Error::Crypto)?;
-            if a.command.mutates(){
-                if a.action_id.is_none(){return Err(Error::Invalid("Mutations require a stable action_id."))}
-                let c=store::connection(&s.db,a.connection_id).await?;if !c.provider.supports(a.command.operation()){return Err(Error::Unsupported)}store::authorize(&mut *s.db.acquire().await?,&c,g.bot_id,g.turn_id,a.command.destination(),true,a.command.sends()).await?;
-                let kind=if matches!(a.command,Command::Delete{..}){Kind::Destructive}else{Kind::External};
-                let spec=Spec::tool_approval(kind,name,args,format!("{} social action",c.provider.label()),serde_json::to_string(&a.command).map_err(|_|Error::Conflict)?);
-                match crate::db::owner_questions::gate(&s.db,g.turn_id,&spec).await.map_err(|_|Error::Forbidden)?{
-                    crate::db::owner_questions::Gate::Pending(q)=>return Ok(super::owner_tools::pending_approval(s,g,&q,"The owner sees an approval card for this exact social action. End this attempt. If approved, call social_action with exactly the same arguments once.").await.0),
-                    crate::db::owner_questions::Gate::Denied(_)=>return Err(Error::Forbidden),
-                    crate::db::owner_questions::Gate::Run{..}=>{}
-                }
-            }
-            Ok(tool_result(m.execute(a.connection_id,g.bot_id,g.turn_id,a.action_id,a.command).await?))
-        },
-        "social_action_status"=>{
-            let a:Status=serde_json::from_value(args.clone()).map_err(|_|Error::Invalid("Use connection_id and action_id."))?;
-            let c=store::connection(&s.db,a.connection_id).await?;
-            let row:Option<(String,String,Option<sqlx::types::Json<Value>>)>=sqlx::query_as("SELECT destination,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2 AND bot_id=?3").bind(a.connection_id).bind(a.action_id).bind(g.bot_id).fetch_optional(&s.db).await?;
-            let(destination,status,result)=row.ok_or(Error::NotFound)?;
-            store::authorize(&mut *s.db.acquire().await?,&c,g.bot_id,g.turn_id,Some(&destination),false,false).await?;
-            Ok(tool_result(json!({"action_id":a.action_id,"status":status,"result":result.map(|x|x.0)})))
-        },_=>Err(Error::Unsupported)
-    }}.await;
+    let result = match name {
+        "social_connect" => connect(s, g, args).await,
+        "social_connections" => connections(s, g, args).await,
+        "social_action" => action(s, g, args).await,
+        "social_action_status" => status(s, g, args).await,
+        _ => Err(Error::Unsupported),
+    };
     result
-        .map(|v| (v, Some(format!("native social tool {name}"))))
+        .map(|value| (value, Some(format!("native social tool {name}"))))
         .unwrap_or_else(refused)
+}
+
+async fn connect(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+    let input: Connect = serde_json::from_value(args.clone())
+        .map_err(|_| Error::Invalid("Use provider and reason only. Never pass a token."))?;
+    let setup = store::request_setup(&s.db, g.turn_id, input.provider, &input.reason).await?;
+    let pending = setup.status == "pending";
+    if pending {
+        s.scheduler.grants().park(g.turn_id).await;
+    }
+    Ok(tool_result(json!({
+        "setup": setup,
+        "parked": pending,
+        "next": if pending {
+            "The owner sees the native connection card. Explain what the token connects and the intended access, then end this attempt. Never request a token in chat."
+        } else {
+            "The owner settled this setup. Discover social_connections to inspect current access and instructions."
+        }
+    })))
+}
+
+async fn connections(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+    if !args.as_object().is_some_and(|a| a.is_empty()) {
+        return Err(Error::Invalid("social_connections takes no arguments."));
+    }
+    let mut list = Vec::new();
+    for c in store::connections(&s.db).await? {
+        let access = {
+            let mut conn = s.db.acquire().await?;
+            match store::authorize(&mut conn, &c, g.bot_id, g.turn_id, None, false, false).await {
+                Ok(access) => access,
+                Err(Error::Forbidden) => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let destinations = store::destinations(&s.db, c.id)
+            .await?
+            .into_iter()
+            .filter(|d| access.destinations.contains(&d.id))
+            .collect::<Vec<_>>();
+        let capabilities = OPERATIONS
+            .iter()
+            .map(|op| {
+                let supported = c.provider.supports(op);
+                let read = matches!(
+                    *op,
+                    "conversations" | "history" | "search" | "message" | "chat" | "members"
+                );
+                json!({
+                    "operation": op,
+                    "supported": supported,
+                    "granted": supported && if read { access.permissions.read } else {
+                        access.permissions.write && (*op != "poll" || access.permissions.send)
+                    },
+                    "approval_required": !read,
+                    "platform_permissions": "checked_by_provider_at_execution"
+                })
+            })
+            .collect::<Vec<_>>();
+        list.push(json!({
+            "connection": c, "destinations": destinations, "permissions": access.permissions,
+            "instructions": access.instructions, "wake_policy": access.wake_policy,
+            "capabilities": capabilities, "limitations": c.provider.limitations(),
+            "sending": "draft_message with account_id then exact approved send_draft"
+        }));
+    }
+    Ok(tool_result(json!({"connections": list})))
+}
+
+async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+    let input: Action = serde_json::from_value(args.clone())
+        .map_err(|_| Error::Invalid("Use connection_id, command, and action_id for a mutation."))?;
+    input.command.validate()?;
+    let manager = s.socials.as_ref().ok_or(Error::Crypto)?;
+    if input.command.mutates() {
+        if input.action_id.is_none() {
+            return Err(Error::Invalid("Mutations require a stable action_id."));
+        }
+        let connection = store::connection(&s.db, input.connection_id).await?;
+        if !connection.provider.supports(input.command.operation()) {
+            return Err(Error::Unsupported);
+        }
+        store::authorize(
+            &mut *s.db.acquire().await?,
+            &connection,
+            g.bot_id,
+            g.turn_id,
+            input.command.destination(),
+            true,
+            input.command.sends(),
+        )
+        .await?;
+        let kind = if matches!(input.command, Command::Delete { .. }) {
+            Kind::Destructive
+        } else {
+            Kind::External
+        };
+        let spec = Spec::tool_approval(
+            kind,
+            "social_action",
+            args,
+            format!("{} social action", connection.provider.label()),
+            serde_json::to_string(&input.command).map_err(|_| Error::Conflict)?,
+        );
+        match crate::db::owner_questions::gate(&s.db, g.turn_id, &spec)
+            .await
+            .map_err(|_| Error::Forbidden)?
+        {
+            crate::db::owner_questions::Gate::Pending(question) => {
+                return Ok(super::owner_tools::pending_approval(s, g, &question,
+                    "The owner sees an approval card for this exact social action. End this attempt. If approved, call social_action with exactly the same arguments once."
+                ).await.0);
+            }
+            crate::db::owner_questions::Gate::Denied(_) => return Err(Error::Forbidden),
+            crate::db::owner_questions::Gate::Run { .. } => {}
+        }
+    }
+    Ok(tool_result(
+        manager
+            .execute(
+                input.connection_id,
+                g.bot_id,
+                g.turn_id,
+                input.action_id,
+                input.command,
+            )
+            .await?,
+    ))
+}
+
+async fn status(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
+    let input: Status = serde_json::from_value(args.clone())
+        .map_err(|_| Error::Invalid("Use connection_id and action_id."))?;
+    let connection = store::connection(&s.db, input.connection_id).await?;
+    let row: Option<(String, String, Option<sqlx::types::Json<Value>>)> = sqlx::query_as(
+        "SELECT destination,status,result FROM social_actions WHERE connection_id=?1 AND action_id=?2 AND bot_id=?3",
+    ).bind(input.connection_id).bind(input.action_id).bind(g.bot_id).fetch_optional(&s.db).await?;
+    let (destination, status, result) = row.ok_or(Error::NotFound)?;
+    store::authorize(
+        &mut *s.db.acquire().await?,
+        &connection,
+        g.bot_id,
+        g.turn_id,
+        Some(&destination),
+        false,
+        false,
+    )
+    .await?;
+    Ok(tool_result(
+        json!({"action_id": input.action_id, "status": status, "result": result.map(|x| x.0)}),
+    ))
 }

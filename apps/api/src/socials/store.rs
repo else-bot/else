@@ -243,19 +243,27 @@ pub async fn authorize(
     send: bool,
 ) -> Result<BindingInput, Error> {
     let row:Option<(Json<BindingInput>,String)>=sqlx::query_as("SELECT g.access,i.kind FROM social_bindings g JOIN social_connections c ON c.id=g.connection_id JOIN turns t ON t.bot_id=g.bot_id JOIN bots b ON b.id=t.bot_id JOIN items i ON i.id=t.owner_item_id WHERE c.id=?1 AND c.state='active' AND c.generation=?2 AND g.bot_id=?3 AND t.id=?4 AND t.status IN ('sending','running') AND b.status='active' AND NOT b.cancel_pending").bind(c.id).bind(c.generation).bind(bot).bind(turn).fetch_optional(&mut *conn).await?;
-    let (Json(access), kind) = row.ok_or(Error::Forbidden)?;
+    let (Json(mut access), kind) = row.ok_or(Error::Forbidden)?;
+    if kind == "connector" {
+        let scoped: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT d.destination FROM social_deliveries d \
+             JOIN social_bindings b ON b.id=d.binding_id AND b.connection_id=d.connection_id \
+             WHERE d.turn_id=?1 AND d.connection_id=?2 AND b.bot_id=?3",
+        )
+        .bind(turn)
+        .bind(c.id)
+        .bind(bot)
+        .fetch_all(&mut *conn)
+        .await?;
+        access.destinations.retain(|d| scoped.contains(d));
+    }
     if !access.permissions.read
+        || access.destinations.is_empty()
         || write && !access.permissions.write
         || send && !access.permissions.send
         || destination.is_some_and(|d| !access.destinations.iter().any(|x| x == d))
     {
         return Err(Error::Forbidden);
-    }
-    if kind == "connector" {
-        let scoped:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_deliveries WHERE turn_id=?1 AND connection_id=?2 AND (?3 IS NULL OR destination=?3) AND binding_id IN (SELECT id FROM social_bindings WHERE connection_id=?2 AND bot_id=?4))").bind(turn).bind(c.id).bind(destination).bind(bot).fetch_one(&mut *conn).await?;
-        if !scoped {
-            return Err(Error::Forbidden);
-        }
     }
     Ok(access)
 }
