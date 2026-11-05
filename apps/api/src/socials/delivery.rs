@@ -1,9 +1,8 @@
 use sha2::{Digest, Sha256};
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Availability, Profile};
 use crate::db::{bot_profiles, events};
 use crate::providers::Registry;
 
@@ -52,37 +51,6 @@ pub async fn admit_pending(
         }
     }
     Ok(queued)
-}
-
-async fn provider(
-    conn: &mut SqliteConnection,
-    registry: &Registry,
-    bot_id: Uuid,
-) -> Result<Option<(&'static str, Option<(i64, sqlx::types::Json<Profile>)>)>, sqlx::Error> {
-    let own: Option<String> =
-        sqlx::query_scalar("SELECT provider_id FROM bot_profiles WHERE bot_id = ?1")
-            .bind(bot_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    let chosen = match own {
-        Some(own) => Some(own),
-        None => bot_profiles::default_provider(conn).await?,
-    };
-    let id = chosen
-        .and_then(|id| registry.get(&id).map(|p| p.id()))
-        .or(registry.default_id());
-    let Some(provider) = id.and_then(|id| registry.get(id)) else {
-        return Ok(None);
-    };
-    if provider.availability() != Availability::Available {
-        return Ok(None);
-    }
-    if !provider.uses_profile() {
-        return Ok(Some((provider.id(), None)));
-    }
-    Ok(bot_profiles::effective(conn, bot_id, provider.id())
-        .await?
-        .map(|profile| (provider.id(), Some(profile))))
 }
 
 #[derive(sqlx::FromRow)]
@@ -149,9 +117,13 @@ async fn admit(
     let chosen = if busy {
         None
     } else {
-        provider(&mut tx, registry, bot_id).await?
+        bot_profiles::for_admission(&mut tx, registry, bot_id).await?
     };
-    let Some((provider_id, profile)) = chosen else {
+    let Some(bot_profiles::TurnProvider {
+        provider_id,
+        profile,
+    }) = chosen
+    else {
         tx.commit().await?;
         return Ok(false);
     };
