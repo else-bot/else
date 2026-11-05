@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod auth;
+pub mod backups;
 pub mod bots;
 pub mod categories;
 pub mod computers;
@@ -55,6 +56,7 @@ pub struct AppState {
     pub computers: Option<Arc<crate::computers::ComputerManager>>,
     /// The installation key for encrypted task and connector credentials.
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
+    pub backups: Option<crate::backup::service::Backups>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     desktop_streams: desktop_stream::Streams,
@@ -77,6 +79,7 @@ impl AppState {
             computers: None,
             secret_key: None,
             connectors: None,
+            backups: None,
             update_hold: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
         }
@@ -127,6 +130,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(computers::routes())
         .merge(connectors::routes())
         .merge(settings::routes())
+        .merge(backups::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())

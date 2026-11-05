@@ -18,6 +18,8 @@ pub mod projects;
 pub mod replicate;
 pub mod restore;
 pub mod s3;
+pub mod service;
+pub mod settings;
 pub mod worker;
 
 use std::fs::{self, File, OpenOptions};

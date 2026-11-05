@@ -86,11 +86,26 @@ impl BackupWorker {
         &self,
         cancel: &CancellationToken,
     ) -> Result<SetSummary, BackupError> {
+        self.capture_until(cancel, true).await
+    }
+
+    pub async fn run_local_until(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<SetSummary, BackupError> {
+        self.capture_until(cancel, false).await
+    }
+
+    async fn capture_until(
+        &self,
+        cancel: &CancellationToken,
+        upload: bool,
+    ) -> Result<SetSummary, BackupError> {
         let _lock = super::try_lock(&self.config.dir)?
             .ok_or_else(|| BackupError::Refused("another backup is running".into()))?;
         self.recover_locked().await?;
         let mut summary = self.locked_run(cancel).await?;
-        if let Some(replicator) = &self.replicator {
+        if upload && let Some(replicator) = &self.replicator {
             summary.remote = Some(
                 replicator
                     .replicate_pending(&self.config.dir, &self.key)
