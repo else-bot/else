@@ -82,6 +82,69 @@ def package_all(source, output):
             binaries.package(VERSION, platform, source, output)
 
 
+class ReleasePreflight(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.remote = self.root / "origin.git"
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git("init", "--bare", str(self.remote))
+        self.git("init", "-b", "main")
+        self.git("config", "user.email", "release-test@example.invalid")
+        self.git("config", "user.name", "Release test")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("config", "tag.gpgsign", "false")
+        self.git("remote", "add", "origin", str(self.remote))
+        scripts = self.repo / "scripts"
+        scripts.mkdir()
+        (scripts / "release.sh").write_text(Path(__file__).with_name("release.sh").read_text())
+        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.1"\n')
+        self.git("add", ".")
+        self.git("commit", "-m", "initial release")
+        self.git("tag", "v0.0.1")
+        self.git("push", "origin", "main", "--tags")
+
+    def git(self, *arguments):
+        return subprocess.run(["git", *arguments], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def preflight(self):
+        return subprocess.run(["bash", str(self.repo / "scripts/release.sh"), "patch"],
+                              input="", capture_output=True, text=True)
+
+    def assert_ready_to_confirm(self, result):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Cut release/v0.0.2", result.stdout, result.stdout + result.stderr)
+        self.assertIn("no terminal to confirm; pass -y", result.stderr)
+        self.assertEqual(self.git("ls-remote", "--heads", "origin", "release/*"), "")
+
+    def test_conflicting_local_tag_does_not_block_release_or_get_overwritten(self):
+        self.git("commit", "--allow-empty", "-m", "local work")
+        self.git("tag", "-f", "v0.0.1")
+        local_tag = self.git("rev-parse", "v0.0.1")
+        self.git("reset", "--hard", "origin/main")
+        self.assert_ready_to_confirm(self.preflight())
+        self.assertEqual(self.git("rev-parse", "v0.0.1"), local_tag)
+
+    def test_remote_tag_blocks_release_even_when_missing_locally(self):
+        self.git("tag", "v0.0.2")
+        self.git("push", "origin", "v0.0.2")
+        self.git("tag", "-d", "v0.0.2")
+        result = self.preflight()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("tag v0.0.2 already exists", result.stderr)
+        self.assertNotIn("Cut release/", result.stdout)
+        self.assertNotIn("v0.0.2", self.git("tag", "--list"))
+
+    def test_local_only_tag_does_not_block_release_or_get_overwritten(self):
+        self.git("tag", "v0.0.2")
+        local_tag = self.git("rev-parse", "v0.0.2")
+        self.assert_ready_to_confirm(self.preflight())
+        self.assertEqual(self.git("rev-parse", "v0.0.2"), local_tag)
+
+
 class Archives(unittest.TestCase):
     def test_archives_and_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
