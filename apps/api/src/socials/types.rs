@@ -22,10 +22,20 @@ impl Provider {
             Self::Discord => "Discord",
         }
     }
-    pub fn supports(self, operation: &str) -> bool {
-        match self {
-            Self::Telegram => operation != "create_thread",
-            Self::Discord => !matches!(operation, "poll" | "members"),
+    pub fn supports(self, operation: CommandKind) -> bool {
+        match operation {
+            CommandKind::CreateThread => self == Self::Discord,
+            CommandKind::Poll | CommandKind::Members => self == Self::Telegram,
+            CommandKind::Conversations
+            | CommandKind::History
+            | CommandKind::Search
+            | CommandKind::Message
+            | CommandKind::Chat
+            | CommandKind::Edit
+            | CommandKind::Delete
+            | CommandKind::React
+            | CommandKind::Pin
+            | CommandKind::Unpin => true,
         }
     }
     pub fn limitations(self) -> &'static [&'static str] {
@@ -220,21 +230,21 @@ fn default_limit() -> u16 {
     50
 }
 impl Command {
-    pub fn operation(&self) -> &'static str {
+    pub fn operation(&self) -> CommandKind {
         match self {
-            Self::Conversations => "conversations",
-            Self::History { .. } => "history",
-            Self::Search { .. } => "search",
-            Self::Message { .. } => "message",
-            Self::Chat { .. } => "chat",
-            Self::Members { .. } => "members",
-            Self::Edit { .. } => "edit",
-            Self::Delete { .. } => "delete",
-            Self::React { .. } => "react",
-            Self::Pin { .. } => "pin",
-            Self::Unpin { .. } => "unpin",
-            Self::CreateThread { .. } => "create_thread",
-            Self::Poll { .. } => "poll",
+            Self::Conversations => CommandKind::Conversations,
+            Self::History { .. } => CommandKind::History,
+            Self::Search { .. } => CommandKind::Search,
+            Self::Message { .. } => CommandKind::Message,
+            Self::Chat { .. } => CommandKind::Chat,
+            Self::Members { .. } => CommandKind::Members,
+            Self::Edit { .. } => CommandKind::Edit,
+            Self::Delete { .. } => CommandKind::Delete,
+            Self::React { .. } => CommandKind::React,
+            Self::Pin { .. } => CommandKind::Pin,
+            Self::Unpin { .. } => CommandKind::Unpin,
+            Self::CreateThread { .. } => CommandKind::CreateThread,
+            Self::Poll { .. } => CommandKind::Poll,
         }
     }
     pub fn destination(&self) -> Option<&str> {
@@ -255,18 +265,10 @@ impl Command {
         }
     }
     pub fn sends(&self) -> bool {
-        matches!(self, Self::Poll { .. })
+        self.operation().sends()
     }
     pub fn mutates(&self) -> bool {
-        !matches!(
-            self,
-            Self::Conversations
-                | Self::History { .. }
-                | Self::Search { .. }
-                | Self::Message { .. }
-                | Self::Chat { .. }
-                | Self::Members { .. }
-        )
+        self.operation().mutates()
     }
     pub fn validate(&self) -> Result<(), Error> {
         if self
@@ -344,23 +346,62 @@ pub enum Error {
     Db(#[from] sqlx::Error),
 }
 
-pub const OPERATIONS: &[&str] = &[
-    "conversations",
-    "history",
-    "search",
-    "message",
-    "chat",
-    "members",
-    "edit",
-    "delete",
-    "react",
-    "pin",
-    "unpin",
-    "create_thread",
-    "poll",
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    Conversations,
+    History,
+    Search,
+    Message,
+    Chat,
+    Members,
+    Edit,
+    Delete,
+    React,
+    Pin,
+    Unpin,
+    CreateThread,
+    Poll,
+}
+impl CommandKind {
+    pub fn mutates(self) -> bool {
+        match self {
+            Self::Conversations
+            | Self::History
+            | Self::Search
+            | Self::Message
+            | Self::Chat
+            | Self::Members => false,
+            Self::Edit
+            | Self::Delete
+            | Self::React
+            | Self::Pin
+            | Self::Unpin
+            | Self::CreateThread
+            | Self::Poll => true,
+        }
+    }
+    pub fn sends(self) -> bool {
+        self == Self::Poll
+    }
+}
+pub const OPERATIONS: &[CommandKind] = &[
+    CommandKind::Conversations,
+    CommandKind::History,
+    CommandKind::Search,
+    CommandKind::Message,
+    CommandKind::Chat,
+    CommandKind::Members,
+    CommandKind::Edit,
+    CommandKind::Delete,
+    CommandKind::React,
+    CommandKind::Pin,
+    CommandKind::Unpin,
+    CommandKind::CreateThread,
+    CommandKind::Poll,
 ];
 pub fn definitions() -> Value {
-    serde_json::json!({"providers":([Provider::Telegram,Provider::Discord].map(|p|serde_json::json!({"provider":p,"label":p.label(),"token_help":format!("Connect the {} bot identity. The API stores the token encrypted and uses it for native tools; the assistant never receives the token.",p.label()),"capabilities":OPERATIONS.iter().filter(|op|p.supports(op)).collect::<Vec<_>>(),"limitations":p.limitations()})))})
+    serde_json::json!({"providers":([Provider::Telegram,Provider::Discord].map(|p|serde_json::json!({"provider":p,"label":p.label(),"token_help":format!("Connect the {} bot identity. The API stores the token encrypted and uses it for native tools; the assistant never receives the token.",p.label()),"capabilities":OPERATIONS.iter().filter(|op|p.supports(**op)).collect::<Vec<_>>(),"limitations":p.limitations()})))})
 }
 
 pub struct Envelope {

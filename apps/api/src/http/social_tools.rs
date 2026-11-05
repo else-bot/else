@@ -96,18 +96,15 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
         let capabilities = OPERATIONS
             .iter()
             .map(|op| {
-                let supported = c.provider.supports(op);
-                let read = matches!(
-                    *op,
-                    "conversations" | "history" | "search" | "message" | "chat" | "members"
-                );
+                let supported = c.provider.supports(*op);
+                let mutates = op.mutates();
                 json!({
                     "operation": op,
                     "supported": supported,
-                    "granted": supported && if read { access.permissions.read } else {
-                        access.permissions.write && (*op != "poll" || access.permissions.send)
+                    "granted": supported && if !mutates { access.permissions.read } else {
+                        access.permissions.write && (!op.sends() || access.permissions.send)
                     },
-                    "approval_required": !read,
+                    "approval_required": mutates,
                     "platform_permissions": "checked_by_provider_at_execution"
                 })
             })

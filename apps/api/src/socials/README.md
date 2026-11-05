@@ -4,11 +4,12 @@ Social connections belong to the API host. An owner connects a platform bot and 
 
 ## Implement the adapter
 
-1. Add the provider to `types::Provider`, its label and limitations, and `Provider::supports`. Keep the supported-operation matrix truthful. Unsupported operations must fail before network dispatch.
+1. Add the provider to `types::Provider`, its label and limitations, and `Provider::supports`. Keep the typed `CommandKind` policy truthful. Discovery and execution share its permission and approval classification. Unsupported operations must fail before network dispatch.
 2. Add an SDK-backed adapter under `providers` and implement `providers::Transport` through `Native`. Keep SDK types, request construction, pagination, and platform-specific permission checks inside the adapter.
 3. Normalize identity, destination, message, and incoming-event values into the social types. Preserve remote identifiers as strings in public JSON. Incoming events need a stable identity for deduplication.
 4. Use the adapter's cancellation token while receiving events and waiting for capacity. Wait for the receiver's storage acknowledgment before advancing a remote cursor. Let the SDK maintain gateway heartbeats independently of bot execution.
 5. Initialize TLS explicitly. Both Rustls crypto backends are present in the dependency graph, so SDK construction must not rely on an implicit backend choice or on an unrelated mail connection initializing it first.
+6. Store the SDK client in `providers::Session`. The connection worker shares one session across discovery, commands, sending, and listening for its credential generation, preserving SDK rate limits and connection pools. Replacing credentials retires that session.
 
 The transport is injectable for tests. A fake transport verifies API policy and lifecycle, while a disposable platform account verifies the SDK integration. Keep those results distinct.
 
@@ -17,6 +18,8 @@ The transport is injectable for tests. A fake transport verifies API policy and 
 Reuse `Manager` for bounded per-connection workers, dispatch, cancellation, and receipt handling. Reuse `store` for encrypted credentials, canonical remote identity, bot bindings, generation checks, event deduplication, and action receipts. HTTP handlers should not call platform SDKs directly.
 
 Owner management routes accept credentials through `SecretJson`. Task tools authenticate with the current turn's grant and resolve bot identity from the server. The requesting model cannot choose another bot's identity, submit a token, change a binding, or expand access through its behavior instructions.
+
+Complete a pending setup with its selected connection and `BindingInput` in one owner request. The store validates the setup and saves access in the same transaction; cancellation or invalid access cannot leave a changed grant behind. Settings may independently save a fully revoked grant.
 
 Sending uses the existing approved-draft lifecycle. Other externally visible mutations use an exact-action approval and a durable action ID. A failed response can leave the external result unknown. Return the stored uncertainty and do not repeat the effect with a new identity.
 
