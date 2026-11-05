@@ -643,7 +643,6 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(c.apply(&delta(5, 2, 2, "✓日")), Ok(Applied::Changed));
-        // A replay of an applied event is ignored and changes nothing.
         assert_eq!(c.apply(&delta(5, 2, 2, "✓日")), Ok(Applied::Duplicate));
         assert_eq!(c.apply(&delta(4, 2, 0, "x")), Ok(Applied::Duplicate));
         assert_eq!(c.item(Uuid::from_u128(2)).unwrap().text, "é✓日");
@@ -709,7 +708,6 @@ mod tests {
             "33333333-3333-3333-3333-333333333333:22222222-2222-2222-2222-222222222222:2".into(),
         );
         assert_eq!(c.apply(&other), Err(Reset::BadCursor));
-        // Nothing was applied by the failed attempts.
         assert_eq!(c.item(Uuid::from_u128(2)).unwrap().text, "ab");
         assert_eq!(c.apply(&delta(2, 2, 2, "c")), Ok(Applied::Changed));
     }
@@ -892,7 +890,6 @@ mod tests {
         c.apply(&frame(3, "turn.updated", turn("queued", "stored")))
             .unwrap();
         assert_eq!(c.secret_request(request).unwrap().status, "stored");
-        // Servers without secret requests still parse.
         let plain = json!({ "turn": {
             "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 2,
             "provider_id": "synthetic", "status": "queued", "error": null,

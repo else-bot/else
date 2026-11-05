@@ -1,3 +1,0 @@
-/Users/lume/pr50/quarantine/else.bot.app: code has no resources but signature indicates they must be present
-/Users/lume/pr50/quarantine/else.bot.app: code has no resources but signature indicates they must be present
-_LSOpenURLsWithCompletionHandler() failed for the application /Users/lume/pr50/quarantine/else.bot.app with error -128.

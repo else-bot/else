@@ -41,7 +41,7 @@ pub struct BotRecord {
     pub active_turn_id: Option<Uuid>,
     pub active_turn_status: Option<String>,
     pub queued_count: i64,
-    /// Its sidebar category (POC-030), if any.
+    /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,
     /// When the newest owner or bot message in its owner conversation was
     /// created; `None` before the first message.
@@ -229,7 +229,6 @@ async fn create_as(
             return Err(BotError::RequestConflict);
         }
         tx.commit().await?;
-        // Retries report current state, including a later deletion.
         return Ok(Created::Existing(
             find(pool, bot_id).await?.ok_or(BotError::NotFound)?,
         ));
@@ -277,7 +276,6 @@ async fn create_as(
     .bind(&hash)
     .execute(&mut *tx)
     .await?;
-    // Wake `bots` channel subscribers once this commits.
     super::events::notify(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Created::New(
@@ -303,7 +301,7 @@ pub async fn find_in(
 
 pub struct Listing {
     pub default_bot_id: Option<Uuid>,
-    /// Sidebar categories (POC-030), in the same snapshot as the bots.
+    /// Sidebar categories, in the same snapshot as the bots.
     pub categories: Vec<super::categories::Category>,
     pub bots: Vec<BotRecord>,
 }
@@ -311,8 +309,6 @@ pub struct Listing {
 /// Active bots, plus tombstones whose shutdown is still pending when
 /// requested. Completed tombstones never appear. Ordered oldest first.
 pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, sqlx::Error> {
-    // One snapshot for both reads, so a concurrent deletion cannot pair a
-    // cleared default with the bot it just deleted.
     let mut tx = pool.begin().await?;
     let bots = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT_BOT} WHERE b.status = 'active' OR (?1 AND b.status = 'deleting')
@@ -393,7 +389,6 @@ pub struct Deleted {
 /// returns the existing tombstone unchanged. History is retained.
 pub async fn delete(pool: &SqlitePool, bot_id: Uuid) -> Result<Deleted, BotError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    // Read under a share lock so the main bot cannot change meanwhile.
     let main: Option<Uuid> = sqlx::query_scalar("SELECT default_bot_id FROM installation")
         .fetch_optional(&mut *tx)
         .await?
@@ -417,7 +412,6 @@ pub async fn delete(pool: &SqlitePool, bot_id: Uuid) -> Result<Deleted, BotError
                 super::stop::halt_accepted(&mut tx, bot_id, i64::MAX, "The bot was deleted.")
                     .await?;
             super::stop::settle(&mut tx, bot_id).await?;
-            // Wake this bot's streams so they close promptly.
             super::events::notify(&mut tx, bot_id).await?;
         }
         Some(BotStatus::Deleting | BotStatus::Deleted) => {}

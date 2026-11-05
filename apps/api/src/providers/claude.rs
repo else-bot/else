@@ -1,5 +1,5 @@
 //! The host Claude adapter, over Claude Code's structured print mode on the
-//! host, started in the bot's project directory (POC-020).
+//! host, started in the bot's project directory.
 //!
 //! One supervised CLI process runs per turn: `claude -p` with stream-json
 //! input and output, user-message replay, and partial messages. A new
@@ -60,7 +60,6 @@ use crate::app::providers::{
 };
 
 pub const ID: &str = "claude";
-/// Bump when the system prompt or packet format change.
 const PROMPT_VERSION: &str = "else-claude-v14";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
@@ -73,15 +72,12 @@ const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Fast mode needs an SDK opt-in this adapter does not use.
 const TIERS: &[&str] = &["default"];
 const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
-/// How long an interrupted turn may take to report its result.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const PARK_GRACE: Duration = Duration::from_secs(20);
 const PARK_STOP: Duration = Duration::from_secs(15);
-/// One event line; larger is a protocol failure.
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const STDERR_TAIL: usize = 4096;
-/// Writing the owner's message or a control line to the CLI.
 const PIPE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Claude {
@@ -94,15 +90,10 @@ pub struct Claude {
     tool_url: Option<String>,
 }
 
-/// What one CLI process may call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tools {
-    /// A checkpoint: nothing at all.
     None,
-    /// else.bot's MCP tools only, for work an incoming connector event
-    /// started.
     Elsebot,
-    /// The built-in shell and file tools and else.bot's.
     HostAndElsebot,
 }
 
@@ -220,8 +211,6 @@ impl Claude {
             .collect()
     }
 
-    /// The exact tool inventory a process is offered: the host tools when
-    /// allowed, and else.bot's when configured.
     fn offered_tools(&self, tools: Tools) -> Vec<String> {
         let mut offered: Vec<String> = Vec::new();
         if tools.host() {
@@ -233,8 +222,6 @@ impl Claude {
         offered
     }
 
-    /// CLI arguments for one process, apart from the files in the bot's
-    /// provider home (added at launch). `tools` selects what can be called.
     fn args(
         &self,
         profile: &Profile,
@@ -338,7 +325,6 @@ fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
     }
 }
 
-/// A user message on the CLI's stdin, with the UUID its echo carries.
 fn user_message(uuid: &str, content: Value) -> String {
     let mut line = json!({
         "type": "user",
@@ -350,9 +336,6 @@ fn user_message(uuid: &str, content: Value) -> String {
     line
 }
 
-/// Message content in the owner's order: plain text, or text blocks with
-/// each small enough image inline after its reference. Every file is also
-/// named by its staged copy, so the bot can open it with its tools.
 fn message_content(segments: &[prompt::Segment<'_>]) -> Value {
     use base64::Engine;
     let mut blocks = Vec::new();
@@ -398,7 +381,6 @@ fn interrupt_request() -> String {
     line
 }
 
-/// Keeps the end of the CLI's stderr for error messages.
 fn collect_stderr(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
@@ -528,8 +510,6 @@ impl Provider for Claude {
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
         let fingerprint = self.fingerprint(&profile, &input);
-        // Resume only a compatible session whose transcript is still in
-        // this bot's own home; otherwise start over from SQLite.
         let resumed = input.session.as_ref().filter(|s| {
             s.fingerprint == fingerprint
                 && self.config.as_ref().is_some_and(|c| {
@@ -589,7 +569,6 @@ impl Provider for Claude {
         let expected = self.offered_tools(tools);
         let mut tracker = Tracker::new(expected, &profile.model, &message_uuid);
 
-        // From here a crash leaves delivery uncertain.
         if sink.sending().await.is_err() {
             child.terminate(EXIT_GRACE).await;
             return TurnOutcome::Interrupted;
@@ -629,12 +608,7 @@ impl Provider for Claude {
                 }
                 _ = tokio::time::sleep_until(wake_at) => {
                     if stop_by.is_some_and(|t| t <= tokio::time::Instant::now()) {
-                        // No result after interruption: end the process
-                        // tree; the outcome of the turn is unknown, unless
-                        // it was a parked attempt the request waits on.
                         child.terminate(EXIT_GRACE).await;
-                        // The native turn never finished: its session must
-                        // not be resumed, whatever the request does next.
                         sink.retire_session().await;
                         if parked {
                             break TurnOutcome::Interrupted;
@@ -680,7 +654,6 @@ impl Provider for Claude {
                     break TurnOutcome::Uncertain { message: err };
                 }
             };
-            // Names and types only: payloads carry conversation text.
             if event["type"] != "stream_event" {
                 tracing::debug!(
                     kind = event["type"].as_str().unwrap_or_default(),
@@ -703,7 +676,6 @@ impl Provider for Claude {
                         }
                     }
                     Step::Accepted => {
-                        // A stop racing acceptance still drains the turn.
                         if sink.running().await.is_err() {
                             cancel.cancel();
                         }
@@ -747,7 +719,6 @@ impl Provider for Claude {
                 break decide(&tracker, &info, interrupted, deadline_hit);
             }
         };
-        // Close input so the CLI exits, then reap its process group.
         drop(stdin);
         if tokio::time::timeout(EXIT_GRACE, child.child.wait())
             .await
@@ -764,7 +735,6 @@ impl Provider for Claude {
     }
 }
 
-/// Write a control line; a CLI that stops reading cannot hold the turn.
 async fn send(stdin: &mut Option<tokio::process::ChildStdin>, line: &str) {
     if let Some(pipe) = stdin.as_mut() {
         let _ = tokio::time::timeout(PIPE_TIMEOUT, async {
@@ -775,7 +745,6 @@ async fn send(stdin: &mut Option<tokio::process::ChildStdin>, line: &str) {
     }
 }
 
-/// The stderr tail, without waiting long for a process being reaped.
 async fn stderr_tail(stderr: tokio::task::JoinHandle<String>) -> String {
     tokio::time::timeout(Duration::from_secs(2), stderr)
         .await
@@ -785,10 +754,6 @@ async fn stderr_tail(stderr: tokio::task::JoinHandle<String>) -> String {
 }
 
 impl Claude {
-    /// One checkpoint with nothing callable: no built-in tools, no MCP
-    /// server, no session persistence, a fresh session in a separate per-bot
-    /// home. The init event must confirm no tools and no servers; any tool
-    /// use, sub-agent, or permission request rejects the output.
     async fn checkpoint_once(
         &self,
         bot_id: Uuid,

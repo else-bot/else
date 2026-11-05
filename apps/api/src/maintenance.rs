@@ -1,4 +1,4 @@
-//! The maintenance gate for coordinated backups (POC-022). Work that can
+//! The maintenance gate for coordinated backups. Work that can
 //! change state or wake a computer is admitted through the gate and holds
 //! an [`Admission`] until it has finished: a turn claim (until the turn is
 //! registered as running, which the drain then waits for), a mutating owner
@@ -136,7 +136,6 @@ mod tests {
     async fn closing_waits_for_admitted_work_and_refuses_new_work() {
         let gate = Arc::new(Gate::default());
         let admitted = gate.enter().unwrap();
-        // Admitted work holds the gate open past the timeout.
         assert_eq!(gate.close(Duration::from_millis(50)).await.err(), Some(1));
         assert!(!gate.is_closed(), "a failed close reopens");
         let closer = {

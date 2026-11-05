@@ -29,7 +29,6 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::error::ApiError;
 
-/// How long requests and steps already admitted get to finish.
 const ADMITTED_GRACE: Duration = Duration::from_secs(10);
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -70,7 +69,6 @@ async fn prepare(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiE
                             )));
                         }
                     };
-                    // Admission has stopped: what runs now can only finish, not start.
                     let work = work(&state).await?;
                     if work.turns > 0 || work.commands > 0 {
                         drop(closed);
@@ -129,7 +127,6 @@ async fn work(state: &AppState) -> Result<Work, ApiError> {
     let (turns, queued): (i64, i64) = turns.map_err(|_| unavailable())?;
     let commands = commands.map_err(|_| unavailable())?;
     let jobs = jobs.map_err(|_| unavailable())?;
-    // A turn this process still runs counts even before its row says so.
     let turns = turns.max(running as i64);
     Ok(Work {
         turns,

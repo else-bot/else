@@ -1,1 +1,0 @@
-app-only connection authenticated and saved mode0600 profile for remote fixture

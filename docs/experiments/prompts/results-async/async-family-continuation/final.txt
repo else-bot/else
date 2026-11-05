@@ -1,6 +1,0 @@
-Family’s pickup checklist:
-
-- Agree on a pickup time.
-- Pack bags.
-
-Recorded completed result: `synthetic-child-family` · Source: `bot_result`.

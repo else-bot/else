@@ -1,15 +1,3 @@
-//! POC-028 against the real application: the `else-api` binary with the
-//! owner's Codex and Claude logins and a real `else-guest:2` VM. A freshly
-//! random code word is drawn only into pixels (an xterm window outside the
-//! browser, its text read from a file that is deleted at once), and each
-//! provider must read it back through `computer_screenshot`. Also: the
-//! capture matches the display VNC serves, a resumed session, a missing
-//! display, and Stop work during a screenshot turn, all without a policy
-//! violation. It consumes subscription quota and boots a VM, so it runs only
-//! with `ELSE_LIVE_VISION=1`:
-//!
-//! ELSE_LIVE_VISION=1 cargo test -p else-api --test vision_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -158,7 +146,6 @@ impl Api {
         body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// An abrupt end (SIGKILL): the API gets no chance to clean up.
     fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -173,7 +160,6 @@ impl Drop for Api {
     }
 }
 
-/// Stops and removes every computer in the installation's runtime home.
 struct Cleanup {
     home: PathBuf,
 }
@@ -200,7 +186,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// Wait for a turn's final state; returns (status, assistant text).
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
@@ -231,8 +216,6 @@ async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String
     }
 }
 
-/// Run a command in the guest directly (the test's own fixture setup and
-/// inspection, not the bot's tools), as `elsebot` unless `root`.
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
     use std::io::Write;
     let mut command = std::process::Command::new(msb());
@@ -286,7 +269,6 @@ async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
         .unwrap()
 }
 
-/// Tool activity bodies of one turn.
 async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
@@ -299,8 +281,6 @@ async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<Stri
     .unwrap()
 }
 
-/// A random code word: two letters groups and digits, never in any text the
-/// model can read.
 fn marker() -> String {
     const WORDS: &[&str] = &[
         "MAPLE", "COBALT", "PEBBLE", "LANTERN", "QUARTZ", "WILLOW", "EMBER", "HARBOR",
@@ -314,8 +294,6 @@ fn marker() -> String {
     )
 }
 
-/// Draw `word` big in a yellow window on the guest display. The word passes
-/// through a file that the window's shell deletes before showing it.
 fn draw(home: &Path, name: &str, word: &str) {
     guest(
         home,
@@ -490,7 +468,6 @@ async fn both_providers_read_pixels_from_their_desktop() {
         let (status, reply) = finish(&pool, turn, long).await;
         assert_eq!(status, "completed", "{reply}");
         assert!(reply.contains(&word), "{reply}");
-        // The same native session answered (resumed, not rebuilt).
         let sessions: Vec<(String, String)> = sqlx::query_as(
             "SELECT native_session_id, status FROM provider_sessions
              WHERE bot_id = ?1 AND provider_id = ?2 ORDER BY created_at",
@@ -645,8 +622,6 @@ async fn both_providers_read_pixels_from_their_desktop() {
             .contains("iVBORw0KGgo"),
         "nor the API log"
     );
-    // Where image data does live: the providers' own native session files
-    // (their conversation, like any tool result), never backed up.
     let holders = std::process::Command::new("grep")
         .args(["-rl", "--exclude-dir=microsandbox", "iVBORw0KGgo"])
         .arg(&data)

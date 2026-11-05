@@ -1,9 +1,0 @@
-cmd-w/before: 'else.bot' elements=87 capture=capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000001
-cmd-w/still-open: 'else.bot' elements=89 capture=capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000002
-Traceback (most recent call last):
-  File "/Users/iam4x/.t3/worktrees/else/t3-85e87aaa/scripts/test-macos-launch.py", line 75, in <module>
-    main()
-    ~~~~^^
-  File "/Users/iam4x/.t3/worktrees/else/t3-85e87aaa/scripts/test-macos-launch.py", line 66, in main
-    raise RuntimeError(f"{name} left the installed app running")
-RuntimeError: cmd-w left the installed app running

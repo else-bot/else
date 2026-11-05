@@ -1,5 +1,3 @@
-//! Uploading files for a bot's messages and reading them back.
-
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
@@ -67,7 +65,6 @@ async fn upload(
 ) -> Result<Response, ApiError> {
     messages::validate_name(&body.name)?;
     let media_type = messages::media_type(&body.media_type)?;
-    // Base64 holds at least 3 bytes per 4 characters.
     if body.data.len() as u64 > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
         return Err(InvalidAttachment::TooLarge.into());
     }

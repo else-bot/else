@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Shared assertions for the new native arm64 installer lanes.
 set -euo pipefail
 fail() { echo "CHECK FAILED: $*" >&2; exit 1; }
 export ELSE_REPO="${ELSE_REPO:-/repo.git}"
@@ -95,7 +94,6 @@ queued="$(send 'after the refusal')"
 [ -n "$queued" ] && [ "$queued" != null ] || fail "work is not accepted after the refusal"
 
 echo "--- update to v0.0.2 once idle"
-# Stop work is bot-wide: it also ends the message queued behind the busy turn.
 api -X POST "$URL/v1/bots/$bot/cancel" -d "{\"request_id\":\"$(uuid)\"}" >/dev/null
 wait_status "$busy" interrupted
 done_before="$(send 'before the update')"

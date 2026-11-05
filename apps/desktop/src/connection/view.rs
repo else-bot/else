@@ -8,9 +8,6 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Theme, h_flex};
 
 impl Shell {
-    /// The server and its connection state. On macOS this is the window's
-    /// title bar, beside the traffic lights; elsewhere a slim strip under the
-    /// desktop's own decorations.
     pub(super) fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let app = active.app.read(cx);
@@ -547,7 +544,6 @@ fn capitalized(text: &str) -> String {
 mod tests {
     use super::*;
 
-    // `gpui_kit::*` brings its own `test` attribute.
     #[::core::prelude::v1::test]
     fn missing_local_states_name_the_next_step() {
         assert!(

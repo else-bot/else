@@ -268,13 +268,10 @@ mod tests {
             paris.next_after(at("2026-10-23T12:00:00Z")),
             Some(at("2026-10-24T07:00:00Z"))
         );
-        // 02:30 does not exist on 29 March 2026 in Paris: that day's run
-        // happens right after the gap, then the schedule resumes.
         let gap = Schedule::parse("30 2 * * *", Some("Europe/Paris")).unwrap();
         let in_gap = gap.next_after(at("2026-03-28T12:00:00Z")).unwrap();
         assert_eq!(in_gap, at("2026-03-29T01:00:00Z"));
         assert_eq!(gap.next_after(in_gap), Some(at("2026-03-30T00:30:00Z")));
-        // 02:30 happens twice on 25 October 2026: it runs once.
         let first = gap.next_after(at("2026-10-24T12:00:00Z")).unwrap();
         assert_eq!(first, at("2026-10-25T00:30:00Z"));
         assert_eq!(gap.next_after(first), Some(at("2026-10-26T01:30:00Z")));

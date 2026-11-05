@@ -1,5 +1,3 @@
-//! POC-003: migrations and explicit installation setup against SQLite.
-
 mod common;
 
 use common::TestDb;
@@ -20,7 +18,6 @@ async fn counts(pool: &sqlx::SqlitePool) -> (i64, i64, i64, i64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_setup_creates_main_bot_and_default_profile_once() {
     let db = TestDb::migrated().await;
-    // Ordinary startup on an empty installation refuses and seeds nothing.
     assert!(matches!(
         installation::check_installed(&db.pool).await,
         Err(InstallError::NotInstalled)
@@ -129,7 +126,6 @@ async fn missing_profile_is_seeded_without_recreating_bots() {
 async fn cleared_default_is_preserved_by_setup_and_startup() {
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
-    // Simulates deleting the main bot (POC-004): tombstone and clear default.
     sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
         .execute(&db.pool)
         .await
@@ -150,7 +146,6 @@ async fn cleared_default_is_preserved_by_setup_and_startup() {
 async fn partial_or_inconsistent_installations_are_refused() {
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
-    // A restore that lost the installation record but kept bots.
     sqlx::query("DELETE FROM installation")
         .execute(&db.pool)
         .await
@@ -165,7 +160,6 @@ async fn partial_or_inconsistent_installations_are_refused() {
     ));
     assert_eq!(counts(&db.pool).await, (1, 1, 0, 1), "nothing was created");
 
-    // A default pointing at a tombstoned bot.
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
     sqlx::query("UPDATE bots SET status = 'deleted', deleted_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')")
@@ -181,7 +175,6 @@ async fn partial_or_inconsistent_installations_are_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_setups_create_one_main_bot() {
     let db = TestDb::migrated().await;
-    // Spawn every task before awaiting any, released together.
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
     let runs: Vec<_> = (0..4)
         .map(|_| {
@@ -215,7 +208,6 @@ async fn constraints_and_rollback_hold_in_sqlite() {
     let db = TestDb::migrated().await;
     installation::setup(&db.pool).await.unwrap();
 
-    // A second installation row violates the singleton.
     assert!(
         sqlx::query("INSERT INTO installation (default_bot_id) VALUES (NULL)")
             .execute(&db.pool)
@@ -243,7 +235,6 @@ async fn constraints_and_rollback_hold_in_sqlite() {
         assert!(result.is_err(), "accepted {name:?} {status} {deleted}");
     }
 
-    // A failure inside the bot+conversation transaction leaves nothing behind.
     let before = counts(&db.pool).await;
     let existing_bot: Uuid = sqlx::query_scalar("SELECT id FROM bots")
         .fetch_one(&db.pool)
@@ -255,14 +246,13 @@ async fn constraints_and_rollback_hold_in_sqlite() {
     installation::insert_bot(&mut tx, Uuid::new_v4(), &name, avatar)
         .await
         .unwrap();
-    // A second conversation for an existing bot violates the unique bot_id.
     let err = sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
         .bind(Uuid::new_v4())
         .bind(existing_bot)
         .execute(&mut *tx)
         .await;
     assert!(err.is_err());
-    drop(tx); // rollback
+    drop(tx);
     assert_eq!(counts(&db.pool).await, before);
 }
 

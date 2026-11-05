@@ -3,9 +3,7 @@ use serde_json::Value;
 use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
 use crate::app::questions::Kind;
 
-/// Bytes of a `purpose` argument (an approval card's title).
 pub(super) const MAX_PURPOSE: usize = 300;
-/// Bytes of an action shown on an approval card.
 const MAX_PREVIEW: usize = 2000;
 
 pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads, or changes only inside your \
@@ -15,9 +13,6 @@ pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads, or ch
     message or email, posts, edits, or publishes anything others can see, pays, or otherwise \
     reaches people or services outside). Required; a missing effect is refused, never assumed local.";
 
-/// What a computer tool call declares about its effects. The API cannot
-/// classify a command itself; it enforces the declaration: a destructive
-/// or external call waits for the owner's approval, bound to that exact call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
     Local,

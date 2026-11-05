@@ -1,7 +1,0 @@
-{"type":"thread.started","thread_id":"01a19b0a-ba6d-7393-ae80-193ab8064c39"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll ask the family bot for a Friday pickup checklist and return its result."}}
-{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a checklist for collecting the kids on Friday. Return your checklist. Do not create reminders or send messages. Do not delegate."},"result":null,"error":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"delegate","arguments":{"target_bot_id":"family","task":"Suggest a checklist for collecting the kids on Friday. Return your checklist. Do not create reminders or send messages. Do not delegate."},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Delegation to the family bot required approval, but this session’s approval policy is “never,” so no checklist was returned. No reminders were created or messages sent."}}
-{"type":"turn.completed","usage":{"input_tokens":45265,"cached_input_tokens":15104,"cache_write_input_tokens":0,"output_tokens":231,"reasoning_output_tokens":58}}

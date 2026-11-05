@@ -1,1 +1,0 @@
-quit desktop and bounded helper are gone; no late profile exists

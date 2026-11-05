@@ -1,5 +1,3 @@
-//! Guest files, browser helper, and host artifact transfer.
-
 use super::{ComputerError, ComputerManager, ExecOutput};
 use std::time::Duration;
 use uuid::Uuid;
@@ -67,8 +65,6 @@ impl ComputerManager {
             remove(&temp);
             return Err(err.into());
         }
-        // Verify what arrived: a regular file within the limit, hashed in
-        // a stream rather than loaded whole.
         let checked = (|| -> std::io::Result<Result<(u64, Vec<u8>, Vec<u8>), String>> {
             let meta = std::fs::symlink_metadata(&temp)?;
             if !meta.is_file() {

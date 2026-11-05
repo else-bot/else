@@ -1,6 +1,3 @@
-//! Ownership of a data directory and database by real `else-api` processes,
-//! and the listener manifest that lets several instances run side by side.
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -13,7 +10,6 @@ use else_api::runtime_lock::{MANIFEST, Manifest};
 use serde_json::json;
 use uuid::Uuid;
 
-/// An `else-api` command with no provider, sandbox, or account of the host.
 fn api(root: &Path, data: &Path, database: Option<&Path>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_else-api"));
     command
@@ -149,8 +145,6 @@ impl Drop for Served {
     }
 }
 
-/// Stands in for Codex: passes the version check and fails every run, after
-/// the API has written the bot's Codex configuration.
 fn fake_codex(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("auth.json"), "{}").unwrap();

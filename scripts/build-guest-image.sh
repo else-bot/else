@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Build the else.bot guest image and load it into the API's private
-# Microsandbox home. Usage: scripts/build-guest-image.sh [DATA_DIR]
-# DATA_DIR defaults to $ELSE_DATA_DIR or ~/.else. The exact image this run
-# built is exported by ID, so concurrent builds never trade a shared tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${ELSE_GUEST_TAG:-else-guest:3}"

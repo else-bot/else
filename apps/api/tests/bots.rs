@@ -1,5 +1,3 @@
-//! POC-004: bot creation, listing, and soft deletion through the real routes.
-
 mod common;
 
 use std::sync::Arc;
@@ -39,13 +37,11 @@ async fn create_retry_and_conflict() {
     assert_eq!(bot["activity"]["phase"], "idle");
     assert!(bot["conversation_id"].is_string());
 
-    // A lost response followed by the same request returns the same bot.
     let retry = create(&app, request, "Work").await;
     assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(retry.body["bot"]["id"], id);
     assert_eq!(retry.body["bot"]["conversation_id"], bot["conversation_id"]);
 
-    // Changed input under the same request ID conflicts and creates nothing.
     let before = row_counts(&app).await;
     let conflict = create(&app, request, "Other").await;
     assert_eq!(conflict.status, StatusCode::CONFLICT);
@@ -179,7 +175,6 @@ async fn invalid_avatar_on_create_leaves_no_bot() {
 async fn concurrent_retries_create_one_bot() {
     let app = Arc::new(TestApp::installed().await);
     let request = Uuid::new_v4();
-    // Spawn every request before awaiting any, released together.
     let barrier = Arc::new(tokio::sync::Barrier::new(6));
     let calls: Vec<_> = (0..6)
         .map(|_| {
@@ -301,9 +296,7 @@ async fn delete_retains_data_and_is_repeatable() {
     let receipt = app.owner("GET", &format!("/v1/bots/{id}"), None).await;
     assert_eq!(receipt.status, StatusCode::OK);
     assert_eq!(receipt.body["bot"]["cleanup"]["state"], "done");
-    // Records and the conversation are retained.
     assert_eq!(row_counts(&app).await, before);
-    // Creating again with a new request ID makes a new identity.
     let new = create(&app, Uuid::new_v4(), "Work").await;
     assert_ne!(new.body["bot"]["id"], id);
 }
@@ -318,13 +311,11 @@ async fn the_main_bot_cannot_be_deleted() {
         .unwrap()
         .to_owned();
 
-    // Deleting another bot leaves the main bot alone.
     app.owner("DELETE", &format!("/v1/bots/{other}"), None)
         .await;
     let listing = app.owner("GET", "/v1/bots", None).await;
     assert_eq!(listing.body["default_bot_id"], main);
 
-    // The main bot is refused, and stays the active main bot.
     let refused = app.owner("DELETE", &format!("/v1/bots/{main}"), None).await;
     assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
     assert_eq!(refused.body["error"]["code"], "main_bot");
@@ -347,7 +338,6 @@ async fn unknown_ids_and_authorization() {
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {path}");
         assert_eq!(reply.body["error"]["code"], "not_found");
     }
-    // Knowing a real bot ID does not bypass owner authentication.
     let main = app.owner("GET", "/v1/bots", None).await.body["default_bot_id"]
         .as_str()
         .unwrap()

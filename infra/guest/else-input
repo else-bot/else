@@ -58,7 +58,6 @@ STARTED = False
 
 def fail(code, message, status=3):
     emit({"error": f"{code}: {message}"})
-    # After execution started, any failure leaves what is done in doubt.
     sys.exit(5 if STARTED else status)
 
 
@@ -115,7 +114,6 @@ class Input:
         x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_void_p] * 7
         x.XQueryKeymap.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.keys, self.buttons = set(), set()
-        # Spare keycodes in use: keysym -> keycode; all restored to empty.
         self.spares = {}
 
     def current_size(self):
@@ -141,8 +139,6 @@ class Input:
         self.sync()
 
     def button(self, b, down):
-        # Recorded before the press is sent and with SIGTERM blocked, so the
-        # cleanup always knows what may be down.
         old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
         try:
             if down:
@@ -171,7 +167,6 @@ class Input:
             self.key(code, False)
         for b in list(self.buttons):
             self.button(b, False)
-        # Leave the spare keycodes as empty as they were.
         for code in self.spares.values():
             none = (ctypes.c_ulong * 1)(0)
             self.x.XChangeKeyboardMapping(self.d, code, 1, none, 1)
@@ -410,7 +405,6 @@ def main(argv):
             if time.monotonic() > deadline:
                 fail("DESKTOP_BUSY", "a script controls the browser or desktop; wait for it or cancel its job")
             time.sleep(0.2)
-    # The wait may have taken a while: check the screen and the owner again.
     check(batch, inp.current_size())
     if vnc_viewer_connected():
         fail("OWNER_USING_DESKTOP", "the owner is connected to the desktop; wait until they leave", 2)

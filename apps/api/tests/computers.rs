@@ -1,6 +1,3 @@
-//! POC-017: bot computer lifecycle against SQLite with a recording fake
-//! runtime (the live Microsandbox check is in `computers_live.rs`).
-
 mod common;
 
 use std::collections::HashMap;
@@ -20,17 +17,11 @@ use uuid::Uuid;
 struct Fake {
     computers: Mutex<HashMap<String, (RuntimeState, HashMap<String, String>)>>,
     calls: Mutex<Vec<String>>,
-    /// Stops fail and leave the computer running.
     fail_stop: std::sync::atomic::AtomicBool,
-    /// Listing fails (the runtime cannot be inspected).
     fail_list: std::sync::atomic::AtomicBool,
-    /// Creation takes this long.
     create_delay: Mutex<Duration>,
-    /// An image upgrade's unpack step fails in the new computer.
     fail_unpack: std::sync::atomic::AtomicBool,
-    /// An image upgrade's SIGINT close of Chromium fails.
     fail_close: std::sync::atomic::AtomicBool,
-    /// Every created computer's spec, in order.
     specs: Mutex<Vec<Spec>>,
 }
 
@@ -165,7 +156,6 @@ impl ComputerRuntime for Fake {
                 String::new()
             }
             "read" => files.get(args[0]).cloned().unwrap_or_default(),
-            // An image upgrade's archive and unpack steps.
             "/bin/sh"
                 if args[1].contains("tar --numeric-owner --sparse --one-file-system -cpf") =>
             {
@@ -266,7 +256,6 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
         .exec(lease_b, "write", &["/root/note", "B-only"], second)
         .await
         .unwrap();
-    // A retry by the same holder keeps one lease; a second use reuses the computer.
     let (again, _) = ready(&manager, a, "test:a").await;
     assert_eq!(again, lease_a);
     manager.release(lease_a).await.unwrap();
@@ -286,9 +275,6 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
     assert_eq!(read(lease_b).await.unwrap().stdout, "B-only");
 }
 
-/// Each computer mounts its own bot's project directory, the one provider
-/// runs start in, at `~/work`, by its resolved path (Microsandbox refuses a
-/// path through a symlink).
 #[tokio::test(flavor = "multi_thread")]
 async fn computers_mount_their_bots_project_directory() {
     let app = TestApp::installed().await;
@@ -318,7 +304,6 @@ async fn computers_mount_their_bots_project_directory() {
             spec.mounts,
             vec![else_api::computers::Mount {
                 host: resolved.join(bot.to_string()),
-                // Without the desktop image, commands run as root.
                 guest: else_api::computers::ROOT_PROJECT.to_owned(),
                 uid: 0,
             }]
@@ -347,7 +332,6 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
         manager.acquire(bot_id, "test:y").await.unwrap(),
         Acquire::OwnerStopped
     );
-    // Chat and memory need no computer.
     let reply = app
         .send(
             &bot,
@@ -364,7 +348,6 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
         !fake.calls().iter().any(|c| c == &format!("start {name}")),
         "nothing woke it"
     );
-    // Resume clears the stop; the next use starts it (its disk is kept).
     manager.owner_resume(bot_id).await.unwrap();
     assert_eq!(
         observed(&app, bot_id).await,
@@ -373,7 +356,6 @@ async fn an_owner_stop_prevents_implicit_wake_until_resume_and_chat_still_works(
     );
     ready(&manager, bot_id, "test:z").await;
     assert!(fake.calls().contains(&format!("start {name}")));
-    // Owner routes reach the same manager.
     let app_state = app.state.clone();
     let _ = app_state;
     let shown = app
@@ -399,7 +381,6 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Queued { .. }
     ));
-    // Idle pause keeps A's memory reserved.
     manager.release(lease).await.unwrap();
     manager.tick(&never()).await.unwrap();
     assert_eq!(observed(&app, a).await, "paused");
@@ -407,7 +388,6 @@ async fn admission_queues_beyond_the_budget_and_paused_computers_keep_their_rese
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Queued { .. }
     ));
-    // Resuming A needs no new capacity; stopping it releases capacity for B.
     let (lease, _) = ready(&manager, a, "test:a").await;
     manager.release(lease).await.unwrap();
     manager.owner_stop(a).await.unwrap();
@@ -421,7 +401,6 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
     let manager = manager(&app, &fake, config(2)).await;
     let bot = app.create_bot("Idle").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    // A running turn holds the computer.
     let sent = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -448,8 +427,6 @@ async fn idle_stop_waits_for_leases_and_expired_leases_of_live_work_are_kept() {
             .await
             .unwrap();
     assert!(live, "the expired lease was renewed for live work");
-    // When the turn ends, the expired lease is released and the idle
-    // computer stops (its worker goes away).
     app.owner(
         "POST",
         &format!("/v1/bots/{bot}/cancel"),
@@ -505,8 +482,6 @@ async fn startup_inspects_without_waking_recreating_or_removing() {
     manager.release(lease).await.unwrap();
     let (_, lost_name) = ready(&manager, lost, "test:l").await;
     let (_, paused_name) = ready(&manager, paused, "test:p").await;
-    // The runtime lost one computer and another was paused meanwhile; the
-    // API also crashed mid-stop for the first.
     fake.computers.lock().unwrap().remove(&lost_name);
     fake.set(&paused_name, RuntimeState::Paused).unwrap();
     fake.set(&kept_name, RuntimeState::Stopped).unwrap();
@@ -567,13 +542,11 @@ async fn a_failed_stop_keeps_its_reservation_and_is_retried() {
     fake.fail_stop
         .store(true, std::sync::atomic::Ordering::SeqCst);
     manager.owner_stop(a).await.unwrap();
-    // The runtime still runs it: recorded as running, budget still held.
     assert_eq!(observed(&app, a).await, "running");
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Queued { .. }
     ));
-    // Maintenance retries the owner's stop until it is confirmed.
     fake.fail_stop
         .store(false, std::sync::atomic::Ordering::SeqCst);
     manager.tick(&never()).await.unwrap();
@@ -626,8 +599,6 @@ async fn a_renewal_wins_over_expiry_and_exec_never_wakes_a_stopped_computer() {
         "running",
         "the renewed lease still holds it"
     );
-    // After an owner stop the old lease cannot run anything (the fake
-    // panics if exec reaches a stopped computer).
     manager.owner_stop(bot).await.unwrap();
     assert!(matches!(
         manager
@@ -666,10 +637,6 @@ async fn computer(app: &TestApp, bot: Uuid) -> (String, String, String) {
     .unwrap()
 }
 
-/// POC-025: a failed image upgrade leaves the bot on its old computer and
-/// removes only the replacement it created; an interrupted one's leftover
-/// replacement is removed by the next attempt; a held computer is refused;
-/// a completed upgrade keeps the old computer for a rollback.
 #[tokio::test(flavor = "multi_thread")]
 async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     let app = TestApp::installed().await;
@@ -678,7 +645,6 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     let bot: Uuid = app.create_bot("Old").await.parse().unwrap();
     let (lease, old_name) = ready(&manager, bot, "turn:a").await;
 
-    // Held by a lease: refused, nothing changes.
     let held = manager.upgrade_image(bot, "img:new", None).await;
     assert!(held.is_err(), "{held:?}");
     assert_eq!(
@@ -691,7 +657,6 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     );
     manager.release(lease).await.unwrap();
 
-    // The unpack fails in the replacement.
     fake.fail_unpack
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let failed = manager.upgrade_image(bot, "img:new", None).await;
@@ -728,7 +693,6 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     assert_eq!(state, "failed");
     assert!(error.contains("user ID"));
 
-    // An interrupted attempt left a replacement nobody uses.
     fake.fail_unpack
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let leftover = format!("{old_name}-leftover");
@@ -779,7 +743,6 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     .unwrap();
     assert_eq!(counts, vec![("completed".into(), 1), ("failed".into(), 2)]);
 
-    // The upgraded computer is used normally, then rolled back.
     let (lease, name) = ready(&manager, bot, "turn:b").await;
     assert_eq!(name, report.to_runtime_name);
     manager.release(lease).await.unwrap();
@@ -802,10 +765,6 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     );
 }
 
-/// POC-025 review: an upgrade keeps the computer's own network profile,
-/// needs an explicit one when it was never recorded, boots only within the
-/// budget, settles leases a stopped API left, and a restarted API stops a
-/// replacement an interrupted upgrade left running.
 #[tokio::test(flavor = "multi_thread")]
 async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     let app = TestApp::installed().await;
@@ -820,11 +779,8 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     drop(first);
     let _ = lease;
 
-    // Restarted with another default network and a one-VM budget, with
-    // another bot's computer using it.
     let manager = manager(&app, &fake, config(1)).await;
     let other: Uuid = app.create_bot("Other").await.parse().unwrap();
-    // The stale lease of the stopped API's turn still holds the computer.
     assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
     manager.settle_offline(bot).await.unwrap();
     first_stop(&app, &manager, &fake, bot).await;
@@ -857,7 +813,6 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
             .unwrap();
     assert_eq!(network.as_deref(), Some("none"));
 
-    // A computer whose profile was never recorded needs an explicit one.
     sqlx::query("UPDATE bot_computers SET network = NULL WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
@@ -875,7 +830,6 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         .await
         .unwrap();
     assert_eq!(fake.specs.lock().unwrap().last().unwrap().network, "public");
-    // Rollback restores the previous computer's (unrecorded) profile.
     manager.rollback_upgrade(bot).await.unwrap();
     let network: Option<String> =
         sqlx::query_scalar("SELECT network FROM bot_computers WHERE bot_id = ?1")
@@ -885,8 +839,6 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
             .unwrap();
     assert_eq!(network, None);
 
-    // An interrupted upgrade's replacement left running is stopped by the
-    // next startup and kept for the next attempt to remove.
     let leftover = format!("{}-leftover", third.to_runtime_name);
     fake.computers
         .lock()
@@ -910,17 +862,12 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     );
 }
 
-/// Stop a computer through the idle path once nothing holds it.
 async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: Uuid) {
     manager.tick(&never()).await.unwrap();
     let _ = fake;
     assert_eq!(observed(app, bot).await, "stopped");
 }
 
-/// POC-032: a lease outlives its turn until it expires; a whole-disk
-/// operation right after the turn (a backup of a stopped API) must not wait
-/// minutes for it. Leases of live work (a running turn or job) and of other
-/// holders (a desktop session) still count.
 #[tokio::test(flavor = "multi_thread")]
 async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     let app = TestApp::installed().await;
@@ -930,8 +877,6 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     let bot_id: Uuid = bot.parse().unwrap();
     let refused = |r: &Result<_, else_api::computers::ComputerError>| r.is_err();
 
-    // A running turn, a running job, a finished job, a finished (unknown)
-    // turn, and a desktop session each hold a lease.
     let sent = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -968,7 +913,6 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
             .unwrap()
         }
     };
-    // An active job refuses before any disk work: nothing ends.
     assert!(refused(
         &manager.upgrade_image(bot_id, "img:new", None).await
     ));
@@ -980,8 +924,6 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    // The running turn and the desktop still hold the computer; the leases
-    // of the finished turn and jobs end on the way.
     assert!(refused(
         &manager.upgrade_image(bot_id, "img:new", None).await
     ));
@@ -1003,7 +945,6 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     )
     .await;
     app.wait_turn(&turn, &["interrupted"]).await;
-    // Only finished holders are left: they end and the upgrade runs.
     manager
         .upgrade_image(bot_id, "img:new", None)
         .await
@@ -1011,7 +952,7 @@ async fn disk_operations_end_the_leases_of_finished_turns_and_jobs_only() {
     assert_eq!(ended(live_turn).await.as_deref(), Some("expired"));
 }
 
-/// PR 62: images before else-guest:3 stop Chromium with SIGTERM, which drops
+/// Images before else-guest:3 stop Chromium with SIGTERM, which drops
 /// cookies set in its last 30 seconds. A desktop upgrade closes Chromium with
 /// SIGINT first, only when nothing holds the computer, resumes a paused one
 /// to do so, and refuses the upgrade, leaving the computer as it was, when
@@ -1036,12 +977,10 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
             .count()
     };
 
-    // A live desktop session holds it: refused before the browser closes.
     assert!(manager.upgrade_image(bot, "img:new", None).await.is_err());
     assert_eq!(closes(&fake), 0);
     manager.release(lease).await.unwrap();
 
-    // The close fails: refused, nothing stopped or recorded.
     fake.fail_close
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let failed = manager.upgrade_image(bot, "img:new", None).await;
@@ -1066,7 +1005,6 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
     fake.fail_close
         .store(false, std::sync::atomic::Ordering::SeqCst);
 
-    // A paused desktop is resumed, closed with SIGINT, then checkpointed and stopped.
     fake.set(&old_name, RuntimeState::Paused).unwrap();
     sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
         .bind(bot)

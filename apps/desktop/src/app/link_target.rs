@@ -1,10 +1,6 @@
-//! Where a Markdown link in a reply leads, and how the desktop opens it.
-
 use std::path::{Path, PathBuf};
 use url::Url;
 
-/// A link the desktop can open: a web page in the browser, or a file on
-/// this machine in its default application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LinkTarget {
     Web(Url),
@@ -12,8 +8,6 @@ pub(super) enum LinkTarget {
 }
 
 impl LinkTarget {
-    /// Reads a link destination. Relative paths are refused: a reply has no
-    /// directory they could be relative to on this machine.
     pub(super) fn parse(destination: &str) -> Option<Self> {
         if Path::new(destination).is_absolute() {
             return Some(Self::File(PathBuf::from(strip_line_anchor(destination))));
@@ -26,7 +20,6 @@ impl LinkTarget {
         }
     }
 
-    /// The full destination, as the link's tooltip shows it.
     pub(super) fn destination(&self) -> String {
         match self {
             Self::Web(url) => url.to_string(),

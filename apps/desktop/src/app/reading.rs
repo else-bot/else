@@ -98,7 +98,6 @@ impl ElseApp {
         }
     }
 
-    /// Unread text of the open conversation is below the viewport.
     pub(super) fn unseen_below(&self) -> bool {
         let (Some(view), Some(position)) = (self.view.as_ref(), self.latest_loaded()) else {
             return false;
@@ -137,8 +136,6 @@ impl ElseApp {
         cx.notify();
     }
 
-    /// Send the bot's next read request unless one is in flight. Requests
-    /// for one bot never overlap, so the server applies them in order.
     fn send_reads(&mut self, bot: Uuid, cx: &mut Context<Self>) {
         if self.connection != Connection::Connected {
             return;

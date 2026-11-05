@@ -1,14 +1,3 @@
-//! POC-025 against the real Microsandbox runtime: the guest programming
-//! toolchain, project dependency installs, persistence across stop/start
-//! and a disk snapshot restore, and the explicit upgrade (and rollback) of
-//! an existing computer to the new image. It boots VMs and downloads small
-//! packages from the public npm, PyPI, and crates.io registries, so it runs
-//! only with `ELSE_LIVE_VM=1`, after building both images:
-//!
-//! docker build -t else-guest:1 <POC-018 revision of infra/guest>
-//! docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest
-//! ELSE_LIVE_VM=1 cargo test -p else-api --test toolchain_live -- --nocapture --test-threads=1
-
 mod common;
 
 use std::sync::Arc;
@@ -31,7 +20,6 @@ fn msb_bin() -> String {
     format!("{}/.microsandbox/bin/msb", std::env::var("HOME").unwrap())
 }
 
-/// Load a Docker image into this test's private runtime home.
 fn load(home: &std::path::Path, dir: &std::path::Path, tag: &str) {
     let tar = dir.join(format!("{}.tar", tag.replace(':', "-")));
     assert!(
@@ -55,8 +43,6 @@ fn load(home: &std::path::Path, dir: &std::path::Path, tag: &str) {
     std::fs::remove_file(&tar).unwrap();
 }
 
-/// Stops and removes every computer in this test's own runtime home, even
-/// when the test fails.
 struct Cleanup {
     home: std::path::PathBuf,
 }
@@ -111,8 +97,6 @@ async fn lease(manager: &ComputerManager, bot: Uuid, holder: &str) -> Uuid {
     }
 }
 
-/// Run a command as the guest user through the computer_run path; panics
-/// on a nonzero exit with its output.
 async fn run(manager: &ComputerManager, bot: Uuid, command: &str, secs: u64) -> String {
     let out = manager
         .run_command(bot, "test:turn", command, Duration::from_secs(secs))
@@ -129,7 +113,6 @@ async fn run(manager: &ComputerManager, bot: Uuid, command: &str, secs: u64) -> 
     out.stdout.trim().to_owned()
 }
 
-/// Release every lease (the computer is idle but still running).
 async fn release_all(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
     let leases: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM computer_leases WHERE bot_id = ?1 AND released_at IS NULL",
@@ -143,7 +126,6 @@ async fn release_all(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
     }
 }
 
-/// Release every lease and stop the computer through the idle path.
 async fn stop(app: &TestApp, manager: &ComputerManager, bot: Uuid) {
     release_all(app, manager, bot).await;
     manager
@@ -167,8 +149,6 @@ async fn runtime_name(app: &TestApp, bot: Uuid) -> (String, String) {
         .unwrap()
 }
 
-/// Write a page that stores `value` in the browser profile and one that
-/// reads it back, served later from the guest's own loopback.
 async fn site(manager: &ComputerManager, bot: Uuid, value: &str) {
     let lease_id = lease(manager, bot, "test:site").await;
     let write = format!("<script>localStorage.setItem('kept', '{value}')</script>stored");
@@ -186,9 +166,6 @@ async fn site(manager: &ComputerManager, bot: Uuid, value: &str) {
 const SERVE: &str =
     "cd site && (setsid python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &); sleep 1";
 
-/// POC-025 on a new computer: the toolchain, dependency installs for each
-/// ecosystem, measurements, persistence across stop/start, and a disk
-/// snapshot restore.
 #[tokio::test(flavor = "multi_thread")]
 async fn toolchain_projects_persist_and_restore() {
     if !live() {
@@ -204,8 +181,6 @@ async fn toolchain_projects_persist_and_restore() {
     let manager = manager(&app, dir.path(), "else-guest:2").await;
     let bot: Uuid = app.create_bot("Builder").await.parse().unwrap();
 
-    // The capability report: every runtime answers as the unprivileged
-    // user, without a login shell, and matches the recorded image.
     let started = Instant::now();
     let report = run(&manager, bot, "whoami; else-capabilities", 120).await;
     eprintln!("first boot and report: {:?}", started.elapsed());
@@ -255,7 +230,6 @@ async fn toolchain_projects_persist_and_restore() {
     .await;
     eprintln!("{plain}");
     assert!(!plain.contains("missing"), "{plain}");
-    // No provider CLI, credential, or runtime socket in the guest.
     let isolated = run(
         &manager,
         bot,
@@ -266,7 +240,6 @@ async fn toolchain_projects_persist_and_restore() {
     .await;
     assert_eq!(isolated, "none\n0");
 
-    // A Node script with a dependency install.
     let lease_id = lease(&manager, bot, "test:files").await;
     manager
         .write_file(
@@ -286,7 +259,6 @@ async fn toolchain_projects_persist_and_restore() {
     eprintln!("{node}");
     assert!(node.ends_with("ms(2h)=7200000"), "{node}");
 
-    // A Python virtual environment with pip.
     manager
         .write_file(
             lease_id,
@@ -306,8 +278,6 @@ async fn toolchain_projects_persist_and_restore() {
     eprintln!("{python}");
     assert!(python.ends_with("six 1.16.0 venv=True"), "{python}");
 
-    // A Rust program with a crates.io dependency, built as a background job
-    // and measured.
     manager
         .write_file(
             lease_id,
@@ -371,7 +341,6 @@ async fn toolchain_projects_persist_and_restore() {
     .await;
     eprintln!("guest disk and memory after the builds:\n{usage}");
 
-    // A value in the browser profile, to check it survives with the files.
     site(&manager, bot, "survives-25").await;
     run(&manager, bot, SERVE, 60).await;
     let lease_id = lease(&manager, bot, "test:browser").await;
@@ -381,9 +350,6 @@ async fn toolchain_projects_persist_and_restore() {
         .unwrap();
     manager.release(lease_id).await.unwrap();
 
-    // Executables the bot plants in its own PATH directories never run as
-    // root: not for the computer tools' privilege drop, the desktop's init
-    // and checkpoint, or a disk capture. Each shim records its user ID.
     let lease_id = lease(&manager, bot, "test:shims").await;
     for tool in [
         "runuser",
@@ -418,10 +384,7 @@ async fn toolchain_projects_persist_and_restore() {
         planted, "/home/elsebot/.cargo/bin/tar",
         "the bot's own PATH comes first"
     );
-    // Stop and start: projects and environments still work.
     stop(&app, &manager, bot).await;
-    // The offline rebuild compiles from scratch, from the Cargo registry
-    // cache kept in the guest.
     let check = "node node-app/index.js && py-app/.venv/bin/python py-app/main.py && \
                  rs-app/target/release/rs-app && cd rs-app && cargo clean -q && \
                  cargo build --release --offline -q && test -x target/release/rs-app && echo REBUILT";
@@ -448,8 +411,6 @@ async fn toolchain_projects_persist_and_restore() {
     assert!(read.stdout.contains("KEPT=survives-25"), "{}", read.stdout);
     manager.release(lease_id).await.unwrap();
 
-    // A disk snapshot (the backup path) restored as another computer keeps
-    // the projects and a usable toolchain configuration.
     stop(&app, &manager, bot).await;
     let archive = dir.path().join("disk.msb");
     let captured = manager.capture_disk(bot, &archive).await.unwrap();
@@ -458,7 +419,6 @@ async fn toolchain_projects_persist_and_restore() {
         "disk archive with image: {:.1} MiB ({captured:?})",
         size as f64 / 1048576.0
     );
-    // (The shims' own records are checked on the restored copy below.)
     let msb = Msb::detect(dir.path(), None).unwrap();
     let restored = format!("{}-restored", runtime_name(&app, bot).await.0);
     msb.restore_disk(
@@ -514,7 +474,6 @@ async fn toolchain_projects_persist_and_restore() {
         "a planted executable ran as root: {}",
         shims.stdout
     );
-    // The restored desktop starts, and its browser profile kept the value.
     let init = msb
         .exec(
             &restored,
@@ -553,10 +512,6 @@ async fn toolchain_projects_persist_and_restore() {
     assert_eq!(msb.state(&restored).await.unwrap(), None);
 }
 
-/// POC-025 upgrade path: an existing computer built from the POC-018 image
-/// keeps its image through ordinary use while new bots get the new one; an
-/// explicit upgrade moves it to the new image with its files and browser
-/// profile, keeps the old computer stopped, and can be rolled back.
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_computers_upgrade_explicitly_and_roll_back() {
     if !live() {
@@ -571,8 +526,6 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     load(&home, dir.path(), "else-guest:2");
     let app = TestApp::installed().await;
 
-    // A bot whose computer was created from the old image, with a project
-    // and browser state.
     let old = manager(&app, dir.path(), "else-guest:1").await;
     let bot: Uuid = app.create_bot("Veteran").await.parse().unwrap();
     let before = run(
@@ -595,8 +548,6 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     stop(&app, &old, bot).await;
     drop(old);
 
-    // The API now configures the new image: the existing computer keeps
-    // its own through ordinary use, and a new bot gets the new image.
     let manager = manager(&app, dir.path(), "else-guest:2").await;
     assert_eq!(
         run(
@@ -621,7 +572,6 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     assert_eq!(runtime_name(&app, newcomer).await.1, "else-guest:2");
     stop(&app, &manager, newcomer).await;
 
-    // An active job refuses the upgrade; nothing changes.
     let Started::Job(job) = manager
         .start_job(bot, None, "sleep 120", Duration::from_secs(300))
         .await
@@ -645,7 +595,6 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         "same image"
     );
 
-    // The upgrade, from a running idle computer.
     release_all(&app, &manager, bot).await;
     let started = Instant::now();
     let report = manager
@@ -679,8 +628,6 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         "staging removed"
     );
 
-    // On the new computer: the files, their owner, the toolchain, the
-    // desktop, and the browser profile.
     let after = run(
         &manager,
         bot,
@@ -713,13 +660,11 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
     manager.release(lease_id).await.unwrap();
     run(&manager, bot, "echo after-upgrade > project/new.txt", 60).await;
 
-    // Startup on the upgraded installation changes nothing.
     stop(&app, &manager, bot).await;
     drop(manager);
     let manager = self::manager(&app, dir.path(), "else-guest:2").await;
     assert_eq!(runtime_name(&app, bot).await.0, new_name);
 
-    // Rollback switches back to the kept computer, its data as it was.
     let back = manager.rollback_upgrade(bot).await.unwrap();
     assert_eq!(back.to_runtime_name, old_name);
     assert_eq!(

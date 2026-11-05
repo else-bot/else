@@ -1,7 +1,3 @@
-//! The in-app desktop viewer stream over a real TCP listener: a fake guest
-//! noVNC (WebSocket, Host routing, VNC password auth, RFB) stands in for
-//! the guest, so the tests see exactly what reaches each VNC server.
-
 mod common;
 
 use std::collections::{HashMap, VecDeque};
@@ -28,7 +24,6 @@ type Socket =
 struct Runtime {
     computers: Mutex<HashMap<String, RuntimeState>>,
     calls: Mutex<Vec<String>>,
-    /// Guest commands never finish, like a first boot's service setup.
     hang_exec: AtomicBool,
 }
 
@@ -89,7 +84,6 @@ impl ComputerRuntime for Runtime {
     }
 }
 
-/// What each fake VNC server received: `watch` or `control`, then the event.
 #[derive(Default)]
 struct Log(Mutex<Vec<String>>);
 
@@ -108,8 +102,6 @@ impl Log {
     }
 }
 
-/// The guest's noVNC on `port`: Host `else-watch` reaches the view-only
-/// server unless `old_image`, which routes everything to the controlling one.
 #[allow(clippy::result_large_err)] // the handshake callback's signature is tungstenite's
 async fn fake_guest(port: u16, password: String, old_image: bool, log: Arc<Log>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -288,7 +280,6 @@ async fn setup(old_image: bool, lease_ttl: Duration) -> Setup {
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let bot = app.create_bot("Viewer").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    // First use creates the computer and its desktop port and password.
     let else_api::computers::Acquire::Ready { lease_id, .. } =
         manager.acquire(bot_id, "test:setup").await.unwrap()
     else {
@@ -374,7 +365,6 @@ impl Setup {
     }
 }
 
-/// The next JSON message, skipping frames and pings.
 async fn next_json(socket: &mut Socket) -> Value {
     loop {
         match tokio::time::timeout(Duration::from_secs(10), socket.next())
@@ -447,7 +437,6 @@ async fn the_stream_authenticates_and_never_wakes_unless_asked() {
     ends_with(&mut socket, "computer_not_running").await;
     assert_eq!(s.runtime.calls.lock().unwrap().len(), calls, "nothing woke");
 
-    // An owner stop is never undone by connecting, even with wake.
     s.manager.owner_stop(bot_id).await.unwrap();
     let calls = s.runtime.calls.lock().unwrap().len();
     let mut socket = s.open("mode=watch&wake=true").await;
@@ -493,7 +482,6 @@ async fn watching_sends_frames_and_no_input_reaches_the_desktop() {
     .await;
     send(&mut socket, json!({"type":"key","key":0x61,"down":true})).await;
     send(&mut socket, json!({"type":"release"})).await;
-    // A second frame proves the session processed those messages.
     next_frame(&mut socket).await;
     next_frame(&mut socket).await;
     assert!(s.log.input("watch").is_empty(), "{:?}", s.log.lines());
@@ -583,8 +571,6 @@ async fn control_sends_input_releases_it_and_excludes_other_controllers() {
         "control handed back"
     );
 
-    // Control is free again: the other stream takes it; its disconnect
-    // releases what it held.
     send(&mut other, json!({"type":"mode","mode":"control"})).await;
     assert_eq!(
         next_json(&mut other).await,
@@ -766,10 +752,8 @@ async fn stopping_the_api_abandons_a_stream_waiting_for_boot() {
     assert!(s.log.lines().is_empty(), "{:?}", s.log.lines());
 }
 
-/// Longer than the stream's one-second lease check.
 const LEASE_TICK: Duration = Duration::from_millis(1500);
 
-/// Hold the right arrow in control mode and wait until the guest has it.
 async fn hold_key(s: &Setup, socket: &mut Socket) {
     while next_json(socket).await != json!({"type":"mode","mode":"control"}) {}
     send(socket, json!({"type":"key","key":0xff53,"down":true})).await;
@@ -786,8 +770,6 @@ fn key_released(s: &Setup) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_the_api_releases_input_a_non_reading_client_holds() {
     let s = setup(false, Duration::from_secs(300)).await;
-    // A tiny receive buffer, set before connecting, so the server's
-    // replies back up into the stream's queue once the client stops reading.
     let tcp = tokio::net::TcpSocket::new_v4().unwrap();
     tcp.set_recv_buffer_size(1024).unwrap();
     let tcp = tcp.connect(s.addr.parse().unwrap()).await.unwrap();
@@ -873,7 +855,6 @@ async fn stopping_the_api_while_taking_control_leaks_no_lease_or_control() {
     let bot_id: Uuid = s.bot.parse().unwrap();
     let mut socket = s.open("mode=watch").await;
     while next_json(&mut socket).await != json!({"type":"mode","mode":"watch"}) {}
-    // Another writer holds SQLite's lock: reads go on, the control lease waits.
     let mut writer = s.app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("UPDATE bots SET name = name WHERE id = ?1")
         .bind(bot_id)

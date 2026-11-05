@@ -34,7 +34,6 @@ async fn respond(
     )
 }
 
-/// ELSE_CODEX_BIN selects a real CLI; every model request goes to the local fixture.
 #[tokio::test]
 async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
     let Some(program) = std::env::var_os("ELSE_CODEX_BIN") else {

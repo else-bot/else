@@ -1,12 +1,9 @@
-//! Bounded Claude event decoding and the verified turn outcome policy.
-
 use super::{MAX_LINE, failed};
 use crate::app::providers::TurnOutcome;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
-/// What the terminal `result` event says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResultInfo {
     pub(super) success: bool,
@@ -15,21 +12,16 @@ pub(super) struct ResultInfo {
     pub(super) num_turns: Option<i64>,
 }
 
-/// What one event means for the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Step {
     Text(String),
-    /// The current text block ended and another one started.
     EndMessage,
     Accepted,
-    /// A permission prompt or other request the CLI waits on.
     Control(String),
     Parked,
     Result(ResultInfo),
 }
 
-/// Interprets the CLI's events for one turn. Pure, so it is unit-tested on
-/// recorded event lines.
 pub(super) struct Tracker {
     expected_tools: Vec<String>,
     model: String,
@@ -41,7 +33,6 @@ pub(super) struct Tracker {
     wrote_text: bool,
     separate: bool,
     pub(super) text: String,
-    /// The model produced anything (a message start, text, or a tool use).
     activity: bool,
 }
 
@@ -120,7 +111,6 @@ impl Tracker {
 
     pub(super) fn on(&mut self, event: &Value) -> Vec<Step> {
         let mut steps = Vec::new();
-        // Anything produced on behalf of a tool use is a sub-agent's.
         if event["parent_tool_use_id"].is_string() {
             self.flag(
                 "policy_violation",
@@ -269,7 +259,6 @@ impl<R: tokio::io::AsyncBufRead + Unpin> Events<R> {
         }
     }
 
-    /// The next event, `Ok(None)` at end of output.
     pub(super) async fn next(&mut self) -> Result<Option<Value>, String> {
         loop {
             let room = (MAX_LINE as usize).saturating_sub(self.buf.len()) as u64;
@@ -285,7 +274,6 @@ impl<R: tokio::io::AsyncBufRead + Unpin> Events<R> {
                 return Ok(None);
             }
             if read != 0 && !self.buf.ends_with(b"\n") {
-                // The limit cut the line, or more is coming.
                 continue;
             }
             let line = std::mem::take(&mut self.buf);
@@ -313,9 +301,6 @@ pub(super) fn decide(
         return failed(code, reason);
     }
     if !tracker.accepted {
-        // Refusal only when the CLI provably consumed nothing: an error
-        // result with no model turn and no output at all (for example a
-        // session it could not open). Anything else may have acted.
         let refused = !info.success
             && !interrupted
             && !tracker.activity
@@ -330,7 +315,6 @@ pub(super) fn decide(
         };
     }
     if !tracker.init_seen {
-        // The tool set, servers, and model were never verified.
         return failed(
             "policy_violation",
             "Claude did not report its tool set and model.",

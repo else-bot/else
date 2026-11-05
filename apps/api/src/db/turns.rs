@@ -248,7 +248,6 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     if cancel_pending {
         return Err(AcceptError::CancellationPending);
     }
-    // The bot's own profile for this provider, else the provider's saved one.
     let profile: Option<(i64, Json<Profile>)> = if req.uses_profile {
         Some(
             crate::db::bot_profiles::effective(&mut tx, req.bot_id, req.provider_id)
@@ -351,7 +350,6 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     if let Some(active) = preempted {
         crate::db::events::turn_changed(&mut tx, req.bot_id, active).await?;
     }
-    // The owner's message enters the bot's memory with its acceptance.
     crate::db::memory::log_item(&mut tx, item_id).await?;
     let (turn, item) = load_turn_and_item(&mut tx, turn_id).await?;
     tx.commit().await?;
@@ -701,17 +699,13 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         routine: crate::db::routines::run_of(&mut conn, turn_id).await?,
     };
-    // Return this connection before memory loading checks out others.
     drop(conn);
     input.memory = crate::db::memory_tree::session_context(pool, input.bot_id).await?;
     Ok(input)
 }
 
-/// Bytes of history files loaded per turn, beyond the message's own.
 const HISTORY_FILE_BUDGET: usize = 32 * 1024 * 1024;
 
-/// The files a turn's packet may name: all of the message's own, then those
-/// of history the session has not seen, newest first within a budget.
 async fn input_files(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -766,8 +760,6 @@ It was not resent; send a follow-up to continue.',
     )
     .fetch_all(&mut *tx)
     .await?;
-    // A claim that never reached its provider, on a bot being stopped or
-    // deleted, simply ends.
     let mut uncertain = uncertain;
     let halted: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled',
@@ -783,12 +775,9 @@ It was not resent; send a follow-up to continue.',
     crate::db::handoffs::settle_ended(&mut tx, None).await?;
     for (turn_id, _) in &uncertain {
         crate::db::memory::log_turn_end(&mut tx, *turn_id).await?;
-        // A root that ended here leaves no child running for it.
         crate::db::delegations::cancel_for_root(&mut tx, *turn_id).await?;
     }
     tx.commit().await?;
-    // Stops and deletions waiting on those turns can now complete. Queued
-    // turns of deleted bots never run (claim requires an active bot).
     crate::db::stop::settle_all(pool).await?;
     Ok((requeued.len() as u64, uncertain.len() as u64))
 }

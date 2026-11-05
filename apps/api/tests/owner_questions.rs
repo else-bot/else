@@ -1,8 +1,3 @@
-//! Owner questions: a bot asks the owner to choose or to approve one
-//! action over MCP, the owner answers through the owner API, and the same
-//! turn continues with the choice. A newer owner message skips a pending
-//! card and grants nothing; an approval covers exactly one call.
-
 mod common;
 
 use std::sync::Arc;
@@ -15,7 +10,6 @@ use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// Long enough (a few seconds) to call tools while it streams.
 const SLOW: &str = "[synthetic:slow] send the newsletter to the subscribers list.";
 
 struct Harness {

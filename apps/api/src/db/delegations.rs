@@ -1,4 +1,4 @@
-//! One-hop asynchronous delegation (POC-016).
+//! One-hop asynchronous delegation.
 //!
 //! A bot's provider attempt in its own owner conversation may hand one task
 //! to another registered bot (the main bot included), at most two per
@@ -109,7 +109,6 @@ pub async fn create(
     if target == parent {
         return Err(DelegateError::SelfTarget);
     }
-    // A retry is the same task to the same target.
     let mut hasher = Sha256::new();
     hasher.update(target.as_bytes());
     hasher.update(task.as_bytes());
@@ -125,7 +124,6 @@ pub async fn create(
     .fetch_optional(&mut *tx)
     .await?;
     if let Some((id, target_bot_id, target_name, status, outcome)) = existing {
-        // A retried call: the same child, never another, with its status.
         return Ok(Accepted {
             delegation_id: id,
             target_bot_id,
@@ -151,7 +149,6 @@ pub async fn create(
     {
         return Err(DelegateError::AttemptParked);
     }
-    // The target: active, not stopping, rechecked inside an immediate transaction.
     let target_row: Option<(String, String, bool, Option<String>, Uuid, i64)> = sqlx::query_as(
         "SELECT b.status, b.name, b.cancel_pending, b.selected_provider_id, c.id, c.last_turn_no
          FROM bots b JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner'
@@ -174,9 +171,6 @@ pub async fn create(
     if target_status != "active" || cancel_pending {
         return Err(DelegateError::BotUnavailable);
     }
-    // The child uses the target's own provider and profile, like an owner
-    // message would: else the installation's default provider, else the
-    // provider it last used, else Codex.
     let own: Option<String> =
         sqlx::query_scalar("SELECT provider_id FROM bot_profiles WHERE bot_id = ?1")
             .bind(target)
@@ -196,8 +190,6 @@ pub async fn create(
     let child_turn = Uuid::new_v4();
     let item_id = Uuid::new_v4();
     let receipt_id = Uuid::new_v4();
-    // Child turns are numbered from the target's owner counter, so a Stop
-    // of the target covers them by the same boundary.
     let turn_no = last_turn_no + 1;
     let receipt_seq: i64 = sqlx::query_scalar(
         "UPDATE conversations SET last_turn_no = ?2, last_item_seq = last_item_seq + 1
@@ -276,7 +268,6 @@ pub async fn create(
     ))
     .execute(&mut *tx)
     .await?;
-    // The task enters the target's memory as model-authored text.
     crate::db::memory::log_item(&mut tx, item_id).await?;
     events::item_upsert(&mut tx, target, receipt_id).await?;
     events::turn_changed(&mut tx, target, child_turn).await?;
@@ -327,10 +318,6 @@ pub async fn lock_targets_of_root(
     Ok(())
 }
 
-/// End the pending children: a queued child is interrupted at once, a
-/// running one moves to `cancelling` for the scheduler to interrupt. The
-/// trigger on the child turn records each delegation's outcome. The caller
-/// holds the target bot locks (see `lock_targets_of_*`).
 async fn stop_children(
     conn: &mut SqliteConnection,
     children: Vec<(Uuid, Uuid)>,

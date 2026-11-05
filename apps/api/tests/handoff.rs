@@ -1,7 +1,3 @@
-//! POC-020: provider switching through one conversation, with two synthetic
-//! providers standing in for Codex and Claude. Each records the packets its
-//! native sessions receive, so deltas and handoffs are checked exactly.
-
 mod common;
 
 use std::sync::Arc;
@@ -93,7 +89,6 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         "a resumed session gets no history"
     );
 
-    // Switch to B: a checkpoint from A plus the history B never saw.
     let (t3, status) = say(&app, &bot, B, "Third, on B: what is the code word?").await;
     assert_eq!(status, "completed");
     let packet = last(&b.packets().await);
@@ -119,15 +114,12 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     assert!(h.omitted_turns.is_empty());
     assert_eq!(h.state, "accepted");
     assert!(h.payload_sha256.is_some() && h.target_session_id.is_some());
-    // The checkpoint request never carried the owner's follow-up.
     assert!(!h.checkpoint.unwrap().contains("Third"));
 
-    // B again: its session has seen everything.
     let (t4, _) = say(&app, &bot, B, "Fourth, still B.").await;
     assert!(handoff(&app, t4).await.is_none());
     assert_eq!(last(&b.packets().await), "Fourth, still B.");
 
-    // Back to A: only what A's session missed (turns 3 and 4).
     let a_before = a.packets().await.len();
     let (t5, _) = say(&app, &bot, A, "Fifth, back on A.").await;
     assert_eq!(a.packets().await.len(), a_before + 1);
@@ -148,7 +140,6 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         (B, A)
     );
     assert_eq!(h.selected_turns, vec![3, 4]);
-    // Both native sessions are the same ones as before the switches.
     let sessions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM provider_sessions WHERE bot_id = ?1")
             .bind(bot.parse::<Uuid>().unwrap())
@@ -163,7 +154,6 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Remember BLUE-3.").await;
-    // The outgoing provider cannot produce a verified checkpoint.
     a.fail_checkpoints(Some("cannot prove a no-tool run")).await;
     let (t2, status) = say(&app, &bot, B, "On B now.").await;
     assert_eq!(status, "completed");
@@ -179,8 +169,6 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     assert!(packet.contains("[turn 1] Owner: Remember BLUE-3."));
     assert_eq!(packet.matches("On B now.").count(), 1);
 
-    // The API restarts without A configured: switching from A is still
-    // possible, from the recorded history.
     say(&app, &bot, A, "Back to A once.").await;
     let db = app.db.clone();
     drop(app);
@@ -192,8 +180,6 @@ async fn a_failing_or_missing_source_uses_the_recorded_history() {
     let h = handoff(&app, t4).await.unwrap();
     assert_eq!(h.kind, "fallback");
     assert!(h.reason.unwrap().contains("not configured"));
-    // A new process has no session state in memory, but B's recorded
-    // session is resumed: it gets only turn 3 (A's) and not 1 and 2 again.
     let packet = last(&b2.packets().await);
     assert!(
         packet.contains("[turn 3] Owner: Back to A once."),
@@ -209,7 +195,6 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, B, "First on B.").await;
     say(&app, &bot, A, "Then A.").await;
-    // B's native session disappears (its files were removed).
     let natives: Vec<String> = sqlx::query_scalar(
         "SELECT native_session_id FROM provider_sessions WHERE provider_id = ?1",
     )
@@ -245,7 +230,6 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Plain first turn.").await;
-    // A turn interrupted mid-way on A.
     let reply = app
         .send(&bot, Uuid::new_v4(), "Long work [synthetic:hang]", Some(A))
         .await;
@@ -260,7 +244,6 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
         .await;
     assert!(stop.status.is_success());
     assert_eq!(app.wait_turn(&hung, &["interrupted"]).await, "interrupted");
-    // An uncertain delivery on A (stopped before acknowledgment).
     let reply = app
         .send(
             &bot,
@@ -279,8 +262,6 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     .await;
     assert_eq!(app.wait_turn(&stalled, &["uncertain"]).await, "uncertain");
 
-    // Switching to B: both appear as recorded history with their status,
-    // and only the owner's new message is the request.
     let (t4, status) = say(&app, &bot, B, "What happened so far?").await;
     assert_eq!(status, "completed");
     let packet = last(&b.packets().await);
@@ -298,7 +279,6 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
         handoff(&app, t4).await.unwrap().selected_turns,
         vec![1, 2, 3]
     );
-    // A's session that may hold the uncertain delivery is not resumed.
     let a_before = a.packets().await.len();
     say(&app, &bot, A, "And on A?").await;
     assert_eq!(a.packets().await.len(), a_before + 1);
@@ -307,7 +287,6 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
         packet.contains("[turn 1] Owner: Plain first turn."),
         "a fresh session: {packet}"
     );
-    // Its earlier sessions were each sent the uncertain message once only.
     let sends = a
         .packets()
         .await
@@ -336,8 +315,6 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     assert_eq!(app.wait_turn(&turn, &["uncertain"]).await, "uncertain");
     let h = handoff(&app, turn.parse().unwrap()).await.unwrap();
     assert_eq!(h.state, "uncertain");
-    // The next B turn starts a new session and rebuilds; the uncertain
-    // message is history, never resent as the request.
     let (_, status) = say(&app, &bot, B, "Next on B.").await;
     assert_eq!(status, "completed");
     let packet = last(&b.packets().await);
@@ -350,7 +327,6 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() {
     let app = TestApp::installed().await;
-    // The profile-bearing test double (id `codex`) has no saved profile.
     sqlx::query("DELETE FROM provider_profiles WHERE provider_id = 'codex'")
         .execute(&app.db.pool)
         .await
@@ -378,7 +354,6 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
     let bot = app.main_bot().await;
     let refused = app.send(&bot, Uuid::new_v4(), "hi", Some("codex")).await;
     assert!(!refused.status.is_success(), "{:?}", refused.body);
-    // A partial profile cannot be created: nothing is inherited.
     let partial = app
         .owner(
             "PATCH",
@@ -388,7 +363,6 @@ async fn a_profile_provider_is_unavailable_until_an_explicit_profile_is_saved() 
         .await;
     assert_eq!(partial.status, axum::http::StatusCode::BAD_REQUEST);
     assert_eq!(partial.body["error"]["code"], "profile_required");
-    // An unsupported one is rejected by the adapter.
     let bad = app
         .owner(
             "PATCH",
@@ -421,7 +395,6 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    // A job the API recorded, which no assistant reply mentions.
     let job = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
@@ -440,7 +413,6 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
     .execute(&app.db.pool)
     .await
     .unwrap();
-    // A hangs on its turn; a message for B must not wait behind it.
     let reply = app
         .send(&bot, Uuid::new_v4(), "Working [synthetic:hang]", Some(A))
         .await;
@@ -459,14 +431,12 @@ async fn a_switch_stops_the_other_providers_active_turn_and_carries_job_records(
             && packet.contains("make release"),
         "the job record is carried: {packet}"
     );
-    // The job itself is untouched.
     let status: String = sqlx::query_scalar("SELECT status FROM guest_jobs WHERE id = ?1")
         .bind(job)
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(status, "running");
-    // A same-provider follow-up does not preempt anything.
     let (_, status) = say(&app, &bot, B, "Still B.").await;
     assert_eq!(status, "completed");
     let _ = a;
@@ -482,9 +452,6 @@ async fn a_restart_after_sending_makes_the_handoff_uncertain() {
         .await;
     let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
     app.wait_turn(&turn, &["sending"]).await;
-    // The API dies here. Stop this scheduler (which records its own
-    // outcome), then put back the state a crash would have left: the turn
-    // and its handoff still `sending`. Startup reconciliation runs.
     let db = app.db.clone();
     drop(app);
     let id: Uuid = turn.parse().unwrap();

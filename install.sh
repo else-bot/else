@@ -1,61 +1,4 @@
 #!/usr/bin/env bash
-# else.bot installer and updater.
-#
-#   curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash
-#
-# Installs the latest release into ~/.else, or updates an existing
-# installation to it; running it again is how you update (`elsebot update`
-# does the same). Linux (Debian 12+, Ubuntu 24.04+, Arch Linux / Omarchy;
-# x86_64) and macOS (Apple silicon) get the API, the desktop, and everything
-# they need. macOS needs Xcode. The guest image is downloaded from GHCR
-# through Microsandbox. SQLite is bundled in the API.
-#
-# On a fresh machine it asks what this machine runs (--both, --server-only,
-# --app-only; Enter or --yes: both); an update keeps what is installed
-# without asking: the server (the API and everything bots need), the app (the
-# desktop, which connects to a server here or elsewhere), or both. Adding a
-# component keeps what is installed: choosing the app on a server installs
-# both. An app-only installation has no server settings, data, or service.
-#
-# Everything it installs or keeps lives in ~/.else:
-#   src/        the release's source (a git checkout at the release tag)
-#   versions/   built releases, versions/<version>/bin/{else-api,else-desktop}
-#   current     -> versions/<version>, the release in use
-#   bin/        elsebot, and else-api / else-desktop through current
-#   config/     .env (settings, 0600)
-#   data/       else.sqlite3, credentials, bot computers, artifacts, backups
-#   bots/       each bot's project directory (bots/<bot id>), where its provider
-#               CLI starts on the host; mounted as ~/work in its computer
-#   toolchain/  Rust (rustup and cargo), only for building else.bot
-#   microsandbox/  the VM runtime (msb and libkrunfw)
-#   build/      the build cache
-#   logs/       install and update logs; the API log without systemd
-# Outside it: system packages (with sudo, only when missing; Homebrew's
-# SQLite CLI for inspection on Linux), the API's service (Linux: the systemd
-# user unit
-# ~/.config/systemd/user/else-api.service, and lingering for your user when
-# it starts at boot; macOS: the launchd agent
-# ~/Library/LaunchAgents/bot.else.else-api.plist), the link
-# ~/.local/bin/elsebot, and the app: ~/.local/share/applications/else-bot.desktop
-# on Linux, a copy of the desktop in ~/Applications/else.bot.app on macOS.
-#
-# The API can start by itself (asked once, remembered; --autostart or
-# --no-autostart to choose): at boot on Linux, at login on macOS, where the
-# agent needs your session for the Keychain login of Claude Code.
-#
-# An update builds the new release first, while the old one keeps running;
-# then it asks the API to stop taking work and refuses (changing nothing)
-# if bots are working. Otherwise it stops the API, backs up first when the
-# release changes the database, switches versions, starts the new API, and
-# switches back if it does not come up. The previous release is kept.
-# Alpha installations with a non-SQLite database URL start with SQLite instead;
-# their previous database history is not imported.
-#
-# Settings (environment): ELSE_VERSION=0.0.2 installs that release instead
-# of the latest; ELSE_HOME, ELSE_REPO, ELSE_API_PORT, ELSE_SERVICE_NAME,
-# ELSE_DATABASE_URL (override the SQLite file location), and
-# ELSE_INSTALL_NO_SYSTEMD=1 (no systemd or launchd: elsebot runs the API as a
-# plain process) exist mostly for tests.
 set -euo pipefail
 
 usage() {
@@ -74,7 +17,6 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
 EOF
 }
 
-# --- Settings ---------------------------------------------------------------
 
 MIN_RUST="1.94.0"
 MSB_VERSION="0.7.13"
@@ -97,8 +39,6 @@ BUILD="$ELSE_HOME/build"
 LINK_PREFIX="$HOME/.local"
 TOOLCHAIN="$ELSE_HOME/toolchain"
 MSB_PREFIX="$ELSE_HOME/microsandbox"
-# The native E2E lanes keep immutable prerequisites/build artifacts between
-# disposable installations. Normal installations keep their original layout.
 TEST_CACHE="${ELSE_INSTALL_TEST_CACHE:-}"
 BUILD_PROFILE="${ELSE_INSTALL_TEST_PROFILE:-release}"
 if [ -n "$TEST_CACHE" ]; then
@@ -122,7 +62,6 @@ export CARGO_HOME="$TOOLCHAIN/cargo"
 MSB="$MSB_PREFIX/bin/msb"
 USER="${USER:-$(id -un)}"
 
-# --- Output -----------------------------------------------------------------
 
 if [ -t 1 ]; then
 	BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
@@ -139,7 +78,6 @@ die() { printf '\n%serror:%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 next() { NEXT="${NEXT}  - $1"$'\n'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Prompts read the terminal, also under `curl … | bash`.
 confirm() {
 	[ "$ASSUME_YES" = 1 ] && return 0
 	if ! { true </dev/tty; } 2>/dev/null; then
@@ -151,7 +89,6 @@ confirm() {
 	case "$answer" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
 }
 
-# A question whose answer is yes with --yes or without a terminal.
 ask_yes() {
 	[ "$ASSUME_YES" = 1 ] && return 0
 	{ true </dev/tty; } 2>/dev/null || return 0
@@ -221,13 +158,11 @@ choose_components() {
 	fi
 }
 
-# Recorded once the installation succeeded.
 remember_components() {
 	printf '%s\n' "$COMPONENTS" >"$COMPONENTS_FILE.tmp"
 	mv -f "$COMPONENTS_FILE.tmp" "$COMPONENTS_FILE"
 }
 
-# version_ge A B: A >= B for dotted numbers.
 version_ge() {
 	[ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
 }
@@ -245,7 +180,6 @@ sudo_ready() {
 	SUDO_READY=1
 }
 
-# --- Platform ---------------------------------------------------------------
 
 OS=""
 ARCH=""
@@ -283,7 +217,6 @@ detect_platform() {
 	fi
 }
 
-# --- System packages --------------------------------------------------------
 
 pkg_installed() {
 	case "$DISTRO" in
@@ -317,7 +250,6 @@ install_packages() {
 	esac
 }
 
-# The bootstrap only needs git, curl, and certificates.
 ensure_bootstrap_tools() {
 	if [ "$DISTRO" = macos ]; then
 		have git || die "git is missing: run 'xcode-select --install', then try again"
@@ -389,7 +321,6 @@ linux_access() {
 	fi
 }
 
-# --- Rust (scoped to ~/.else/toolchain) -------------------------------------
 
 ensure_rust() {
 	step "Rust toolchain ($TOOLCHAIN)"
@@ -409,7 +340,6 @@ ensure_rust() {
 	ok "$("$CARGO_HOME/bin/rustc" --version)"
 }
 
-# --- Microsandbox (scoped to ~/.else/microsandbox) --------------------------
 
 ensure_msb() {
 	step "Microsandbox $MSB_VERSION ($MSB_PREFIX)"
@@ -454,9 +384,6 @@ ensure_msb() {
 	ok "msb $("$MSB" --version | awk '{print $2}')"
 }
 
-# --- Source and versions ----------------------------------------------------
-
-# The release to install: the newest vX.Y.Z tag, or the one asked for.
 resolve_release() {
 	if [ -n "$WANT_VERSION" ]; then
 		WANT_VERSION="${WANT_VERSION#v}"
@@ -483,13 +410,11 @@ fetch_source() {
 	fi
 	git -C "$SRC" rev-parse -q --verify "refs/tags/v$WANT_VERSION" >/dev/null ||
 		die "release v$WANT_VERSION does not exist at $REPO_URL"
-	# A managed checkout: local changes are discarded.
 	git -C "$SRC" -c advice.detachedHead=false checkout -q --force "v$WANT_VERSION"
 	git -C "$SRC" clean -q -fdx
 	ok "checked out v$WANT_VERSION"
 }
 
-# Both binaries report the one version; an app-only installation has no API.
 installed_version() {
 	local bin
 	for bin in else-api else-desktop; do
@@ -505,8 +430,6 @@ source_version() {
 	sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1
 }
 
-# Builds only the binaries this installation needs and lacks, so adding a
-# component to an installed release leaves the other binary in place.
 build_release() {
 	local version="$1" dest="$VERSIONS/$1" pkg missing=""
 	local built_profile output="$BUILD_PROFILE"
@@ -532,7 +455,6 @@ build_release() {
 		die "the build failed; the full log is $log"
 	fi
 	mkdir -p "$dest/bin"
-	# Renamed into place: the API may be running from this release.
 	for pkg in $missing; do
 		install -m 755 "$BUILD/$output/$pkg" "$dest/bin/.$pkg.new"
 		mv -f "$dest/bin/.$pkg.new" "$dest/bin/$pkg"
@@ -541,7 +463,6 @@ build_release() {
 	ok "built into $dest"
 }
 
-# Point `current` at a release (atomically).
 switch_to() {
 	ln -sfn "versions/$1" "$ELSE_HOME/current.tmp"
 	mv -fT "$ELSE_HOME/current.tmp" "$CURRENT" 2>/dev/null || {
@@ -551,7 +472,6 @@ switch_to() {
 	}
 }
 
-# Keep the release in use and the one before it.
 prune_versions() {
 	local keep_a="$1" keep_b="${2:-}" dir name
 	for dir in "$VERSIONS"/*; do
@@ -565,8 +485,6 @@ install_commands() {
 	mkdir -p "$BIN" "$LINK_PREFIX/bin" "$CONFIG"
 	chmod 700 "$CONFIG"
 	install -m 755 "$SRC/scripts/elsebot" "$BIN/elsebot"
-	# How elsebot runs the API here: a systemd user unit (Linux), a launchd
-	# agent (macOS), or a process it manages itself where there is neither.
 	local manager=process previous="" previous_autostart=""
 	if [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ]; then
 		if [ "$DISTRO" = macos ]; then
@@ -579,12 +497,9 @@ install_commands() {
 		previous="$(sed -n 's/^ELSEBOT_MANAGER=//p' "$CONFIG/elsebot.env")"
 		previous_autostart="$(sed -n 's/^ELSEBOT_AUTOSTART=//p' "$CONFIG/elsebot.env")"
 	fi
-	# An API run by another manager (a process before the launchd agent) is
-	# stopped by the elsebot that started it; this run starts it again.
 	if [ -n "$previous" ] && [ "$previous" != "$manager" ] && [ -x "$BIN/elsebot" ]; then
 		elsebot stop >/dev/null 2>&1 || true
 	fi
-	# Asked once with the server; the answer is kept for updates.
 	if [ -z "$AUTOSTART" ]; then AUTOSTART="$previous_autostart"; fi
 	if [ -z "$AUTOSTART" ] && want_server; then
 		AUTOSTART=0
@@ -640,7 +555,6 @@ publish_app() {
 	esac
 }
 
-# --- Configuration and services ---------------------------------------------
 
 dotenv_quote() {
 	local v="$1"
@@ -724,8 +638,6 @@ EOF
 	ok "written (mode 0600)"
 }
 
-# The bots' project directories; set once (an owner's own choice is kept),
-# including for installations made before they existed.
 ensure_bots_dir() {
 	if ! grep -q '^ELSE_BOTS_DIR=' "$ENV_FILE"; then
 		config_set ELSE_BOTS_DIR "$ELSE_HOME/bots"
@@ -734,7 +646,6 @@ ensure_bots_dir() {
 	chmod 700 "$ELSE_HOME/bots"
 }
 
-# Provider CLIs found now; refreshed on every run (they move with updates).
 refresh_provider_paths() {
 	local codex claude
 	codex="$(command -v codex 2>/dev/null || true)"
@@ -814,8 +725,6 @@ run_setup() {
 
 elsebot() { ELSE_HOME="$ELSE_HOME" "$BIN/elsebot" "$@"; }
 
-# The API's service, and whether it starts by itself. Without systemd or
-# launchd it only starts with `elsebot start`.
 setup_service() {
 	step "API service"
 	local manager
@@ -854,8 +763,6 @@ setup_service() {
 	fi
 }
 
-# The API as the app reaches it: the saved bind, with a wildcard bind on
-# loopback, and $API_PORT before any configuration is saved.
 api_url() {
 	local bind=""
 	[ -f "$ENV_FILE" ] && bind="$(env_value ELSE_API_BIND)"
@@ -891,7 +798,6 @@ start_api() {
 	return 1
 }
 
-# Ask the running API to stop taking work; refuse the update if bots work.
 prepare_running_api() {
 	local token response status
 	token="$(cat "$(owner_token_file)")"
@@ -918,7 +824,6 @@ prepare_running_api() {
 	esac
 }
 
-# A backup before a release that changes the database, with the old binary.
 backup_if_migrating() {
 	local from="$1" to="$2" added
 	added="$(git -C "$SRC" diff --name-only --diff-filter=A "v$from" "v$to" -- apps/api/migrations 2>/dev/null || echo unknown)"
@@ -948,7 +853,6 @@ check_providers() {
 	fi
 }
 
-# --- Stage 2: install or update from the release's own source ---------------
 
 macos_prerequisites() {
 	step "Xcode"
@@ -1035,7 +939,6 @@ stage2() {
 	return 0
 }
 
-# The API, its settings, data, service, and computers; then the switch.
 install_server() {
 	local mode="$1" installed="$2" target="$3" database_url
 	if [ "$mode" = reset ]; then
@@ -1043,7 +946,6 @@ install_server() {
 		case "$database_url" in sqlite:*) ;; *) die "ELSE_DATABASE_URL must be a SQLite URL" ;; esac
 		step "Set up SQLite"
 		elsebot stop || die "could not stop the API before setting up SQLite"
-		# Switch first so a retry cannot run the old binary against SQLite.
 		switch_to "$target"
 		config_set DATABASE_URL "$database_url"
 	fi
@@ -1103,7 +1005,6 @@ summary() {
 	if [ -n "$NEXT" ]; then printf '%sNext:%s\n%s' "$BOLD" "$RESET" "$NEXT"; fi
 }
 
-# --- Main -------------------------------------------------------------------
 
 main() {
 	case "$BUILD_PROFILE" in dev | release) ;; *) die "ELSE_INSTALL_TEST_PROFILE must be dev or release" ;; esac
@@ -1129,8 +1030,6 @@ main() {
 	done
 	detect_platform
 
-	# Stage 1: fetch the release, then run its own installer, so an update
-	# always runs the new release's logic.
 	if [ "${ELSE_INSTALL_STAGE:-1}" != 2 ]; then
 		printf '%selse.bot installer%s\n' "$BOLD" "$RESET"
 		info "System: $DISTRO_NAME ($ARCH)"
@@ -1146,5 +1045,4 @@ main() {
 	summary
 }
 
-# Everything above is definitions: a truncated download runs nothing.
 main "$@"

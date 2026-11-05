@@ -26,14 +26,9 @@ use crate::app::providers::Profile;
 use crate::db::memory_tree::{self as store, Completion, Job};
 use crate::scheduler::Scheduler;
 
-/// Longer than a whole summary batch (`BATCH_LIMIT` plus one attempt).
 const LEASE: Duration = Duration::from_secs(20 * 60);
-/// A summary batch starts no attempt after this long, so with an attempt's
-/// own deadline it ends well inside the lease.
 const BATCH_LIMIT: Duration = Duration::from_secs(12 * 60);
-/// Output attempts per claim, each told the measured size of the last.
 const SUMMARY_ATTEMPTS: usize = 5;
-/// Summaries in flight at once (the reference allows up to eight).
 const SUMMARY_CONCURRENCY: usize = 1;
 const NO_SUMMARIZER_RETRY: Duration = Duration::from_secs(10 * 60);
 const CAPACITY_RETRY: Duration = Duration::from_secs(20);
@@ -72,7 +67,6 @@ pub struct Compactor {
     scheduler: Option<Arc<Scheduler>>,
     cancel: CancellationToken,
     summary: Actor<Option<JoinHandle<()>>>,
-    /// Steps are admitted through the backup gate when one is set.
     gate: Option<Arc<crate::maintenance::Gate>>,
 }
 
@@ -129,8 +123,6 @@ impl Compactor {
     pub async fn step(&self) -> Result<Step, sqlx::Error> {
         let pool = &self.pool;
         let Some(job) = store::claim(pool, LEASE).await? else {
-            // No job: publish built leaves still waiting (a long backlog
-            // continues in bounded steps).
             if store::advance(pool).await? {
                 return Ok(Step::Built);
             }
@@ -172,7 +164,6 @@ impl Compactor {
                     return Ok(Step::Deferred);
                 };
                 if self.cancel.is_cancelled() {
-                    // Woken as soon as the running summary ends.
                     store::defer(pool, &job, "waiting_for_summary", None, NO_SUMMARIZER_RETRY)
                         .await?;
                     return Ok(Step::Deferred);
@@ -198,7 +189,6 @@ impl Compactor {
                             if let Err(err) = task.run().await {
                                 tracing::warn!(error = %err, "memory summary task failed");
                             }
-                            // Jobs that waited for this summary may go next.
                             let woken = sqlx::query(
                                 "UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE blocked_reason = 'waiting_for_summary' AND lease_token IS NULL",
@@ -230,7 +220,6 @@ impl Compactor {
         let mut done = 0;
         for _ in 0..1_000_000 {
             match self.step().await? {
-                // A finished summary wakes the jobs that waited for it.
                 Step::Idle if self.summary_pending().await => self.settle().await,
                 Step::Idle => break,
                 _ => done += 1,
@@ -244,7 +233,6 @@ impl Compactor {
     pub async fn run(mut self, cancel: CancellationToken) {
         self.cancel = cancel.clone();
         loop {
-            // While a backup holds the gate, compaction waits.
             let admission = match &self.gate {
                 Some(gate) => match gate.enter() {
                     Some(admission) => Some(admission),
@@ -283,7 +271,6 @@ impl Compactor {
     }
 }
 
-/// One job's summary attempts, run beside the compactor loop.
 struct SummaryTask {
     pool: SqlitePool,
     summarizer: Arc<dyn Summarizer>,
@@ -306,7 +293,6 @@ impl SummaryTask {
         store::defer_counting(&self.pool, &self.job, reason, error, retry, failure).await
     }
 
-    /// Back off by provider failures only (capacity waits do not count).
     async fn fail(&self, reason: &str, error: &str) -> Result<(), sqlx::Error> {
         let failures = store::failures(&self.pool, &self.job).await? + 1;
         self.wait(reason, Some(error), backoff(failures), true)
@@ -357,9 +343,6 @@ impl SummaryTask {
             if started.elapsed() > BATCH_LIMIT {
                 break;
             }
-            // Each attempt takes a slot only while no turn waits, and gives
-            // it back afterwards, so an arriving message is not held up by
-            // the remaining attempts.
             let waiting: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM turns WHERE status = 'queued')")
                     .fetch_one(&pool)
@@ -417,7 +400,6 @@ impl SummaryTask {
                     return Ok(());
                 }
                 Ok(text) => {
-                    // Oversized or empty: never cut it; ask again with the measure.
                     sizes.push(text.len());
                     previous = Some(text.len());
                 }

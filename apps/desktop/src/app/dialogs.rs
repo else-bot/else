@@ -1,5 +1,3 @@
-//! Onboarding and bot deletion dialogs.
-
 use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Capabilities};
@@ -11,8 +9,6 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
-/// The welcome screen, shown until the main bot is named and its provider
-/// and model chosen.
 pub(super) struct Welcome {
     name: Entity<InputState>,
     picker: Entity<ProfilePicker>,
@@ -225,6 +221,4 @@ impl ElseApp {
         })
         .detach();
     }
-
-    // ----- Rendering --------------------------------------------------------
 }

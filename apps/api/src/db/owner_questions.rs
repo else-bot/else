@@ -1,5 +1,5 @@
 //! A bot's question to the owner, answered by choosing one option in the
-//! conversation (see docs/decisions/0002-owner-questions.md).
+//! conversation.
 //!
 //! Three kinds share one lifecycle. A `choice` asks the owner to pick one
 //! of up to four options. A `destructive` or `external` question asks the
@@ -257,21 +257,14 @@ pub async fn has_permission(
     .await
 }
 
-/// Which standing grant can apply to a turn, by where its work comes from.
 #[derive(Debug, Clone, Copy)]
 enum Scope {
-    /// An owner request or other work of the bot: the bot's own grant.
     Bot,
-    /// A routine run. `current`: it was admitted with the routine's current
-    /// prompt revision and the routine still exists, so a grant can be
-    /// given and used. `granted`: the routine's grant is for that revision.
     Routine { current: bool, granted: bool },
-    /// A task a routine run delegated: no standing grant applies.
     RoutineTask,
 }
 
 impl Scope {
-    /// The standing grant a destructive card of this turn offers.
     fn offer(self) -> Option<Standing> {
         match self {
             Scope::Bot => Some(Standing::Bot),

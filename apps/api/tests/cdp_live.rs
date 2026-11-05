@@ -1,13 +1,3 @@
-//! POC-027 against real Microsandbox VMs from `else-guest:2`: Node and
-//! Python scripts drive the computer's visible Chromium through the guest
-//! CDP helpers, and the checks cover the visible window, closed targets,
-//! navigation timeouts, a browser restart with a mutating action in flight,
-//! the browser lock shared with `computer_browser`, Stop work, backups
-//! deferring to a running script, loopback-only DevTools, and separate
-//! browsers per bot. Runs only with `ELSE_LIVE_VM=1`:
-//!
-//! ELSE_LIVE_VM=1 cargo test -p else-api --test cdp_live -- --nocapture
-
 mod common;
 
 use std::sync::Arc;
@@ -88,7 +78,6 @@ async fn write(manager: &ComputerManager, bot: Uuid, path: &str, content: &str) 
     manager.release(lease_id).await.unwrap();
 }
 
-/// The window titles on the guest's X display (the one VNC serves).
 async fn windows(manager: &ComputerManager, bot: Uuid) -> String {
     ok(
         manager,
@@ -155,10 +144,6 @@ with elsecdp.connect() as browser:
 print(json.dumps(out))
 "#;
 
-/// A mutating action whose acknowledgment is lost: the order is counted at
-/// once and its reply withheld; the test restarts the browser after the
-/// count moved. Reported as uncertain, never repeated; then the script opens
-/// the page again.
 const RESTART_PY: &str = r#"
 import json, sys, urllib.request
 sys.path.insert(0, "/usr/local/lib/elsebot/cdp")
@@ -203,8 +188,6 @@ try {
 console.log(JSON.stringify(out));
 "#;
 
-/// Work left inside the browser by a stopped script: a delayed order in a
-/// tab it opened, and a busy loop in a tab it attached to.
 const DELAYED: &str = r#"
 import sys
 sys.path.insert(0, "/usr/local/lib/elsebot/cdp")
@@ -328,8 +311,6 @@ async fn scripts_drive_the_visible_browser_safely() {
     .await;
     eprintln!("DevTools: {version}");
 
-    // Node: the visible browser, a new tab, a search, a bounded navigation,
-    // a closed target.
     write(&manager, bot, "cdp/node.mjs", NODE).await;
     let node: Value =
         serde_json::from_str(&ok(&manager, bot, "node cdp/node.mjs", 120).await).unwrap();
@@ -345,7 +326,6 @@ async fn scripts_drive_the_visible_browser_safely() {
     assert_eq!(node["slow"], "NavigationTimeout");
     assert_eq!(node["closed"], "TargetClosed");
     assert_eq!(node["blank"], "about:blank");
-    // The script's tab is the one on the display VNC serves.
     let shown = windows(&manager, bot).await;
     eprintln!("windows: {shown}");
     assert!(shown.contains("Results for node-picnic"), "{shown}");
@@ -355,7 +335,6 @@ async fn scripts_drive_the_visible_browser_safely() {
         "the same browser's tab"
     );
 
-    // Python, from a virtual environment (stdlib helper).
     write(&manager, bot, "cdp/py.py", PYTHON).await;
     let python: Value = serde_json::from_str(
         &ok(
@@ -376,7 +355,6 @@ async fn scripts_drive_the_visible_browser_safely() {
             .contains("Results for python-picnic")
     );
 
-    // The shipped examples run as they are.
     let example = ok(
         &manager,
         bot,
@@ -390,9 +368,6 @@ async fn scripts_drive_the_visible_browser_safely() {
         "{example}"
     );
 
-    // A lost acknowledgment, for each helper: the order happened (the count
-    // moved) before the browser restarted; it is reported uncertain and
-    // never repeated.
     let name = ComputerManager::runtime_name(bot);
     write(&manager, bot, "cdp/restart.py", RESTART_PY).await;
     write(&manager, bot, "cdp/restart.mjs", RESTART_NODE).await;
@@ -415,7 +390,6 @@ async fn scripts_drive_the_visible_browser_safely() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if expected == 1 {
-            // While the script holds the browser, a backup defers.
             let held = manager
                 .capture_disk(bot, &dir.path().join("disk.msb"))
                 .await;
@@ -453,9 +427,6 @@ async fn scripts_drive_the_visible_browser_safely() {
         );
     }
 
-    // Stop work reconciles the browser: a stopped script's delayed order
-    // in a tab it opened never happens (the tab is closed), and its busy
-    // loop in a tab it attached to is halted.
     let before = count(&manager, bot).await;
     write(&manager, bot, "cdp/delayed.py", DELAYED).await;
     let Started::Job(job) = manager
@@ -486,7 +457,6 @@ async fn scripts_drive_the_visible_browser_safely() {
         before,
         "the delayed order never ran"
     );
-    // A tab the owner had open, attached to by a script stuck in a loop.
     let keep = ok(
         &manager,
         bot,
@@ -541,7 +511,6 @@ async fn scripts_drive_the_visible_browser_safely() {
         "the attached tab's loop was halted"
     );
 
-    // One controller at a time: computer_browser waits for a script.
     let Started::Job(holder) = manager
         .start_job(
             bot,
@@ -563,14 +532,12 @@ async fn scripts_drive_the_visible_browser_safely() {
         busy.stdout.contains("BROWSER_BUSY") || busy.stderr.contains("BROWSER_BUSY"),
         "{busy:?}"
     );
-    // Stop the script: the lock is released with its process.
     let cancelled = manager.cancel_job(bot, holder).await.unwrap().unwrap();
     assert_eq!(cancelled.status, "cancelled");
     let free = manager.browser(lease_id, &["title"]).await.unwrap();
     assert!(free.stdout.contains("\"title\""), "{free:?}");
     manager.release(lease_id).await.unwrap();
 
-    // DevTools listens on guest loopback only and is not published.
     let listening = ok(
         &manager,
         bot,
@@ -599,7 +566,6 @@ async fn scripts_drive_the_visible_browser_safely() {
     );
     assert!(chromium.contains("--remote-debugging-address=127.0.0.1"));
 
-    // Another bot's computer has its own browser.
     let other: Uuid = app.create_bot("Other").await.parse().unwrap();
     ok(&manager, other, "true", 120).await;
     tokio::time::sleep(Duration::from_secs(4)).await;

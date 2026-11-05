@@ -1,5 +1,3 @@
-//! Process lifetime file locks, scoped to runtime storage and the database,
-//! and the listener manifest that only the lock holder publishes.
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -65,8 +63,6 @@ fn lock(path: &Path, in_use: LockError) -> Result<File, LockError> {
     }
 }
 
-/// The database file's path with its directory resolved, so every alias of
-/// one database names the same lock. The file itself is not created.
 fn canonical_database(url: &DatabaseUrl) -> Result<Option<PathBuf>, LockError> {
     let options = crate::db::options(url.expose())?;
     let path = options.get_filename();

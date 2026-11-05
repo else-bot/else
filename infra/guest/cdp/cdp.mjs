@@ -1,4 +1,4 @@
-// else.bot guest CDP helper for Node.js scripts (POC-027). Dependency-free.
+// else.bot guest CDP helper for Node.js scripts. Dependency-free.
 //
 // Drives the computer's own visible Chromium (the one the owner sees over
 // VNC) through its DevTools endpoint on guest loopback, 127.0.0.1:9222. The
@@ -28,9 +28,7 @@ import fs from "node:fs";
 
 export const ENDPOINT = "http://127.0.0.1:9222";
 const LOCK = "/var/lib/elsebot/browser.lock";
-/** The longest page code may run (enforced by the browser). */
 export const MAX_EVALUATE_MS = 300000;
-/** Tabs scripts control: one JSON line {pid, target, created} each. */
 const CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl";
 
 function record(target, created) {
@@ -75,7 +73,6 @@ function getJson(path, timeoutMs = 2000) {
   });
 }
 
-/** Wait until DevTools answers (the browser may be starting or restarting). */
 export async function ready({ timeoutMs = 30000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -90,7 +87,6 @@ export async function ready({ timeoutMs = 30000 } = {}) {
   throw new BrowserNotReady(`the browser did not answer at ${ENDPOINT} within ${timeoutMs} ms (${last?.message ?? "no reply"})`);
 }
 
-/** A minimal WebSocket client (RFC 6455 text frames) for CDP over loopback. */
 class Socket {
   static open(url, timeoutMs) {
     const u = new URL(url);
@@ -208,7 +204,6 @@ class Socket {
   }
 }
 
-/** One CDP connection (to the browser or one page). */
 class Connection {
   constructor(socket) {
     this.socket = socket;
@@ -305,8 +300,6 @@ export class Page {
   }
 
   async evaluate(expression, { mutating = true, timeoutMs = 30000 } = {}) {
-    // The browser itself stops the code at the deadline (Runtime.evaluate's
-    // timeout), so it does not outlive the script.
     const limit = Math.min(timeoutMs, MAX_EVALUATE_MS);
     const r = await this.call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, timeout: limit }, { mutating, timeoutMs: limit + 2000 });
     if (r.exceptionDetails) throw new CdpError(`page script failed: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
@@ -369,7 +362,6 @@ export class Page {
     if (!ok) throw new CdpError(`no element matches ${selector}`);
   }
 
-  /** Make this the tab shown in the visible browser window. */
   async show() {
     await this.call("Page.bringToFront", {});
   }
@@ -399,7 +391,6 @@ export class Browser {
     this.pages = [];
   }
 
-  /** The page tabs of the visible browser. */
   async targets() {
     return (await getJson("/json/list")).filter((t) => t.type === "page");
   }

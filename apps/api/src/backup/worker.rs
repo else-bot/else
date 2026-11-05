@@ -45,7 +45,7 @@ impl BackupWorker {
         }
     }
 
-    /// Replicate completed sets to a bucket after each capture (POC-023).
+    /// Replicate completed sets to a bucket after each capture.
     pub fn with_replicator(mut self, replicator: super::replicate::Replicator) -> Self {
         self.replicator = Some(replicator);
         self
@@ -69,7 +69,7 @@ impl BackupWorker {
     }
 
     /// Coordinate with the scheduler and the bot computers: whole-assistant
-    /// sets (POC-022). Without this a set is database only.
+    /// sets. Without this a set is database only.
     pub fn with_coordinator(mut self, coordinator: Coordinator) -> Self {
         self.coordinator = coordinator;
         self
@@ -91,7 +91,6 @@ impl BackupWorker {
         self.recover_locked().await?;
         let mut summary = self.locked_run(cancel).await?;
         if let Some(replicator) = &self.replicator {
-            // The local set is complete; replication is a separate outcome.
             summary.remote = Some(
                 replicator
                     .replicate_pending(&self.config.dir, &self.key)
@@ -103,7 +102,6 @@ impl BackupWorker {
         Ok(summary)
     }
 
-    /// Local retention, never removing a set that still awaits replication.
     async fn apply_local_retention(&self, newest: &str) -> Result<(), BackupError> {
         let awaiting = match &self.replicator {
             Some(replicator) => replicator.awaiting(&self.config.dir).await?,
@@ -229,7 +227,6 @@ impl BackupWorker {
         let mut capture_retry = FIRST_RETRY;
         let mut upload_retry = FIRST_RETRY;
         let mut capture_at = Instant::now() + self.next_due().unwrap_or(FIRST_RETRY);
-        // Sets left awaiting upload by an earlier process go first.
         let mut upload_at = match &self.replicator {
             Some(replicator) => match replicator.awaiting(&self.config.dir).await {
                 Ok(awaiting) if !awaiting.is_empty() => Some(Instant::now()),
@@ -257,7 +254,6 @@ impl BackupWorker {
                 }
             }
             if capture_at <= Instant::now() {
-                // Shutdown kills the dump and waits for it to be reaped.
                 let result = self.run_once_until(&cancel).await;
                 if cancel.is_cancelled() {
                     return;

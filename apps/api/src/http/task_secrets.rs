@@ -1,4 +1,4 @@
-//! Owner routes for a bot's task secrets (POC-026): credentials its guest
+//! Owner routes for a bot's task secrets: credentials its guest
 //! scripts use, such as SMTP settings. Values are write-only: listing shows
 //! names and variable names, never values. Task grants never reach these
 //! routes (everything under `/v1` needs the owner token).
@@ -98,7 +98,6 @@ async fn store(
         Json(json!({
             "name": name,
             "env": body.env.keys().collect::<Vec<_>>(),
-            // Values this short are not redacted from output.
             "not_redacted": short,
         })),
     ))

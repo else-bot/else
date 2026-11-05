@@ -1,7 +1,3 @@
-//! POC-028: the screenshot tool's outcomes against SQLite, the real MCP
-//! endpoint, and a fake runtime standing in for the guest capture (the live
-//! vision checks are in `vision_live.rs`).
-
 mod common;
 
 use std::sync::{Arc, Mutex};
@@ -19,7 +15,6 @@ use serde_json::{Value, json};
 use sha2::Digest;
 use uuid::Uuid;
 
-/// A 1x1 PNG.
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -27,7 +22,6 @@ enum Mode {
     Ok,
     NoDisplay,
     TooLarge,
-    /// Reports a different image than it writes.
     Mismatch,
 }
 
@@ -35,9 +29,7 @@ struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
     mode: Mutex<Mode>,
     files: Mutex<Vec<String>>,
-    /// Input batches the guest received, decoded.
     inputs: Mutex<Vec<Value>>,
-    /// How the guest input helper ends: (exit code, stdout lines).
     input_reply: Mutex<(i32, Vec<String>)>,
 }
 
@@ -124,7 +116,6 @@ impl ComputerRuntime for Guest {
         self.inputs.lock().unwrap().push(batch);
         let (code, lines) = self.input_reply.lock().unwrap().clone();
         let out = lines.join("\n");
-        // The RUN wrapper's reply: code, sizes, stdout, NUL line, stderr.
         Ok(ExecOutput {
             status: Some(0),
             stdout: format!("{code}\n{}\n0\n{out}\n\0\n", out.len()),
@@ -215,7 +206,6 @@ async fn setup(desktop: bool) -> Setup {
     }
 }
 
-/// A running turn of `bot` whose profile names `model`, and its grant.
 async fn grant(app: &TestApp, bot: &str, model: Option<&str>) -> String {
     let reply = app
         .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
@@ -294,13 +284,11 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let bot = app.create_bot("Seer").await;
     let other = app.create_bot("Other").await;
 
-    // A model not verified for images is refused, and nothing is captured.
     let token = grant(&app, &bot, Some("gpt-5.4-mini")).await;
     let refused = error(&shot(&app, &token, json!({})).await);
     assert!(refused.starts_with("IMAGE_UNSUPPORTED"), "{refused}");
     assert!(guest.files.lock().unwrap().is_empty());
 
-    // A verified model gets the image as an image block, with metadata.
     sqlx::query(
         "UPDATE turns SET profile = json_object('model', 'gpt-6.1-sol')
          WHERE bot_id = ?1 AND status = 'running'",
@@ -323,9 +311,7 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert_eq!(content[1]["mimeType"], "image/png");
     assert_eq!(content[1]["data"], PNG);
     let artifact = meta["artifact_id"].as_str().unwrap().to_owned();
-    // What left the guest is root's checked copy, not the user's file.
     assert!(guest.files.lock().unwrap()[0].starts_with("/var/lib/elsebot-screens/"));
-    // Memory records metadata only, never the image.
     let logged: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
@@ -340,10 +326,8 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     );
     assert!(logged.iter().all(|l| !l.contains(&PNG[..40])), "{logged:?}");
 
-    // The saved screenshot can be shown again; another bot cannot see it.
     let again = shot(&app, &token, json!({ "artifact_id": artifact })).await;
     assert_eq!(again["content"][1]["data"], PNG);
-    // With the original capture's coordinate mapping.
     let saved: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
     for key in [
         "screen_width",
@@ -355,7 +339,6 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     ] {
         assert_eq!(saved[key], meta[key], "{key}");
     }
-    // A capture for a turn that no longer runs takes nothing.
     let lease = match manager
         .acquire(bot.parse().unwrap(), "test:late")
         .await
@@ -376,8 +359,6 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     let foreign = error(&shot(&app, &other_token, json!({ "artifact_id": artifact })).await);
     assert!(foreign.starts_with("No such screenshot"), "{foreign}");
 
-    // Explicit outcomes for a missing display, an image over the budget,
-    // and a copy that does not match the capture.
     *guest.mode.lock().unwrap() = Mode::NoDisplay;
     assert!(error(&shot(&app, &token, json!({})).await).starts_with("DISPLAY_UNAVAILABLE"));
     *guest.mode.lock().unwrap() = Mode::TooLarge;
@@ -386,13 +367,11 @@ async fn screenshots_reach_the_model_as_images_with_explicit_refusals() {
     assert!(error(&shot(&app, &token, json!({})).await).starts_with("SCREENSHOT_INVALID"));
     *guest.mode.lock().unwrap() = Mode::Ok;
 
-    // An owner-stopped computer is neither started nor captured.
     manager.owner_stop(bot.parse().unwrap()).await.unwrap();
     let before = guest.files.lock().unwrap().len();
     assert!(error(&shot(&app, &token, json!({})).await).starts_with("COMPUTER_STOPPED"));
     assert_eq!(guest.files.lock().unwrap().len(), before);
 
-    // A revoked grant gets no capture at all.
     app.scheduler
         .grants()
         .revoke_turn(
@@ -431,10 +410,6 @@ async fn computers_without_a_desktop_say_so() {
     assert!(refused.contains("no desktop"), "{refused}");
 }
 
-/// POC-029: the input tool's outcomes. The guest helper validates and acts
-/// (checked live); here: what reaches it, typed text kept out of memory, the
-/// owner's open desktop, the per-turn bound, and uncertain or refused
-/// batches reported without replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let Setup {
@@ -479,7 +454,6 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
         "typed text never enters memory"
     );
 
-    // A batch the helper refused did nothing; a cut-off one is uncertain.
     *guest.input_reply.lock().unwrap() = (2, vec![r#"{"error": "SCREEN_CHANGED: the screen is now 1024x768, not 1280x800; take a new screenshot"}"#.into()]);
     let refused = tool(&app, &token, "computer_input", batch.clone()).await;
     let text = refused["content"][0]["text"].as_str().unwrap();
@@ -499,8 +473,6 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let cut = tool(&app, &token, "computer_input", batch.clone()).await;
     let text = cut["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("UNCERTAIN: 1 of 2"), "{text}");
-    // An error after execution started (say a failure on action 2) is never
-    // reported as nothing done.
     *guest.input_reply.lock().unwrap() = (
         5,
         vec![
@@ -515,7 +487,6 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     let sent = guest.inputs.lock().unwrap().len();
     assert_eq!(sent, 4, "nothing was replayed");
 
-    // The owner's open desktop session has the desktop.
     *guest.input_reply.lock().unwrap() = (
         0,
         vec![
@@ -541,7 +512,6 @@ async fn input_batches_are_bounded_reported_and_never_logged_verbatim() {
     );
     manager.close_desktop(bot.parse().unwrap()).await.unwrap();
 
-    // A bounded number of batches per turn.
     let mut limited = None;
     for _ in 0..60 {
         let r = tool(&app, &token, "computer_input", batch.clone()).await;

@@ -169,12 +169,5 @@ Do not publish control or API tokens. No host pointer or focus measurements
 were taken during the trial. Guest-only routing establishes where the driver
 sent input, not a measured guarantee about the host pointer.
 
-On macOS arm64, run the [failure-path checks](test_lume.py) after changing the
-helper:
-
-```sh
-python3 .agents/skills/verify-else/test_lume.py
-```
-
-Then repeat the real guest journeys. Mock lifecycle checks do not prove GPUI
-input. These checks skip on hosts that cannot run Lume.
+After changing the helper, repeat the guest journeys on macOS arm64. Check
+that input reaches the app and that cleanup removes only that run's VM.

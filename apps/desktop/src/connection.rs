@@ -23,14 +23,12 @@ use crate::launch::{
     KeyState, Launch, Limits, LocalServer, NoLocal, Phase, RemoteSeed, Step, this_machine,
 };
 
-/// Below this width the story column gives its room to the form.
 const STORY_MIN_WIDTH: f32 = 760.;
 
 pub(crate) const SHELL_CONTEXT: &str = "AppShell";
 
 actions!(else_desktop, [OpenAppSettings]);
 
-/// A connection the server accepted, with the client that checked it.
 struct Verified {
     profile: Profile,
     client: Arc<Client>,
@@ -128,9 +126,7 @@ struct RemoteForm {
 }
 
 enum Page {
-    /// The story column and this machine's server.
     Welcome,
-    /// A server elsewhere, typed in.
     Remote(RemoteForm),
 }
 
@@ -273,8 +269,6 @@ impl Shell {
         cx.notify();
     }
 
-    /// Show the notification's conversation, unless it belongs to another
-    /// connection or its bot is gone.
     fn open_notification(
         &mut self,
         scope: uuid::Uuid,

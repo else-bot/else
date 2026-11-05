@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A local web fixture for else.bot's CDP tests (POC-027). Stdlib only.
+"""A local web fixture for else.bot's CDP tests. Stdlib only.
 
 /          a search form (input name=q, submit button)
 /search    results for ?q= (title "Results for <q>", #results)

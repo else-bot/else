@@ -1,5 +1,3 @@
-//! Provider handoff records (POC-020). See migration `0017_handoffs`.
-
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;

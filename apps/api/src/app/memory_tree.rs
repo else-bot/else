@@ -1,12 +1,9 @@
-//! Deterministic rules of the memory summary tree and saved view (POC-014),
-//! adapted from the pinned UniiChat design (docs/research/memory.md).
-//!
 //! A node `start+span` covers entries `start .. start+span` (zero-based);
 //! spans are powers of two and starts are aligned. A view is an ordered list
 //! of nodes covering a contiguous prefix of the log. Code decides everything
 //! here: labels, exact copies and joins, byte sizes, and which adjacent
 //! siblings merge next. Only text that cannot be copied or joined within the
-//! node limit needs a model (POC-015).
+//! node limit needs a model.
 
 use std::cmp::Ordering;
 
@@ -206,7 +203,7 @@ pub fn covers(view: &[NodeId], count: i64) -> bool {
 /// is the pair's final entry; ties go to the oldest range. Compared exactly
 /// by cross multiplication.
 pub fn next_merge(view: &[NodeId], count: i64, built: impl Fn(NodeId) -> bool) -> Option<usize> {
-    let mut best: Option<(i128, i128, i64, usize)> = None; // (numerator, denominator, start, pos)
+    let mut best: Option<(i128, i128, i64, usize)> = None;
     for pos in 0..view.len().saturating_sub(1) {
         let left = view[pos];
         let right = view[pos + 1];
@@ -314,7 +311,6 @@ pub fn publish_within(
             view.nodes.splice(pos..pos + 2, [parent]);
             merged = true;
         }
-        // Without a built parent, coverage stays and compaction resumes later.
         view.compacting = size > low;
     }
     merged
@@ -372,18 +368,12 @@ mod tests {
 
     #[test]
     fn reference_merge_order_regression() {
-        // At 10 entries the newest pair merges, not the older left pair:
-        // due is measured from the pair's last entry.
         let view = [n(0, 4), n(4, 4), n(8, 1), n(9, 1)];
         assert_eq!(next_merge(&view, 10, |_| true), Some(2));
-        // Without that parent built, the older pair is next; without any
-        // built parent nothing merges and coverage stays.
         assert_eq!(next_merge(&view, 10, |p| p != n(8, 2)), Some(0));
         assert_eq!(next_merge(&view, 10, |_| false), None);
     }
 
-    /// The reference's rollback push (docs/experiments/memory/run.py,
-    /// `rollback_equivalence`): states as (keep, start) pairs, newest first.
     fn push(state: i64, states: &mut Vec<(u8, i64)>, at: usize) {
         if at == states.len() {
             states.push((0, state));
@@ -415,7 +405,6 @@ mod tests {
                 })
                 .collect();
             view.push(NodeId::leaf(count - 1));
-            // Every aligned parent counts as built for this algorithm check.
             while view.len() > expected.len() {
                 let pos = next_merge(&view, count, |_| true).expect("a merge");
                 let parent = view[pos].parent().0;
@@ -482,7 +471,6 @@ mod tests {
             let bytes = WRAPPER_BYTES + view.nodes.iter().map(|n| size(*n)).sum::<usize>();
             assert!(bytes <= recipe.view_high, "count {count}: {bytes}");
         }
-        // With no parents built, nothing merges and nothing is lost.
         let mut blocked = View {
             nodes: vec![],
             compacting: false,

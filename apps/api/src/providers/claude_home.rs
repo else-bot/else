@@ -164,8 +164,6 @@ pub fn tool_names() -> Vec<String> {
         .collect()
 }
 
-/// Replace `dir/name` atomically without following anything the sandbox
-/// may have planted there.
 fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
     if !fs::symlink_metadata(dir)?.is_dir() {
         return Err(std::io::Error::other("provider home is not a directory"));

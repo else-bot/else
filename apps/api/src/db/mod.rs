@@ -1,6 +1,3 @@
-//! SQLite adapter: connection, versioned migrations, and the
-//! transactional operations that persist application state.
-
 pub mod attachments;
 pub mod bot_profiles;
 pub mod bots;
@@ -63,14 +60,10 @@ pub async fn connect(url: &DatabaseUrl) -> Result<SqlitePool, DbError> {
             .open(path)
             .map_err(|e| DbError::Unavailable(e.to_string()))?;
     }
-    // Each SQLx SQLite connection owns its handle in a worker thread and uses
-    // bounded command/row channels. SQLite arbitrates writers per database;
-    // readers remain concurrent in WAL mode.
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .acquire_timeout(Duration::from_secs(30))
         .connect_lazy_with(options);
-    // Fail fast with a readable error instead of on the first request.
     sqlx::query("SELECT 1")
         .execute(&pool)
         .await

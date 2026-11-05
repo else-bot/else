@@ -13,10 +13,6 @@ image adds the helpers on top of the pinned base, and its inputs include the
 base manifest, so release CI rebuilds it without touching APT. `image` is null
 until one is published. --base selects the base manifest.
 
-The release workflows in .github/workflows call this script;
-scripts/test-release.py exercises it against disposable repositories and a
-fake registry.
-
     guest-release.py [--base] hash [--rev REV]
     guest-release.py [--base] check [--rev REV] [--allow-unpinned]
     guest-release.py [--base] pinned [--rev REV]

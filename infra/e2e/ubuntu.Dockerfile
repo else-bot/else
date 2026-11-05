@@ -1,5 +1,3 @@
-# The source is bind-mounted at runtime, so edits never invalidate the SDK or
-# distribution prerequisites. Only the new native arm64 lane uses this image.
 ARG RUST_IMAGE=rust:1
 FROM ${RUST_IMAGE} AS rust
 FROM ubuntu:26.04

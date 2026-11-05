@@ -1,4 +1,3 @@
-//! Bounded in-process wake hints for committed SQLite changes.
 use std::time::Duration;
 
 use sqlx::SqlitePool;

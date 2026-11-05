@@ -220,7 +220,7 @@ pub enum ReadCommand {
     MarkUnread,
 }
 
-/// A sidebar category (POC-030).
+/// A sidebar category.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Category {
     pub id: Uuid,
@@ -313,7 +313,6 @@ impl ClientError {
     pub fn outcome_unknown(&self) -> bool {
         match self {
             Self::Unreachable { .. } | Self::Protocol(_) => true,
-            // Refused before acceptance, so nothing was accepted.
             Self::Api { code, .. } if code == "provider_unavailable" => false,
             Self::Api { status, .. } => *status >= 500,
             Self::Unauthorized => false,
@@ -346,7 +345,6 @@ impl Client {
         let http = reqwest::Client::builder()
             .tls_backend_preconfigured(tls.clone())
             .redirect(reqwest::redirect::Policy::none())
-            // Never route the owner token through an environment proxy.
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .build()
@@ -774,7 +772,6 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// A one-shot HTTP server returning `response` and capturing the request.
     pub(crate) async fn serve_once(
         response: &'static str,
     ) -> (Origin, tokio::task::JoinHandle<String>) {
@@ -1025,7 +1022,6 @@ pub(crate) mod tests {
                 )
                 .await
                 .unwrap();
-                // Read the client's subscriptions for a moment.
                 while let Ok(Some(Ok(Message::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(300), socket.next()).await
                 {
@@ -1038,7 +1034,6 @@ pub(crate) mod tests {
                         .await
                         .unwrap();
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    // Drop the connection: the client must reconnect.
                 }
             }
         });
@@ -1067,7 +1062,6 @@ pub(crate) mod tests {
             live.events.recv().await,
             Some(LiveEvent::Connected)
         ));
-        // A connection that dropped quickly is retried after a backoff.
         assert!(dropped.elapsed() >= Duration::from_millis(500));
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut log = Vec::new();

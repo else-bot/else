@@ -275,7 +275,6 @@ fn plain_content(
     content
 }
 
-/// The toolkit's default link gestures.
 fn activates_link(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(click) => {

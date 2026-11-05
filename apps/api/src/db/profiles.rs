@@ -1,5 +1,3 @@
-//! Saved provider execution profiles.
-
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 

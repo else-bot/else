@@ -23,8 +23,6 @@ pub enum Principal {
     Owner,
 }
 
-/// Failed-authentication budget per window, shared by all callers. The
-/// listener is loopback-only, so per-address accounting adds nothing.
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_FAILURES_PER_WINDOW: u32 = 30;
 
@@ -48,7 +46,6 @@ impl FailureLimiter {
         self.started.elapsed().as_secs() / FAILURE_WINDOW.as_secs()
     }
 
-    /// Seconds until attempts are accepted again, if the budget is spent.
     fn blocked_for(&self) -> Option<u64> {
         let window = self.window.load(Ordering::Acquire);
         (window >> 32 == self.epoch() && window as u32 >= MAX_FAILURES_PER_WINDOW).then(|| {
@@ -103,7 +100,6 @@ pub async fn check_origin(request: Request, next: Next) -> Response {
 
 fn is_loopback_host(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed IPv6 literal with an optional port.
         match rest.split_once(']') {
             Some((addr, tail)) if tail.is_empty() || is_port(tail) => addr,
             _ => return false,
@@ -127,8 +123,6 @@ fn is_port(tail: &str) -> bool {
         .is_some_and(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }
 
-/// Extract the single bearer credential, or `None` for any missing,
-/// duplicated, or malformed header.
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next()?;
@@ -166,7 +160,6 @@ pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Princ
     let presented = bearer(headers);
     let authenticated = presented.is_some_and(|token| state.owner_token.matches(token));
     if !authenticated {
-        // A valid task grant is authenticated but not allowed here.
         if let Some(token) = presented
             && state.scheduler.grants().resolve(token).await.is_some()
         {
@@ -177,8 +170,6 @@ pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Princ
             )
             .into_response());
         }
-        // The valid owner is never locked out; failures beyond the budget
-        // get a cheap 429 instead of a 401.
         if let Some(retry_after) = state.auth_failures.blocked_for() {
             return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,

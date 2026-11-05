@@ -9,7 +9,7 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 
 Verify behavior on the real surface the change affects. Reuse this repository's
 harnesses and the current session's UI tools. Read the
-[development guide](../../../docs/development.md) for the app's launch and test setup.
+[development guide](../../../CONTRIBUTING.md) for the app's launch and test setup.
 
 ## Setup
 

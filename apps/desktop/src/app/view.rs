@@ -1,5 +1,3 @@
-//! Rendering of the sidebar, header, conversation, and composer.
-
 use super::layout::{CategoryDrag, SidebarEdge};
 use super::mentions::MentionAction;
 use super::reply::{Author, MessageReference};
@@ -491,8 +489,6 @@ impl ElseApp {
                         .conversation
                         .as_ref()
                         .is_some_and(|c| c.older_before_seq.is_some());
-                    // Outside the list, so prepending history shifts the
-                    // anchored message instead of the button.
                     let mut column = v_flex().flex_1().min_h_0();
                     if older {
                         let loading = view.loading_older;
@@ -831,8 +827,6 @@ fn subtitle(bot: &Bot, main: bool) -> String {
 pub(super) const HEADER_HEIGHT: Pixels = px(56.);
 const READING_WIDTH: Pixels = px(760.);
 
-/// A transcript row's or the composer's column: full width in a narrow
-/// window, centered and bounded in a wide one.
 pub(super) fn reading_column() -> Div {
     v_flex().w_full().max_w(READING_WIDTH).mx_auto().px_5()
 }

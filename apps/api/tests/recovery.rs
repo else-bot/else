@@ -1,9 +1,3 @@
-//! POC-019: execution recovery and resource admission. A fault point stops
-//! an operation exactly where a crash would; a fresh `ComputerManager` then
-//! plays the restarted API (its state lives only in SQLite and the
-//! runtime). The fake runtime emulates the guest job scripts so effects
-//! (launches, kills) are observable and must never repeat.
-
 mod common;
 
 use std::collections::HashMap;
@@ -25,17 +19,13 @@ use uuid::Uuid;
 #[derive(Default)]
 struct Guest {
     computers: Mutex<HashMap<String, RuntimeState>>,
-    /// Job directory -> finished exit code (None while running).
     jobs: Mutex<HashMap<String, Option<i32>>>,
     launches: Mutex<Vec<String>>,
     kills: Mutex<Vec<String>>,
     fail_list: std::sync::atomic::AtomicBool,
     create_delay: Mutex<Duration>,
-    /// The launch is accepted but its reply is lost.
     lose_launch_reply: AtomicBool,
-    /// Kills do not take effect.
     kills_fail: AtomicBool,
-    /// Stopping fails (the runtime still reports the computer running).
     stops_fail: AtomicBool,
 }
 
@@ -107,7 +97,6 @@ impl ComputerRuntime for Guest {
         if self.stops_fail.load(SeqCst) {
             return Err(RuntimeError::Unavailable("stop timed out".into()));
         }
-        // Stopping kills every guest process.
         for state in self.jobs.lock().unwrap().values_mut() {
             state.get_or_insert(137);
         }
@@ -134,7 +123,6 @@ impl ComputerRuntime for Guest {
             Some(&RuntimeState::Running),
             "exec only on a running computer"
         );
-        // Non-desktop: sh -c SCRIPT sh ARGS...
         let script = args[1];
         let rest = &args[3..];
         if script.contains("setsid") {
@@ -176,7 +164,6 @@ fn config(max_vms: u64) -> ComputerConfig {
     }
 }
 
-/// A manager for the same database and runtime: a (re)started API.
 async fn api(app: &TestApp, guest: &Arc<Guest>, max_vms: u64) -> ComputerManager {
     let manager = ComputerManager::new(app.db.pool.clone(), guest.clone(), config(max_vms));
     manager.reconcile_startup().await.unwrap();
@@ -248,7 +235,6 @@ async fn job_leases(app: &TestApp) -> i64 {
     .unwrap()
 }
 
-/// Fault points are process-wide: run these tests one at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread")]
@@ -327,8 +313,6 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
     let a: Uuid = app.create_bot("A").await.parse().unwrap();
     let b: Uuid = app.create_bot("B").await.parse().unwrap();
 
-    // Start decision recorded, runtime never called: the slot stays
-    // reserved until a restart learns nothing was created.
     let first = api(&app, &guest, 1).await;
     faults::arm("computer.after_start_decision");
     assert!(matches!(
@@ -347,7 +331,6 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
         panic!()
     };
 
-    // Lease renewed, then a crash: the renewal holds after restart.
     sqlx::query(
         "UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 seconds') WHERE id = ?1",
     )
@@ -369,8 +352,6 @@ async fn crashes_around_start_stop_and_renewal_keep_reservations_until_reconcile
         "the renewed lease still holds it"
     );
 
-    // Stop decision recorded, runtime never stopped: still reserved, and
-    // a restart records the computer as still running, then stops it.
     third.release(lease_id).await.unwrap();
     faults::arm("computer.after_stop_decision");
     assert!(matches!(
@@ -402,7 +383,6 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
     let a: Uuid = app.create_bot("A").await.parse().unwrap();
     let b: Uuid = app.create_bot("B").await.parse().unwrap();
     let manager = Arc::new(api(&app, &guest, 1).await);
-    // The caller gives up while the computer is being created.
     let m = manager.clone();
     let waiting = tokio::spawn(async move { m.acquire(a, "test:a").await });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -413,16 +393,13 @@ async fn a_cancelled_wait_and_an_unreachable_runtime_keep_reservations() {
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Queued { .. }
     ));
-    // Maintenance reconciles it from what the runtime has.
     tokio::time::sleep(Duration::from_millis(600)).await;
     manager.tick(&never()).await.unwrap();
-    // The aborted create left nothing: recorded absent, slot released.
     assert_eq!(observed(&app, a).await, "absent");
     assert!(matches!(
         manager.acquire(b, "test:b").await.unwrap(),
         Acquire::Ready { .. }
     ));
-    // An unreachable runtime at startup changes nothing and admits nothing.
     guest
         .fail_list
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -454,11 +431,9 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     else {
         panic!()
     };
-    // Desktop disconnection (a released desktop lease) leaves the job alone.
     manager.close_desktop(bot_id).await.unwrap();
     manager.tick(&never()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "running");
-    // Bot-wide Stop work: pending until the job is gone.
     let request = uuid::Uuid::new_v4();
     let stop = app
         .owner(
@@ -486,7 +461,6 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
         again.body
     );
     assert_eq!(again.body["state"], "done");
-    // Deleting a bot with a job also completes once the job is resolved.
     let Started::Job(other) = manager
         .start_job(bot_id, None, "again", Duration::from_secs(600))
         .await
@@ -494,8 +468,6 @@ async fn stop_work_cancels_background_jobs_and_completes_after_them() {
     else {
         panic!()
     };
-    // The VM refuses to stop at first: the job is killed (not assumed
-    // lost), and deletion waits for the computer to be confirmed down.
     guest.stops_fail.store(true, SeqCst);
     let deleted = app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     assert!(deleted.status.is_success());
@@ -559,8 +531,6 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     else {
         panic!()
     };
-    // Something else also holds the computer (a desktop), so it would not
-    // stop on its own.
     let Acquire::Ready { .. } = manager.acquire(bot, "desktop:x").await.unwrap() else {
         panic!()
     };
@@ -568,7 +538,6 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
     let request = stop_work(&app, bot).await;
     manager.tick(&never()).await.unwrap();
     assert_eq!(job_status(&app, job).await.0, "cancelling");
-    // Its lease expires: the job is still live work, so it is renewed.
     sqlx::query("UPDATE computer_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', '-1 minutes')")
         .execute(&app.db.pool)
         .await
@@ -581,7 +550,6 @@ async fn a_cancelling_job_keeps_its_lease_and_fences_new_jobs_until_killed() {
         "not released before the kill is confirmed"
     );
     assert_eq!(receipt(&app, request).await, "pending");
-    // No job can be admitted while the stop is pending.
     assert_eq!(
         manager
             .start_job(bot, None, "late", Duration::from_secs(600))
@@ -604,7 +572,6 @@ async fn a_job_for_a_stopped_turn_is_refused() {
     let guest = Arc::new(Guest::default());
     let bot: Uuid = app.create_bot("A").await.parse().unwrap();
     let manager = api(&app, &guest, 2).await;
-    // A turn that has already been stopped (or never ran).
     let ended = Uuid::new_v4();
     assert_eq!(
         manager
@@ -664,7 +631,6 @@ async fn a_job_ending_by_itself_during_a_stop_still_completes_the_stop() {
         panic!()
     };
     let request = stop_work(&app, bot).await;
-    // A poll that read it as running records its completion meanwhile.
     sqlx::query("UPDATE guest_jobs SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
         .bind(job)
         .execute(&app.db.pool)

@@ -1,5 +1,3 @@
-//! POC-030: sidebar categories against SQLite and the real router.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -42,7 +40,6 @@ fn category_of(listing: &Value, bot: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
     let app = TestApp::installed().await;
-    // Existing bots start unassigned.
     let main = app.main_bot().await;
     assert_eq!(category_of(&listing(&app).await, &main), Value::Null);
 
@@ -51,7 +48,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
     assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
     assert_eq!(made.body["category"]["name"], "Family");
     let id = made.body["category"]["id"].clone();
-    // A matching retry returns the same category; a different one conflicts.
     let again = create(&app, request, "Family").await;
     assert_eq!(
         (again.status, again.body["category"]["id"].clone()),
@@ -61,7 +57,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         create(&app, request, "Work").await.status,
         StatusCode::CONFLICT
     );
-    // Names: unique regardless of case, trimmed, bounded, no control characters.
     let dup = create(&app, Uuid::new_v4(), "FAMILY").await;
     assert_eq!(
         (dup.status, dup.body["error"]["code"].clone()),
@@ -78,7 +73,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         create(&app, Uuid::new_v4(), &"é".repeat(80)).await.status,
         StatusCode::CREATED
     );
-    // A request ID already used to create a bot is a conflict.
     let bot_request = Uuid::new_v4();
     let reply = app
         .owner(
@@ -93,7 +87,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         StatusCode::CONFLICT
     );
 
-    // Empty categories are listed, ordered by name.
     create(&app, Uuid::new_v4(), "archive").await;
     let names: Vec<String> = app.owner("GET", "/v1/categories", None).await.body["categories"]
         .as_array()
@@ -101,7 +94,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .iter()
         .map(|c| c["name"].as_str().unwrap().to_owned())
         .collect();
-    // By the case-folded name's code points: the same on any collation.
     assert_eq!(
         names,
         vec!["archive".to_owned(), "Family".to_owned(), "é".repeat(80)]
@@ -111,7 +103,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         3
     );
 
-    // Rename (to a free name; not onto another's).
     let renamed = app
         .owner(
             "PATCH",
@@ -132,8 +123,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         .await;
     assert_eq!(clash.status, StatusCode::CONFLICT);
 
-    // Unicode case folding: Straße and STRASSE are one name, on create and
-    // on rename.
     assert_eq!(
         create(&app, Uuid::new_v4(), "Straße").await.status,
         StatusCode::CREATED
@@ -169,7 +158,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
     )
     .await;
 
-    // Request IDs are one namespace, in both directions.
     let shared = Uuid::new_v4();
     assert_eq!(
         create(&app, shared, "Shared").await.status,
@@ -201,7 +189,6 @@ async fn categories_are_created_once_named_uniquely_and_kept_when_empty() {
         "the category retry still works"
     );
 
-    // Repeated startup keeps everything.
     let app = app.restart().await;
     else_api::db::migrate(&app.db.pool).await.unwrap();
     assert_eq!(
@@ -221,7 +208,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     let work = create(&app, Uuid::new_v4(), "Work").await.body["category"]["id"].clone();
     let home = create(&app, Uuid::new_v4(), "Home").await.body["category"]["id"].clone();
 
-    // Assign, move, unassign.
     let reply = assign(&app, &a, work.clone()).await;
     assert_eq!(
         (reply.status, reply.body["bot"]["category_id"].clone()),
@@ -232,7 +218,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     assert_eq!(category_of(&listing(&app).await, &b), home);
     assign(&app, &b, Value::Null).await;
     assert_eq!(category_of(&listing(&app).await, &b), Value::Null);
-    // Unknown categories, malformed bodies, and missing bots are refused.
     let unknown = assign(&app, &a, json!(Uuid::new_v4())).await;
     assert_eq!(
         (unknown.status, unknown.body["error"]["code"].clone()),
@@ -250,7 +235,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
         StatusCode::NOT_FOUND
     );
 
-    // Some chat in Alpha, to check deletion keeps it.
     let sent = app
         .send(&a, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
@@ -264,7 +248,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
     .await
     .unwrap();
 
-    // Deleting a category unassigns its bots and touches nothing else.
     let deleted = app
         .owner(
             "DELETE",
@@ -296,7 +279,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
         StatusCode::NOT_FOUND
     );
 
-    // A deleted bot cannot be assigned (nor revived by trying).
     assign(&app, &b, home.clone()).await;
     assert_eq!(
         app.owner("DELETE", &format!("/v1/bots/{b}"), None)
@@ -312,7 +294,6 @@ async fn assignments_move_and_deleting_a_category_keeps_its_bots() {
         .await
         .unwrap();
     assert_eq!(status, "deleted");
-    // A create retried after its category was deleted says so.
     let request = Uuid::new_v4();
     let temp = create(&app, request, "Temp").await.body["category"]["id"].clone();
     app.owner(
@@ -403,8 +384,6 @@ async fn task_grants_cannot_change_categories() {
     );
 }
 
-/// An installation migrated to 0026 with bots and chat gains categories at
-/// 0027 and 0028 without losing anything; every bot starts unassigned.
 #[tokio::test(flavor = "multi_thread")]
 async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
     let db = common::TestDb::empty().await;
@@ -454,8 +433,6 @@ async fn migrating_a_populated_installation_keeps_every_bot_unassigned() {
     assert_eq!(conversations, 2, "the main bot's and the old bot's");
 }
 
-/// Concurrent deletes, assignments, Stop work, and bot deletions never
-/// deadlock into a server error.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_category_and_bot_changes_never_fail_with_server_errors() {
     let app = std::sync::Arc::new(TestApp::installed().await);
@@ -507,7 +484,6 @@ async fn concurrent_category_and_bot_changes_never_fail_with_server_errors() {
             assert!(!status.is_server_error(), "round {round}: {status}");
         }
     }
-    // Whatever won, no bot points at a missing category.
     let dangling: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bots b LEFT JOIN bot_categories c ON c.id = b.category_id
          WHERE b.category_id IS NOT NULL AND (c.id IS NULL OR c.deleting)",

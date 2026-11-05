@@ -315,7 +315,6 @@ impl ElseApp {
             let result = client.create_bot(payload.clone()).await;
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(bot) => {
-                    // Close only the dialog this request came from.
                     if app.create.as_ref() == Some(&holder) {
                         app.create = None;
                         window.close_dialog(cx);
@@ -331,10 +330,6 @@ impl ElseApp {
                 Err(err) => {
                     holder.update(cx, |h, cx| {
                         h.form.busy = false;
-                        // A definite rejection lets the owner edit and send a
-                        // new request. An unknown outcome (or a conflict,
-                        // which proves nothing about the original) keeps the
-                        // same ID and payload so a retry cannot duplicate.
                         if err.outcome_unknown() || err.is_request_conflict() {
                             h.form.in_doubt = Some(payload.clone());
                             h.form.error = Some(format!(

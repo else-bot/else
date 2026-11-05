@@ -1,9 +1,4 @@
-# S3 emulator for the optional replication tests (POC-023), owned by one
-# scripts/test-replication.py run: its project name, credentials, volume and
-# host port are private to that run. Synthetic keys only; never a real bucket.
 services:
-  # Owns the network namespace and the kernel-assigned host port, so the
-  # endpoint survives the outage tests stopping and restarting seaweedfs.
   s3:
     image: chrislusf/seaweedfs:4.50
     entrypoint: ["sleep", "2147483647"]

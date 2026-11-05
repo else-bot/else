@@ -94,8 +94,6 @@ pub async fn table_digests(
     Ok(digests)
 }
 
-/// Write `complete.json` without replacing an existing one: a synced
-/// temporary file hard-linked into place, then the directory synced.
 fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), BackupError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -162,7 +160,6 @@ pub async fn create_set(
                 publish_completion(&final_dir, &completion)
             })();
             if let Err(err) = published {
-                // Never leave a set this run made behind half-published.
                 let _ = std::fs::remove_dir_all(&staging);
                 if !matches!(err, BackupError::Interrupted) {
                     let _ = std::fs::remove_dir_all(&final_dir);
@@ -199,7 +196,6 @@ pub struct Coordinator {
     pub projects_dir: Option<PathBuf>,
 }
 
-/// Seal a plaintext file into an artifact and remove the plaintext.
 async fn seal_file(
     plain: PathBuf,
     target: PathBuf,
@@ -217,8 +213,6 @@ async fn seal_file(
     .map_err(|e| BackupError::Io(e.to_string()))?
 }
 
-/// Capture every active bot's computer disk into sealed artifacts. Live
-/// work defers the whole set; nothing is captured half-way.
 async fn capture_computers(
     computers: &crate::computers::ComputerManager,
     bots: &[(uuid::Uuid, String, String)],
@@ -283,7 +277,6 @@ async fn capture_computers(
                     .ok()
                     .map(|p| p.trim().to_owned())
                     .filter(|p| !p.is_empty() && p.len() <= 64);
-                // A desktop's password is required to use it after restore.
                 if desktop_port.is_some() && desktop_password.is_none() {
                     return Err(BackupError::Producer(format!(
                         "bot {name}'s desktop password ({}) is missing or invalid",
@@ -329,9 +322,6 @@ async fn capture_computers(
     Ok((artifacts, entries))
 }
 
-/// Seal every host artifact (files bots fetched from their computers) whose
-/// file matches its recorded size and hash. Returns the artifacts and the
-/// IDs that could not be included.
 async fn capture_files(
     pool: &SqlitePool,
     state_dir: &Path,
@@ -384,8 +374,6 @@ async fn capture_files(
     Ok((artifacts, missing))
 }
 
-/// Archive and seal every active bot's project directory. Returns the
-/// artifacts and each bot's project state.
 async fn capture_projects(
     bots: &[(uuid::Uuid, String, String)],
     projects_dir: &Path,
@@ -458,9 +446,6 @@ async fn capture_into(
     let encryption = super::encryption_for(key, &salt);
     let identity = super::identity(key, &salt)?;
 
-    // The application checkpoint: no new turn, mutation, or desktop wake
-    // while the computers and the database are captured; current turns
-    // finish first or the set is deferred.
     if coordinator.exclusive {
         let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE status IN {})",
@@ -476,8 +461,6 @@ async fn capture_into(
     }
     let gate = match &coordinator.scheduler {
         Some(scheduler) => {
-            // Closing waits for admitted claims, requests, tool calls, and
-            // memory work; then the turns themselves drain.
             let deadline = tokio::time::Instant::now() + coordinator.drain;
             let closed = match scheduler.gate().close(coordinator.drain).await {
                 Ok(Some(closed)) => closed,
@@ -525,8 +508,6 @@ async fn capture_into(
         }
         None => Default::default(),
     };
-    // Project directories only at a checkpoint: no turn runs and their
-    // computers (which mount them) are stopped.
     let (mut project_artifacts, mut project_states) = match (
         &coordinator.projects_dir,
         gate.is_some() || coordinator.exclusive,
@@ -540,8 +521,6 @@ async fn capture_into(
         return Err(BackupError::Interrupted);
     }
 
-    // One snapshot for the digests and the dump; held open until the dump
-    // has finished. Computers are already stopped and recorded so.
     let mut tx = pool.begin().await?;
     let tables = table_digests(&mut tx).await?;
     let migration_version: i64 =
@@ -566,8 +545,6 @@ async fn capture_into(
             .fetch_all(&mut *tx)
             .await?;
 
-    // Serialize the same read snapshot used by the digests. Plaintext stays
-    // in memory and is bounded before SQLite allocates the image.
     let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
         .fetch_one(&mut *tx)
         .await?;
@@ -617,7 +594,6 @@ async fn capture_into(
         return Err(BackupError::Interrupted);
     }
     let sealed = sealed?;
-    // The sources are fixed: work may resume while the set is published.
     drop(gate);
 
     let coordinated = coordinator.computers.is_some()
@@ -642,8 +618,6 @@ async fn capture_into(
             if status == "active" && !matches!(project.as_str(), "included" | "none") {
                 complete = false;
             }
-            // A desktop whose browser was not checkpointed may carry a
-            // stale profile lock.
             if computer.as_ref().is_some_and(|c| {
                 c.desktop_port.is_some() && c.browser_checkpoint.as_deref() != Some("ok")
             }) {

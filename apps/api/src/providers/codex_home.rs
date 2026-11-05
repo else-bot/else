@@ -137,10 +137,6 @@ pub fn host_auth_file(codex_home: Option<&str>, home: Option<&str>) -> Option<Pa
     Some(dir.join("auth.json"))
 }
 
-/// Replace `dir/name` atomically without following anything the sandbox
-/// may have planted there: the new file is created exclusively (never through
-/// a symlink) and renamed over the old entry, which replaces a symlink itself
-/// rather than its target.
 fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
     if !fs::symlink_metadata(dir)?.is_dir() {
         return Err(std::io::Error::other("provider home is not a directory"));
@@ -317,7 +313,6 @@ mod tests {
             .collect();
         assert!(text.contains(&format!("enabled_tools = [{}]", expected.join(", "))));
         assert!(text.contains("\"memory_search\""));
-        // The grant itself is never written to disk.
         assert!(!text.contains("tg_"));
     }
 
@@ -349,7 +344,6 @@ mod tests {
             config_toml(None, true)
         );
         assert_eq!(fs::read_link(home.join("auth.json")).unwrap(), login);
-        // A refresh writes through to the host login.
         fs::write(home.join("auth.json"), "REFRESHED").unwrap();
         assert_eq!(fs::read_to_string(&login).unwrap(), "REFRESHED");
     }

@@ -1,9 +1,3 @@
-//! Live Claude checks that use the owner's subscription (POC-020). They run
-//! only when `ELSE_LIVE_CLAUDE=1` is set; the provider round trip also needs
-//! `ELSE_LIVE_CODEX=1`, `ELSE_LIVE_VM=1`, and the guest image.
-//!
-//! ELSE_LIVE_CLAUDE=1 cargo test -p else-api --test claude_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -72,7 +66,6 @@ async fn save_claude_profile(db: &TestDb) {
     .unwrap();
 }
 
-/// The API on a real port (else.bot's MCP endpoint is reached over it).
 async fn serve(app: &TestApp, listener: tokio::net::TcpListener) {
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -117,7 +110,6 @@ async fn session(app: &TestApp, bot: &str, provider: &str) -> Option<String> {
     .unwrap()
 }
 
-/// Processes of this installation's sandboxes running the provider CLI.
 fn provider_processes() -> usize {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return 0;
@@ -125,7 +117,6 @@ fn provider_processes() -> usize {
     entries
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|pid| {
-            // Inside the sandbox the CLI is mounted at /opt/else/provider.
             std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| {
                 let exe = exe.to_string_lossy();
                 exe.ends_with("/opt/else/provider") || exe.ends_with("/claude")
@@ -137,9 +128,6 @@ fn provider_processes() -> usize {
         .count()
 }
 
-/// Claude through the API: resume, native agents denied (with the tool
-/// inventory, model, lifecycle events, and processes checked), host
-/// restrictions, per-bot session isolation, and interruption.
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible() {
     if !live() {
@@ -190,10 +178,6 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
             .unwrap();
     assert_eq!(reported["model"], MODEL);
 
-    // Native agents cannot run; the host tools do, in the bot's project
-    // directory. The adapter fails the turn on any other tool use,
-    // sub-agent event, permission request, or other model, so a completed
-    // turn is the proof; processes are also sampled while it runs.
     let reply = app
         .send(
             &a,
@@ -240,9 +224,6 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     );
     assert_eq!(provider_processes(), 0, "nothing left running");
 
-    // Per-bot isolation: bot B is pointed at A's native session, but the
-    // transcript is not under B's project directory, so a new session is
-    // started.
     let b = app.create_bot("Beta").await;
     let (_, status, _) = ask(&app, &b, "claude", "Synthetic test. Reply OK.").await;
     assert_eq!(status, "completed");
@@ -269,8 +250,6 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     );
     assert_ne!(session(&app, &b, "claude").await.unwrap(), first);
 
-    // Interruption: the CLI's interrupt request stops it; the outcome is
-    // recorded and the process reaped.
     let reply = app
         .send(
             &a,
@@ -311,13 +290,11 @@ async fn claude_conversations_are_restricted_resumed_isolated_and_interruptible(
     assert_eq!(status, "interrupted");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(provider_processes(), 0);
-    // After the interruption the session resumes for the next message.
     let (_, status, text) = ask(&app, &a, "claude", "Reply with the code word again.").await;
     assert_eq!(status, "completed");
     assert!(text.contains("ZETA-9"), "{text}");
 }
 
-/// A checkpoint from Claude has nothing it could call.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_checkpoint_runs_with_no_tools() {
     if !live() {
@@ -351,10 +328,6 @@ async fn a_claude_checkpoint_runs_with_no_tools() {
     assert!(text.contains("19:00"), "{text}");
 }
 
-/// POC-020 acceptance: Codex to Claude to Codex in one conversation, with
-/// memory, the computer, and a running guest job preserved. The receiving
-/// provider inspects the job rather than launching it again, and returning
-/// Codex gets only what it missed.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     let all = live()
@@ -508,7 +481,6 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
     let job = jobs[0].0.to_string();
     assert!(t1.contains(&job[..8]) || t1.contains(&job), "{t1}");
     assert!(t2.contains("QUARTZ-5"), "{t2}");
-    // Claude's own turn called computer_job (not job start) with this ID.
     assert!(
         claude_checks.iter().any(|body| body.contains(&job)),
         "Claude inspected the job by ID: {claude_checks:?}"

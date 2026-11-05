@@ -360,8 +360,6 @@ fn installed(home: &Path) -> Result<LocalServer, NoLocal> {
     })
 }
 
-/// An installed server was checked by `installed`; an app-only one is
-/// checked here the same way before its `bin/elsebot` may run.
 fn updatable(home: &Path, local: &Result<LocalServer, NoLocal>) -> Result<Installation, String> {
     let server = match local {
         Ok(server) => Some(server.clone()),
@@ -526,7 +524,6 @@ async fn probe(client: &Arc<Client>, limit: Duration) -> Probe {
     }
 }
 
-/// `None` when the receiver is gone.
 async fn attempt(
     tx: &mpsc::Sender<Step>,
     client: Arc<Client>,

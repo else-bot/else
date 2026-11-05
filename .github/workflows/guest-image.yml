@@ -64,8 +64,6 @@ jobs:
         run: docker run --rm --user elsebot -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/x11vnc/test_keymap_settle.py
       - name: Test VNC targets
         run: docker run --rm --user elsebot -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/vnc/test_else_vnc_targets.py
-      - name: Test APT downloads
-        run: docker run --rm --network none -v "$PWD/infra/guest:/guest:ro" --entrypoint python3 else-guest:candidate /guest/test_apt_downloads.py
       - name: Push
         env:
           ELSE_GUEST_REGISTRY_USER: ${{ github.actor }}

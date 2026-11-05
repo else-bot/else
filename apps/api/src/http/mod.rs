@@ -1,5 +1,3 @@
-//! HTTP transport. Handlers translate requests into application operations.
-
 pub mod attachments;
 pub mod auth;
 pub mod bots;
@@ -58,7 +56,6 @@ pub struct AppState {
     /// The installation key for encrypted task and connector credentials.
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
-    /// Held while an update is prepared: the gate stays closed until exit.
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     desktop_streams: desktop_stream::Streams,
 }
@@ -152,8 +149,6 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         .nest("/v1", v1)
-        // Task-scoped tools: a separate route group that accepts only task
-        // grants and never the owner token.
         .nest(
             "/tools/v1",
             tools::routes()
@@ -173,10 +168,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(move |request, next| {
             reject_large_body(max_body, request, next)
         }))
-        // Body extractors also enforce the limit on chunked bodies.
         .layer(DefaultBodyLimit::max(max_body))
-        // Record method and path only: never headers, query strings, or
-        // URI user information, which could carry a misplaced credential.
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request| {
                 tracing::info_span!("request", method = %request.method(), path = request.uri().path())
@@ -192,8 +184,6 @@ fn method_not_allowed() -> ApiError {
     )
 }
 
-/// While a coordinated backup holds the gate, refuse requests that would
-/// change state or wake a computer.
 async fn maintenance_gate(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -202,7 +192,6 @@ async fn maintenance_gate(
     if crate::maintenance::allowed(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
-    // Admitted until the handler has finished, so a backup waits for it.
     let Some(_admission) = state.scheduler.gate().enter() else {
         return maintenance_response();
     };
@@ -217,7 +206,6 @@ fn maintenance_response() -> Response {
     .into_response()
 }
 
-/// Task-scoped tool calls are admitted work too.
 async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let Some(_admission) = state.scheduler.gate().enter() else {
         return maintenance_response();
@@ -235,8 +223,6 @@ async fn fallback(State(state): State<Arc<AppState>>, request: Request) -> Respo
     ApiError::not_found().into_response()
 }
 
-/// Reject a declared oversized body on every route, including routes that
-/// never read their body.
 async fn reject_large_body(max: usize, request: Request, next: Next) -> Response {
     let declared = request
         .headers()
@@ -281,10 +267,6 @@ async fn readiness(
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let registry = state.scheduler.registry();
-    // A provider that needs a saved profile is usable only once one is
-    // configured; the picker shows why it is not.
-    // Unknown when the database does not answer quickly: then only the
-    // adapters' own availability is reported.
     let (configured, defaults, onboarding_required) = tokio::join!(
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -328,8 +310,6 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
                 "label": provider.label(),
                 "available": available,
                 "unavailable_reason": reason,
-                // Whether the CLI itself runs here (a profile can still be
-                // chosen for a bot), and the exact values it applies.
                 "cli_available": cli == Availability::Available,
                 "cli_unavailable_reason": match cli {
                     Availability::Unavailable(reason) => Some(reason),
@@ -349,7 +329,6 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         "server_instance_id": state.server_instance_id,
         "default_provider_id": default_id,
         "defaults": defaults,
-        // The welcome screen: name the main bot and choose its model.
         "onboarding_required": onboarding_required,
         "providers": providers,
         "limits": {
@@ -380,7 +359,6 @@ pub mod tests {
             32
         );
         let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        // Capability queries use an empty SQLite database in these auth tests.
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("sqlite::memory:")
@@ -476,7 +454,6 @@ pub mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{headers:?}");
             assert_eq!(body["error"]["code"], "unauthorized");
         }
-        // A token in the query string is never accepted.
         let (status, _) = send(
             app.clone(),
             get(&format!("/v1/capabilities?access_token={TOKEN}"))
@@ -539,7 +516,6 @@ pub mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        // A tunnel's different local port is fine.
         let (status, _) = send(
             app(),
             Request::get("/healthz")
@@ -568,7 +544,6 @@ pub mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        // The owner is never locked out by someone else's failures.
         let (status, _) = send(
             app,
             get("/v1/capabilities")

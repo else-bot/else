@@ -25,8 +25,8 @@ including wrong-key/corruption failures. Keep their per-target logs.
 For a native reconnect change, retain the same disposable data while stopping
 and relaunching only its API, then inspect the disconnected and reconnected
 window as well as the saved transcript. Never restart the installed service.
-Use `docs/restore.md` and the gated live tests for real-VM recovery; this fast
-runner does not provision a guest image or an S3 account.
+Use the gated live tests for real-VM recovery. This fast runner does not
+provision a guest image or an S3 account.
 
 ## Gotchas
 

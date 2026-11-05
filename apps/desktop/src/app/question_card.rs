@@ -17,7 +17,6 @@ use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question};
 
-/// The owner's click on a pending card, until the turn's event settles it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionSubmit {
     pub(super) choice: String,
@@ -26,11 +25,8 @@ pub(super) struct QuestionSubmit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SubmitState {
-    /// On its way to the server.
     Sending,
-    /// The server recorded it; the card stays locked until its event arrives.
     Recorded,
-    /// Refused or lost; the card can be answered again.
     Failed(String),
 }
 
@@ -79,8 +75,6 @@ fn letter(choice_id: &str) -> String {
 }
 
 impl ElseApp {
-    /// Forget the submissions of cards no longer pending: the event that
-    /// settled them is the truth, whether it was this answer or another.
     pub(super) fn sync_question_submits(&mut self) {
         let Some(view) = self.view.as_mut() else {
             return;

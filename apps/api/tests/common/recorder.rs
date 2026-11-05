@@ -1,7 +1,3 @@
-//! The synthetic provider behind a recorder: tests read each attempt's
-//! input and real scheduler-issued grant, and a turn whose text contains
-//! [`GATE`] holds its first attempt, once running, until the test releases it.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -174,13 +170,10 @@ pub struct Harness {
     pub recorder: Arc<Recorder>,
 }
 
-/// The real router and scheduler with `max_active` provider slots. New bots
-/// use the recorder as the installation's default provider.
 pub async fn harness(max_active: usize) -> Harness {
     harness_with(max_active, None).await
 }
 
-/// [`harness`] with email connectors on a test mail transport.
 pub async fn harness_with(
     max_active: usize,
     mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
@@ -211,7 +204,6 @@ pub async fn harness_with(
 }
 
 impl Harness {
-    /// The grant the scheduler issued to the turn's latest attempt.
     pub async fn grant(&self, turn: Uuid) -> String {
         for _ in 0..400 {
             if let Some(token) = self.recorder.ask(|r| Message::Grant(turn, r)).await {
@@ -222,7 +214,6 @@ impl Harness {
         panic!("turn {turn} never started");
     }
 
-    /// Let a gated turn go on.
     pub async fn release(&self, turn: Uuid) {
         self.recorder
             .mailbox
@@ -231,20 +222,17 @@ impl Harness {
             .unwrap();
     }
 
-    /// Send `text` to `bot` without waiting for it to start.
     pub async fn send(&self, bot: &str, text: &str) -> Uuid {
         let sent = self.app.send(bot, Uuid::new_v4(), text, None).await;
         assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
         sent.body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// An owner message running on `bot`, with its attempt's grant.
     pub async fn running(&self, bot: &str, text: &str) -> (Uuid, String) {
         let turn = self.send(bot, text).await;
         self.started(turn).await
     }
 
-    /// Wait until `turn` runs and return it with its grant.
     pub async fn started(&self, turn: Uuid) -> (Uuid, String) {
         self.app
             .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
@@ -252,7 +240,6 @@ impl Harness {
         (turn, self.grant(turn).await)
     }
 
-    /// The inputs of `turn`'s attempts so far, oldest first.
     pub async fn inputs(&self, turn: Uuid) -> Vec<TurnInput> {
         self.recorder.ask(|r| Message::Inputs(turn, r)).await
     }
@@ -270,7 +257,6 @@ pub struct Called {
 }
 
 impl Called {
-    /// The refusal code of a tool error, such as `NOT_ALLOWED`.
     pub fn code(&self) -> &str {
         self.result
             .as_str()

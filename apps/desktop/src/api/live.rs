@@ -1,5 +1,3 @@
-//! Bounded WebSocket delivery, subscription state, and reconnect handling.
-
 use super::{BotList, Client};
 use crate::model::Frame;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -99,7 +97,6 @@ pub struct Live {
     pub events: tokio::sync::mpsc::Receiver<LiveEvent>,
 }
 
-/// Turn one server message into a UI event, tracking resume cursors.
 pub(super) fn route(
     message: &serde_json::Value,
     wanted: &mut HashMap<Uuid, String>,
@@ -120,7 +117,6 @@ pub(super) fn route(
         return Some(LiveEvent::Bot { bot, message });
     }
     let id = message["id"].as_str()?.to_owned();
-    // Only resume from cursors of channels still wanted.
     if let Some(cursor) = wanted.get_mut(&bot) {
         *cursor = id.clone();
     }
@@ -140,8 +136,6 @@ impl Client {
     /// backoff and resubscribes every channel from its last delivered cursor.
     pub fn live(self: Arc<Self>) -> Live {
         let (commands, command_rx) = tokio::sync::watch::channel(HashMap::new());
-        // Bounded: a slow UI applies backpressure to the socket instead of
-        // buffering an unbounded backlog in memory.
         let (event_tx, events) = tokio::sync::mpsc::channel(256);
         let this = self.clone();
         self.runtime
@@ -171,12 +165,9 @@ impl Client {
         events: tokio::sync::mpsc::Sender<LiveEvent>,
     ) {
         use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-        /// Longer than the server's 15-second ping.
         const INACTIVITY: Duration = Duration::from_secs(45);
         const HANDSHAKE: Duration = Duration::from_secs(10);
-        /// A connection that lasted this long resets the reconnect backoff.
         const STABLE: Duration = Duration::from_secs(30);
-        // Wanted `bot:<id>` channels and the cursor to resume from.
         let mut wanted: HashMap<Uuid, String> = HashMap::new();
         let mut applied = HashMap::new();
         let mut backoff = Duration::from_millis(500);
@@ -188,7 +179,6 @@ impl Client {
                 }
             };
         }
-        // Wait with jittered exponential backoff (500 ms to 15 s).
         macro_rules! pause {
             () => {
                 let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_bytes()[0]) * 2);
@@ -218,7 +208,6 @@ impl Client {
                     if response.status() == StatusCode::UNAUTHORIZED =>
                 {
                     deliver!(LiveEvent::Unauthorized);
-                    // Retrying a rejected token cannot help; check rarely.
                     tokio::select! {
                         _ = events.closed() => return,
                         _ = tokio::time::sleep(Duration::from_secs(30)) => {}
@@ -307,8 +296,6 @@ impl Client {
                 }
             };
             deliver!(LiveEvent::Disconnected(reason.into()));
-            // A server that accepts and then drops connections must not be
-            // hammered: only a connection that stayed up resets the backoff.
             if connected_at.elapsed() >= STABLE {
                 backoff = Duration::from_millis(500);
             }

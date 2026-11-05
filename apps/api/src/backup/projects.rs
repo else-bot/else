@@ -70,7 +70,6 @@ fn add_dir(
             return Ok(());
         }
     };
-    // A stable order, so equal trees give equal archives.
     entries.sort();
     for name in entries {
         let rel = rel.join(&name);
@@ -103,7 +102,6 @@ fn add_dir(
                 .map_err(fail)?;
             add_dir(builder, root, &rel, unreadable)?;
         } else if kind.is_file() {
-            // Opened without following a link swapped in meanwhile.
             let Ok(mut file) = fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
@@ -120,7 +118,6 @@ fn add_dir(
                 .append_data(&mut header, &rel, &mut file)
                 .map_err(fail)?;
         }
-        // Sockets, FIFOs, and devices are not data.
     }
     Ok(())
 }
@@ -149,8 +146,6 @@ pub fn unpack(archive: &Path, dir: &Path) -> Result<(), BackupError> {
             .path()
             .map_err(|e| invalid(e.to_string()))?
             .into_owned();
-        // Our archives hold only relative paths; anything else is refused
-        // rather than rewritten.
         if path.is_absolute()
             || path
                 .components()
@@ -171,8 +166,6 @@ pub fn unpack(archive: &Path, dir: &Path) -> Result<(), BackupError> {
                 path.display()
             )));
         }
-        // Refuses absolute paths, `..`, and parents that resolve outside
-        // `dir`; a refused entry is never silently skipped.
         let inside = entry
             .unpack_in(dir)
             .map_err(|e| invalid(format!("{}: {e}", path.display())))?;
@@ -204,7 +197,6 @@ mod tests {
         fs::write(&outside, "OUTSIDE").unwrap();
         std::os::unix::fs::symlink(&outside, src.join("link")).unwrap();
         std::os::unix::fs::symlink("sub/deep", src.join("rel")).unwrap();
-        // Not data: skipped.
         let _socket = std::os::unix::net::UnixListener::bind(src.join("sock")).unwrap();
 
         let tar = dir.path().join("p.tar");
@@ -221,7 +213,6 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755);
-        // Links stay links; the file outside was never archived.
         assert_eq!(fs::read_link(out.join("link")).unwrap(), outside);
         assert_eq!(
             fs::read_link(out.join("rel")).unwrap(),
@@ -230,7 +221,6 @@ mod tests {
         let bytes = fs::read(&tar).unwrap();
         assert!(!bytes.windows(7).any(|w| w == b"OUTSIDE"));
         assert!(fs::symlink_metadata(out.join("sock")).is_err());
-        // Never into an existing directory.
         assert!(unpack(&tar, &out).is_err());
     }
 
@@ -238,7 +228,7 @@ mod tests {
     fn unreadable_entries_are_reported_and_left_out() {
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
-            return; // root reads everything
+            return;
         }
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
@@ -267,7 +257,6 @@ mod tests {
             } else {
                 0
             });
-            // Written raw: the builder's own checks would refuse these.
             let name = header.as_gnu_mut().unwrap();
             name.name[..path.len()].copy_from_slice(path.as_bytes());
             if !link.is_empty() {

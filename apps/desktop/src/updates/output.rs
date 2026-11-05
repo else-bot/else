@@ -1,7 +1,3 @@
-//! The installer's output as the app shows it: decoded across read
-//! boundaries, without terminal escapes, with carriage returns redrawing the
-//! line, and capped to its last lines.
-
 const MAX_ESCAPE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +119,6 @@ impl Log {
         }
     }
 
-    /// Keep the last `cap` bytes, starting at a whole line when there is one.
     fn trim(&mut self) {
         if self.text.len() <= self.cap {
             return;

@@ -1,5 +1,5 @@
 //! MCP tools for outgoing drafts the owner approves: emails, messages, and
-//! posts (see docs/decisions/0003-outgoing-drafts.md). `draft_email` and
+//! posts. `draft_email` and
 //! `draft_message` parse their channel's content; every other step is
 //! shared. An email bound to a connected account is sent by the API
 //! through that account (`send_draft`), as one durable mail action. Other
@@ -497,8 +497,6 @@ async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome
     ))
 }
 
-/// The approved draft an external computer tool call sends, claimed for
-/// exactly that call: it needs no other approval card.
 pub(super) async fn claim_for_tool(
     state: &AppState,
     grant: &Grant,

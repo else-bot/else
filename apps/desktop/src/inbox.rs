@@ -383,8 +383,6 @@ mod tests {
         Uuid::from_u128(1000 + n)
     }
 
-    /// Bot `id` whose latest reply belongs to `reply` and is at `latest`,
-    /// read through `read`.
     fn bot(id: u128, reply: Option<(u128, ReplyPosition)>, read: ReplyPosition) -> Bot {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::from_u128(id),
@@ -557,12 +555,10 @@ mod tests {
             Some(ReadCommand::Through { .. })
         ));
         inbox.mark(&b, Mark::Unread);
-        // The server's list still predates the mark.
         let read = bot(1, Some((1, at(3, 40))), at(3, 40));
         assert!(inbox.is_unread(&read));
         inbox.finished(id, Outcome::Done);
         assert!(inbox.is_unread(&read), "the read landed first");
-        // The open conversation keeps being seen, and more text arrives.
         inbox.saw(&read, at(3, 50));
         assert_eq!(inbox.next_command(id), Some(ReadCommand::MarkUnread));
         inbox.finished(id, Outcome::Done);

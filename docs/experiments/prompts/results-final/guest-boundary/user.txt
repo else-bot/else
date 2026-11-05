@@ -1,1 +1,0 @@
-Use your assigned task computer to calculate 7 times 8. Report its actual returned result and job ID.

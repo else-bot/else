@@ -1,6 +1,6 @@
 //! Outgoing drafts: a bot proposes an email, message, or post, the owner
 //! edits and approves or discards it, and the bot sends it once and reports
-//! the result (see docs/decisions/0003-outgoing-drafts.md). Every channel
+//! the result. Every channel
 //! shares this lifecycle; only `Content` differs.
 //!
 //! A pending draft parks the attempt that proposed it, like an owner

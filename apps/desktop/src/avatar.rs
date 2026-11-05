@@ -20,7 +20,6 @@ pub struct Avatar {
 }
 
 impl Default for Avatar {
-    /// The blue star the API gives the main bot; Reset restores it.
     fn default() -> Self {
         Self {
             shape: AvatarShape::Star,
@@ -29,8 +28,6 @@ impl Default for Avatar {
     }
 }
 
-/// A newer API may offer presets this build does not draw; those fall back
-/// to the default rather than failing the whole bot.
 #[derive(Deserialize)]
 struct LenientAvatar {
     #[serde(default, deserialize_with = "lenient")]
@@ -92,15 +89,12 @@ pub enum AvatarColor {
     Gray,
 }
 
-/// How a body's outline is generated: a radius around the center for each
-/// angle (y grows downward), then softened, stretched, and turned.
 #[derive(Clone, Copy)]
 enum Outline {
     Wave {
         base: f32,
         waves: &'static [(f32, f32, f32)],
     },
-    /// Rounded points between flat valleys.
     Points {
         count: f32,
         base: f32,
@@ -117,11 +111,9 @@ enum Outline {
 struct Art {
     label: &'static str,
     outline: Outline,
-    /// Samples averaged on each side; rounds polygon corners.
     soften: usize,
     stretch: (f32, f32),
     turn: f32,
-    /// Center between the eyes, as a fraction of the size from the middle.
     eyes: (f32, f32),
 }
 
@@ -306,8 +298,6 @@ impl AvatarColor {
 
 const SAMPLES: usize = 72;
 
-/// The body outline in unit coordinates around the center, fitted so its
-/// widest point reaches `REACH` of the size.
 fn outline(art: &Art) -> [(f32, f32); SAMPLES] {
     const REACH: f32 = 0.455;
     let mut radius = [0f32; SAMPLES];
@@ -401,12 +391,9 @@ impl IntoElement for BotAvatar {
     }
 }
 
-/// Motion kept across frames for one live avatar.
 struct Live {
     motion: Motion,
     started: Instant,
-    /// Whether pointer moves outside the attention zone still matter: the
-    /// eyes are away from center or still moving back.
     awake: Rc<Cell<bool>>,
     wake: Option<(Instant, Task<()>)>,
 }
@@ -528,8 +515,6 @@ impl Element for BotAvatar {
     }
 }
 
-/// Gaze toward the pointer: eases out as it moves away, and lets go past
-/// `reach` so the eyes return to center.
 fn gaze_toward(
     center: Point<Pixels>,
     pointer: Point<Pixels>,

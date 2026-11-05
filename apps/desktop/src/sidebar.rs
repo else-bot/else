@@ -1,4 +1,4 @@
-//! Sidebar layout (POC-031): the main bot pinned on top, then categories
+//! Sidebar layout: the main bot pinned on top, then categories
 //! with their bots, then the unassigned bots. Pure, so the order is tested
 //! without a window.
 //!
@@ -208,7 +208,6 @@ mod tests {
             bot(11, "Alpha", Some(2)),
             bot(12, "beta", None),
             bot(13, "Mom", Some(1)),
-            // A category the client does not know: shown unassigned.
             bot(14, "Orphan", Some(99)),
             bot(15, "alpha", Some(2)),
         ];

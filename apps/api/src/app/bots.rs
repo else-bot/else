@@ -1,5 +1,3 @@
-//! Bot definition rules.
-
 pub const MAX_NAME_CHARS: usize = 80;
 
 /// Name of the main bot created once by explicit setup.

@@ -1,5 +1,3 @@
-//! Desktop access, credentials, and guest service startup.
-
 use super::{
     Acquire, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Desktop, GUEST_INIT, RuntimeError,
     bounded,
@@ -8,9 +6,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 impl ComputerManager {
-    /// For a desktop computer: a free host loopback port for noVNC (saved
-    /// with the computer) and a fresh VNC password in a private host file
-    /// that is copied into the guest.
     pub(super) async fn desktop_resources(
         &self,
         bot_id: Uuid,
@@ -140,9 +135,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Start the desktop services for the current boot unless already done
-    /// for this generation. The caller holds the bot's operation lock. A
-    /// failure is recorded and retried on the next use.
     pub(super) async fn ensure_services(
         &self,
         bot_id: Uuid,
@@ -393,9 +385,6 @@ impl ComputerManager {
         self.attach(bot_id, holder).await
     }
 
-    /// Whether the owner controls a bot's desktop now: an in-app viewer
-    /// stream in control (`desktop-control:` lease) or, with `novnc`, the
-    /// noVNC desktop session (`desktop:` lease).
     pub(crate) async fn owner_controls(
         &self,
         bot_id: Uuid,

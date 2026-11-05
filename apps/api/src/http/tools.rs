@@ -35,7 +35,6 @@ fn revoked() -> ApiError {
     )
 }
 
-/// The grant's turn must still be running and its bot active.
 pub(crate) async fn check(state: &AppState, grant: &Grant, tool: Tool) -> Result<(), ApiError> {
     if !grant.allows(tool) {
         return Err(ApiError::new(
@@ -106,7 +105,6 @@ async fn item(
     ApiPath(item_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     check(&state, &grant, Tool::ReadHistory).await?;
-    // A foreign object is indistinguishable from a missing one.
     let item: Option<ItemRecord> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {ITEM_COLUMNS} FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.id = ?2 AND {GRANT_ITEMS} AND i.kind <> 'routine'"

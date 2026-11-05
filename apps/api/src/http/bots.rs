@@ -1,5 +1,3 @@
-//! Owner bot management routes.
-
 use std::sync::Arc;
 
 use axum::extract::{Query, State};

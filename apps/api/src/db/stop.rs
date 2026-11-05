@@ -57,7 +57,6 @@ pub async fn halt_accepted(
     boundary: i64,
     message: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    // Children's bots before any root or child turn (their order).
     crate::db::delegations::lock_targets_of_bot(conn, bot_id).await?;
     let queued: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'cancelled', error_message = ?3,
@@ -73,10 +72,7 @@ pub async fn halt_accepted(
     for turn_id in &queued {
         events::turn_changed(conn, bot_id, *turn_id).await?;
     }
-    // Work delegated by those roots, and by the active one, ends too.
     crate::db::delegations::cancel_for_bot(conn, bot_id, boundary).await?;
-    // So do the bot's background guest jobs: computer maintenance kills
-    // them and completes the stop once none remains.
     sqlx::query(
         "UPDATE guest_jobs SET status = 'cancelling'
          WHERE bot_id = ?1 AND status IN ('starting', 'running')",
@@ -97,7 +93,6 @@ pub async fn halt_accepted(
         events::turn_changed(conn, bot_id, turn_id).await?;
         return Ok(Some(turn_id));
     }
-    // Already cancelling from an earlier stop.
     sqlx::query_scalar("SELECT id FROM turns WHERE bot_id = ?1 AND status = 'cancelling'")
         .bind(bot_id)
         .fetch_optional(&mut *conn)
@@ -105,7 +100,7 @@ pub async fn halt_accepted(
 }
 
 /// Complete pending stops and deletion once no turn, no cancelling guest
-/// job, and no foreground command (POC-026) remains (and, for deletion, the computer is shut down). Runs in the
+/// job, and no foreground command remains (and, for deletion, the computer is shut down). Runs in the
 /// caller's transaction inside the immediate transaction. Returns true if it changed
 /// anything.
 pub async fn settle(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
@@ -128,8 +123,6 @@ pub async fn settle(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, s
     .execute(&mut *conn)
     .await?
     .rows_affected();
-    // A deletion completes only once the bot's computer is confirmed shut
-    // down; maintenance stops it and settles again.
     let bot = sqlx::query(
         "WITH down AS (SELECT NOT EXISTS (
                  SELECT 1 FROM bot_computers WHERE bot_id = ?1
@@ -161,8 +154,6 @@ pub async fn stop_work(
     if crate::db::categories::used_by_category(&mut tx, request_id).await? {
         return Err(BotError::RequestConflict.into());
     }
-    // Lock first, then read the boundary in a new statement: a send that
-    // held the lock has committed by then, so its turn is inside the stop.
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
         .fetch_optional(&mut *tx)
@@ -222,8 +213,6 @@ pub async fn stop_work(
     Ok(StopReceipt {
         request_id,
         bot_id,
-        // Done only if nothing remains to stop (no provider turn, no guest
-        // job still being cancelled).
         state: if settled { "done" } else { "pending" }.to_owned(),
         interrupt,
         created: true,

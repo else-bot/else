@@ -1,9 +1,3 @@
-//! Standing approval of destructive actions for one routine: chosen on a
-//! card its run showed, it covers the current and future runs of that
-//! routine while its prompt stays the same, and nothing else. The bot's own
-//! Always allow never covers a routine run, and no grant covers an
-//! external action.
-
 mod common;
 
 use std::time::Duration;
@@ -53,7 +47,6 @@ async fn create(
     )
 }
 
-/// Admit every routine due at `now` and return the turn each started.
 async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
     routines::admit_due(&app.db.pool, app.scheduler.registry(), now, 8)
         .await
@@ -85,7 +78,6 @@ async fn wait(app: &TestApp, turn: Uuid, status: &str) {
         .await;
 }
 
-/// The grant of the turn's attempt after the one holding `old`.
 async fn next_grant(h: &Harness, turn: Uuid, old: &str) -> String {
     for _ in 0..400 {
         let token = h.grant(turn).await;
@@ -97,7 +89,6 @@ async fn next_grant(h: &Harness, turn: Uuid, old: &str) -> String {
     panic!("turn {turn} never continued");
 }
 
-/// A destructive or external call that waits: its card's choice IDs.
 async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
     let called = tool(app, token, "computer_run", args).await;
     assert_eq!(called.result["status"], "pending", "{}", called.body);
@@ -119,7 +110,6 @@ async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
     (question, ids)
 }
 
-/// A destructive call passed the gate: only the missing computer stops it.
 async fn runs_without_asking(app: &TestApp, token: &str, args: Value) {
     let called = tool(app, token, "computer_run", args).await;
     assert!(

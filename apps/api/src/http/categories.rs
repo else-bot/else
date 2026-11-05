@@ -1,4 +1,4 @@
-//! Owner routes for sidebar categories (POC-030). Everything under `/v1`
+//! Owner routes for sidebar categories. Everything under `/v1`
 //! needs the owner token, so a task grant can never change them.
 
 use std::sync::Arc;
@@ -105,7 +105,6 @@ async fn remove(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     let unassigned = categories::delete(&state.db, id).await?;
-    // The bots are kept, unassigned.
     Ok(Json(
         json!({ "deleted": id, "unassigned_bots": unassigned }),
     ))
@@ -116,7 +115,6 @@ async fn assign(
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    // `category_id` is required: a UUID assigns, null unassigns.
     let invalid = || {
         ApiError::bad_request(
             "invalid_input",

@@ -40,7 +40,6 @@ pub(super) enum Error {
     Unreadable,
 }
 
-/// The `current` directory that holds Omarchy's theme, if Omarchy is installed.
 pub(super) fn current(home: &Path) -> Option<PathBuf> {
     let present = |path: &Path| path.symlink_metadata().is_ok();
     let modern = home.join(".local/state/omarchy");
@@ -56,8 +55,6 @@ pub(super) fn read(home: &Path) -> Result<Palette, Error> {
     parse(&std::fs::read_to_string(current.join("theme/colors.toml"))?)
 }
 
-/// Accepts Omarchy's semantic keys and the older ANSI `colorN` names.
-/// A palette either parses whole or not at all.
 pub(super) fn parse(text: &str) -> Result<Palette, Error> {
     let table: toml::Table = text.parse()?;
     let color = |keys: &[&'static str]| -> Result<Option<Rgb>, Error> {
@@ -221,8 +218,6 @@ impl Watch {
     }
 }
 
-/// Reads and the shared ancestor directories' unrelated entries are not
-/// changes to the palette.
 fn relevant(event: &notify::Event, branches: &[(PathBuf, &[&str])]) -> bool {
     use notify::EventKind::{Access, Modify};
     use notify::event::{AccessKind, AccessMode, ModifyKind};
@@ -246,9 +241,6 @@ fn relevant(event: &notify::Event, branches: &[(PathBuf, &[&str])]) -> bool {
         })
 }
 
-/// Installs the current palette, then follows it for the app's lifetime.
-/// The watch is registered before the first read, so a change in between
-/// is not missed. A broken or missing palette leaves the last good one.
 pub(super) fn follow(cx: &mut App) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
@@ -495,7 +487,6 @@ color8 = "#555753"
         home.write(".local/state/omarchy/current/theme/colors.toml", TOKYO);
         let (mut watch, mut wakes) = Watch::new(home.0.path().to_path_buf()).unwrap();
 
-        // What omarchy-theme-set does: build the next theme, then swap it in.
         home.write(
             ".local/state/omarchy/current/next-theme/colors.toml",
             FLEXOKI,

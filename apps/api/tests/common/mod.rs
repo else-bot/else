@@ -1,4 +1,3 @@
-//! Each integration test owns a private temporary SQLite database.
 #![allow(dead_code)]
 pub mod recorder;
 use else_api::config::{Config, DatabaseUrl};
@@ -31,13 +30,11 @@ impl TestDb {
 
 pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-/// The real router over a test database, driven in-process.
 pub struct TestApp {
     pub router: axum::Router,
     pub state: std::sync::Arc<else_api::http::AppState>,
     pub scheduler: std::sync::Arc<else_api::scheduler::Scheduler>,
     stop: tokio_util::sync::CancellationToken,
-    // Declared last so the scheduler stops before the database is dropped.
     pub db: std::sync::Arc<TestDb>,
 }
 
@@ -47,8 +44,6 @@ impl Drop for TestApp {
     }
 }
 
-/// A provider that uses saved profiles, standing in for Codex in tests. It
-/// accepts only the documented Codex profile values.
 pub struct ProfiledFake;
 
 #[async_trait::async_trait]
@@ -96,7 +91,6 @@ pub struct Reply {
 }
 
 impl TestApp {
-    /// Migrated database with explicit setup completed.
     pub async fn installed() -> Self {
         let db = TestDb::migrated().await;
         else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -107,13 +101,10 @@ impl TestApp {
         Self::with_options(std::sync::Arc::new(db), 4)
     }
 
-    /// Simulate an API restart: stop this scheduler, run startup
-    /// reconciliation, and serve the same database again.
     pub async fn restart(self) -> Self {
         let db = self.db.clone();
         let scheduler = self.scheduler.clone();
         drop(self);
-        // Wait for the old scheduler's turns to record their outcomes.
         for _ in 0..200 {
             if std::sync::Arc::strong_count(&scheduler) == 1 {
                 break;
@@ -126,8 +117,6 @@ impl TestApp {
         Self::with_options(db, 4)
     }
 
-    /// The real router and a running scheduler with the synthetic provider
-    /// (5 ms per chunk) and the profile-bearing test double.
     pub fn with_options(db: std::sync::Arc<TestDb>, max_active: usize) -> Self {
         use std::sync::Arc;
         let registry = else_api::providers::Registry::new(vec![
@@ -147,7 +136,6 @@ impl TestApp {
         Self::with_parts(db, max_active, registry, None)
     }
 
-    /// With bot computers attached to the API state.
     pub fn with_parts(
         db: std::sync::Arc<TestDb>,
         max_active: usize,
@@ -157,7 +145,6 @@ impl TestApp {
         Self::build(db, max_active, registry, computers, None)
     }
 
-    /// With email connectors that use `mail` instead of real servers.
     pub fn with_mail(
         db: std::sync::Arc<TestDb>,
         max_active: usize,
@@ -175,7 +162,6 @@ impl TestApp {
         mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
     ) -> Self {
         use std::sync::Arc;
-        // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_test_writer()
@@ -202,7 +188,6 @@ impl TestApp {
         if let Some(computers) = computers {
             state = state.with_computers(computers);
         }
-        // A fixed test master key, for task secrets.
         let key = Arc::new(
             else_api::credentials::SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
                 .unwrap(),
@@ -229,7 +214,6 @@ impl TestApp {
         }
     }
 
-    /// Poll the database until a turn reaches one of `statuses`.
     pub async fn wait_turn(&self, turn_id: &str, statuses: &[&str]) -> String {
         self.wait_turn_for(turn_id, statuses, std::time::Duration::from_secs(10))
             .await
@@ -345,18 +329,12 @@ impl else_api::config::Source for MapEnv {
     }
 }
 
-/// A real `else-api serve` process over a test database and a private data
-/// directory, with the synthetic provider enabled.
 pub struct ApiProcess {
     pub child: std::process::Child,
     pub base: String,
     pub token: String,
 }
 
-/// A working directory for a spawned `else-api` that stops `.env` lookup:
-/// the binary loads the first `.env` found from its working directory
-/// upward, and the repository's (or the owner's) must never configure a
-/// test installation. Writes an empty `.env` into `dir` and returns it.
 #[allow(dead_code)]
 pub fn without_dotenv(dir: &std::path::Path) -> &std::path::Path {
     std::fs::write(dir.join(".env"), "").unwrap();
@@ -382,7 +360,6 @@ pub fn api_command(db: &TestDb, data_dir: &std::path::Path, port: u16) -> std::p
         .env("ELSE_API_BIND", format!("127.0.0.1:{port}"))
         .env("ELSE_SYNTHETIC_PROVIDER", "1")
         .env("ELSE_SHUTDOWN_GRACE_SECS", "2")
-        // Scheduled backups are tested on their own (`tests/backup.rs`).
         .env("ELSE_BACKUP_INTERVAL_SECS", "0")
         .env("RUST_LOG", "warn")
         .current_dir(data_dir)
@@ -391,7 +368,6 @@ pub fn api_command(db: &TestDb, data_dir: &std::path::Path, port: u16) -> std::p
 }
 
 impl ApiProcess {
-    /// Run `setup` once for this data directory, then start `serve`.
     pub async fn start(db: &TestDb, data_dir: &std::path::Path) -> Self {
         if !data_dir.join("owner-token").exists() {
             let status = api_command(db, data_dir, 1).arg("setup").status().unwrap();
@@ -446,7 +422,6 @@ impl ApiProcess {
         )
     }
 
-    /// SIGKILL: no shutdown code runs, like a crash or power loss.
     pub fn kill(mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
@@ -460,7 +435,6 @@ impl Drop for ApiProcess {
     }
 }
 
-/// Canonical values for comparing arbitrary result rows across recovery.
 pub async fn rows(conn: &mut sqlx::SqliteConnection, sql: &str) -> Vec<String> {
     use sqlx::{Row, TypeInfo, ValueRef};
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
@@ -491,7 +465,6 @@ pub async fn rows(conn: &mut sqlx::SqliteConnection, sql: &str) -> Vec<String> {
     out
 }
 
-/// Remove only a test restore's SQLite files, never an application database.
 pub fn remove_database(options: &sqlx::sqlite::SqliteConnectOptions, name: &str) {
     let params = else_api::backup::DatabaseParams {
         options: options.clone(),

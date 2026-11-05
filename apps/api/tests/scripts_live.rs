@@ -1,17 +1,3 @@
-//! POC-026 against the real application: the `else-api` binary with the
-//! owner's Codex login and real Microsandbox VMs from `else-guest:2`. A
-//! Codex bot writes and runs multi-file scripts in its own computer (Python,
-//! Node, Rust), returns an artifact, sends a batch of ten messages to a
-//! capture-only SMTP fixture inside its guest with task-secret credentials,
-//! survives a lost acknowledgment without resending, reports bad
-//! credentials and a missing dependency, and its foreground and background
-//! work stops with Stop work; a job keeps running across an API restart
-//! without being launched twice. It consumes subscription quota and boots
-//! VMs, so it runs only with `ELSE_LIVE_SCRIPTS=1` (after
-//! `docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" --build-arg IMAGE_TAG=else-guest:2 -t else-guest:2 infra/guest`):
-//!
-//! ELSE_LIVE_SCRIPTS=1 cargo test -p else-api --test scripts_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -159,7 +145,6 @@ impl Api {
         body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// An abrupt end (SIGKILL): the API gets no chance to clean up.
     fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -174,7 +159,6 @@ impl Drop for Api {
     }
 }
 
-/// Stops and removes every computer in the installation's runtime home.
 struct Cleanup {
     home: PathBuf,
 }
@@ -201,7 +185,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// Wait for a turn's final state; returns (status, assistant text).
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
@@ -232,8 +215,6 @@ async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String
     }
 }
 
-/// Run a command in the guest directly (the test's own fixture setup and
-/// inspection, not the bot's tools), as `elsebot` unless `root`.
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
     use std::io::Write;
     let mut command = std::process::Command::new(msb());
@@ -287,7 +268,6 @@ async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
         .unwrap()
 }
 
-/// Captured messages per recipient (the fixture's own record).
 fn captured(home: &Path, name: &str) -> (std::collections::BTreeMap<String, usize>, usize) {
     let text = guest(
         home,
@@ -313,7 +293,6 @@ fn captured(home: &Path, name: &str) -> (std::collections::BTreeMap<String, usiz
     (counts, auth_failures)
 }
 
-/// Every captured message: (recipients, sender, data).
 fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
     let text = guest(
         home,
@@ -340,7 +319,6 @@ fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
         .collect()
 }
 
-/// The last receipt line naming each recipient in the bot's receipt file.
 fn receipts(home: &Path, name: &str, project: &str) -> std::collections::BTreeMap<String, String> {
     let text = guest(
         home,
@@ -556,8 +534,6 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         counts.values().all(|c| *c == 1),
         "no duplicates: {counts:?}"
     );
-    // Ten separate messages, one per recipient, with the requested
-    // sender, subject, and body.
     let sent = messages(&home, &name);
     assert_eq!(sent.len(), 10, "ten captured messages");
     for (to, from, data) in &sent {
@@ -888,7 +864,6 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    // The API (and with it the provider's connection) dies mid-turn.
     api.kill();
     let mut api = install.serve().await;
     let after: Vec<(Uuid, String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
@@ -911,7 +886,6 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         "1",
         "one process"
     );
-    // The foreground command the dead API left is ended after the restart.
     let restarted = Instant::now();
     loop {
         let left = guest(

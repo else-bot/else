@@ -1,5 +1,3 @@
-//! Lease creation, renewal, release, and checked execution.
-
 use super::{ComputerError, ComputerManager, ExecOutput, OwnedSemaphorePermit, SqliteConnection};
 use std::time::Duration;
 use uuid::Uuid;
@@ -116,10 +114,6 @@ impl ComputerManager {
         Ok(out)
     }
 
-    /// Validate a lease under its bot's operation lock: live, its bot
-    /// active, and its computer running at the lease's generation with no
-    /// owner stop. The returned guard keeps a stop from slipping in before
-    /// the caller's runtime call (which could otherwise wake a stopped VM).
     pub(crate) async fn checked(
         &self,
         lease_id: Uuid,

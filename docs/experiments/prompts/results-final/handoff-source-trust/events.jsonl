@@ -1,4 +1,0 @@
-{"type":"thread.started","thread_id":"01a19b0c-b4e9-76a0-bfbc-0a479ed39731"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The handoff reports pickup at 16:30, citing source `synthetic-email-1`."}}
-{"type":"turn.completed","usage":{"input_tokens":14830,"cached_input_tokens":14592,"cache_write_input_tokens":0,"output_tokens":168,"reasoning_output_tokens":142}}

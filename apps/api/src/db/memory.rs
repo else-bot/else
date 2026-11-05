@@ -1,4 +1,4 @@
-//! Each bot's immutable original memory log (POC-013).
+//! Each bot's immutable original memory log.
 //!
 //! Appends run inside the caller's transaction, so a memory entry commits
 //! with the conversation change it records. The per-bot `memory_store` row
@@ -114,7 +114,6 @@ pub async fn append(
     if (entry.kind == Kind::OwnerCorrection) != entry.supersedes_seq.is_some() {
         return Err(AppendError::InvalidCorrection);
     }
-    // The caller's immediate transaction fences concurrent deletion and appends.
     let active: Option<bool> =
         sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
             .bind(bot_id)
@@ -134,7 +133,6 @@ pub async fn append(
     .bind(bot_id)
     .fetch_one(&mut *conn)
     .await?;
-    // The first generation takes the installation's current recipe.
     sqlx::query(
         "INSERT INTO memory_generation (bot_id, generation, recipe)
          VALUES (?1, 1, coalesce((SELECT memory_recipe FROM installation), ?2))
@@ -204,8 +202,6 @@ pub async fn append(
         .bind(next + seqs.len() as i64)
         .execute(&mut *conn)
         .await?;
-    // Each new entry needs its leaf in the active generation and in a
-    // rebuild in progress.
     let generations: Vec<i32> = std::iter::once(generation).chain(building).collect();
     sqlx::query(
         "INSERT INTO memory_job (bot_id, generation, start_seq, span)
@@ -235,7 +231,6 @@ pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), 
         return Ok(());
     };
     let kind = match kind.as_str() {
-        // The first message of a task conversation is the delegated task.
         "user" if conversation_kind == "task" => Kind::DelegatedTask,
         "user" => Kind::OwnerMessage,
         "assistant" => Kind::AssistantMessage,
@@ -256,8 +251,6 @@ pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), 
     };
     match append(conn, bot_id, &entry).await {
         Ok(_) | Err(AppendError::Empty | AppendError::BotInactive) => Ok(()),
-        // Text never changes after its turn finishes, so a conflict means
-        // the item was logged earlier with its final text.
         Err(AppendError::Conflict) => Ok(()),
         Err(AppendError::Db(err)) => Err(err),
         Err(AppendError::InvalidCorrection) => unreachable!("items are never corrections"),
@@ -325,8 +318,6 @@ pub struct EntryRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Entry columns; `bound` limits which corrections count (a search page
-/// sees only corrections below its watermark).
 fn entry_columns(bound: &str) -> String {
     format!(
         "e.seq, e.kind, e.authority, e.body, e.source, e.part_index,
@@ -425,7 +416,7 @@ mod tests {
 
     #[test]
     fn split_respects_utf8_boundaries_and_limits() {
-        let text = "é".repeat(10); // 20 bytes
+        let text = "é".repeat(10);
         let parts = split(&text, 7);
         assert!(parts.iter().all(|p| p.len() <= 7 && !p.is_empty()));
         assert_eq!(parts.concat(), text);
@@ -442,8 +433,6 @@ mod tests {
     }
 }
 
-/// Quote user input rather than exposing FTS operators. Preserve web-search
-/// phrases, OR alternatives, and exclusions; malformed quotes remain safe.
 fn search_query(query: &str) -> String {
     let mut tokens = Vec::new();
     let mut chars = query.chars().peekable();

@@ -1,4 +1,4 @@
-"""else.bot guest CDP helper for Python scripts (POC-027). Standard library only.
+"""else.bot guest CDP helper for Python scripts. Standard library only.
 
 Drives the computer's own visible Chromium (the one the owner sees over VNC)
 through its DevTools endpoint on guest loopback, 127.0.0.1:9222. The endpoint
@@ -34,9 +34,7 @@ import urllib.request
 
 ENDPOINT = "http://127.0.0.1:9222"
 LOCK = "/var/lib/elsebot/browser.lock"
-# The longest page code may run, in seconds (enforced by the browser).
 MAX_EVALUATE = 300
-# Tabs scripts control: one JSON line {pid, target, created} each.
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
 
 
@@ -271,8 +269,6 @@ class Page:
         return self.conn.call(method, params, timeout, mutating)
 
     def evaluate(self, expression, mutating=True, timeout=30):
-        # The browser itself stops the code at the deadline, so it does not
-        # outlive the script.
         limit = min(timeout, MAX_EVALUATE)
         r = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": True,
                                            "timeout": int(limit * 1000)}, limit + 2, mutating)

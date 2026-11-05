@@ -1,4 +1,3 @@
-//! Storage-specific guarantees for the embedded database.
 mod common;
 
 use else_api::db::memory::{self, Kind, NewEntry};

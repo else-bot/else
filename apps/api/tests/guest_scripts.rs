@@ -1,10 +1,3 @@
-//! POC-026 review: the guest scripts themselves (the `RUN`/`LAUNCH`/`KILL`
-//! shells, the stdin secret prologue, and the in-guest output filter) run
-//! for real here, on this host in a private home, through a local runtime
-//! that kills a timed-out command's process group the way Microsandbox
-//! does. It checks what fakes cannot: exact secret values, filtered output
-//! and job files, timeouts, and descendants. The scripts expect the guest's
-//! Linux userland (`/usr/bin/setsid`, `/proc`), so these run only on Linux.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -24,9 +17,6 @@ use else_api::db::task_secrets::Env;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// Runs guest commands as local processes: `HOME` and `/var/lib/elsebot`
-/// map into a temporary directory. A timeout kills the command's process
-/// group, as the runtime's guest agent does.
 struct Local {
     root: PathBuf,
 }
@@ -217,7 +207,6 @@ fn env(vars: &[(&str, &str)]) -> Env {
     }
 }
 
-/// Our own processes whose command line contains `pattern`.
 fn processes(pattern: &str) -> usize {
     let out = std::process::Command::new("pgrep")
         .args([
@@ -282,7 +271,6 @@ async fn secret_values_arrive_exactly_and_never_reach_output() {
         "{}",
         out.stderr
     );
-    // A long value where the returned tail starts: redacted whole.
     let out = manager
         .run_command_with(
             bot,
@@ -376,7 +364,6 @@ async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
             .unwrap();
     assert_eq!(ended, (Some("killed after timeout".into()), true));
 
-    // What a command leaves running in its group ends with it.
     let out = manager
         .run_command(
             bot,

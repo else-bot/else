@@ -1,4 +1,4 @@
-//! Sidebar categories (POC-030): flat, owner-managed groups of bots.
+//! Sidebar categories: flat, owner-managed groups of bots.
 //!
 //! A category organizes the sidebar only. Assigning a bot changes nothing
 //! else about it: not its identity, role, permissions, memory, provider
@@ -83,8 +83,6 @@ fn duplicate(err: sqlx::Error) -> CategoryError {
     }
 }
 
-/// Wake `bots` subscribers once the transaction commits, for a change no
-/// single bot carries.
 async fn wake(conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
     events::notify(conn, Uuid::nil()).await
 }
@@ -240,7 +238,6 @@ pub async fn assign(
     category: Option<Uuid>,
 ) -> Result<(), CategoryError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    // The category first (the lock order), then the bot.
     if let Some(id) = category {
         let usable: Option<bool> =
             sqlx::query_scalar("SELECT NOT deleting FROM bot_categories WHERE id = ?1")
