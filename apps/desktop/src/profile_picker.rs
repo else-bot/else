@@ -3,28 +3,33 @@
 use std::collections::HashSet;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::base::actions::Cancel;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::popover::Popover;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
     h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::{Capabilities, ProfileChoice, ProviderInfo};
 
 const FAST: &str = "priority";
+pub(crate) const CATALOG_CONTEXT: &str = "ProfilePickerCatalog";
+
+enum PickerView {
+    Settings,
+    Catalog { provider: Option<String> },
+}
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
     choice: Option<ProfileChoice>,
     search: Entity<InputState>,
-    change_focus: FocusHandle,
-    browsing: bool,
+    model_focus: FocusHandle,
+    view: PickerView,
     expanded_providers: HashSet<String>,
-    customizing: bool,
     disabled: bool,
     _search: Subscription,
 }
@@ -58,13 +63,12 @@ impl ProfilePicker {
             }
         });
         Self {
-            browsing: false,
+            view: PickerView::Settings,
             expanded_providers: HashSet::new(),
             choice,
             providers,
             search,
-            change_focus: cx.focus_handle(),
-            customizing: false,
+            model_focus: cx.focus_handle(),
             disabled: false,
             _search: subscription,
         }
@@ -102,8 +106,12 @@ impl ProfilePicker {
             choice.model = model;
             choice
         });
-        self.browsing = false;
-        self.change_focus.focus(window, cx);
+        self.show_settings(window, cx);
+    }
+
+    fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = PickerView::Settings;
+        self.model_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -117,6 +125,11 @@ impl ProfilePicker {
             .p_1();
         let mut found = false;
         for provider in &self.providers {
+            if let PickerView::Catalog { provider: Some(id) } = &self.view
+                && provider.id != *id
+            {
+                continue;
+            }
             let expanded = self.expanded_providers.contains(&provider.id);
             let models = visible_models(provider, self.choice.as_ref(), &query, expanded);
             if models.is_empty() {
@@ -236,21 +249,73 @@ impl ProfilePicker {
                     .child("No matching models."),
             );
         }
-        v_flex()
-            .w(px(360.))
-            .bg(theme.popover)
-            .rounded(theme.radius)
-            .overflow_hidden()
-            .child(
-                div().p_2().border_b_1().border_color(theme.border).child(
-                    Input::new(&self.search)
-                        .focus_ring(false)
-                        .small()
-                        .prefix(Icon::new(IconName::Search).size_3())
-                        .aria_label("Find a model")
-                        .disabled(self.disabled),
-                ),
+        let filters = std::iter::once((None, "All".to_owned()))
+            .chain(
+                self.providers
+                    .iter()
+                    .map(|p| (Some(p.id.clone()), p.label.clone())),
             )
+            .map(|(provider, label)| {
+                let selected = matches!(
+                    &self.view,
+                    PickerView::Catalog { provider: current } if *current == provider
+                );
+                Button::new(SharedString::from(format!(
+                    "provider-{}",
+                    provider.as_deref().unwrap_or("all")
+                )))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .small()
+                .selected(selected)
+                .toggled(selected)
+                .label(label.clone())
+                .accessibility_label(format!("Filter {label} models"))
+                .disabled(self.disabled)
+                .on_click(cx.listener(move |picker, _, _, cx| {
+                    picker.view = PickerView::Catalog {
+                        provider: provider.clone(),
+                    };
+                    cx.notify();
+                }))
+            });
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        Button::new("model-back")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .ghost()
+                            .small()
+                            .icon(IconName::ArrowLeft)
+                            .label("Model settings")
+                            .accessibility_label("Back to model settings")
+                            .disabled(self.disabled)
+                            .on_click(cx.listener(|picker, _, window, cx| {
+                                picker.show_settings(window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Choose a model"),
+                    ),
+            )
+            .child(
+                Input::new(&self.search)
+                    .focus_ring(false)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).size_3())
+                    .aria_label("Find a model")
+                    .disabled(self.disabled),
+            )
+            .child(h_flex().flex_wrap().gap_1().children(filters))
             .child(groups)
             .into_any_element()
     }
@@ -284,12 +349,51 @@ impl ProfilePicker {
                     cx.notify();
                 }))
         });
+        let speeds = [
+            ("default", "Standard", IconName::Clock),
+            (FAST, "Fast", IconName::Zap),
+        ]
+        .into_iter()
+        .map(|(tier, label, icon)| {
+            let selected = choice.service_tier == tier;
+            Button::new(SharedString::from(format!("speed-{tier}")))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .small()
+                .flex_1()
+                .flex_basis(px(0.))
+                .min_w_0()
+                .selected(selected)
+                .toggled(selected)
+                .icon(icon)
+                .label(label)
+                .when(selected, |button| {
+                    button
+                        .bg(theme.primary.opacity(0.1))
+                        .text_color(theme.primary)
+                        .border_color(theme.primary.opacity(0.4))
+                })
+                .accessibility_label(format!("{label} speed"))
+                .disabled(self.disabled || (tier == FAST && !fast_offered))
+                .on_click(cx.listener(move |picker, _, _, cx| {
+                    picker.choice.as_mut().unwrap().service_tier = tier.to_owned();
+                    cx.notify();
+                }))
+        });
         v_flex()
-            .gap_3()
+            .gap_4()
             .child(
                 v_flex()
                     .gap_2()
-                    .child(div().text_xs().child("Reasoning"))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::SlidersHorizontal).size_3())
+                            .child("Reasoning"),
+                    )
                     .child(
                         h_flex()
                             .w_full()
@@ -298,46 +402,36 @@ impl ProfilePicker {
                             .bg(theme.muted.opacity(0.3))
                             .rounded(theme.radius)
                             .children(efforts),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Choose how much reasoning the model uses."),
                     ),
             )
             .child(
-                h_flex()
-                    .gap_3()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(theme.border)
+                v_flex()
+                    .gap_2()
                     .child(
-                        v_flex()
-                            .flex_1()
+                        h_flex()
                             .gap_1()
-                            .child(div().text_sm().child("Fast mode"))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                if fast_offered {
-                                    "Use priority processing."
-                                } else {
-                                    "Not available through this provider."
-                                },
-                            )),
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::Zap).size_3())
+                            .child("Speed"),
                     )
                     .child(
-                        Switch::new("pick-fast")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .accessibility_label("Fast mode")
-                            .checked(choice.service_tier == FAST)
-                            .disabled(self.disabled || !fast_offered)
-                            .on_click(cx.listener(|picker, checked: &bool, _, cx| {
-                                picker.choice.as_mut().unwrap().service_tier =
-                                    if *checked { FAST } else { "default" }.to_owned();
-                                cx.notify();
-                            })),
-                    ),
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .p_1()
+                            .bg(theme.muted.opacity(0.3))
+                            .rounded(theme.radius)
+                            .children(speeds),
+                    )
+                    .when(!fast_offered, |settings| {
+                        settings.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Fast mode is not available through this provider."),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -440,128 +534,89 @@ pub fn effort_label(id: &str) -> &str {
 
 impl Render for ProfilePicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
+        let mut body = v_flex().w_full().gap_4();
+        if matches!(self.view, PickerView::Catalog { .. }) {
+            return body
+                .key_context(CATALOG_CONTEXT)
+                .capture_action(cx.listener(|picker, _: &Cancel, window, cx| {
+                    picker.show_settings(window, cx);
+                    cx.stop_propagation();
+                }))
+                .child(self.render_catalog(cx));
+        }
         let choice = self.choice.as_ref();
-        let fast = choice.is_some_and(|choice| choice.service_tier == FAST);
-        let chip = |icon, text: String, active| {
-            h_flex()
-                .gap_1()
-                .px_2()
-                .py_1()
+        let model = choice
+            .map(|c| model_label(&c.model))
+            .unwrap_or_else(|| "Choose a model".into());
+        body = body.child(
+            Button::new("pick-model")
+                .focus_ring(false)
+                .cursor_pointer()
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(theme.muted.opacity(0.3))
+                        .hover(theme.muted.opacity(0.5))
+                        .active(theme.muted.opacity(0.6)),
+                )
+                .w_full()
+                .h_auto()
+                .p_3()
                 .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .text_xs()
-                .text_color(if active {
-                    theme.primary
-                } else {
-                    theme.muted_foreground
-                })
-                .child(Icon::new(icon).size_3())
-                .child(text)
-        };
-        let summary = v_flex()
-            .p_4()
-            .gap_3()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radius_lg)
-            .bg(theme.muted.opacity(0.2))
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size_10()
-                            .flex_none()
-                            .rounded(theme.radius)
-                            .bg(theme.primary.opacity(0.1))
-                            .text_color(theme.primary)
-                            .child(Icon::new(IconName::Cpu).size_5()),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
-                                    choice
-                                        .map(|c| model_label(&c.model))
-                                        .unwrap_or_else(|| "Choose a model".into()),
-                                ),
-                            )
-                            .children(self.current().map(|provider| {
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(provider.label.clone())
-                            })),
-                    )
-                    .child(
-                        Popover::new("model-browser")
-                            .anchor(Anchor::TopRight)
-                            .p_0()
-                            .open(self.browsing)
-                            .track_focus(&self.search.read(cx).focus_handle(cx))
-                            .on_open_change(cx.listener(|picker, open, window, cx| {
-                                picker.browsing = *open;
-                                if *open {
-                                    picker
-                                        .search
-                                        .update(cx, |search, cx| search.set_value("", window, cx));
-                                }
-                                cx.notify();
-                            }))
-                            .trigger(
-                                Button::new("pick-change")
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .link()
-                                    .small()
-                                    .label(if self.browsing {
-                                        "Done"
-                                    } else if choice.is_some() {
-                                        "Change"
-                                    } else {
-                                        "Choose"
-                                    })
-                                    .accessibility_label(if self.browsing {
-                                        "Close model browser"
-                                    } else {
-                                        "Change model"
-                                    })
-                                    .track_focus(&self.change_focus)
-                                    .disabled(self.disabled),
-                            )
-                            .content({
-                                let picker = cx.entity();
-                                move |_, _, cx| {
-                                    picker.update(cx, |picker, cx| picker.render_catalog(cx))
-                                }
-                            }),
-                    ),
-            )
-            .children(choice.map(|choice| {
-                h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(chip(
-                        IconName::SlidersHorizontal,
-                        format!("{} reasoning", effort_label(&choice.reasoning_effort)),
-                        false,
-                    ))
-                    .child(chip(
-                        if fast { IconName::Zap } else { IconName::Clock },
-                        if fast { "Fast mode" } else { "Standard speed" }.to_owned(),
-                        fast,
-                    ))
-            }));
-        let mut body = v_flex().gap_3().child(summary);
+                .track_focus(&self.model_focus)
+                .disabled(self.disabled)
+                .accessibility_label(format!("Choose model: {model}"))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size_8()
+                                .flex_none()
+                                .rounded(theme.radius)
+                                .bg(theme.primary.opacity(0.1))
+                                .text_color(theme.primary)
+                                .child(Icon::new(IconName::Cpu).size_4()),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .text_left()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(model),
+                                )
+                                .children(self.current().map(|provider| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(provider.label.clone())
+                                })),
+                        )
+                        .child(
+                            Icon::new(IconName::ChevronRight)
+                                .size_4()
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
+                .on_click(cx.listener(|picker, _, window, cx| {
+                    picker.view = PickerView::Catalog { provider: None };
+                    picker.expanded_providers.clear();
+                    picker
+                        .search
+                        .update(cx, |search, cx| search.set_value("", window, cx));
+                    picker.search.read(cx).focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                })),
+        );
         if !self.any_available() {
             body = body.child(
                 div()
@@ -571,52 +626,7 @@ impl Render for ProfilePicker {
             );
         }
         if choice.is_some() {
-            body = body.child(
-                Button::new("pick-customize")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .accessibility_label("Customize reasoning & speed")
-                    .toggled(self.customizing)
-                    .disabled(self.disabled)
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .gap_2()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::SlidersHorizontal).size_3())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_left()
-                                    .child("Customize reasoning & speed"),
-                            )
-                            .child(
-                                Icon::new(if self.customizing {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .size_3(),
-                            ),
-                    )
-                    .on_click(cx.listener(|picker, _, _, cx| {
-                        picker.customizing = !picker.customizing;
-                        cx.notify();
-                    })),
-            );
-            if self.customizing {
-                body = body.child(self.render_settings(cx));
-            } else {
-                body = body.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("You can change this model and its settings anytime."),
-                );
-            }
+            body = body.child(self.render_settings(cx));
         }
         body
     }
