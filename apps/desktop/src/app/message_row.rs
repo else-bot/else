@@ -21,14 +21,127 @@ impl ElseApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let Some(row) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.rows.get(ix))
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+        let Some(body) = self.render_row_content(&row, cx) else {
+            return div().into_any_element();
+        };
+        let column = super::view::reading_column();
+        let Some(group) = row.routine else {
+            return column.py_1p5().child(body).into_any_element();
+        };
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
         };
-        let Some(row) = view.rows.get(ix).cloned() else {
+        let Some(conversation) = view.conversation.as_ref() else {
             return div().into_any_element();
         };
+        let Some(turn) = conversation.turn(group.turn) else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().clone();
+        let footer = if group.tail {
+            let at = row.footer_stamp.map(stamp);
+            let status = self.render_turn_status(turn, view.bot_id, cx);
+            (status.is_some() || at.is_some()).then(|| {
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
+                    .px_3p5()
+                    .pt_2()
+                    .pb_2p5()
+                    .children(status)
+                    .child(div().flex_1())
+                    .children(
+                        at.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)),
+                    )
+            })
+        } else {
+            None
+        };
+        let frame = gpui_kit::component::v_flex()
+            .w_full()
+            .border_l_1()
+            .border_r_1()
+            .border_color(theme.primary.opacity(0.25))
+            .bg(theme.sidebar.opacity(0.6))
+            .when(group.first, |frame| {
+                frame.border_t_1().rounded_t(theme.radius_lg)
+            })
+            .when(group.last, |frame| {
+                frame.border_b_1().rounded_b(theme.radius_lg)
+            })
+            .children(
+                turn.routine
+                    .as_ref()
+                    .filter(|_| group.first)
+                    .map(|run| routine_banner(run, cx)),
+            )
+            .child(div().w_full().px_1().pt_1().child(body))
+            .children(footer)
+            .when(group.last, |frame| frame.pb_1());
+        column
+            .when(group.first, |column| column.pt_1p5())
+            .when(group.last, |column| column.pb_1p5())
+            .child(frame)
+            .into_any_element()
+    }
+
+    fn render_turn_status(
+        &self,
+        turn: &crate::model::Turn,
+        bot: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let (label, error) = turn_label(turn);
+        if label.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let active = matches!(turn.status.as_str(), "preparing" | "sending" | "running");
+        Some(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .children(self.bots.iter().find(|b| active && b.id == bot).map(|bot| {
+                    bot_avatar(
+                        SharedString::from(format!("working-{}", turn.id)),
+                        bot.avatar,
+                        px(20.),
+                    )
+                    .working()
+                }))
+                .child(
+                    h_flex()
+                        .text_xs()
+                        .text_color(if error {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(label)
+                        .children(active.then(|| working_dots(turn.id))),
+                ),
+        )
+    }
+
+    fn render_row_content(
+        &mut self,
+        row: &super::conversation::TranscriptRow,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = self.view.as_ref()?;
         let key = row.key;
-        let footer = row.footer_stamp.map(stamp);
+        let grouped = row.routine.is_some();
+        let footer = row.footer_stamp.filter(|_| !grouped).map(stamp);
         let theme = cx.theme().clone();
         let card = |text: &RowText, user: bool| {
             let card = div().w_full();
@@ -48,11 +161,12 @@ impl ElseApp {
                     .child(text.render())
             }
         };
-        // Wrapped text needs a definite width, so bubbles span the row and
-        // owner messages are inset from the left.
+        // Wrapped text needs a definite width.
         let side = |user: bool, card: AnyElement| {
             let side = div().w_full();
-            let side = if user {
+            let side = if grouped {
+                side
+            } else if user {
                 side.pl(relative(0.15))
             } else {
                 side.pr(px(60.))
@@ -95,21 +209,22 @@ impl ElseApp {
                 })
                 .child(text)
         };
-        match key {
+        Some(match key {
             RowKey::Item(id) => {
                 let Some(conversation) = view.conversation.as_ref() else {
-                    return div().into_any_element();
+                    return None;
                 };
                 let Some(item) = conversation.item(id) else {
-                    return div().into_any_element();
+                    return None;
                 };
                 let Some(text) = view.texts.get(&key) else {
-                    return div().into_any_element();
+                    return None;
                 };
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
                 let run = conversation.run(id);
                 let status = turn
+                    .filter(|_| row.routine.is_none())
                     .filter(|turn| {
                         conversation
                             .items()
@@ -117,52 +232,20 @@ impl ElseApp {
                             .find(|i| i.turn_id == turn.id)
                             .is_some_and(|i| i.id == id)
                     })
-                    .and_then(|turn| {
-                        let (label, error) = turn_label(turn);
-                        if label.is_empty() {
-                            return None;
-                        }
-                        let active =
-                            matches!(turn.status.as_str(), "preparing" | "sending" | "running");
-                        Some(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .children(
-                                    active
-                                        .then(|| self.bots.iter().find(|b| b.id == view.bot_id))
-                                        .flatten()
-                                        .map(|bot| {
-                                            bot_avatar(
-                                                SharedString::from(format!("working-{}", turn.id)),
-                                                bot.avatar,
-                                                px(20.),
-                                            )
-                                            .working()
-                                        }),
-                                )
-                                .child(
-                                    h_flex()
-                                        .text_color(theme.muted_foreground)
-                                        .child(note(label, error))
-                                        .children(active.then(|| working_dots(turn.id))),
-                                ),
-                        )
-                    });
+                    .and_then(|turn| self.render_turn_status(turn, view.bot_id, cx));
                 // A reaction's feedback prompt is generated for the bot. The
                 // badge on the reacted message stands for it.
                 if item.reaction.is_some() {
-                    return match status {
-                        Some(status) => super::view::reading_column()
-                            .py_1p5()
+                    return status.map(|status| {
+                        gpui_kit::component::v_flex()
+                            .w_full()
                             .child(status)
-                            .into_any_element(),
-                        None => div().into_any_element(),
-                    };
+                            .into_any_element()
+                    });
                 }
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
-                let mut column = super::view::reading_column().gap_1().py_1p5();
+                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
                 let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
                 let exchange = item
                     .bot_task
@@ -230,13 +313,12 @@ impl ElseApp {
                         );
                     }
                 }
-                if let Some(routine) = turn.and_then(|t| t.routine.as_ref()) {
-                    if run.first {
-                        column = column.child(routine_banner(routine, cx));
-                    }
+                if grouped {
                     card = card
-                        .border_color(theme.primary.opacity(0.25))
-                        .bg(theme.primary.opacity(0.035));
+                        .border_0()
+                        .rounded(theme.radius)
+                        .bg(theme.secondary.opacity(0.4))
+                        .pr(px(60.));
                 }
                 let card = if conversation
                     .latest_reply()
@@ -310,13 +392,13 @@ impl ElseApp {
                     .and_then(|bot| self.pending.get(&bot))
                     .and_then(|list| list.iter().find(|p| p.request_id == request_id))
                 else {
-                    return div().into_any_element();
+                    return None;
                 };
                 let Some(text) = view.texts.get(&key) else {
-                    return div().into_any_element();
+                    return None;
                 };
                 let mark = pending.reaction.map(|r| r.kind.mark());
-                let mut column = super::view::reading_column().gap_1().py_1p5();
+                let mut column = gpui_kit::component::v_flex().w_full().gap_1();
                 if mark.is_none() {
                     column = column
                         .child(side(
@@ -329,38 +411,46 @@ impl ElseApp {
                 }
                 let subject = mark.map_or_else(String::new, |mark| format!("{mark} "));
                 if let Some(reason) = &pending.rejected {
-                    return column
-                        .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_end()
-                                .gap_2()
-                                .children(mark.is_none().then(|| {
-                                    Button::new(SharedString::from(format!("restore-{request_id}")))
+                    return Some(
+                        column
+                            .child(note(format!("{subject}Not sent. {reason}"), true).w_full())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_end()
+                                    .gap_2()
+                                    .children(mark.is_none().then(|| {
+                                        Button::new(SharedString::from(format!(
+                                            "restore-{request_id}"
+                                        )))
                                         .focus_ring(false)
                                         .cursor_pointer()
                                         .label("Restore to composer")
                                         .xsmall()
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.take_rejected(request_id, true, window, cx)
-                                        }))
-                                }))
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "dismiss-{request_id}"
-                                    )))
-                                    .focus_ring(false)
-                                    .cursor_pointer()
-                                    .label("Dismiss")
-                                    .xsmall()
-                                    .ghost()
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.take_rejected(request_id, false, window, cx)
-                                    })),
-                                ),
-                        )
-                        .into_any_element();
+                                        .on_click(
+                                            cx.listener(move |app, _, window, cx| {
+                                                app.take_rejected(request_id, true, window, cx)
+                                            }),
+                                        )
+                                    }))
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "dismiss-{request_id}"
+                                        )))
+                                        .focus_ring(false)
+                                        .cursor_pointer()
+                                        .label("Dismiss")
+                                        .xsmall()
+                                        .ghost()
+                                        .on_click(
+                                            cx.listener(move |app, _, window, cx| {
+                                                app.take_rejected(request_id, false, window, cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
                 }
                 column = match &pending.unknown {
                     None => column.child(
@@ -386,23 +476,18 @@ impl ElseApp {
                 };
                 column.into_any_element()
             }
-        }
+        })
     }
 }
 
-pub(super) fn routine_banner(
-    run: &crate::model::RoutineRun,
-    cx: &mut Context<ElseApp>,
-) -> AnyElement {
+fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {
     let theme = cx.theme();
     gpui_kit::component::v_flex()
         .w_full()
         .gap_1p5()
         .px_3p5()
         .py_2p5()
-        .rounded(theme.radius_lg)
-        .border_1()
-        .border_color(theme.primary.opacity(0.25))
+        .rounded_t(theme.radius_lg)
         .bg(theme.primary.opacity(0.07))
         .child(
             h_flex()
@@ -430,7 +515,7 @@ pub(super) fn routine_banner(
 }
 
 /// A short public description of a turn's state. Returns (text, is_error).
-fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
+pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     let detail = turn
         .error
         .as_ref()
