@@ -3,7 +3,10 @@
 //! owner token, and saving replaces the whole messaging view, so nothing
 //! started for the previous server can reach the new one.
 
+mod settings;
 mod view;
+
+use settings::Presentation;
 
 use std::sync::Arc;
 
@@ -21,6 +24,10 @@ use crate::launch::{
 
 /// Below this width the story column gives its room to the form.
 const STORY_MIN_WIDTH: f32 = 760.;
+
+pub(crate) const SHELL_CONTEXT: &str = "AppShell";
+
+actions!(else_desktop, [OpenAppSettings]);
 
 /// A connection the server accepted, with the client that checked it.
 struct Verified {
@@ -127,10 +134,12 @@ enum Page {
 }
 
 struct Setup {
+    presentation: Presentation,
     page: Page,
     draft: Draft,
     error: Option<String>,
     focus: FocusHandle,
+    navigation_focus: [FocusHandle; 2],
     _attempt: Option<Task<()>>,
 }
 
@@ -140,6 +149,7 @@ pub struct Shell {
     runtime: tokio::runtime::Handle,
     active: Option<Active>,
     setup: Option<Setup>,
+    settings_focus: FocusHandle,
 }
 
 impl Shell {
@@ -177,6 +187,7 @@ impl Shell {
             runtime,
             active: None,
             setup: None,
+            settings_focus: cx.focus_handle(),
         };
         match loaded {
             Ok(Some(profile))
@@ -219,10 +230,12 @@ impl Shell {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.setup = Some(Setup {
+            presentation: Presentation::Onboarding,
             page: Page::Welcome,
             draft: Draft::new(),
             error,
             focus,
+            navigation_focus: [cx.focus_handle(), cx.focus_handle()],
             _attempt: None,
         });
         cx.notify();
@@ -256,18 +269,6 @@ impl Shell {
         cx.notify();
     }
 
-    fn change_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = &self.active else { return };
-        let profile = active.profile.clone();
-        // The messaging view's dialogs belong to the hidden view.
-        window.close_dialog(cx);
-        active
-            .app
-            .update(cx, |app, cx| app.set_hidden(true, window, cx));
-        self.open_setup(None, window, cx);
-        self.open_remote(Some(&profile), window, cx);
-    }
-
     /// Show the notification's conversation, unless it belongs to another
     /// connection or its bot is gone.
     fn open_notification(
@@ -285,6 +286,9 @@ impl Shell {
         cx.activate(true);
         window.activate_window();
         if self.setup.is_some() {
+            if self.settings_section().is_some() {
+                window.close_dialog(cx);
+            }
             self.cancel(window, cx);
         }
     }
@@ -438,6 +442,15 @@ impl Shell {
                 return;
             }
         };
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.profile == profile && active.app.read(cx).connected())
+        {
+            self.cancel(window, cx);
+            window.close_dialog(cx);
+            return;
+        }
         let revision = setup.draft.begin();
         setup._attempt = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = verify(profile, client).await;
@@ -489,6 +502,9 @@ impl Shell {
             setup.error = Some(err);
             return;
         }
+        if self.settings_section().is_some() {
+            window.close_dialog(cx);
+        }
         self.setup = None;
         self.activate(profile, client, window, cx);
     }
@@ -532,11 +548,18 @@ fn prefill_origin_changed(bound: Option<&Origin>, raw: &str) -> bool {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let root = v_flex()
-            .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground);
-        if let Some(setup) = &self.setup {
+        let root =
+            v_flex()
+                .key_context(SHELL_CONTEXT)
+                .on_action(cx.listener(|shell, _: &OpenAppSettings, window, cx| {
+                    shell.open_settings(window, cx)
+                }))
+                .size_full()
+                .bg(theme.background)
+                .text_color(theme.foreground);
+        if let Some(setup) = &self.setup
+            && setup.presentation == Presentation::Onboarding
+        {
             let wide = window.viewport_size().width >= px(STORY_MIN_WIDTH);
             let start_on_enter = matches!(setup.page, Page::Welcome) && self.launch.local.is_ok();
             // macOS still needs a title bar to drag the window by.

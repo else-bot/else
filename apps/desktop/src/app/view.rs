@@ -779,7 +779,7 @@ impl ElseApp {
         let message = match self.connection {
             Connection::Connected => "Create a bot to start a conversation.",
             Connection::InvalidCredentials(_) => {
-                "Use Change server to fix the address or owner token."
+                "Open Settings to fix the server address or owner key."
             }
             _ => "Waiting for the API…",
         };

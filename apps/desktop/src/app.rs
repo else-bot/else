@@ -96,10 +96,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-g"), NewCategory, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-m"), MoveBot, Some(APP_CONTEXT)),
         KeyBinding::new(primary!("shift-b"), ToggleSettings, Some(APP_CONTEXT)),
+        KeyBinding::new(
+            primary!(","),
+            crate::connection::OpenAppSettings,
+            Some(crate::connection::SHELL_CONTEXT),
+        ),
     ]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([
-            KeyBinding::new("cmd-,", ToggleSettings, Some(APP_CONTEXT)),
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
@@ -123,6 +127,7 @@ pub fn install_menus(cx: &mut App) {
     });
     cx.set_menus(vec![
         Menu::new("else.bot").items([
+            MenuItem::action("Settings…", crate::connection::OpenAppSettings),
             MenuItem::action("Bot details", ToggleSettings),
             MenuItem::separator(),
             MenuItem::action("Quit else.bot", Quit),
