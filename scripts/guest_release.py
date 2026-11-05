@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin, verify, and release the prebuilt else.bot guest image.
+"""Pin and verify prebuilt else.bot guest images.
 
 The guest is built in two layers, each recorded by a manifest that names the
 published image matching its build inputs at a commit:
@@ -13,17 +13,15 @@ image adds the helpers on top of the pinned base, and its inputs include the
 base manifest, so release CI rebuilds it without touching APT. `image` is null
 until one is published. --base selects the base manifest.
 
-    guest-release.py [--base] hash [--rev REV]
-    guest-release.py [--base] check [--rev REV] [--allow-unpinned]
-    guest-release.py [--base] pinned [--rev REV]
-    guest-release.py [--base] build-args
-    guest-release.py [--base] pin IMAGE [--rev REV]
-    guest-release.py plan [--rev REV] [--main-ref REF]
-    guest-release.py platform-digest REF --platform OS/ARCH
-    guest-release.py digest REF
-    guest-release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
-    guest-release.py release-plan [--remote NAME] [--main BRANCH]
-    guest-release.py finalize --assets-dir DIR [--remote NAME] [--main BRANCH]
+    guest_release.py [--base] hash [--rev REV]
+    guest_release.py [--base] check [--rev REV] [--allow-unpinned]
+    guest_release.py [--base] pinned [--rev REV]
+    guest_release.py [--base] build-args
+    guest_release.py [--base] pin IMAGE [--rev REV]
+    guest_release.py plan [--rev REV] [--main-ref REF]
+    guest_release.py platform-digest REF --platform OS/ARCH
+    guest_release.py digest REF
+    guest_release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
 """
 
 import argparse
@@ -31,7 +29,6 @@ import base64
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
@@ -40,8 +37,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-
-from release_binaries import BINARIES, PLATFORMS as BINARY_PLATFORMS, archive_name, release_assets
 
 CONTEXT = "infra/guest"
 PLATFORMS = ("linux/amd64", "linux/arm64")
@@ -88,7 +83,9 @@ GUEST = Kind(
     repo=os.environ.get("ELSE_GUEST_IMAGE_REPO", "ghcr.io/else-bot/else-guest"),
     label="bot.else.guest.source_sha256",
     dockerfile=f"{CONTEXT}/Dockerfile",
-    inputs=(CONTEXT, BASE.manifest, "scripts/guest-release.py", ".github/workflows/guest-image.yml"),
+    # Both paths preserve source hashes recorded before the helper was renamed.
+    inputs=(CONTEXT, BASE.manifest, "scripts/guest-release.py", "scripts/guest_release.py",
+            ".github/workflows/guest-image.yml"),
     build_args={"IMAGE_TAG": "else-guest:3"},
     publisher="the release workflow pins a new image",
     parent=BASE,
@@ -438,86 +435,6 @@ def cmd_gate(branch, rev, main_ref):
     print(f"release v{version} is ready: guest image {data['image']}")
 
 
-def release_context(remote, main):
-    head = git_out("rev-parse", "HEAD")
-    git("fetch", "-q", remote, f"+refs/heads/{main}:refs/remotes/{remote}/{main}")
-    if not is_ancestor(head, f"{remote}/{main}"):
-        raise Fail(f"HEAD {head} is not on {remote}/{main}")
-    version = cargo_version(head)
-    tag = f"v{version}"
-    tags = remote_tags(remote)
-    if tag in tags:
-        if not is_ancestor(tags[tag], head):
-            raise Fail(f"{tag} already exists at {tags[tag]}, which is not on {main}")
-    else:
-        newer = [t for t in tags if version_key(t[1:]) >= version_key(version)]
-        if newer:
-            raise Fail(f"{tag} is not newer than the existing {max(newer, key=lambda t: version_key(t[1:]))}")
-    return head, version, tag, tags
-
-
-def github_release(tag=None):
-    target = [tag] if tag is not None else []
-    result = subprocess.run(["gh", "release", "view", *target, "--json", "isDraft,assets,tagName"], capture_output=True, text=True)
-    if result.returncode:
-        if "release not found" in result.stderr.lower() or "HTTP 404" in result.stderr:
-            return None
-        raise Fail(f"cannot look up release {tag or 'latest'}: {result.stderr.strip()}")
-    return json.loads(result.stdout)
-
-
-def complete_release(release, version):
-    expected = {archive_name(binary, version, platform) for platform in BINARY_PLATFORMS for binary in BINARIES}
-    expected.add("SHA256SUMS")
-    return (release is not None and not release["isDraft"]
-            and expected <= {asset["name"] for asset in release["assets"]})
-
-
-def cmd_release_plan(remote, main):
-    head, version, tag, tags = release_context(remote, main)
-    if tag in tags and (tags[tag] != head or complete_release(github_release(tag), version)):
-        print("state=skip")
-    else:
-        print("state=build")
-
-
-def cmd_finalize(remote, main, assets_dir):
-    head, version, tag, tags = release_context(remote, main)
-    if tag in tags and tags[tag] != head:
-        print(f"{tag} is already released at an earlier commit; nothing to publish")
-        return
-    assets = release_assets(version, assets_dir)
-    if tag not in tags:
-        data = cmd_check(GUEST, head, allow_unpinned=False)
-        git("tag", "-f", "-a", tag, "-m", f"else.bot {version}\n\nGuest image: {data['image']}", head)
-        git("push", "-q", remote, f"refs/tags/{tag}")
-        print(f"tagged {tag} at {head} with guest image {data['image']}")
-    release = github_release(tag)
-    if complete_release(release, version):
-        print(f"{tag} already has all release binaries")
-        return
-    if release is None:
-        command = ["gh", "release", "create", tag, *map(str, assets), "--draft", "--verify-tag",
-                   "--title", f"else.bot {version}", "--generate-notes"]
-    else:
-        command = ["gh", "release", "upload", tag, *map(str, assets), "--clobber"]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode:
-        raise Fail(f"tag {tag} is ready, but uploading its release binaries failed: {result.stderr.strip()}")
-    latest = github_release()
-    promote = True
-    if latest is not None:
-        latest_version = latest["tagName"].removeprefix("v")
-        if not VERSION.fullmatch(latest_version):
-            raise Fail(f"cannot compare the latest release tag {latest['tagName']} with {tag}")
-        promote = version_key(version) >= version_key(latest_version)
-    result = subprocess.run(["gh", "release", "edit", tag, "--draft=false",
-                             "--latest" if promote else "--latest=false"], capture_output=True, text=True)
-    if result.returncode:
-        raise Fail(f"tag {tag} has binaries, but publishing its GitHub release failed: {result.stderr.strip()}")
-    print(f"published the GitHub release for {tag} with all release binaries")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", action="store_true", help="act on the guest base manifest")
@@ -545,12 +462,6 @@ def main():
     p.add_argument("--branch", required=True)
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--main-ref", default="origin/main")
-    for command in ("release-plan", "finalize"):
-        p = sub.add_parser(command)
-        p.add_argument("--remote", default="origin")
-        p.add_argument("--main", default="main")
-        if command == "finalize":
-            p.add_argument("--assets-dir", required=True, type=Path)
     args = parser.parse_args()
     if args.base and args.command not in ("hash", "check", "pinned", "build-args", "pin"):
         parser.error(f"--base does not apply to {args.command}")
@@ -592,10 +503,6 @@ def main():
             print(f"pinned {args.image} for {kind.name} source {source}")
         elif args.command == "gate":
             cmd_gate(args.branch, args.rev, args.main_ref)
-        elif args.command == "release-plan":
-            cmd_release_plan(args.remote, args.main)
-        elif args.command == "finalize":
-            cmd_finalize(args.remote, args.main, args.assets_dir)
     except (Fail, ValueError) as e:
         print(f"guest-release: {e}", file=sys.stderr)
         return 1

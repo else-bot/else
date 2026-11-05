@@ -2,7 +2,6 @@
 """Check release archives and publication against disposable Git repositories."""
 import contextlib
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -16,7 +15,8 @@ from unittest.mock import patch
 
 import release_binaries as binaries
 
-release = importlib.import_module("guest-release")
+import release
+import guest_release
 VERSION = "0.0.2"
 
 FAKE_GH = '''#!/usr/bin/env python3
@@ -285,6 +285,23 @@ class Publication(unittest.TestCase):
         self.latest.unlink()
         self.finalize()
         self.assertEqual(self.latest.read_text(), "v0.0.2")
+
+    def test_guest_build_fingerprint_ignores_native_publisher_changes(self):
+        helper = self.repo / "scripts/guest_release.py"
+        helper.parent.mkdir()
+        helper.write_text(Path(guest_release.__file__).read_text())
+        self.git("add", "scripts")
+        self.git("commit", "-m", "guest build helper")
+        before = guest_release.source_sha256(guest_release.GUEST)
+        publisher = helper.parent / "release.py"
+        publisher.write_text(Path(release.__file__).read_text())
+        self.git("add", "scripts")
+        self.git("commit", "-m", "native publisher change")
+        self.assertEqual(guest_release.source_sha256(guest_release.GUEST), before)
+        helper.write_text(helper.read_text() + "\n# changed guest build inputs\n")
+        self.git("add", "scripts")
+        self.git("commit", "-m", "guest helper change")
+        self.assertNotEqual(guest_release.source_sha256(guest_release.GUEST), before)
 
 
 if __name__ == "__main__":

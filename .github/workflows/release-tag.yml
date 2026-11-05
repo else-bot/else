@@ -32,7 +32,7 @@ jobs:
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/guest-release.py release-plan --remote origin --main main >> "$GITHUB_OUTPUT"
+        run: python3 scripts/release.py plan --remote origin --main main >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -153,4 +153,4 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          python3 scripts/guest-release.py finalize --remote origin --main main --assets-dir target/release-assets
+          python3 scripts/release.py finalize --remote origin --main main --assets-dir target/release-assets
