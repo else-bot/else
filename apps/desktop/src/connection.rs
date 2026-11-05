@@ -138,7 +138,7 @@ struct Setup {
     draft: Draft,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 4],
+    navigation_focus: [FocusHandle; 5],
     _attempt: Option<Task<()>>,
 }
 
@@ -151,6 +151,7 @@ pub struct Shell {
     settings_focus: FocusHandle,
     updates: updates::View,
     backups: Option<backups::View>,
+    socials: Option<Entity<crate::socials::SocialsView>>,
 }
 
 impl Shell {
@@ -192,6 +193,7 @@ impl Shell {
             settings_focus: cx.focus_handle(),
             updates,
             backups: None,
+            socials: None,
         };
         match loaded {
             Ok(Some(profile))
@@ -252,6 +254,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_socials(window, cx);
         if let Some(previous) = self.active.take() {
             previous
                 .app
@@ -265,7 +268,13 @@ impl Shell {
             .unwrap_or_default();
         self.backups = None;
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
-        let observer = cx.observe(&app, |_, _, cx| cx.notify());
+        let observer = cx.observe_in(&app, window, |shell, app, window, cx| {
+            if let Some(socials) = &shell.socials {
+                let available = app.read(cx).social_network_available();
+                socials.update(cx, |view, cx| view.set_available(available, window, cx));
+            }
+            cx.notify();
+        });
         self.active = Some(Active {
             profile,
             client,
@@ -514,6 +523,7 @@ impl Shell {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_socials(window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();
             self.backups = None;

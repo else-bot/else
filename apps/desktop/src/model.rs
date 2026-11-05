@@ -181,6 +181,8 @@ pub struct Turn {
     pub routine: Option<RoutineRun>,
     #[serde(default)]
     pub outgoing_drafts: Vec<OutgoingDraft>,
+    #[serde(default)]
+    pub social_setups: Vec<crate::api::socials::SocialSetup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -460,6 +462,13 @@ impl Conversation {
             .values()
             .flat_map(|t| &t.questions)
             .find(|q| q.id == id)
+    }
+
+    pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.social_setups)
+            .find(|s| s.id == id)
     }
 
     pub fn outgoing_draft(&self, id: Uuid) -> Option<&OutgoingDraft> {

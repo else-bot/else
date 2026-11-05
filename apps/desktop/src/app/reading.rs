@@ -237,6 +237,11 @@ impl ElseApp {
     /// The connection editor covers (or uncovers) this view.
     pub fn set_hidden(&mut self, hidden: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.hidden = hidden;
+        if hidden {
+            self.clear_social_forms(window, cx);
+        } else {
+            self.sync_social_forms(window, cx);
+        }
         if !hidden {
             self.check_reading(window, cx);
         }

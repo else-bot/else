@@ -19,6 +19,7 @@ mod reply;
 mod row_text;
 mod secret_card;
 mod settings;
+mod social_card;
 mod view;
 
 use categories::CategoryFormHolder;
@@ -226,6 +227,21 @@ pub struct ElseApp {
 }
 
 impl ElseApp {
+    pub(crate) fn social_network_available(&self) -> bool {
+        self.connection == Connection::Connected
+    }
+
+    pub(crate) fn social_context(&self) -> (Arc<Client>, Vec<Bot>) {
+        (
+            self.client.clone(),
+            self.bots
+                .iter()
+                .filter(|b| b.is_active())
+                .cloned()
+                .collect(),
+        )
+    }
+
     pub fn new(
         client: Arc<Client>,
         preferences: crate::preferences::Preferences,
@@ -346,6 +362,7 @@ impl ElseApp {
         match event {
             LiveEvent::Connected => {
                 self.connection = Connection::Connected;
+                self.sync_social_forms(window, cx);
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = None;
                     if view.conversation.is_none() {
@@ -361,12 +378,14 @@ impl ElseApp {
                     view.stream_problem = Some(format!("Reconnecting… {reason}"));
                 }
                 self.clear_secret_forms(window, cx);
+                self.clear_social_forms(window, cx);
                 self.sync_secret_forms(window, cx);
             }
             LiveEvent::Unauthorized => {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
+                self.clear_social_forms(window, cx);
                 self.sync_secret_forms(window, cx);
             }
             LiveEvent::Bots(list) => self.apply_bots(list, window, cx),
@@ -394,6 +413,7 @@ impl ElseApp {
                 self.connection =
                     Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
                 self.clear_secret_forms(window, cx);
+                self.clear_social_forms(window, cx);
                 self.sync_secret_forms(window, cx);
             }
             Err(_) => {}
@@ -480,6 +500,7 @@ impl ElseApp {
             self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
         }
         self.clear_secret_forms(window, cx);
+        self.clear_social_forms(window, cx);
         self.view = id.map(ConversationView::new);
         if let Some(view) = &self.view {
             let this = cx.entity().downgrade();

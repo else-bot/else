@@ -385,6 +385,7 @@ impl ElseApp {
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
             RowKey::Question(id) => self.render_question_card(id, cx),
             RowKey::Draft(id) => self.render_draft_card(id, cx),
+            RowKey::SocialSetup(id) => self.render_social_card(id, cx),
             RowKey::Pending(request_id) => {
                 let Some(pending) = self
                     .selected
@@ -546,6 +547,9 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "waiting" if turn.questions.iter().any(|q| q.is_pending()) => {
             ("Waiting for your answer…".into(), false)
         }
+        "waiting" if turn.social_setups.iter().any(|setup| setup.is_pending()) => {
+            ("Waiting for you to connect an account…".into(), false)
+        }
         "waiting" => ("Waiting for another bot…".into(), false),
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
@@ -606,8 +610,33 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dot_opacity, stamp_in};
+    use super::{dot_opacity, stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
+
+    #[test]
+    fn social_setup_waits_for_the_owner_to_connect() {
+        let turn = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "request_id": uuid::Uuid::nil(),
+            "turn_no": 1,
+            "provider_id": "synthetic",
+            "status": "waiting",
+            "error": null,
+            "effect_uncertain": false,
+            "social_setups": [{
+                "id": uuid::Uuid::nil(),
+                "provider": "telegram",
+                "reason": "Summarize mentions",
+                "status": "pending",
+                "connection_id": null
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            turn_label(&turn),
+            ("Waiting for you to connect an account…".into(), false)
+        );
+    }
 
     #[test]
     fn working_dots_pulse_left_to_right() {
