@@ -1,6 +1,3 @@
-//! Owner attachments: upload and download, ordered message parts across
-//! persistence, events, and restart, and the provider input they produce.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -238,8 +235,6 @@ async fn ordered_parts_persist_through_events_restart_and_provider_input() {
     assert_eq!(sent.body["item"]["text"], text);
     assert_eq!(sent.body["item"]["parts"], parts);
 
-    // A retry with the same parts is the same message; changed parts or
-    // dropped parts reuse the ID with other input.
     let retry = send_parts(&app, &bot, request, text, parts.clone()).await;
     assert_eq!(retry.status, StatusCode::OK);
     assert_eq!(retry.body["item"]["id"], sent.body["item"]["id"]);
@@ -309,7 +304,6 @@ async fn ordered_parts_persist_through_events_restart_and_provider_input() {
         "other items expose empty parts"
     );
 
-    // The next turn's cold history names both files by their copies.
     let follow = app
         .send(&bot, Uuid::new_v4(), "and now?", Some("synthetic"))
         .await;
@@ -344,7 +338,6 @@ async fn parts_are_validated_against_text_and_the_bot() {
         .body;
     let file = |meta: &Value| json!({ "type": "file", "file": meta });
 
-    // A file-only message.
     let only = send_parts(
         &app,
         &bot,
@@ -355,7 +348,6 @@ async fn parts_are_validated_against_text_and_the_bot() {
     .await;
     assert_eq!(only.status, StatusCode::ACCEPTED, "{:?}", only.body);
 
-    // Text-only parts are a plain message.
     let plain = send_parts(
         &app,
         &bot,

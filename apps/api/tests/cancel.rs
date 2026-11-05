@@ -1,6 +1,3 @@
-//! POC-007: Stop work, deletion during work, crash reconciliation, and the
-//! singleton guard, through the real routes, SQLite, and API processes.
-
 mod common;
 
 use std::time::Duration;
@@ -62,7 +59,6 @@ async fn stop_work_cancels_through_its_boundary_only() {
     let first = stop(&app, &bot, request).await;
     assert_eq!(first.status, StatusCode::ACCEPTED, "{:?}", first.body);
     assert_eq!(first.body["state"], "pending");
-    // While stopping, new messages are refused without creating anything.
     let rejected = app
         .send(&bot, Uuid::new_v4(), "too early", Some("synthetic"))
         .await;
@@ -91,7 +87,6 @@ async fn stop_work_cancels_through_its_boundary_only() {
         "history is retained; the rejected send added nothing"
     );
 
-    // Messaging works again, and retrying the old stop leaves new work alone.
     let after = app
         .send(
             &bot,
@@ -110,7 +105,6 @@ async fn stop_work_cancels_through_its_boundary_only() {
             .await,
         "completed"
     );
-    // The request ID cannot be reused for another bot.
     let other = app.create_bot("Other").await;
     assert_eq!(
         stop(&app, &other, request).await.status,
@@ -136,7 +130,6 @@ async fn stop_with_no_work_completes_at_once_and_keeps_partial_text() {
             Some("synthetic"),
         )
         .await;
-    // Wait until some assistant text is committed.
     for _ in 0..200 {
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM items WHERE kind = 'assistant'")
             .fetch_one(&app.db.pool)
@@ -179,7 +172,6 @@ async fn a_provider_that_ignores_interruption_ends_uncertain() {
     app.wait_turn(&turn_id(&stuck), &["running"]).await;
     let request = Uuid::new_v4();
     assert_eq!(stop(&app, &bot, request).await.status, StatusCode::ACCEPTED);
-    // Still pending during the grace period; effects are not claimed undone.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(stop(&app, &bot, request).await.body["state"], "pending");
     wait_receipt(&app, &bot, request).await;
@@ -233,7 +225,6 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
             .iter()
             .all(|b| b["id"] != bot.as_str())
     );
-    // Sending and stopping are refused once deleted.
     assert_eq!(
         app.send(&bot, Uuid::new_v4(), "hi", Some("synthetic"))
             .await
@@ -245,7 +236,6 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
         StatusCode::GONE
     );
 
-    // Shutdown completes after the grace period.
     for _ in 0..200 {
         let receipt = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
         if receipt.body["bot"]["cleanup"]["state"] == "done" {
@@ -273,7 +263,6 @@ async fn deletion_during_work_blocks_late_output_and_never_reactivates() {
     .unwrap();
     assert_eq!(assistant, 0, "no output appended after deletion");
 
-    // Restart and setup leave it deleted.
     let app = app.restart().await;
     else_api::db::installation::setup(&app.db.pool)
         .await
@@ -373,8 +362,6 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         .await;
     let third = created["bot"]["id"].as_str().unwrap().to_owned();
 
-    // Bot A: one turn stuck while sending. Bot B: one turn running. They
-    // hold both provider slots, so bot C's message stays queued.
     let sending = send(&api, &main, "[synthetic:stall-send]").await;
     wait_status(&api, &db.pool, &sending, "sending").await;
     let running = send(&api, &second, "[synthetic:hang]").await;
@@ -397,7 +384,6 @@ async fn killing_the_api_at_each_boundary_reconciles_without_replay() {
         .unwrap();
     for _ in 0..2 {
         let api = ApiProcess::start(&db, dir.path()).await;
-        // The queued turn was never sent, so it runs once.
         wait_status(&api, &db.pool, &queued, "completed").await;
         let (status, code, uncertain) = status_of(&db.pool, &sending).await;
         assert_eq!(
@@ -444,7 +430,6 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     let hanging = send(&api, &main, "[synthetic:hang]").await;
     wait_status(&api, &db.pool, &hanging, "running").await;
 
-    // Same storage, different port.
     let output = common::api_command(&db, dir.path(), common::free_port())
         .arg("serve")
         .output()
@@ -453,7 +438,6 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("already running"), "{stderr}");
 
-    // Different storage, same database.
     let other = tempfile::tempdir().unwrap();
     std::fs::copy(
         dir.path().join("owner-token"),
@@ -473,7 +457,6 @@ async fn a_second_api_cannot_take_over_runtime_storage_or_database() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("already using this database"), "{stderr}");
 
-    // The running instance's work was not reconciled or replaced.
     assert_eq!(status_of(&db.pool, &hanging).await.0, "running");
     let (status, body) = api
         .call(
@@ -491,7 +474,6 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
     let bot_id: Uuid = bot.parse().unwrap();
-    // Hold the bot lock and commit a new queued turn while Stop waits.
     let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
         .bind(bot_id)
@@ -550,7 +532,6 @@ async fn a_stop_waiting_on_a_send_includes_that_send() {
 async fn lost_interrupts_are_redelivered_and_orphans_settle() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
-    // A stop whose interrupt never reached the provider task.
     let hang = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -565,7 +546,6 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
         "interrupted"
     );
 
-    // An active turn that no provider task owns.
     let other = app.create_bot("Orphan").await;
     let queued = app
         .send(
@@ -591,7 +571,6 @@ async fn lost_interrupts_are_redelivered_and_orphans_settle() {
     );
     let (_, code, uncertain) = status_of(&app.db.pool, &turn_id(&queued)).await;
     assert_eq!((code.as_deref(), uncertain), (Some("orphaned"), true));
-    // The bot is usable again.
     let next = app
         .send(&other, Uuid::new_v4(), "after orphan", Some("synthetic"))
         .await;

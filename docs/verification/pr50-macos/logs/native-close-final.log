@@ -1,6 +1,0 @@
-cmd-w/before: 'else.bot' elements=89 capture=capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000003
-PASS cmd-w: desktop exited, API 762 survived
-close-menu/before: 'else.bot' elements=87 capture=capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000004
-PASS close-menu: desktop exited, API 762 survived
-cmd-q/before: 'else.bot' elements=87 capture=capture_51ba3fdaf5ec4657ae9a25a125c41271_0000000000000005
-PASS cmd-q: desktop exited, API 762 survived

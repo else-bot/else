@@ -8,7 +8,7 @@ Read the [local runtime rules](../../rules/plugin-compatibility.md) and [model p
 # Run smoke tests
 
 1. Read the workspace manifests and the
-   [development guide](../../../docs/development.md). Identify the smallest
+   [development guide](../../../CONTRIBUTING.md). Identify the smallest
    existing check that exercises the changed behavior.
 2. Check the affected Rust targets and run the relevant headless tests:
 

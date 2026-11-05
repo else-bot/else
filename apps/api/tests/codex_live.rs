@@ -1,8 +1,3 @@
-//! Live Codex checks that use the owner's subscription. They run only when
-//! `ELSE_LIVE_CODEX=1` is set, so routine `cargo test` never consumes it.
-//!
-//! ELSE_LIVE_CODEX=1 cargo test -p else-api --test codex_live -- --nocapture
-
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -33,8 +28,6 @@ fn codex_and_auth() -> (PathBuf, PathBuf) {
     (std::fs::canonicalize(codex).unwrap(), auth)
 }
 
-/// Item types that would mean a native agent, the web, or an unexpected
-/// tool ran. Commands and file changes are the host tools.
 const FORBIDDEN_ITEMS: &[&str] = &[
     "dynamicToolCall",
     "collabAgentToolCall",
@@ -53,9 +46,6 @@ async fn host_tools_run_in_the_project_and_agents_still_cannot() {
     probe_native_tools(None).await;
 }
 
-/// The same probe with else.bot's memory tools configured, which enables
-/// Codex's code-mode host: host commands and edits still work, and
-/// user-input requests and native agents are still impossible.
 #[tokio::test(flavor = "multi_thread")]
 async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     if !live() {
@@ -69,7 +59,6 @@ async fn with_memory_tools_host_tools_still_run_and_agents_still_cannot() {
     let app = TestApp::with_registry(db, 1, Registry::new(vec![]));
     let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    // Listing tools needs only a valid grant; calls would also need a turn.
     let grant = app
         .scheduler
         .grants()
@@ -168,7 +157,6 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         match message {
             Incoming::Refused { method } => server_requests.push(method),
             Incoming::Notification { method, params } => match method.as_str() {
-                // Any thread other than ours would be a native child.
                 "thread/started" if params["thread"]["id"] != thread_id.as_str() => {
                     threads_started += 1
                 }
@@ -211,7 +199,6 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         item_types.iter().any(|t| t == "commandExecution"),
         "the shell ran on the host"
     );
-    // Never asks for approval: commands and edits just run.
     assert!(
         !server_requests.iter().any(|m| m.contains("pproval")),
         "an approval was requested: {server_requests:?}"
@@ -241,7 +228,6 @@ use else_api::providers::Registry;
 use else_api::providers::codex::Codex;
 use std::sync::Arc;
 
-/// The real API with the live Codex adapter (and the synthetic provider).
 fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
     let sandbox = Host::new(data, &data.join("bots"));
     let (codex, auth) = codex_and_auth();
@@ -311,7 +297,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     let caps = app.owner("GET", "/v1/capabilities", None).await;
     assert_eq!(caps.body["default_provider_id"], "codex", "{:?}", caps.body);
 
-    // Two bots keep separate native sessions and context.
     let a = app.main_bot().await;
     let b = app.create_bot("Garden").await;
     let (_, status, _) = ask(
@@ -355,7 +340,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         );
         assert!(data.join("bots").join(bot).join("work").is_dir());
     }
-    // Requested settings are recorded as reported by Codex.
     let reported: Vec<(String,)> = sqlx::query_as(
         "SELECT reported_profile FROM turns WHERE provider_id = 'codex' AND reported_profile IS NOT NULL",
     )
@@ -369,7 +353,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
             && p.contains("priority"))
     );
 
-    // Restart: the same native session resumes.
     let app = app.restart().await;
     drop(app);
     let app = codex_app(db.clone(), &data);
@@ -386,8 +369,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         "resumed, not replaced"
     );
 
-    // A lost native session is rebuilt from SQLite without duplicating
-    // the owner's request.
     sqlx::query("UPDATE provider_sessions SET native_session_id = ?2 WHERE id = ?1")
         .bind(b_session)
         .bind(Uuid::new_v4().to_string())
@@ -424,7 +405,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         "replaced"
     );
 
-    // Interrupt an actual turn: partial text kept, process reaped.
     let reply = app
         .send(
             &a,
@@ -475,7 +455,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
         "process reaped"
     );
 
-    // A profile update applies only to new work and survives restart.
     let patch = app
         .owner(
             "PATCH",
@@ -498,7 +477,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     );
     drop(app);
     let app = codex_app(db.clone(), &data);
-    // Native sub-agents stay disabled even when asked for in the prompt.
     let (turn, status, _) = ask(
         &app,
         &a,
@@ -522,9 +500,6 @@ async fn codex_conversations_resume_rebuild_and_interrupt() {
     assert!(earlier >= 5, "earlier turns keep their recorded settings");
 }
 
-/// POC-013: a real Codex session finds a fact in another bot's memory
-/// through else.bot's MCP tools, authorized only by its turn's grant and the
-/// owner's read grant. No VM exists or starts.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     if !live() {
@@ -556,7 +531,6 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
 
     let work = app.create_bot("Work").await;
     let family = app.create_bot("Family").await;
-    // The fact lives only in Work's memory (saved through a synthetic turn).
     let fact = app
         .send(
             &work,
@@ -590,7 +564,6 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
         .unwrap();
     assert_eq!(status, "completed", "{error:?}");
     assert!(text.contains("HARBORLIGHT"), "{text}");
-    // The retrieval went through the API: Family's memory logs the tool calls.
     let calls: Vec<String> = sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity' ORDER BY seq",
     )
@@ -603,7 +576,6 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
         calls.iter().any(|c| c.contains(&work)),
         "a memory tool read Work's memory: {calls:?}"
     );
-    // The answer itself is now in Family's memory as assistant text.
     let answer: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM memory_entry WHERE bot_id = ?1 AND kind = 'assistant_message'
            AND body LIKE '%HARBORLIGHT%'",
@@ -615,8 +587,6 @@ async fn codex_retrieves_a_saved_fact_through_memory_tools() {
     assert_eq!(answer, 1);
 }
 
-/// Code mode runs the model's tool-calling scripts. Prove it reaches only
-/// else.bot's tools: no network canary hit, no host file read, no write.
 #[tokio::test(flavor = "multi_thread")]
 async fn code_mode_reaches_only_elsebot_tools() {
     if !live() {
@@ -627,7 +597,6 @@ async fn code_mode_reaches_only_elsebot_tools() {
     let data = dir.path().join("data");
     std::fs::create_dir(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // A canary on the host network: any connection is a failure.
     let canary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     canary.set_nonblocking(true).unwrap();
     let canary_port = canary.local_addr().unwrap().port();
@@ -682,8 +651,6 @@ async fn code_mode_reaches_only_elsebot_tools() {
     );
 }
 
-/// POC-015: a summary attempt has no tools. Records that demand commands,
-/// file writes, or agents produce at most a summary, never an action.
 #[tokio::test(flavor = "multi_thread")]
 async fn summary_attempts_cannot_run_tools() {
     if !live() {
@@ -729,16 +696,11 @@ async fn summary_attempts_cannot_run_tools() {
         }
         assert!(!text.contains("uid="), "a command output leaked");
     }
-    // An error (a policed or refused attempt) is also acceptable: nothing ran,
-    // as the empty work directory below shows.
     let work = data.join("bots").join(bot.to_string()).join("work");
     assert_eq!(std::fs::read_dir(&work).map(|d| d.count()).unwrap_or(0), 0);
     assert!(sandbox.live_processes(Uuid::nil()).is_empty());
 }
 
-/// POC-015: a synthetic corpus summarized by real Codex keeps its facts,
-/// corrections, and attribution; injected instructions stay data; a new
-/// session answers from the saved memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     if !live() {
@@ -799,7 +761,6 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
         .unwrap();
         tx.commit().await.unwrap();
     }
-    // An explicit owner correction of the dentist appointment.
     let fix = app
         .owner(
             "POST",
@@ -857,7 +818,6 @@ async fn a_synthetic_corpus_is_summarized_faithfully_and_recalled() {
     assert!(saved.valid);
     assert_eq!(saved.published_seq, 6, "the whole corpus is in the view");
 
-    // A new session gets the saved memory and answers from it.
     let (turn, status, text) = ask(
         &app,
         &bot,
@@ -975,9 +935,6 @@ async fn main_bot_creates_a_github_specialist_on_request() {
     assert_eq!(violations, 0);
 }
 
-/// POC-016: with one provider slot, the real main bot routes a subtask to a
-/// newly created bot by name, parks, the child runs through its own
-/// API-managed attempt, and the parent continues with the recorded result.
 #[tokio::test(flavor = "multi_thread")]
 async fn main_bot_delegates_by_name_with_one_provider_slot() {
     if !live() {
@@ -1018,7 +975,6 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
         .await
         .unwrap();
     eprintln!("first attempt status {status} {error:?}: {text}");
-    // The ask helper returns at the first terminal or parked state.
     let final_status = app
         .wait_turn_for(
             &turn,
@@ -1063,7 +1019,6 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
         "the continuation received the result"
     );
     assert_eq!(attempt, 2, "the parent resumed once");
-    // No provider attempt reported a policy violation (native agents etc.).
     let violations: i64 =
         sqlx::query_scalar("SELECT count(*) FROM turns WHERE error_code = 'policy_violation'")
             .fetch_one(&app.db.pool)
@@ -1072,10 +1027,6 @@ async fn main_bot_delegates_by_name_with_one_provider_slot() {
     assert_eq!(violations, 0);
 }
 
-/// POC-018: a host Codex session uses its own guest computer through
-/// else.bot tools: runs a synthetic command, retrieves an artifact, and
-/// operates a local browser page. Needs ELSE_LIVE_CODEX=1, ELSE_LIVE_VM=1,
-/// and the guest image (`docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:1 infra/guest`).
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_uses_its_guest_computer_through_tools() {
     if !live() || std::env::var("ELSE_LIVE_VM").as_deref() != Ok("1") {
@@ -1164,7 +1115,6 @@ async fn codex_uses_its_guest_computer_through_tools() {
             .fetch_all(&app.db.pool)
             .await
             .unwrap();
-    // Cleanup before asserting.
     let name = else_api::computers::ComputerManager::runtime_name(bot_id);
     for args in [
         ["stop", "--force", name.as_str()].as_slice(),

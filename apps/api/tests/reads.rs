@@ -1,6 +1,3 @@
-//! The owner's read position: bot replies become unread, reads persist and
-//! never rewind, and an explicit unread mark survives automatic reads.
-
 mod common;
 
 use std::borrow::Cow;
@@ -22,7 +19,6 @@ async fn mark(app: &TestApp, bot: &str, command: Value) -> common::Reply {
         .await
 }
 
-/// Send `text` with the synthetic provider and wait for the reply to finish.
 async fn reply(app: &TestApp, bot: &str, text: &str) -> String {
     let sent = app.send(bot, Uuid::new_v4(), text, Some("synthetic")).await;
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{:?}", sent.body);
@@ -262,7 +258,6 @@ async fn owner_messages_task_replies_and_failures_are_not_unread_replies() {
     app.wait_turn(&turn, &["failed"]).await;
     assert_eq!(read_state(&app, &bot).await, empty, "no reply was written");
 
-    // A reply in the bot's task conversation belongs to delegated work.
     let bot_id: Uuid = bot.parse().unwrap();
     let (task, task_turn) = (Uuid::new_v4(), Uuid::new_v4());
     sqlx::query("INSERT INTO conversations (id, bot_id, kind) VALUES (?1, ?2, 'task')")
@@ -320,7 +315,6 @@ async fn a_mark_unread_outlasts_automatic_reads_until_marked_read() {
     )
     .await;
     mark(&app, &bot, json!({ "action": "mark_unread" })).await;
-    // A read the client sent before the mark arrives after it.
     let late = mark(
         &app,
         &bot,

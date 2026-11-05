@@ -28,7 +28,6 @@ use crate::grants::{Grant, Tool};
 
 use crate::app::tools::SERVER_NAME;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
-/// Body bytes of one search hit; read the entry for the rest.
 const HIT_BODY: usize = 600;
 const MAX_QUERY: usize = 200;
 const MAX_READ: i64 = 20;
@@ -41,7 +40,6 @@ pub async fn endpoint(
     let Ok(Json(message)) = body else {
         return rpc_error(Value::Null, -32700, "Parse error");
     };
-    // A JSON-RPC 2.0 request or notification, nothing else.
     let valid_version = message["jsonrpc"] == "2.0";
     let method = message["method"].as_str();
     let params_ok = matches!(message.get("params"), None | Some(Value::Object(_)));
@@ -53,7 +51,6 @@ pub async fn endpoint(
     let (Some(method), true, true) = (method, valid_version, params_ok) else {
         return rpc_error(id.unwrap_or(Value::Null), -32600, "Invalid request");
     };
-    // Notifications get no response body.
     let Some(id) = id else {
         return StatusCode::ACCEPTED.into_response();
     };
@@ -215,7 +212,6 @@ fn tool_list() -> Value {
                 "required": ["target_bot_id", "task"],
                 "additionalProperties": false,
             },
-            // It creates work, so it is not read-only; retries are safe.
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
@@ -265,13 +261,10 @@ fn tool_list() -> Value {
     ])
 }
 
-/// A tool-level failure the model can read and act on.
 pub(crate) fn tool_error(message: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": message }], "isError": true })
 }
 
-/// A result with an image (POC-028): the metadata as text, then the PNG as
-/// an MCP image content block, so the model receives pixels.
 pub(crate) fn tool_image(meta: Value, png: &[u8]) -> Value {
     use base64::Engine;
     json!({ "content": [
@@ -285,15 +278,10 @@ pub(crate) fn tool_result(value: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": value.to_string() }] })
 }
 
-/// Bytes of the complete tool result that would carry `value`.
 pub(crate) fn wire_size(value: &Value) -> usize {
     tool_result(value.clone()).to_string().len()
 }
 
-/// Append items built by `make(max_body)` to `result[key]` while the
-/// complete response stays within the budget. Each item may shrink its body
-/// to fit; an item that cannot fit even with an empty body ends the page.
-/// Returns how many items were added.
 fn fill(
     result: &mut Value,
     key: &str,
@@ -314,10 +302,8 @@ fn fill(
             }
             result[key].as_array_mut().unwrap().pop();
             if max == 0 {
-                // Not even its metadata fits: the page ends here.
                 return added;
             }
-            // Each removed body byte removes at least one serialized byte.
             max = max.saturating_sub(size - RESPONSE_BUDGET);
         }
         added += 1;
@@ -325,7 +311,6 @@ fn fill(
     added
 }
 
-/// The bot whose memory is read: the caller's, or a granted target.
 async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, Value> {
     let target = match args.get("bot_id") {
         None | Some(Value::Null) => grant.bot_id,
@@ -345,7 +330,6 @@ async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, V
     }
     match memory::readable(&state.db, grant.bot_id, target).await {
         Ok(true) => Ok(target),
-        // Unknown, deleted, and unshared bots look the same.
         Ok(false) => Err(tool_error(
             "No readable memory for that bot. Use memory_bots.",
         )),
@@ -356,8 +340,6 @@ async fn target(state: &AppState, grant: &Grant, args: &Value) -> Result<Uuid, V
     }
 }
 
-/// The text from `start` (moved back to a character boundary) of at most
-/// `max` bytes, ending on a character boundary, with its normalized start.
 pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
     let mut from = start.min(text.len());
     while !text.is_char_boundary(from) {
@@ -370,7 +352,6 @@ pub(crate) fn slice(text: &str, start: usize, max: usize) -> (usize, &str) {
     (from, &text[from..to])
 }
 
-/// Correction links shown per entry; more are flagged, not listed.
 const MAX_LINKS: usize = 10;
 
 fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Value {
@@ -391,7 +372,6 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
         "body": body,
         "body_bytes": entry.body.len(),
         "offset": from,
-        // Explicit: more text follows; read it with offset = next_offset.
         "truncated": end < entry.body.len(),
         "next_offset": (end < entry.body.len()).then_some(end),
     })
@@ -432,7 +412,6 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
     result
 }
 
-/// Each tool returns its result and, when it ran, a short log line.
 pub(crate) type Outcome = (Value, Option<String>);
 
 async fn bots(state: &AppState, grant: &Grant) -> Outcome {
@@ -502,7 +481,6 @@ async fn search(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let shown = fill(&mut result, "hits", page.hits.len(), HIT_BODY, |i, max| {
         entry_json(bot_id, &page.hits[i], 0, max.min(HIT_BODY))
     });
-    // Hits left out by the byte budget come on the next page.
     let next = if shown < page.hits.len() {
         Some(offset + shown as i64)
     } else {
@@ -568,7 +546,6 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         RESPONSE_BUDGET,
         |i, max| entry_json(bot_id, &rows[i], offset as usize, max),
     );
-    // Entries the budget left out are read from here.
     if shown < rows.len() {
         result["next_start_seq"] = json!(rows[shown].seq);
     }
@@ -584,8 +561,6 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     (tool_result(result), Some(log))
 }
 
-/// Log the call to the calling bot's memory. Failure to log does not fail
-/// the call, which only read.
 async fn record(state: &AppState, grant: &Grant, name: &str, args: &Value, log: &str) {
     let key = format!("tool:{}:{}", grant.turn_id, Uuid::new_v4());
     let body = format!("{name} {args} -> {log}");
@@ -659,7 +634,6 @@ async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         "valid": saved.valid,
         "length": saved.length,
         "covered": covered,
-        // Entries not yet in the view: read or search them as originals.
         "pending": pending,
         "blocked": blocked,
         "compacting": saved.compacting,
@@ -693,8 +667,6 @@ async fn view(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     (tool_result(result), Some(log))
 }
 
-/// A node's text within `max` bytes. Cut text says so, with its full size
-/// and where the rest is: the halves (zoom) or the original (read).
 fn text_fields(item: &mut Value, node: NodeId, body: &str, max: usize) {
     let text = slice(body, 0, max).1;
     item["text"] = json!(text);
@@ -769,7 +741,6 @@ async fn zoom(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                         text_fields(&mut item, *child, body, max);
                         item
                     }
-                    // Not built yet: zoom further down or read the originals.
                     None => json!({ "start_seq": child.start, "span": child.span, "built": false }),
                 }
             });
@@ -831,7 +802,6 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     };
     match delegations::create(&state.db, grant.turn_id, target, task).await {
         Ok(accepted) if !matches!(accepted.status.as_str(), "queued" | "running") => {
-            // A retry of a child that already ended: its recorded outcome.
             let log = format!("already {} {}", accepted.status, accepted.delegation_id);
             let result = json!({
                 "status": accepted.status,
@@ -843,7 +813,6 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             (tool_result(result), Some(log))
         }
         Ok(accepted) => {
-            // This attempt must now end; the API refuses its further calls.
             state.scheduler.grants().park(grant.turn_id).await;
             state.scheduler.wake();
             let log = format!(

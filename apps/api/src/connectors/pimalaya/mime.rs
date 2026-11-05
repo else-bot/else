@@ -51,7 +51,6 @@ pub(super) fn reply(
     ))
 }
 
-/// The headers that place an answer in `parsed`'s thread.
 pub(super) fn thread(parsed: &mail_parser::Message<'_>) -> ThreadHeaders {
     let id = parsed
         .message_id()

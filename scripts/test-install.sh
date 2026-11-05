@@ -1,27 +1,4 @@
 #!/usr/bin/env bash
-# Install and update else.bot in fresh distribution containers, as an
-# unprivileged user with sudo, the way a person would: `curl … | bash`.
-# Nothing touches this host's installation.
-#
-#   scripts/test-install.sh [DISTRO...]
-#
-# DISTRO: debian-12, debian-13, ubuntu-24.04, ubuntu-26.04, arch (default: all)
-#
-# Releases come from a throwaway git repository built from the working tree:
-# v0.0.1 is the tree as it is, v0.0.2 bumps the version and adds a no-op
-# migration (so the update backs up first). Each container installs v0.0.1
-# through a pipe, checks the layout and the running API, is refused an update
-# while a bot works (which keeps working, and work is accepted again),
-# updates to v0.0.2 once idle (history kept, new messages answered), and
-# runs the installer once more,
-# which changes nothing. SQLite is bundled; containers
-# have no systemd, Docker daemon, or KVM, so the API runs as a managed
-# process and there is no guest image or bot computer.
-#
-# The Rust toolchain and build caches stay in Docker volumes owned by this
-# checkout (else-install-<checkout>-*), and one run at a time uses them.
-# Other checkouts have their own. Remove them all with:
-#   docker volume rm $(docker volume ls -q -f name=else-install-)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -59,12 +36,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# --- Releases v0.0.1 and v0.0.2 from the working tree ------------------------
 
 echo "== releases v0.0.1 and v0.0.2 from the working tree"
 mkdir -p "$work/tree"
-# Tracked and unignored files as they are in the working tree: no .env,
-# credentials, build output, or git metadata.
 git ls-files -z -c -o --exclude-standard |
 	while IFS= read -r -d '' f; do if [ -e "$f" ] || [ -L "$f" ]; then printf '%s\0' "$f"; fi; done |
 	tar --null -T - -cf - | tar -C "$work/tree" -xf -
@@ -88,7 +62,6 @@ git ls-files -z -c -o --exclude-standard |
 git clone -q --bare "$work/tree" "$work/repo.git"
 chmod -R a+rX "$work"
 
-# --- The scenario, inside each container -------------------------------------
 
 cat >"$work/prepare.sh" <<'EOF'
 set -eu
@@ -204,7 +177,6 @@ echo "ALL CHECKS PASSED"
 EOF
 chmod 644 "$work"/*.sh
 
-# --- Run ---------------------------------------------------------------------
 
 docker network create "$network" >/dev/null
 results=()
@@ -215,8 +187,6 @@ for distro in "${DISTROS[@]}"; do
     containers+=("$box")
     echo "== $distro ($image) -> $log"
     started=$(date +%s)
-	# In the background and waited for: an interrupt then reaches the trap
-	# at once, which removes the containers.
 	timeout 3600 docker run --rm --name "$box" --network "$network" --platform linux/amd64 \
 		-v "$work/tree:/src:ro" -v "$work/repo.git:/repo.git:ro" -v "$work:/harness:ro" \
 		-v "else-install-$checkout-toolchain:/home/tester/.else/toolchain" \

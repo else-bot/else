@@ -1,6 +1,4 @@
 #!/bin/sh
-# Report this computer's installed tools and their versions as JSON, for the
-# bot to discover what it can use (POC-025). Read-only and quick.
 v() { "$@" 2>/dev/null | head -n 1 | tr -d '\r'; }
 jq -n \
   --argjson image "$(cat /etc/elsebot/image.json 2>/dev/null || echo null)" \

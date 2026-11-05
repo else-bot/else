@@ -1,6 +1,3 @@
-//! The welcome screen's one step: name the main bot and choose its
-//! provider and model, which also become the defaults new bots start with.
-
 use std::sync::Arc;
 
 use axum::extract::State;

@@ -20,7 +20,7 @@ rendering behavior.
 ## Launch
 
 Run from the repository root with Python 3.11+ and the native Rust toolchain.
-Build prerequisites are in [the development guide](../../../docs/development.md).
+Build prerequisites are in [the development guide](../../../CONTRIBUTING.md).
 For the Linux omabox backend, read the installed omabox skill first.
 SQLite is bundled. The macOS fast pass needs no Docker or provider account.
 
@@ -62,7 +62,7 @@ python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64 --compile-live
 This reuses the journeys on macOS and native Ubuntu arm64 in Docker, adds
 the workspace tests, doctests, private S3 fixture, and real install/update
 scenario, and preserves each platform's logs under its evidence directory.
-`--suite verification` selects journeys and Python runner checks only.
+`--suite verification` selects the public API journeys.
 Live provider gates remain disabled even with `--compile-live`.
 On Linux arm64, select `ubuntu-arm64` alone. Docker must be native arm64.
 Some existing tests internally skip when a provider or executable is
@@ -87,7 +87,7 @@ does not expose provider logins or the rest of the Cargo home.
 On Linux with omabox, for an interactive GUI session without these verification probes,
 `scripts/dev.py run` starts the API and desktop in a new isolated box and
 prints the exact box, window address, and commands; Ctrl-C saves its evidence
-and removes the box. See [the development guide](../../../docs/development.md#test-the-desktop-in-a-private-box).
+and removes the box. See [the development guide](../../../CONTRIBUTING.md#run-a-development-session).
 
 For macOS desktop automation, follow [the Lume workflow](lume.md). Each
 invocation clones a stopped base into a private VM, including when several
@@ -247,20 +247,5 @@ API helper modes are in executable [verify.py](verify.py). Run `--help` for
 the flags. The API helper uses only the Python standard library. The separate
 [Lume helper](lume.py) uses a private Python environment with a pinned guest
 shell client, as described in [the Lume workflow](lume.md).
-After changing the runner, run its executable [failure-path checks](test_verify.py)
-before the public journeys. On macOS or inside an owned Linux container:
-
-```sh
-python3 .agents/skills/verify-else/test_verify.py
-```
-
-With omabox:
-
-```sh
-omabox run -b BOX -- python3 .agents/skills/verify-else/test_verify.py
-```
-
-They verify child reaping on timeout, failure exit codes despite success-like
-output, retained failure evidence, and removal of inherited live configuration.
 Use `/maintain-verification-skill` after app behavior or entry points change
 to reconcile the feature map with the implementation.

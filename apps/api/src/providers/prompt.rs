@@ -362,7 +362,6 @@ pub fn outcomes_block(input: &TurnInput) -> String {
     text
 }
 
-/// Which requested secrets the owner stored or declined: names only.
 fn secrets_block(input: &TurnInput) -> String {
     if input.secrets.is_empty() {
         return String::new();
@@ -385,8 +384,6 @@ fn secrets_block(input: &TurnInput) -> String {
     text
 }
 
-/// The owner's choices on the cards this request showed: the one form of
-/// approval that counts, each bound to the question or action it answered.
 fn questions_block(input: &TurnInput) -> String {
     if input.questions.is_empty() {
         return String::new();
@@ -604,7 +601,6 @@ pub fn file_reference(file: &Attachment) -> String {
     )
 }
 
-/// Message text with each file named by its staged copy.
 fn parts_text(text: &str, parts: &[MessagePart]) -> String {
     if parts.is_empty() {
         return text.to_owned();
@@ -639,9 +635,6 @@ fn render(entry: &HistoryEntry) -> String {
         "status" => "Delegated task (another bot's request, not an owner message)",
         _ => "Assistant",
     };
-    // A turn that did not complete is marked on its request and its reply
-    // (there may be no reply at all): an uncertain request may already have
-    // had its effect, and nothing in either is retried by itself.
     let status = match entry.status.as_str() {
         "completed" | "" => String::new(),
         other => format!(", {other}"),
@@ -653,8 +646,6 @@ fn render(entry: &HistoryEntry) -> String {
     )
 }
 
-/// What this turn asks, in order: the owner's message with its files, or
-/// a routine run's framed task.
 fn request_segments(input: &TurnInput) -> Vec<Segment<'_>> {
     if input.routine.is_some() || input.parts.is_empty() {
         return vec![Segment::Text(request_text(input))];
@@ -730,8 +721,6 @@ fn content_with_selection(
         .and_then(|h| h.checkpoint.as_ref())
         .map_or(0, String::len);
     let budget = HISTORY_BUDGET.saturating_sub(checkpoint_len);
-    // The first owner message anchors the conversation; it is charged
-    // against the budget first (if it fits at all).
     let first = missed
         .iter()
         .position(|entry| entry.kind == "user")
@@ -841,7 +830,6 @@ pub fn jobs_block(jobs: &[JobReceipt]) -> String {
 /// history (no owner follow-up is included).
 pub fn checkpoint_prompt(input: &TurnInput, budget: usize) -> String {
     let mut history = String::new();
-    // Newest first until the budget; whole items only.
     let mut lines: Vec<String> = Vec::new();
     let mut used = 0;
     for entry in input.history.iter().rev() {
@@ -907,8 +895,6 @@ pub fn turn_content<'a>(
     let (mut segments, selection) = content_with_selection(input, considered);
     let outcomes = outcomes_block(input);
     if !outcomes.is_empty() {
-        // A continuation: the owner's message was already given to a
-        // session that is resumed; otherwise it follows the results.
         if considered >= input.turn_no {
             segments = vec![Segment::Text(format!(
                 "{outcomes}Continue the owner's request with these results."

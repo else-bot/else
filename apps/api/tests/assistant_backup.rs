@@ -1,6 +1,3 @@
-//! POC-022: coordinated assistant backups with a fake computer runtime
-//! (the live check with real VMs is in `computers_live.rs`).
-
 mod common;
 
 use std::collections::HashMap;
@@ -27,16 +24,13 @@ use uuid::Uuid;
 
 #[derive(Default)]
 struct Fake {
-    /// name -> (state, disk contents)
     computers: Mutex<HashMap<String, (RuntimeState, String)>>,
     starts: AtomicUsize,
     execs: Mutex<Vec<String>>,
     fail_export: AtomicBool,
     restored: Mutex<Vec<Spec>>,
-    /// name -> the mounts it was created or restored with
     mounts: Mutex<HashMap<String, Vec<Mount>>>,
     checkpoint_fails: AtomicBool,
-    /// Restore boots the computer, then fails.
     restore_fails_running: AtomicBool,
     stop_fails: AtomicBool,
 }
@@ -195,7 +189,6 @@ async fn setup() -> Setup {
     setup_with(false).await
 }
 
-/// With `projects`, computers are created with their bot's project mount.
 async fn setup_with(projects: bool) -> Setup {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -253,7 +246,6 @@ async fn chat(app: &TestApp, bot: &str, text: &str) {
     app.wait_turn(&turn, &["completed"]).await;
 }
 
-/// A database dropped when the test ends.
 struct Target {
     name: String,
     params: DatabaseParams,
@@ -300,7 +292,6 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
     let (a_id, b_id): (Uuid, Uuid) = (a.parse().unwrap(), b.parse().unwrap());
     chat(&s.app, &a, "Alpha's chat").await;
     chat(&s.app, &b, "Beta's chat").await;
-    // A: used and left running, idle. B: used, then stopped by the owner.
     for (bot, disk) in [
         (a_id, "alpha files + browser profile"),
         (b_id, "beta files"),
@@ -347,15 +338,12 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         3,
         "database and two disk archives"
     );
-    // The stopped computer was never woken; the running one was stopped
-    // through the normal stop, which checkpoints the desktop browser.
     assert_eq!(
         s.fake.starts.load(SeqCst),
         starts,
         "no start for the backup"
     );
     let execs = s.fake.execs.lock().unwrap()[checkpoints_before..].to_vec();
-    // A verified checkpoint, then the one the normal stop runs.
     assert!(
         !execs.is_empty() && execs.iter().all(|e| e == "/usr/local/bin/else-checkpoint"),
         "{execs:?}"
@@ -366,7 +354,6 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
             .await
             .unwrap();
     assert!(observed.iter().all(|o| o == "stopped"));
-    // Nothing in the set is plaintext: the archives are sealed.
     for artifact in &manifest.artifacts {
         let bytes = std::fs::read(summary.path.join(&artifact.object)).unwrap();
         assert!(bytes.starts_with(b"age-encryption.org/v1"));
@@ -379,7 +366,6 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
             .ends_with(".msb"))
     );
 
-    // Restore with the original runtime gone: a new runtime and directory.
     let fresh = Arc::new(Fake::default());
     let new_dir = s.dir.path().join("restored-installation");
     std::fs::create_dir(&new_dir).unwrap();
@@ -451,7 +437,6 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
     let a = s.app.create_bot("Alpha").await;
     let a_id: Uuid = a.parse().unwrap();
     let backups = s.dir.path().join("backups");
-    // A turn that does not finish within the drain time defers the set.
     let reply = s
         .app
         .send(
@@ -479,7 +464,6 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
         .await;
     s.app.wait_turn(&hung, &["interrupted"]).await;
 
-    // A held computer (an open desktop or a background job) defers too.
     let Acquire::Ready { lease_id, .. } = s.manager.acquire(a_id, "desktop:x").await.unwrap()
     else {
         panic!()
@@ -491,7 +475,6 @@ async fn live_work_defers_the_set_and_a_failed_component_publishes_nothing() {
     );
     s.manager.release(lease_id).await.unwrap();
 
-    // A failed disk export: no completed set, staging removed.
     s.fake.fail_export.store(true, SeqCst);
     let result = worker(&s, Duration::from_secs(2)).run_once().await;
     assert!(
@@ -602,8 +585,6 @@ async fn retention_keeps_every_artifact_a_kept_set_needs() {
     let first = w.run_once().await.unwrap();
     let second = w.run_once().await.unwrap();
     assert!(!first.path.exists(), "the older set is removed whole");
-    // Sets are standalone: the kept one has every artifact it names and
-    // opens with its own manifest.
     let (_, manifest, _) = else_api::backup::restore::open_set(&second.path, &key()).unwrap();
     for artifact in &manifest.artifacts {
         let meta = std::fs::metadata(second.path.join(&artifact.object)).unwrap();
@@ -630,7 +611,6 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
     let s = setup().await;
     let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     let name = used(&s, a).await;
-    // A failed checkpoint defers the set: the computer keeps running.
     s.fake.checkpoint_fails.store(true, SeqCst);
     let result = worker(&s, Duration::from_secs(2)).run_once().await;
     assert!(
@@ -642,7 +622,6 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
         Some(RuntimeState::Running)
     );
     s.fake.checkpoint_fails.store(false, SeqCst);
-    // A paused desktop is resumed for its checkpoint, then captured.
     s.fake.set(&name, RuntimeState::Paused).unwrap();
     sqlx::query("UPDATE bot_computers SET observed_state = 'paused' WHERE bot_id = ?1")
         .bind(a)
@@ -667,7 +646,6 @@ async fn browser_checkpoints_and_desktop_secrets_are_required() {
         Some("ok")
     );
     assert!(set.manifest.coverage.whole_assistant);
-    // A missing desktop password fails the capture.
     std::fs::remove_file(s.manager.desktop_password_file(a)).unwrap();
     let result = worker(&s, Duration::from_secs(2)).run_once().await;
     assert!(
@@ -681,7 +659,6 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
     let s = setup().await;
     let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
     used(&s, a).await;
-    // A file the bot fetched to the host, registered with its hash.
     let id = Uuid::new_v4();
     let store = s.dir.path().join("state/artifacts").join(a.to_string());
     std::fs::create_dir_all(&store).unwrap();
@@ -707,7 +684,6 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
             .iter()
             .any(|x| x.object == format!("file-{id}.age"))
     );
-    // Restored into the new installation's artifact store.
     let fresh = Arc::new(Fake::default());
     let new_dir = s.dir.path().join("new");
     std::fs::create_dir(&new_dir).unwrap();
@@ -730,8 +706,6 @@ async fn host_artifacts_are_captured_and_a_partial_set_never_replaces_a_whole_on
         std::fs::read(new_dir.join(format!("artifacts/{a}/{id}"))).unwrap(),
         b"REPORT-BYTES"
     );
-    // The file disappears from the host: the next set is partial, and with
-    // keep 1 it does not delete the whole-assistant set.
     std::fs::remove_file(store.join(id.to_string())).unwrap();
     let partial = w.run_once().await.unwrap();
     assert!(!partial.manifest.coverage.whole_assistant);
@@ -795,9 +769,6 @@ async fn a_failed_restore_stops_what_it_started_or_keeps_the_installation() {
     }
 }
 
-/// Each bot's project directory is sealed into the set at the checkpoint
-/// and restored into the new installation's `projects/`, and a computer
-/// created with the project mount is restored bound to the restored copy.
 #[tokio::test(flavor = "multi_thread")]
 async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     let s = setup_with(true).await;
@@ -806,7 +777,6 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     let b = s.app.create_bot("Beta").await;
     let (a_id, b_id): (Uuid, Uuid) = (a.parse().unwrap(), b.parse().unwrap());
     chat(&s.app, &a, "Alpha's chat").await;
-    // Alpha's computer is created with the mount (and its project).
     let Acquire::Ready {
         lease_id,
         runtime_name,
@@ -822,7 +792,6 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     std::fs::write(pa.join("notes.md"), "alpha notes").unwrap();
     std::fs::write(pa.join("sub/data.csv"), "a,b\n").unwrap();
     std::os::unix::fs::symlink("sub/data.csv", pa.join("latest")).unwrap();
-    // Beta never used a computer but keeps files in its project.
     let pb = bots.join(b_id.to_string());
     std::fs::create_dir_all(&pb).unwrap();
     std::fs::write(pb.join("sheet.csv"), "item,qty\n").unwrap();

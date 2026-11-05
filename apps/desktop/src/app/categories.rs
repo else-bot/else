@@ -1,5 +1,3 @@
-//! Category forms, assignment, and move dialogs.
-
 use super::delete_dialog::DeleteTarget;
 use super::{Connection, ElseApp};
 use crate::api::{Bot, Category};
@@ -20,7 +18,6 @@ mod form;
 
 pub(super) use form::CategoryFormHolder;
 
-/// The Move dialog's pending choice for one bot.
 struct MoveHolder {
     bot: Uuid,
     current: Option<Uuid>,
@@ -28,8 +25,6 @@ struct MoveHolder {
 }
 
 impl ElseApp {
-    // ----- Categories (POC-031) ---------------------------------------------
-
     pub(super) fn movable_bot(&self, bot: Uuid) -> Option<&Bot> {
         if self.connection != Connection::Connected || self.moving.contains(&bot) {
             return None;
@@ -44,9 +39,6 @@ impl ElseApp {
         })
     }
 
-    /// Assign (or with `None` unassign) a bot. One move per bot at a time.
-    /// The list itself changes only from the server's `bots` snapshots (the
-    /// one ordered source), never from this response or an extra fetch.
     pub(super) fn assign_category(
         &mut self,
         bot: Uuid,
@@ -74,7 +66,6 @@ impl ElseApp {
         .detach();
     }
 
-    /// Rename and Delete for a category's right-click menu.
     pub(super) fn category_menu(
         owner: WeakEntity<Self>,
         category: &Category,
@@ -141,9 +132,6 @@ impl ElseApp {
         cx.spawn_in(window, async move |this, cx| {
             let result = client.delete_category(id).await;
             let _ = this.update_in(cx, |app, _, cx| {
-                // The `bots` snapshot shows the result; a failure is shown
-                // in the sidebar, where it is visible with or without a
-                // selected bot.
                 app.category_notice = match result {
                     Ok(()) => None,
                     Err(err) => Some(format!("Deleting the category failed: {err}")),
@@ -154,8 +142,6 @@ impl ElseApp {
         .detach();
     }
 
-    /// Move the selected bot: a radio group of every category and
-    /// Unassigned (Tab and Space, or a click, choose; Enter or Move applies).
     pub(super) fn open_move_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected.and_then(|id| self.movable_bot(id)).cloned() else {
             return;

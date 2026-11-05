@@ -126,7 +126,7 @@ pub trait ComputerRuntime: Send + Sync {
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
     /// Export a stopped computer's disk, with its image, to a standalone
-    /// archive at `archive` (POC-022). The computer is not started.
+    /// archive at `archive`. The computer is not started.
     async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
         let _ = (name, archive);
         Err(RuntimeError::Unavailable(
@@ -175,7 +175,6 @@ pub struct Msb {
 }
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
-/// Snapshot capture, export, import, and restore of large disks.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The network policy for a restored computer. `msb snapshot restore` does
@@ -227,8 +226,6 @@ impl Msb {
             })
             .ok_or_else(|| RuntimeError::Unavailable("msb was not found".into()))?;
         let program = std::fs::canonicalize(&program).unwrap_or(program);
-        // Only the verified runtime is used; another version needs an
-        // explicit, checked opt-in.
         let version = std::process::Command::new(&program)
             .arg("--version")
             .output()
@@ -335,8 +332,6 @@ impl Msb {
                 });
             }
         }
-        // Keep at most OUTPUT_LIMIT bytes of each stream; keep reading (and
-        // dropping) the rest so the child never blocks on a full pipe.
         async fn capture(mut stream: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, bool) {
             let mut kept = Vec::new();
             let mut truncated = false;
@@ -422,7 +417,6 @@ pub fn parse_state(status: &str) -> RuntimeState {
     }
 }
 
-/// `SOURCE:DEST:uid=N,gid=N` for `--mount-dir` and `-v`.
 fn mount_arg(mount: &Mount, operation: &str) -> Result<String, RuntimeError> {
     // A colon in the host path would shift the fields.
     let host = mount
@@ -440,7 +434,6 @@ fn mount_arg(mount: &Mount, operation: &str) -> Result<String, RuntimeError> {
     Ok(format!("{host}:{guest}:uid={uid},gid={uid}"))
 }
 
-/// The bind mounts in `msb inspect --format json`.
 fn inspected_mounts(json: &str) -> Option<Vec<Mount>> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let mounts = value["config"]["mounts"].as_array()?;
@@ -518,7 +511,6 @@ impl ComputerRuntime for Msb {
             args.push("--mount-dir".into());
             args.push(mount_arg(mount, "create")?);
         }
-        // `--` keeps the image a positional argument, never an option.
         args.push("--".into());
         args.push(spec.image.clone());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -542,8 +534,6 @@ impl ComputerRuntime for Msb {
     }
 
     async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
-        // A disk snapshot of the stopped computer, verified, exported with
-        // its image so it boots without this runtime, then removed here.
         let snapshot = format!("backup-{}", uuid::Uuid::new_v4().simple());
         let member = format!("{name}:{snapshot}");
         self.run_checked(

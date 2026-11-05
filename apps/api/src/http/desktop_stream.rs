@@ -60,22 +60,16 @@ const IDLE_LIMIT: Duration = Duration::from_secs(60);
 const WRITE_LIMIT: Duration = Duration::from_secs(30);
 const CLOSE_LIMIT: Duration = Duration::from_secs(2);
 const MAX_HELD_KEYS: usize = 32;
-/// Connecting to the guest (TCP, WebSocket, and RFB handshake).
 const CONNECT_LIMIT: Duration = Duration::from_secs(10);
-/// One write to a guest connection; a stuck guest ends the stream.
 const GUEST_WRITE_LIMIT: Duration = Duration::from_secs(5);
 const STOPPING: &str = "else.bot is stopping; reconnect in a moment.";
 
-/// The API's open streams. Upgraded connections outlive axum's graceful
-/// shutdown, so the API stops them here before the runtime is dropped.
 #[derive(Default)]
 pub(crate) struct Streams {
     stop: CancellationToken,
     tasks: TaskTracker,
 }
 
-/// A stream counted by [`Streams`] from its upgrade request until it has
-/// released everything.
 struct Admission {
     stop: CancellationToken,
     _tracked: TaskTrackerToken,
@@ -83,8 +77,6 @@ struct Admission {
 
 impl Streams {
     fn admit(&self) -> Option<Admission> {
-        // Taken before the check: both touch the tracker's one atomic, so
-        // either `stop` sees this token or this sees the tracker closed.
         let tracked = self.tasks.token();
         (!self.tasks.is_closed()).then(|| Admission {
             stop: self.stop.clone(),
@@ -92,8 +84,6 @@ impl Streams {
         })
     }
 
-    /// Refuse new streams and end open ones now; the future resolves once
-    /// every stream has released its input, control, and lease.
     pub(crate) fn stop(&self) -> TaskTrackerWaitFuture<'_> {
         self.stop.cancel();
         self.tasks.close();
@@ -143,7 +133,6 @@ pub(super) async fn stream(
         .on_upgrade(move |socket| session(computers, db, bot_id, params, socket, admission)))
 }
 
-/// Why a stream ended, sent to the client before the close.
 struct End {
     code: &'static str,
     message: String,
@@ -236,8 +225,6 @@ async fn session(
     writer.abort();
 }
 
-/// Release a lease an abandoned `viewer` or control admission may have
-/// taken for `holder`.
 async fn release_abandoned(computers: &ComputerManager, db: &sqlx::SqlitePool, holder: &str) {
     let leases = async {
         // A cancelled SQLite COMMIT may still run on its worker. Take the
@@ -350,21 +337,14 @@ struct Session {
     out: mpsc::Sender<Message>,
     frame_queued: Arc<AtomicBool>,
     mode: Mode,
-    /// The `desktop-control:` lease that bot input batches and browser
-    /// actions defer to while this stream controls.
     control_lease: Option<Uuid>,
-    /// Whether the image has the view-only server; known after the first
-    /// watch connection.
     watch_server: Option<bool>,
     view: Option<View>,
     control: Option<Control>,
     fb: Framebuffer,
     sent_size: Option<(u16, u16)>,
-    /// Pixels changed since the last encoded frame.
     dirty: bool,
-    /// An update request is outstanding.
     requested: bool,
-    /// The next request asks for the whole screen.
     full: bool,
     encoding: Option<JoinHandle<Vec<u8>>>,
     held_keys: BTreeSet<u32>,
@@ -419,8 +399,6 @@ impl Session {
         }
     }
 
-    /// The viewer lease's state, unless the API stops first. Dropping the
-    /// check is safe: it reads, and a renewal only extends a live lease.
     async fn lease_state(&self, renew: bool) -> Option<Result<ViewerLease, String>> {
         self.stop
             .run_until_cancelled(self.computers.viewer_lease(self.target.lease_id, renew))
@@ -648,7 +626,6 @@ impl Session {
     async fn enter_control(&mut self) -> Option<End> {
         let claim = self.computers.claim_control(self.bot, self.stream_id);
         let Some(claimed) = self.stop.run_until_cancelled(claim).await else {
-            // An accepted claim still lands; `shutdown` ends it after.
             return end("server_stopping", STOPPING);
         };
         if !claimed {
@@ -851,7 +828,6 @@ impl Session {
             return None;
         }
         let request = viewer::update_request(!self.full, self.fb.width, self.fb.height);
-        // A cut request is safe: a stopping stream closes this view.
         let written = write_guest(&mut view.writer, &request);
         match self.stop.run_until_cancelled(written).await {
             None => return end("server_stopping", STOPPING),
@@ -872,9 +848,6 @@ impl Session {
         self.frame_request().await
     }
 
-    /// Release held input, then control, then the view. Control writes
-    /// finish rather than being cut, so the guest never sees a partial
-    /// message; the database waits follow the release.
     async fn shutdown(&mut self) {
         self.leave_control().await;
         if let Some(view) = self.view.take() {
@@ -934,7 +907,6 @@ async fn encoded(task: &mut Option<JoinHandle<Vec<u8>>>) -> Option<Vec<u8>> {
     png
 }
 
-/// Abandoned when the API stops: a half-open connection carries no input.
 async fn connect(
     target: &ViewerTarget,
     to: Target,

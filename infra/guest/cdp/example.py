@@ -1,4 +1,4 @@
-"""Example: search a page in the visible browser from Python (POC-027).
+"""Example: search a page in the visible browser from Python.
 
 python3 /usr/local/lib/elsebot/cdp/example.py URL QUERY
 """
@@ -15,7 +15,6 @@ with elsecdp.connect() as browser:
     try:
         page.click("button[type=submit]")
     except elsecdp.Uncertain as e:
-        # Do not click again blindly: look at the page first.
         print("the click may or may not have happened:", e, file=sys.stderr)
         raise
     page.wait_for("document.querySelector('#results')", timeout=10)

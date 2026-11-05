@@ -1,5 +1,4 @@
-//! The single JSON error shape returned by every route.
-#![allow(dead_code)] // Constructors are used as product routes are added.
+#![allow(dead_code)]
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -172,7 +171,6 @@ impl From<axum::extract::rejection::PathRejection> for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
-        // Database messages can describe schema details; keep them in logs.
         match err {
             sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) | sqlx::Error::PoolClosed => {
                 tracing::warn!(error = %err, "database unavailable");

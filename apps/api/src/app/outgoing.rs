@@ -1,8 +1,3 @@
-//! Outgoing drafts a bot proposes and the owner approves (see
-//! docs/decisions/0003-outgoing-drafts.md): the typed content of each
-//! channel, the shared lifecycle states, and parsing of the bot's and the
-//! owner's input.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;

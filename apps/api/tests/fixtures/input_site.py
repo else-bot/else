@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A local web fixture for else.bot's visual input tests (POC-029). Stdlib only.
+"""A local web fixture for else.bot's visual input tests. Stdlib only.
 
 /                 one button at (X, Y); clicking it reveals a text box that
                   asks for WORD; Enter submits to /done (the layout is fixed

@@ -31,7 +31,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-/// `Some(true)` active, `Some(false)` deleted, `None` unknown.
 async fn bot_state(state: &AppState, bot_id: Uuid) -> Result<Option<bool>, ApiError> {
     Ok(
         sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
@@ -268,14 +267,10 @@ struct RecipeBody {
     context_low: Option<usize>,
 }
 
-/// Change the budgets for generations created from now on. Existing
-/// generations keep theirs; apply to a bot with an explicit rebuild.
 async fn set_recipe(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<RecipeBody>,
 ) -> Result<Json<Value>, ApiError> {
-    // The compaction view defaults to 16,000/32,000 bytes, scaled down to
-    // fit a smaller main view but never below one node.
     let context_low = body
         .context_low
         .unwrap_or_else(|| body.node_bytes.max(16_000.min(body.view_low / 2)));

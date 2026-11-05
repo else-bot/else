@@ -1,6 +1,3 @@
-//! POC-005: durable messages, scheduling, the synthetic adapter, and saved
-//! provider profiles, through the real routes and SQLite.
-
 mod common;
 
 use std::sync::Arc;
@@ -44,7 +41,6 @@ async fn send_retry_and_conflict_create_one_message() {
     assert_eq!(first.body["turn"]["status"], "queued");
     assert_eq!(first.body["turn"]["provider_id"], "synthetic");
 
-    // Double submission and a lost response yield the same message.
     let retry = app
         .send(&bot, request, "Hello there", Some("synthetic"))
         .await;
@@ -52,7 +48,6 @@ async fn send_retry_and_conflict_create_one_message() {
     assert_eq!(retry.body["item"]["id"], first.body["item"]["id"]);
     assert_eq!(retry.body["turn"]["id"], first.body["turn"]["id"]);
 
-    // Reuse with different text or provider fails without another message.
     for (text, provider) in [
         ("Changed", Some("synthetic")),
         ("Hello there", Some("codex")),
@@ -184,7 +179,6 @@ async fn bots_keep_separate_histories_and_order() {
             .map(|(_, kind, text)| format!("{kind}:{text}"))
             .collect()
     };
-    // Each reply belongs to its own turn and its own bot.
     let a_history = texts(items(&app, &a).await);
     assert_eq!(a_history.len(), 6);
     let a_users: Vec<_> = a_history
@@ -412,7 +406,6 @@ async fn different_bots_run_concurrently_within_the_global_limit() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(counts, (2, 1));
-    // The limit holds over time, not just at one sample.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE status = 'queued'")
         .fetch_one(&app.db.pool)
@@ -472,7 +465,6 @@ async fn failures_are_terminal_outcomes_with_partial_text() {
 async fn failed_acceptance_publishes_nothing() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
-    // Fail the owner-item insert after the turn row was written.
     sqlx::raw_sql(
         "CREATE TRIGGER fail_item BEFORE INSERT ON items WHEN NEW.text = 'trigger-failure' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
     )
@@ -555,7 +547,6 @@ async fn profiles_validate_snapshot_and_survive_restart() {
         })
     );
 
-    // Hold the bot busy so the next message stays queued across the update.
     let busy = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -566,7 +557,6 @@ async fn profiles_validate_snapshot_and_survive_restart() {
         .await;
     assert_eq!(queued.body["turn"]["profile_revision"], 1);
 
-    // Unsupported values are rejected without changing the profile.
     for body in [
         json!({ "model": "gpt-4" }),
         json!({ "service_tier": "turbo" }),
@@ -655,8 +645,6 @@ async fn capabilities_list_providers_and_limits() {
     assert_eq!(ids, vec!["synthetic", "codex"]);
     assert_eq!(caps.body["providers"][0]["label"], "Synthetic (test)");
     assert_eq!(caps.body["limits"]["max_text_bytes"], 32768);
-    // The owner picks each bot's model: the defaults and each provider's
-    // exact values are offered.
     assert_eq!(caps.body["defaults"]["provider_id"], "codex");
     assert_eq!(caps.body["defaults"]["model"], "gpt-6.1-sol");
     assert_eq!(caps.body["providers"][1]["cli_available"], true);
@@ -676,7 +664,6 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .send(&bot, Uuid::new_v4(), "after restart", Some("synthetic"))
         .await;
     let waiting_id = waiting.body["turn"]["id"].as_str().unwrap().to_owned();
-    // Simulate a crash: the process vanishes without recording outcomes.
     sqlx::query("UPDATE turns SET status = 'running' WHERE id = ?1")
         .bind(hang_id.parse::<Uuid>().unwrap())
         .execute(&app.db.pool)
@@ -684,10 +671,7 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
         .unwrap();
     let pool = app.db.pool.clone();
     let db = app.db.clone();
-    // Abandon the old scheduler's in-memory state, then reconcile as startup does.
     drop(app);
-    // Let the old scheduler finish draining (the hang takes 200 ms to stop)
-    // before simulating that the crash left the row running.
     let id = hang_id.parse::<Uuid>().unwrap();
     for _ in 0..200 {
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
@@ -727,7 +711,6 @@ async fn restart_requeues_undelivered_and_marks_delivered_uncertain() {
 async fn transient_text_write_failure_keeps_the_text() {
     let app = TestApp::installed().await;
     let bot = app.main_bot().await;
-    // Hold an injected write fault until the first assistant insert is attempted.
     sqlx::raw_sql("CREATE TRIGGER fail_assistant_once BEFORE INSERT ON items WHEN NEW.kind = 'assistant' BEGIN SELECT RAISE(ABORT, 'transient'); END;")
         .execute(&app.db.pool).await.unwrap();
     let pool = app.db.pool.clone();
@@ -795,7 +778,6 @@ async fn retry_succeeds_after_provider_removed_and_patch_needs_adapter() {
         .await;
     let db = app.db.clone();
     drop(app);
-    // Restart with no providers enabled, like the production default.
     let app = TestApp::with_registry(db, 4, else_api::providers::Registry::new(vec![]));
     let retry = app
         .send(&bot, request, "before removal", Some("synthetic"))

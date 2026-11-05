@@ -1,6 +1,3 @@
-//! POC-021: encrypted database backups and non-destructive restore, against
-//! private SQLite files, with encrypted snapshots and no external tools.
-
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -18,7 +15,6 @@ use serde_json::json;
 use sqlx::Connection;
 use uuid::Uuid;
 
-/// Entries in a backup directory other than its lock file.
 fn entries(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
@@ -26,7 +22,6 @@ fn entries(dir: &Path) -> usize {
         .count()
 }
 
-/// Fault points are process-wide: one test at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn key_text(byte: u8) -> String {
@@ -57,7 +52,6 @@ fn worker(app: &TestApp, key: SecretKey, config: BackupConfig) -> BackupWorker {
     )
 }
 
-/// A new SQLite file beside the test source database.
 struct Target {
     name: String,
 }
@@ -115,7 +109,6 @@ async fn rows(url: &str, sql: &str) -> Vec<String> {
     common::rows(&mut conn, sql).await
 }
 
-/// An installation with bots, a conversation, and a changed profile.
 async fn populated() -> TestApp {
     let app = TestApp::installed().await;
     let bot = app.create_bot("Planner").await;
@@ -159,7 +152,6 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         "a database-only set says so"
     );
     assert_eq!(manifest.coverage.vm, "omitted");
-    // No computer was ever used; none is claimed.
     assert!(
         manifest
             .bots
@@ -168,7 +160,6 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
     );
     assert_eq!(manifest.bots.len(), 2, "main bot and Planner");
     assert!(manifest.application.migration_version >= 1);
-    // The set: three files, private, and nothing else.
     let mut names: Vec<String> = std::fs::read_dir(&summary.path)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -191,8 +182,6 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
             .mode();
         assert_eq!(mode & 0o077, 0, "{name} is private");
     }
-    // Neither the master key nor its bytes appear in any file, and the dump
-    // itself (decrypted) does not hold them either.
     let text = key_text(1);
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&text)
@@ -218,7 +207,6 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         "the bootstrap reveals no content"
     );
 
-    // Restore beside an existing staging file, into a new database.
     let staging = dir.path().join("staging");
     std::fs::create_dir(&staging).unwrap();
     std::fs::write(staging.join("keep.txt"), "untouched").unwrap();
@@ -248,7 +236,6 @@ async fn a_backup_restores_into_a_new_database_with_matching_rows() {
         "untouched"
     );
     assert_eq!(entries(&staging), 1, "decrypted staging files are removed");
-    // The same target again: refused, and the restored data is unchanged.
     let again = restore_into(&app, &summary.path, &key(1), &target, &staging).await;
     assert!(matches!(again, Err(BackupError::Refused(_))), "{again:?}");
     assert_eq!(
@@ -268,7 +255,6 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
         .await
         .unwrap();
 
-    // Wrong key: recognized from the recorded key ID, before decrypting.
     let target = Target::new(&app);
     let wrong = restore_into(&app, &summary.path, &key(2), &target, &staging).await;
     assert!(
@@ -277,7 +263,6 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
     );
     assert!(!target.exists().await);
 
-    // Damaged copies of the set (same name, in another directory).
     let damaged = |name: &str, change: &dyn Fn(&Path)| {
         let root = dir.path().join(name);
         std::fs::create_dir(&root).unwrap();
@@ -336,7 +321,6 @@ async fn wrong_keys_damage_and_existing_databases_never_produce_a_restore() {
         assert!(!target.exists().await, "{what} created a database");
     }
 
-    // An existing database is refused and left exactly as it was.
     let existing = Target::new(&app);
     {
         let mut db =
@@ -384,7 +368,6 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     assert_eq!(status, "failed");
     assert!(!error.unwrap().contains(&key_text(1)));
 
-    // Too large for the configured bound: nothing kept.
     let mut small = config(dir.path());
     small.max_bytes = 1000;
     let result = worker(&app, key(1), small).run_once().await;
@@ -394,8 +377,6 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     );
     assert_eq!(entries(&backups), 0);
 
-    // Interrupted publication: the set exists but is not complete, is not
-    // listed, cannot be restored, and is cleaned on the next start.
     else_api::faults::arm("backup.before_complete");
     let worker = worker(&app, key(1), config(dir.path()));
     assert!(matches!(
@@ -421,7 +402,6 @@ async fn producer_failures_interruptions_and_overruns_leave_no_completed_set() {
     .await;
     assert!(matches!(result, Err(BackupError::Invalid(_))), "{result:?}");
     assert!(!target.exists().await);
-    // A run left `running` by a crash is failed at the next start.
     sqlx::query("INSERT INTO backup_runs (id, set_id) VALUES (?1, 'crashed')")
         .bind(Uuid::new_v4())
         .execute(&app.db.pool)
@@ -462,15 +442,12 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
         due > Duration::from_secs(3500) && due <= Duration::from_secs(3600),
         "{due:?}"
     );
-    // Two runs at once: one is refused rather than interleaved.
     let (a, b) = tokio::join!(worker.run_once(), worker.run_once());
     let refused = [&a, &b]
         .iter()
         .filter(|r| matches!(r, Err(BackupError::Refused(m)) if m.contains("another backup")))
         .count();
     assert_eq!(refused, 1, "{a:?} {b:?}");
-    // The scheduled loop: due at once with no set (a missed backup runs
-    // once at start), then idle until the interval passes.
     let empty = tempfile::tempdir().unwrap();
     let mut cfg = config(empty.path());
     cfg.interval = Duration::from_secs(3600);
@@ -506,8 +483,6 @@ async fn scheduling_serializes_runs_and_keeps_the_newest_sets() {
 async fn a_restored_profile_cannot_enable_native_agents() {
     let _serial = SERIAL.lock().await;
     let app = populated().await;
-    // A saved value no adapter accepts (Codex's `ultra` delegates to
-    // native sub-agents), written behind the API's validation.
     sqlx::query(
         "UPDATE provider_profiles SET reasoning_effort = 'ultra' WHERE provider_id = 'codex'",
     )
@@ -571,8 +546,6 @@ async fn a_restore_imports_descriptions_its_backup_still_held() {
     );
 }
 
-/// The operator commands on a real installation: `setup`, `backup`, then
-/// `restore` into a new database; logs never contain the master key.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_backup_and_restore_commands_work_on_an_installation() {
     let _serial = SERIAL.lock().await;
@@ -584,8 +557,6 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |args: &[&str]| {
         let out = common::api_command(&db, &data, common::free_port())
-            // Exercise the database/project-only operator path consistently,
-            // including on machines where Microsandbox happens to be installed.
             .env("ELSE_MSB_BIN", data.join("unavailable-msb"))
             .env("RUST_LOG", "info")
             .args(args)
@@ -643,7 +614,6 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
         rows(&target.url(), COMPARED[0]).await,
         rows(db.url.expose(), COMPARED[0]).await
     );
-    // With another key the restore fails and changes nothing.
     let other = Target::new(&app);
     let out = common::api_command(&db, &data, common::free_port())
         .env("SECRET_KEY", key_text(9))
@@ -654,7 +624,6 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("made with key"));
     assert!(!other.exists().await);
-    // The original key file is untouched.
     assert_eq!(
         std::fs::read_to_string(data.join("secret-key"))
             .unwrap()
@@ -670,8 +639,6 @@ async fn cleanup_and_retention_touch_only_owned_real_set_directories() {
     let dir = tempfile::tempdir().unwrap();
     let backups = dir.path().join("backups");
     std::fs::create_dir(&backups).unwrap();
-    // Unrelated directories in the backup directory, and a symlink to an
-    // outside directory that looks like a completed set.
     std::fs::create_dir(backups.join("archive")).unwrap();
     std::fs::write(backups.join("archive/photo.jpg"), "keep").unwrap();
     let outside = dir.path().join("outside");
@@ -682,7 +649,6 @@ async fn cleanup_and_retention_touch_only_owned_real_set_directories() {
     let mut cfg = config(dir.path());
     cfg.keep = 1;
     let worker = worker(&app, key(1), cfg);
-    // Two sets in quick succession with keep 1: the newest survives.
     worker.run_once().await.unwrap();
     let newest = worker.run_once().await.unwrap();
     assert!(
@@ -711,8 +677,6 @@ async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
     let worker = Arc::new(worker(&app, key(1), config(dir.path())));
-    // While the backup lock is held (a run in progress), recovery leaves
-    // its staging alone.
     let backups = dir.path().join("backups");
     let held = backup::try_lock(&backups).unwrap().unwrap();
     let staging = backups.join(".staging-20990101T000000000Z-aaaaaaaa");
@@ -727,7 +691,6 @@ async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
     drop(held);
     assert_eq!(worker.recover().await.unwrap(), 1);
 
-    // Cancel while encryption is actively consuming a sizeable snapshot.
     sqlx::raw_sql(
         "CREATE TABLE bulk (bytes BLOB); INSERT INTO bulk VALUES (randomblob(33554432));",
     )
@@ -762,7 +725,6 @@ async fn recovery_waits_for_a_running_backup_and_capture_honors_cancellation() {
         "{result:?}"
     );
     assert!(backup::completed_sets(&backups).unwrap().is_empty());
-    // The lock was released: a normal run works.
     worker.run_once().await.unwrap();
 }
 
@@ -777,7 +739,6 @@ async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
         .unwrap();
     let staging = dir.path().join("staging");
     std::fs::create_dir(&staging).unwrap();
-    // A killed restore's plaintext, and a directory that is not ours.
     let stale = staging.join(".restore-stale");
     std::fs::create_dir(&stale).unwrap();
     std::fs::write(stale.join(backup::MARKER), "").unwrap();
@@ -807,8 +768,6 @@ async fn a_restore_cleans_stale_staging_and_bounds_its_size() {
     assert!(staging.join(".restore-foreign").exists(), "not ours, kept");
 }
 
-/// POC-030: a backup set restores categories, their IDs and names, bot
-/// assignments, and the saved main-bot pointer.
 #[tokio::test(flavor = "multi_thread")]
 async fn categories_and_assignments_survive_backup_and_restore() {
     let _serial = SERIAL.lock().await;

@@ -1,6 +1,3 @@
-//! POC-016: one-hop asynchronous delegation through the real router,
-//! scheduler, and SQLite, with the synthetic provider.
-
 mod common;
 
 use std::sync::Arc;
@@ -12,7 +9,6 @@ use else_api::grants::{DEFAULT_TTL, Tool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// Long enough (about six seconds) to call tools while it streams.
 const SLOW: &str = "[synthetic:slow] please plan the week: groceries, school forms, the work \
                     review, and the dentist; ask the right bot for the school part of this.";
 
@@ -22,7 +18,6 @@ async fn app_with(max_active: usize) -> TestApp {
     TestApp::with_options(db, max_active)
 }
 
-/// A bot that answers with the synthetic provider (its selected provider).
 async fn leaf(app: &TestApp, name: &str) -> String {
     let bot = app.create_bot(name).await;
     let warm = app
@@ -33,7 +28,6 @@ async fn leaf(app: &TestApp, name: &str) -> String {
     bot
 }
 
-/// Start a slow main-bot turn and return it with a grant for its attempt.
 async fn running_main(app: &TestApp) -> (String, Uuid, String) {
     let main = app.main_bot().await;
     let sent = app
@@ -569,7 +563,6 @@ async fn a_running_delegated_task_keeps_its_scope_and_its_stop_is_shown() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
-    // One provider slot: the parent must release it for the child.
     let app = app_with(1).await;
     let school = leaf(&app, "School").await;
     let (main, root, token) = running_main(&app).await;
@@ -584,7 +577,6 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     let pending = tool_text(&reply);
     assert_eq!(pending["status"], "pending", "{}", reply.body);
     let task_id: Uuid = pending["task_id"].as_str().unwrap().parse().unwrap();
-    // A retried call returns the same child; further calls are refused.
     let again = delegate(
         &app,
         &token,
@@ -594,8 +586,6 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     .await;
     assert_eq!(again.status, StatusCode::CONFLICT, "the attempt is parked");
 
-    // The parent ends its attempt and waits without holding the slot; the
-    // child runs, then the parent continues and completes.
     app.wait_turn_for(&root.to_string(), &["completed"], Duration::from_secs(40))
         .await;
     let (status, result, delivered, child): (String, Option<String>, Option<i32>, Uuid) =
@@ -655,8 +645,6 @@ async fn a_pending_child_parks_the_parent_and_a_continuation_uses_its_result() {
     .await
     .unwrap();
     assert_eq!(child_conversation, "task");
-    // Memory: the task is model-authored in the target; the result is tool
-    // activity in the parent.
     let task_entry: (String, String) = sqlx::query_as(
         "SELECT kind, authority FROM memory_entry WHERE bot_id = ?1 AND body LIKE '%planetarium form details%'
          ORDER BY seq LIMIT 1",
@@ -701,7 +689,6 @@ async fn delegation_limits_fail_in_code() {
         error(&delegate(&app, &token, &Uuid::new_v4().to_string(), "anything").await)
             .starts_with("BOT_UNAVAILABLE")
     );
-    // A grant without the delegate tool (any leaf or other bot) is refused.
     let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
         .bind(root)
         .fetch_one(&app.db.pool)
@@ -722,7 +709,6 @@ async fn delegation_limits_fail_in_code() {
         delegate(&app, &no_delegate, &work, "x").await.status,
         StatusCode::FORBIDDEN
     );
-    // Budget: two children per request, one per attempt.
     let first = tool_text(&delegate(&app, &token, &work, "first task").await);
     assert_eq!(first["status"], "pending");
     app.wait_turn_for(
@@ -731,8 +717,6 @@ async fn delegation_limits_fail_in_code() {
         Duration::from_secs(20),
     )
     .await;
-    // The database rules hold even without the grant check: a second child
-    // in the same attempt is refused (or the attempt has already ended).
     let second = else_api::db::delegations::create(
         &app.db.pool,
         root,
@@ -748,7 +732,6 @@ async fn delegation_limits_fail_in_code() {
         ),
         "{second:?}"
     );
-    // A leaf (a child turn) cannot delegate even with a forged grant.
     let child: Uuid =
         sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE root_turn_id = ?1")
             .bind(root)
@@ -790,8 +773,6 @@ async fn delegation_limits_fail_in_code() {
             .unwrap();
     assert_eq!(children, 1);
 
-    // A request whose two children are used up refuses a third, whatever
-    // the attempt: simulate a third attempt that is running.
     let (_, root, _) = running_main(&app).await;
     for (n, target) in [&work, &family].iter().enumerate() {
         sqlx::query("UPDATE turns SET attempt = ?2 WHERE id = ?1")
@@ -825,7 +806,6 @@ async fn delegation_limits_fail_in_code() {
 async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
     let app = app_with(2).await;
     let work = leaf(&app, "Work").await;
-    // The child hangs until stopped.
     let (main, root, token) = running_main(&app).await;
     let reply = delegate(&app, &token, &work, "[synthetic:hang] long research").await;
     let task_id: Uuid = tool_text(&reply)["task_id"]
@@ -843,7 +823,6 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         .unwrap()
         .clone();
     assert_eq!(main_view["activity"]["phase"], "working", "{main_view}");
-    // Stop work on the main bot ends the root and its pending child.
     let stop = app
         .owner(
             "POST",
@@ -871,8 +850,6 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
         .unwrap();
     assert_eq!(status, "cancelled");
 
-    // Deleting the target of a pending child gives the parent a recorded
-    // failure to continue with.
     let (_, root, token) = running_main(&app).await;
     let reply = delegate(&app, &token, &work, "[synthetic:hang] another long task").await;
     let task_id: Uuid = tool_text(&reply)["task_id"]
@@ -913,7 +890,6 @@ async fn an_owner_follow_up_ends_a_waiting_root_and_its_task_only() {
         .unwrap();
     wait_status(&app, child, "running").await;
 
-    // A message in the target's own chat waits for the task, never ends it.
     let aside = app
         .send(
             &work,
@@ -954,8 +930,6 @@ async fn an_owner_follow_up_ends_a_waiting_root_and_its_task_only() {
         .await;
 }
 
-/// Rows for a main bot's running root with one queued child on Target,
-/// written directly so states can be set precisely (no scheduler runs).
 async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let main: Uuid = sqlx::query_scalar("SELECT default_bot_id FROM installation")
@@ -1009,14 +983,12 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
 async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     let db = TestDb::migrated().await;
     let (_, root, child, delegation) = seed(&db).await;
-    // The parent's finish holds the root lock and decides to park.
     let mut parent = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("SELECT 1 FROM turns WHERE id = ?1")
         .bind(root)
         .execute(&mut *parent)
         .await
         .unwrap();
-    // Meanwhile the child ends; its trigger waits for the root lock.
     let pool = db.pool.clone();
     let child_end = tokio::spawn(async move {
         sqlx::query("UPDATE turns SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1")
@@ -1100,7 +1072,6 @@ async fn the_same_task_to_another_bot_is_a_different_child() {
         .unwrap();
     assert!(second.created);
     assert_ne!(second.delegation_id, first);
-    // A retry of a settled child reports its outcome, not `pending`.
     let target: Uuid = sqlx::query_scalar("SELECT target_bot_id FROM delegations WHERE id = ?1")
         .bind(first)
         .fetch_one(&db.pool)
@@ -1130,7 +1101,6 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
     let private = leaf(&app, "Private").await;
     let shared = leaf(&app, "Shared").await;
     let main = app.main_bot().await;
-    // Work may read Private and Shared; the main bot may read only Shared.
     for (reader, target) in [(&work, &private), (&work, &shared), (&main, &shared)] {
         let reply = app
             .owner(
@@ -1156,8 +1126,6 @@ async fn a_delegated_task_cannot_read_memory_the_parent_could_not() {
         !scope.contains(&private_id),
         "Work's own grant to Private is not inherited"
     );
-    // A scoped grant is refused outside its scope even though Work itself
-    // may read Private.
     let warm: Uuid = sqlx::query_scalar(
         "SELECT id FROM turns WHERE bot_id = ?1 ORDER BY created_at DESC LIMIT 1",
     )
@@ -1574,7 +1542,6 @@ async fn stopping_a_peer_cancels_its_task_on_the_main_bot() {
     assert_eq!(status, "cancelled");
 }
 
-/// Main-bot events, oldest first, as (kind, data).
 async fn bot_events(pool: &sqlx::SqlitePool, bot: Uuid) -> Vec<(String, Value)> {
     sqlx::query_as("SELECT kind, data FROM bot_events WHERE bot_id = ?1 ORDER BY seq")
         .bind(bot)
@@ -1735,7 +1702,6 @@ async fn the_parent_chat_shows_the_childs_reply_once_before_its_continuation() {
     assert!(!kinds.contains(&"status"), "{kinds:?}");
 }
 
-/// The delegating bot's shown replies and their item.upsert events.
 async fn parent_replies(db: &TestDb, main: Uuid) -> (Vec<(String, String, Uuid)>, usize) {
     let snapshot = else_api::db::conversation::snapshot(&db.pool, main, 50, None)
         .await

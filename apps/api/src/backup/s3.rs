@@ -1,4 +1,4 @@
-//! A small S3 client for backup replication (POC-023): AWS Signature V4 over
+//! A small S3 client for backup replication: AWS Signature V4 over
 //! HTTP(S), with only the operations the emulator probe verified so the
 //! behavior on R2 stays predictable: `PutObject` (optionally with
 //! `If-None-Match: *`), multipart create, upload, complete, list, and abort,
@@ -99,7 +99,6 @@ fn xml_unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// The contents of every `<name>…</name>` element, in order.
 fn tags(xml: &str, name: &str) -> Vec<String> {
     let (open, close) = (format!("<{name}>"), format!("</{name}>"));
     let mut out = Vec::new();
@@ -194,7 +193,6 @@ impl S3 {
         }
     }
 
-    /// Build and sign one request.
     fn request(
         &self,
         method: reqwest::Method,
@@ -586,7 +584,6 @@ mod tests {
         assert!(!format!("{config:?}").contains("SECRET"));
         let s3 = S3::new(config.clone()).unwrap();
         assert_eq!(s3.key("sets/x"), "p/sets/x");
-        // The signed authority is the one sent: no default port, lowercase.
         let with = |endpoint: &str| {
             S3::new(S3Config {
                 endpoint: endpoint.into(),

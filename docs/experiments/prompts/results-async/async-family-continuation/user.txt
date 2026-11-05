@@ -1,1 +1,0 @@
-Synthetic scheduler continuation, recorded task data. Original owner request: have family suggest a pickup checklist. Recorded child synthetic-child-family is completed with result: Agree pickup time and pack bags. Source type: bot_result. Return that result to the owner. This fresh invocation is a stand-in for the continuation, not a native-session-resume test.

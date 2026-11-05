@@ -1,7 +1,3 @@
-//! POC-026: task secrets and script execution against SQLite, the real
-//! router and MCP endpoint, and a fake runtime that records what reaches
-//! the guest (the live checks are in `scripts_live.rs`).
-
 mod common;
 
 use std::sync::{Arc, Mutex};
@@ -19,16 +15,12 @@ use uuid::Uuid;
 
 const PASSWORD: &str = "s3cr3t-Pa55word";
 
-/// Records every guest command (program, args, stdin). A foreground command
-/// containing `HANG` blocks until a kill for it arrives.
 #[derive(Default)]
 struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
     execs: Mutex<Vec<(String, Vec<String>, Vec<u8>)>>,
-    /// Per computer: a kill for it arrived.
     killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     started: tokio::sync::Notify,
-    /// Computers whose kill never answers.
     stalled: Mutex<Vec<String>>,
 }
 
@@ -46,8 +38,6 @@ impl Guest {
         self.execs.lock().unwrap().clone()
     }
 
-    /// A RUN reply: the command's stdout echoes the secret variable the way
-    /// a careless script would.
     fn run_reply(&self, args: &[&str], input: &[u8]) -> String {
         use base64::Engine;
         let mut out = String::from("no secret");
@@ -127,14 +117,11 @@ impl ComputerRuntime for Guest {
             args.iter().map(|a| (*a).to_owned()).collect(),
             input.to_vec(),
         ));
-        // `runuser -u elsebot -- /bin/sh -c SCRIPT sh ARGS...`
         let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
         let script = args.get(at).copied().unwrap_or_default();
         let stdout = if script.contains("wait $pg; c=$?") {
-            // A foreground command (RUN): its user command follows `sh`.
             if args.get(at + 2).is_some_and(|c| c.contains("HANG")) {
                 self.started.notify_one();
-                // Bounded, so a broken kill fails the test instead of hanging.
                 let killed = self.killed(name);
                 let _ = tokio::time::timeout(Duration::from_secs(20), killed.notified()).await;
                 "143\n0\n0\n\n\0\n".to_owned()
@@ -142,7 +129,6 @@ impl ComputerRuntime for Guest {
                 self.run_reply(args, input)
             }
         } else if script.contains("alive()") {
-            // The kill script.
             if self.stalled.lock().unwrap().iter().any(|n| n == name) {
                 tokio::time::sleep(Duration::from_secs(12)).await;
             }
@@ -193,7 +179,6 @@ async fn setup() -> Setup {
     }
 }
 
-/// A running turn of `bot` and a computer grant for it.
 async fn grant(app: &TestApp, bot: &str) -> (Uuid, String) {
     let reply = app
         .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
@@ -261,14 +246,12 @@ async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
         json!(["SMTP_PASSWORD", "SMTP_USER"])
     );
     assert!(!listed.body.to_string().contains(PASSWORD));
-    // At rest: ciphertext only.
     let stored: Vec<u8> = sqlx::query_scalar("SELECT ciphertext FROM task_secrets")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert!(!String::from_utf8_lossy(&stored).contains(PASSWORD));
     assert!(stored.starts_with(b"age-encryption.org/v1"));
-    // Another bot sees none; invalid variables are refused.
     let none = app
         .owner("GET", &format!("/v1/bots/{other}/task-secrets"), None)
         .await;
@@ -287,7 +270,6 @@ async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
             .await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{env}");
     }
-    // Task grants never reach owner routes.
     let (_, token) = grant(&app, &bot).await;
     let as_task = app
         .call(
@@ -373,7 +355,6 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         format!("SMTP_PASSWORD {encoded}\n")
     );
 
-    // A job records its secret names and a redaction set, not the value.
     let job = tool(
         &app,
         &token,
@@ -396,7 +377,6 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         .unwrap();
     assert!(launch.1.iter().all(|a| !a.contains(PASSWORD)));
     assert!(String::from_utf8_lossy(&launch.2).contains(&encoded));
-    // Tool activity names the secret, never its value.
     let logged: Vec<String> = sqlx::query_scalar("SELECT body FROM memory_entry WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_all(&app.db.pool)
@@ -406,7 +386,6 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     assert!(logged.iter().all(|l| !l.contains(PASSWORD)));
 }
 
-/// Stop work ends a foreground command that is still running.
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_work_ends_a_running_foreground_command() {
     let Setup {
@@ -433,7 +412,6 @@ async fn stop_work_ends_a_running_foreground_command() {
     tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
         .await
         .expect("the foreground command started");
-    // While its turn runs, nothing ends it.
     manager.end_orphaned_commands().await.unwrap();
     assert!(!call.is_finished());
     let stop = app
@@ -457,7 +435,6 @@ async fn stop_work_ends_a_running_foreground_command() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // Until the command ended, the stop stays pending.
     else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
     let receipt = |state: &'static str| {
         let pool = app.db.pool.clone();
@@ -492,7 +469,6 @@ async fn stop_work_ends_a_running_foreground_command() {
         .await
         .unwrap();
     assert!(ended, "the run is recorded as ended");
-    // Once the turn also finished stopping, the stop completes.
     for _ in 0..100 {
         else_api::db::stop::settle_all(&app.db.pool).await.unwrap();
         let done: bool = sqlx::query_scalar(
@@ -509,7 +485,6 @@ async fn stop_work_ends_a_running_foreground_command() {
     receipt("done").await;
 }
 
-/// A computer whose kill never answers does not hold up another bot's.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_stalled_kill_does_not_delay_another_bots_stop() {
     let Setup {
@@ -566,13 +541,11 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
         "{:?}",
         started.elapsed()
     );
-    // The pass itself returns within its bound, leaving the slow kill.
     tokio::time::timeout(Duration::from_secs(15), pass)
         .await
         .expect("the pass is bounded")
         .unwrap()
         .unwrap();
-    // The stalled kill finishes on its own; its command then ends too.
     let slow_call = calls.pop().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(30), slow_call)
         .await
@@ -581,9 +554,6 @@ async fn one_stalled_kill_does_not_delay_another_bots_stop() {
     assert_eq!(result["exit_code"], 143);
 }
 
-/// POC-029 review: foreground work ends with an owner stop (without
-/// waiting for the operation lock it holds) and when its request is
-/// dropped; a command queued behind it runs nothing once its turn stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() {
     let Setup {
@@ -616,7 +586,6 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
             .count()
     };
 
-    // An owner stop ends the running command at once.
     let first = call("HANG one");
     tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
         .await
@@ -634,7 +603,6 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     assert_eq!(result["exit_code"], 143, "{result}");
     manager.owner_resume(bot_id).await.unwrap();
 
-    // A dropped request ends its command.
     let before = kills();
     let second = call("HANG two");
     tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
@@ -650,8 +618,6 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // A command queued behind a running one, for a turn stopped meanwhile,
-    // runs nothing.
     let third = call("HANG three");
     tokio::time::timeout(Duration::from_secs(10), guest.started.notified())
         .await
@@ -703,9 +669,6 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
     );
 }
 
-/// POC-030: a category change touches no computer state: a running guest
-/// job keeps its status and lease while its bot is assigned, moved, and
-/// its category deleted.
 #[tokio::test(flavor = "multi_thread")]
 async fn category_changes_leave_guest_jobs_running() {
     let Setup { app, manager, .. } = setup().await;
@@ -760,7 +723,6 @@ async fn category_changes_leave_guest_jobs_running() {
     );
 }
 
-/// Retiring old input counters must never renew a live turn's allowance.
 #[tokio::test(flavor = "multi_thread")]
 async fn input_allowances_survive_counter_cleanup() {
     let Setup { app, manager, .. } = setup().await;
@@ -769,7 +731,6 @@ async fn input_allowances_survive_counter_cleanup() {
     for expected in 1..=41 {
         assert_eq!(manager.count_input(turn).await.unwrap(), expected);
     }
-    // These IDs stand for settled turns whose counters have accumulated.
     for _ in 0..10_001 {
         manager.count_input(Uuid::new_v4()).await.unwrap();
     }

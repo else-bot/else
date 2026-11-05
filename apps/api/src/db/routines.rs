@@ -601,8 +601,6 @@ async fn admit(
         .bind(next.map(ts))
         .execute(&mut *tx)
         .await?;
-    // An occurrence is recorded once. After the clock moved back, a due
-    // instant may repeat: it only advances the schedule.
     let recorded: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM routine_runs WHERE routine_id = ?1 AND due_at = ?2)",
     )

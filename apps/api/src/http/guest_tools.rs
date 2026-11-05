@@ -1,4 +1,4 @@
-//! MCP tools for a bot's own computer (POC-018): commands, background jobs,
+//! MCP tools for a bot's own computer: commands, background jobs,
 //! files, artifacts, and the guest browser. The computer is always the
 //! grant's bot's; a tool can never name another bot's computer. Calls take
 //! the turn's lease (`turn:<id>`), which starts the computer on demand unless
@@ -42,7 +42,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// bot asks the owner to continue beyond this).
 pub const MAX_INPUT_BATCHES: u32 = 40;
 
-/// Models verified to receive MCP image results (POC-028). Another model
+/// Models verified to receive MCP image results. Another model
 /// gets an explicit refusal; nothing switches models.
 pub const VISION_MODELS: &[&str] = &[
     "gpt-6.1-sol",
@@ -193,7 +193,6 @@ pub fn tool_list() -> Vec<Value> {
                 "save": { "type": "boolean" },
                 "artifact_id": { "type": "string", "format": "uuid" } },
                 "additionalProperties": false },
-            // It may start the computer and, with save, store an artifact.
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": false, "openWorldHint": false },
         }),
@@ -258,7 +257,6 @@ fn failure(err: ComputerError) -> Outcome {
 fn output_json(out: &CommandOutput) -> Value {
     json!({
         "exit_code": out.exit_code,
-        // The end of each stream; earlier output is dropped and marked.
         "stdout": out.stdout,
         "stderr": out.stderr,
         "stdout_bytes": out.stdout_bytes,
@@ -268,9 +266,6 @@ fn output_json(out: &CommandOutput) -> Value {
     })
 }
 
-/// Fit a result into the response budget after JSON escaping: the longest
-/// text field is cut (output keeps its end, page text its start) and marked
-/// until the complete serialized result fits.
 fn fit(mut value: Value) -> Value {
     const KEEP_END: &[&str] = &["stdout", "stderr", "output_tail"];
     const FIELDS: &[&str] = &[
@@ -308,7 +303,6 @@ fn fit(mut value: Value) -> Value {
     value
 }
 
-/// A lease on the bot's own computer for this turn, or the tool error.
 async fn lease(state: &AppState, grant: &Grant) -> Result<Uuid, Outcome> {
     let Some(computers) = state.computers.as_ref() else {
         return Err((
@@ -333,7 +327,6 @@ fn job_json(job: &crate::computers::jobs::JobState) -> Value {
     })
 }
 
-/// Whether this turn's model is verified to receive images.
 async fn vision(state: &AppState, grant: &Grant) -> Result<(), String> {
     let model: Option<String> =
         sqlx::query_scalar("SELECT profile->>'model' FROM turns WHERE id = ?1")
@@ -388,8 +381,6 @@ async fn screenshot(
         };
         return match computers.saved_screen(grant.bot_id, id).await {
             Ok(Ok((png, meta))) => {
-                // The original capture's metadata: screen size, scale, and
-                // pointer still map this image to the screen it showed.
                 let mut meta = if meta.is_object() { meta } else { json!({}) };
                 meta["artifact_id"] = json!(id);
                 meta["saved"] = json!(true);
@@ -433,9 +424,6 @@ async fn screenshot(
     }
 }
 
-/// Ends a turn's foreground commands if the request that started them is
-/// dropped before they returned (the caller went away); disarmed once the
-/// command returned.
 struct EndOnDrop {
     computers: Option<std::sync::Arc<crate::computers::ComputerManager>>,
     turn: Uuid,
@@ -450,7 +438,6 @@ impl Drop for EndOnDrop {
     }
 }
 
-/// Pointer and keyboard input on the bot's own desktop (POC-029).
 async fn input(
     _state: &AppState,
     grant: &Grant,
@@ -490,8 +477,6 @@ async fn input(
     if batch.len() > 16_000 {
         return (tool_error("the batch is over 16 KB."), None);
     }
-    // The batch (with any typed text) travels as an environment variable
-    // over the runtime's stdin, never in a command line.
     let env = Env {
         vars: vec![(
             "ELSE_INPUT_BATCH".to_owned(),
@@ -499,8 +484,6 @@ async fn input(
         )],
     };
     let command = "DISPLAY=:99 exec /usr/local/bin/else-input".to_owned();
-    // If this request is dropped (the provider went away), the batch is
-    // ended rather than left clicking on its own.
     let mut guard = EndOnDrop {
         computers: Some(computers.clone()),
         turn: grant.turn_id,
@@ -543,8 +526,6 @@ async fn input(
         .find_map(|l| l["error"].as_str().map(str::to_owned));
     let summary = summarize_input(actions);
     if !started {
-        // Refused before anything happened (validation, a changed screen,
-        // the owner connected, the desktop busy, no display).
         return (
             tool_error(&format!(
                 "{} Nothing was done.",
@@ -574,9 +555,6 @@ async fn input(
     )
 }
 
-/// An input batch for the activity log: action kinds and points, never the
-/// typed text (it may be a password).
-/// The task secrets a call names, decrypted, or the tool error.
 async fn secrets_for(
     state: &AppState,
     grant: &Grant,
@@ -643,8 +621,6 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
-            // In its own task: a dropped request (the provider went away)
-            // must not cut the command off between its record and its end.
             let run = {
                 let computers = computers.clone();
                 let (bot, holder) = (grant.bot_id, holder(grant));
@@ -747,7 +723,6 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     tool_result(fit(job_json(&job))),
                     Some(format!("{name} {id}: {}", job.status)),
                 ),
-                // Another bot's job looks the same as no job.
                 Ok(None) => (tool_error("No such job."), None),
                 Err(err) => failure(err),
             }
@@ -786,8 +761,6 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             };
             match computers.read_file(lease, &path, offset, READ_CHUNK).await {
                 Ok(Ok((size, bytes))) => {
-                    // Whole characters only: a chunk ending inside one stops
-                    // before it, and next_offset counts the bytes consumed.
                     let (text, consumed, binary) = match std::str::from_utf8(&bytes) {
                         Ok(text) => (text.to_owned(), bytes.len(), false),
                         Err(err) if err.error_len().is_none() => {
@@ -924,7 +897,6 @@ mod tests {
 
     #[test]
     fn results_are_fitted_to_the_budget_after_escaping() {
-        // Quotes double when escaped twice; 20,000 of them far exceed it.
         let value = json!({ "stdout": "\"".repeat(20_000), "stderr": "ok", "exit_code": 0 });
         let fitted = fit(value);
         assert!(wire_size(&fitted) <= RESPONSE_BUDGET);

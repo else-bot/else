@@ -1,4 +1,4 @@
-//! Desktop screenshots for the model (POC-028).
+//! Desktop screenshots for the model.
 //!
 //! A screenshot is the whole guest framebuffer (Xvfb display `:99`, the one
 //! the owner sees through VNC), captured inside the guest by
@@ -21,9 +21,7 @@ use super::{ComputerError, ComputerManager};
 /// The largest PNG handed to a model (about 2 MB as base64, well inside the
 /// providers' 8 MiB event lines).
 pub const MAX_IMAGE_BYTES: u64 = 1_500_000;
-/// Where the desktop user writes a capture.
 const GUEST_DIR: &str = "/var/lib/elsebot/screens";
-/// Where root keeps the checked copy that is copied out (root only).
 const ROOT_DIR: &str = "/var/lib/elsebot-screens";
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,7 +124,6 @@ impl ComputerManager {
                 .create(&staging)
                 .map_err(|e| ComputerError::Refused(format!("screenshot staging: {e}")))?;
         }
-        // What an interrupted capture left on the host.
         if let Ok(entries) = std::fs::read_dir(&staging) {
             for entry in entries.flatten() {
                 let _ = std::fs::remove_file(entry.path());
@@ -139,7 +136,6 @@ impl ComputerManager {
         let result = self
             .capture_in_guest(&name, &user_path, &root_path, &staging, capture_id)
             .await;
-        // Always: nothing of this capture stays in the guest.
         let _ = self
             .runtime
             .exec(
@@ -203,7 +199,6 @@ impl ComputerManager {
         Ok(Ok(Screenshot { meta, png }))
     }
 
-    /// The guest steps of a capture, under the caller's operation lock.
     async fn capture_in_guest(
         &self,
         name: &str,
@@ -235,8 +230,6 @@ impl ComputerManager {
                 super::bounded(out.stderr.trim(), 300)
             ))));
         }
-        // Root takes a bounded copy of a regular file (never through a link)
-        // into a directory only root writes; that copy is what leaves.
         let moved = self
             .runtime
             .exec(
@@ -283,8 +276,6 @@ impl ComputerManager {
         Ok(Ok((reported, png)))
     }
 
-    /// Keep a captured screenshot as an artifact with its metadata. A failed
-    /// registration removes the stored file.
     async fn save_screen(
         &self,
         bot_id: Uuid,

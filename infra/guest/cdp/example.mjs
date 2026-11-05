@@ -1,5 +1,3 @@
-// Example: search a page in the visible browser from Node.js (POC-027).
-// node /usr/local/lib/elsebot/cdp/example.mjs URL QUERY
 import { connect, Uncertain } from "/usr/local/lib/elsebot/cdp/cdp.mjs";
 
 const [url, query] = process.argv.slice(2);
@@ -11,7 +9,6 @@ try {
     await page.click("button[type=submit]");
   } catch (e) {
     if (e instanceof Uncertain) {
-      // Do not click again blindly: look at the page first.
       console.error("the click may or may not have happened:", e.message);
     }
     throw e;

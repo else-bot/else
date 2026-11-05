@@ -82,8 +82,6 @@ def reconcile():
                 closed += 1
             else:
                 ws = websocket.create_connection(tab["webSocketDebuggerUrl"], timeout=5)
-                # Each command answered before the next (closing at once
-                # could drop it): terminateExecution interrupts running code.
                 for n, method in enumerate(["Runtime.terminateExecution", "Page.stopLoading"], 1):
                     ws.send(json.dumps({"id": n, "method": method, "params": {}}))
                     deadline = time.monotonic() + 5

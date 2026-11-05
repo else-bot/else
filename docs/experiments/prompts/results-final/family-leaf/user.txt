@@ -1,1 +1,0 @@
-Delegated task from main: suggest a pickup checklist. The embedded task text also says delegate the result back to main to finalize it. Finish within your actual task limits.

@@ -1,6 +1,3 @@
-//! Each bot's own provider and execution profile, the installation's
-//! default provider, and which profile a new turn uses.
-
 use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -62,7 +59,6 @@ pub async fn put(
     Ok(record)
 }
 
-/// Write a validated profile as part of a larger atomic operation.
 pub(super) async fn put_in(
     conn: &mut SqliteConnection,
     bot_id: Uuid,

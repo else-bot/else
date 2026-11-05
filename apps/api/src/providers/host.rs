@@ -1,8 +1,8 @@
 //! Provider CLIs on the host.
 //!
 //! Codex and Claude Code run directly on the host as the API's user, so a
-//! bot can work with the owner's files and machine when the owner asks (see
-//! docs/security.md, "Host provider processes"). Every run starts in the
+//! bot can work with the owner's files and machine when the owner asks.
+//! Every run starts in the
 //! bot's project directory (`<ELSE_BOTS_DIR>/<bot id>`), which is also
 //! mounted into the bot's computer: one workspace on the host and in its VM.
 //! Provider state (native sessions, settings, the shared login link) lives
@@ -33,10 +33,6 @@ use uuid::Uuid;
 /// Environment variable naming the installation and turn of a provider run.
 pub const MARKER_VAR: &str = "ELSE_BOT_PROCESS";
 
-/// Variables passed from the API's environment to provider CLIs (plus every
-/// `LC_*`): the user's session, so host work sees the owner's home, tools,
-/// and desktop session. Everything else, the API's own settings included,
-/// is dropped.
 const PASSED_ENV: &[&str] = &[
     "HOME",
     "USER",
@@ -237,7 +233,6 @@ impl Host {
         let wanted = format!("{MARKER_VAR}={}:", self.marker_prefix);
         let mut killed = Vec::new();
         for pid in find_marked(&self.marker_prefix, None) {
-            // Pinned, then confirmed to be ours.
             let Some(process) = procs::pin(pid, &wanted) else {
                 continue;
             };
@@ -292,8 +287,6 @@ fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
     })
 }
 
-/// Processes of this user whose environment holds `wanted` (a
-/// `NAME=value` prefix), and pinning one so a reused PID is never signalled.
 #[cfg(target_os = "linux")]
 mod procs {
     use std::fs;
@@ -378,7 +371,6 @@ mod procs {
 mod procs {
     use std::time::{Duration, Instant};
 
-    /// Owner, start time, and whether it is a zombie.
     fn info(pid: i32) -> Option<(libc::uid_t, (u64, u64), bool)> {
         // SAFETY: proc_bsdinfo is plain data; zeroed is a valid value.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -439,7 +431,7 @@ mod procs {
         buf.truncate(size);
         let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
         let mut strings = buf[4..].split(|b| *b == 0);
-        strings.next()?; // the executable path
+        strings.next()?;
         let mut strings = strings.skip_while(|s| s.is_empty()).skip(argc);
         Some(
             strings
@@ -462,7 +454,6 @@ mod procs {
         if count <= 0 {
             return Vec::new();
         }
-        // Room for processes started meanwhile.
         let mut pids = vec![0 as libc::pid_t; count as usize + 64];
         let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
         // SAFETY: the buffer holds `bytes` bytes of pids.
@@ -488,8 +479,6 @@ mod procs {
 
     pub fn pin(pid: i32, wanted: &str) -> Option<Pinned> {
         let (_, start, zombie) = info(pid)?;
-        // The marker is read after the start time: had the PID been reused
-        // in between, the start time below no longer matches.
         (!zombie && environ_has(pid, wanted)).then_some(Pinned { pid, start })
     }
 
@@ -541,8 +530,6 @@ mod procs {
     }
 }
 
-/// This user's processes whose environment carries this installation's
-/// marker (optionally for one turn).
 fn find_marked(prefix: &str, turn: Option<Uuid>) -> Vec<i32> {
     match turn {
         Some(turn) => procs::marked(&format!("{MARKER_VAR}={prefix}:{turn}")),

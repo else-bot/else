@@ -1,6 +1,3 @@
-//! Actor-owned persistence of one provider attempt. Queue acceptance and
-//! restart recovery live in `turns`; only this sink buffers provider text.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,27 +19,19 @@ struct OwnerTranscript {
     last_seq: i64,
 }
 
-/// Persists one turn's progress. Writes succeed only while the turn is in
-/// an active status and its bot is active.
 struct SinkState {
     pool: SqlitePool,
     turn_id: Uuid,
     bot_id: Uuid,
     execution_conversation_id: Uuid,
     provider_id: String,
-    /// Only the actor touches text and serializes writes with `finish`.
     assistant_item: Option<Uuid>,
-    /// Text not yet committed. Bounded by the flush threshold and
-    /// drained only after the transaction that wrote it commits.
     pending: String,
     flush_wanted: Arc<tokio::sync::Notify>,
     fenced: bool,
     attempt: i32,
-    /// Child outcomes this attempt's input carried.
     delivered: Vec<Uuid>,
-    /// Secret request answers this attempt's input carried.
     delivered_secrets: Vec<Uuid>,
-    /// Owner question answers this attempt's input carried.
     delivered_questions: Vec<Uuid>,
     delivered_drafts: Vec<Uuid>,
 }
@@ -101,7 +90,6 @@ impl SinkState {
         Fenced
     }
 
-    /// Lock the bot row and check the turn may still write.
     async fn guard(
         &self,
         conn: &mut SqliteConnection,
@@ -146,7 +134,6 @@ impl SinkState {
             .bind(self.turn_id)
             .execute(&mut *tx)
             .await?;
-            // A handoff this attempt carries follows the delivery state.
             match to {
                 "sending" => {
                     crate::db::handoffs::transition(
@@ -185,8 +172,6 @@ impl SinkState {
         }
     }
 
-    /// Write `chunk` to the assistant item inside `tx`, creating the item
-    /// on first use. Returns the item ID.
     async fn write_text(
         &self,
         tx: &mut SqliteConnection,
@@ -251,8 +236,6 @@ impl SinkState {
         }
         let result: Result<Option<Uuid>, sqlx::Error> = async {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-            // Text may still arrive while a stop is being confirmed; it is
-            // real output and is preserved.
             let Some(transcript) = self
                 .guard(&mut tx, "('sending', 'running', 'cancelling')")
                 .await?
@@ -274,7 +257,6 @@ impl SinkState {
             }
             Ok(None) => Err(self.fence()),
             Err(err) => {
-                // Transient: keep the text and let the next flush retry.
                 tracing::warn!(turn = %self.turn_id, error = %err, "persisting assistant text failed");
                 Ok(())
             }
@@ -316,8 +298,6 @@ impl SinkState {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Children's bots, then the root turn: a child settling meanwhile
-        // takes the same root lock, so parking sees its outcome.
         crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
         sqlx::query("SELECT 1 FROM turns WHERE id = ?1")
             .bind(self.turn_id)
@@ -358,8 +338,6 @@ impl SinkState {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        // A handoff sent but never acknowledged is uncertain, unless the
-        // provider explicitly refused it before consuming it.
         let refused =
             matches!(outcome, TurnOutcome::Failed { code, .. } if code == "provider_refused");
         crate::db::handoffs::transition(
@@ -372,10 +350,8 @@ impl SinkState {
         .await?;
         if updated == 1 {
             crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id).await?;
-            // The reply's final text enters memory with the terminal status.
             crate::db::memory::log_turn_end(&mut tx, self.turn_id).await?;
         }
-        // Confirm a pending Stop work or deletion now that this turn ended.
         crate::db::stop::settle(&mut tx, self.bot_id).await?;
         tx.commit().await?;
         if let Some(item_id) = wrote_item {
@@ -428,12 +404,8 @@ impl SinkState {
     }
 
     async fn running(&mut self) -> Result<(), Fenced> {
-        // A stop may already have moved the turn to `cancelling`; the turn
-        // was still accepted and must be drained, so that is not a fence.
         match self.transition("sending", "running").await {
             Ok(()) => {
-                // Accepted by the provider: the outcomes this attempt carried
-                // were delivered.
                 if !self.delivered.is_empty()
                     || !self.delivered_secrets.is_empty()
                     || !self.delivered_questions.is_empty()
@@ -488,7 +460,6 @@ impl SinkState {
                 .await;
                 if matches!(cancelling, Ok(true)) {
                     self.fenced = false;
-                    // Accepted all the same.
                     let accepted = async {
                         let mut conn = self.pool.acquire().await?;
                         crate::db::handoffs::transition(
@@ -547,7 +518,6 @@ impl SinkState {
                     id
                 }
                 None => {
-                    // A replacement retires the previous native session.
                     sqlx::query(
                         "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'",
@@ -587,8 +557,6 @@ impl SinkState {
         match result {
             Ok(true) => Ok(()),
             Ok(false) => Err(self.fence()),
-            // Bookkeeping failure: without a recorded session the next turn
-            // simply starts a new one, so output is never fenced for it.
             Err(err) => {
                 tracing::warn!(turn = %self.turn_id, error = %err, "recording provider session failed");
                 Ok(())
@@ -604,7 +572,6 @@ impl SinkState {
         if self.fenced {
             return Err(Fenced);
         }
-        // Bookkeeping: a database error is logged, never fences the output.
         if let Err(err) =
             sqlx::query("UPDATE turns SET reported_profile = ?2, native_turn_id = ?3 WHERE id = ?1")
                 .bind(self.turn_id)
@@ -622,9 +589,6 @@ impl SinkState {
         if self.fenced {
             return Err(Fenced);
         }
-        // The actor completes commits even if the adapter future is dropped.
-        // Flush at the threshold to apply backpressure to a fast provider.
-        // A failed previous write must drain before any more text is admitted.
         if self.pending.len() >= FLUSH_BYTES {
             self.flush().await?;
             if self.pending.len() >= FLUSH_BYTES {
@@ -636,8 +600,6 @@ impl SinkState {
             self.flush_wanted.notify_one();
             self.flush().await?;
             if self.pending.len() >= FLUSH_BYTES {
-                // Stop accepting output after a failed flush. Keep the
-                // buffer unfenced so finish can retry its final transaction.
                 return Err(Fenced);
             }
         }
@@ -649,8 +611,6 @@ impl SinkState {
         if self.pending.is_empty() {
             self.assistant_item = None;
         } else {
-            // A failed write keeps the text buffered, so the next message
-            // joins it rather than splitting text whose item is unknown.
             self.pending.push_str("\n\n");
         }
         Ok(())
@@ -707,7 +667,6 @@ impl TurnSink for SqliteSink {
             .await
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
-        // Bound the bytes in each mailbox entry as well as the number of entries.
         let mut remaining = chunk;
         while !remaining.is_empty() {
             let mut end = remaining.len().min(FLUSH_BYTES);

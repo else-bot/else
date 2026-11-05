@@ -81,7 +81,6 @@ fn provider_name(provider: Provider) -> &'static str {
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')";
 
-/// What a stored credential is bound to.
 #[derive(Clone, Copy)]
 struct Binding {
     account: Uuid,
@@ -931,8 +930,6 @@ fn fingerprint(account_id: Uuid, bot_id: Uuid, turn_id: Uuid, command: &MailComm
     hasher.finalize().to_vec()
 }
 
-/// What a caller sees for a recorded action: its result once settled, or
-/// its status while unsettled or after a crash.
 fn receipt(action_id: Uuid, status: &str, result: Option<Json<Value>>) -> Value {
     match result {
         Some(result) => result.0,

@@ -1,5 +1,3 @@
-//! Ephemeral Codex sessions with no tools for memory summaries and handoffs.
-
 use super::{AppServer, Codex, Incoming, LaunchSpec, Profile, Provider, codex_home, json, prompt};
 use super::{ID, RPC_TIMEOUT, Reported, SHUTDOWN_GRACE};
 use async_trait::async_trait;
@@ -72,8 +70,6 @@ impl Codex {
         let mut server = AppServer::start(host, &spec)
             .await
             .map_err(|e| e.to_string())?;
-        // The deadline and cancellation cover the whole exchange; either
-        // way the process is shut down and reaped before returning.
         let result = tokio::select! {
             _ = cancel.cancelled() => Err("cancelled".to_owned()),
             outcome = tokio::time::timeout(
@@ -161,11 +157,9 @@ impl Codex {
                 "item/started" | "item/completed" => {
                     let item = &params["item"];
                     let kind = item["type"].as_str().unwrap_or_default();
-                    // Only the request, reasoning, and the answer are allowed.
                     if !matches!(kind, "userMessage" | "agentMessage" | "reasoning") {
                         violation.get_or_insert(format!("Codex produced a {kind} item"));
                     } else if method == "item/completed" && kind == "agentMessage" {
-                        // The final answer replaces commentary.
                         if item["phase"].as_str() != Some("commentary") {
                             text = item["text"].as_str().unwrap_or_default().to_owned();
                         }
@@ -174,7 +168,6 @@ impl Codex {
                 "model/rerouted" if params["toModel"].as_str() != Some(&profile.model) => {
                     violation.get_or_insert("Codex rerouted the model".into());
                 }
-                // Settings changed mid-thread must still be the saved ones.
                 "thread/settings/updated" => {
                     if let Some(mismatch) =
                         Reported::from_response(&params["threadSettings"]).mismatch(profile)

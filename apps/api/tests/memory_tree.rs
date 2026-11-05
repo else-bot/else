@@ -1,6 +1,3 @@
-//! POC-014: the summary tree and saved views, against real SQLite with
-//! the application's own storage functions and compactor.
-
 mod common;
 
 use std::collections::HashMap;
@@ -46,7 +43,6 @@ async fn add(app: &TestApp, bot: Uuid, key: &str, body: &str) -> i64 {
     seqs[0]
 }
 
-/// The labeled leaf text of every entry, by sequence.
 async fn leaf_texts(app: &TestApp, bot: Uuid) -> HashMap<i64, String> {
     let rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT seq, body FROM memory_entry WHERE bot_id = ?1")
@@ -59,7 +55,6 @@ async fn leaf_texts(app: &TestApp, bot: Uuid) -> HashMap<i64, String> {
         .collect()
 }
 
-/// Every exact node's text is exactly the originals of its range, in order.
 async fn assert_exact_coverage(app: &TestApp, bot: Uuid) -> memory_tree::SavedView {
     let saved = memory_tree::load_view(&app.db.pool, bot).await.unwrap();
     assert!(
@@ -115,7 +110,6 @@ async fn exact_tree_publishes_in_order_compacts_and_keeps_every_range() {
         }
     }
     assert!(merged_once, "compaction merged exact parents");
-    // Joins that no longer fit a node wait for a summary instead of being cut.
     let blocked: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM memory_job WHERE bot_id = ?1 AND blocked_reason = 'summary_unavailable'",
     )
@@ -141,7 +135,7 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
     let bot = app.create_bot("Long").await;
     let bot_id: Uuid = bot.parse().unwrap();
     add(&app, bot_id, "a", "short one").await;
-    add(&app, bot_id, "b", &"long ".repeat(40)).await; // 200 bytes > 64
+    add(&app, bot_id, "b", &"long ".repeat(40)).await;
     add(&app, bot_id, "c", "after the long one").await;
     memory_worker::drain(&app.db.pool).await.unwrap();
     let saved = assert_exact_coverage(&app, bot_id).await;
@@ -150,13 +144,11 @@ async fn a_long_original_waits_for_a_summary_and_coverage_is_explicit() {
         "publication stops at the first missing leaf"
     );
     assert_eq!(saved.blocked, vec![("summary_unavailable".to_owned(), 1)]);
-    // The later leaf is built and waits; the original stays readable.
     let later = memory_tree::node(&app.db.pool, bot_id, 1, NodeId::leaf(2))
         .await
         .unwrap();
     assert!(later.is_some());
 
-    // The tools report the partial coverage and still reach every original.
     let reply = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -219,7 +211,6 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
     small_recipe(&app).await;
     let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
-    // A worker claims, then stalls past its lease; another takes over.
     let slow = memory_tree::claim(&app.db.pool, Duration::from_secs(60))
         .await
         .unwrap()
@@ -262,7 +253,6 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
         Completion::Done
     );
 
-    // Three workers race over many jobs; every range is built once.
     for n in 1..80 {
         add(&app, bot, &format!("r{n}"), &format!("r{n}")).await;
     }
@@ -276,7 +266,6 @@ async fn replaced_leases_and_concurrent_workers_never_publish_twice() {
     let saved = assert_exact_coverage(&app, bot).await;
     assert_eq!(saved.published_seq, 79);
 
-    // A deleted bot's late completion is fenced.
     add(&app, bot, "late", "late").await;
     let late = memory_tree::claim(&app.db.pool, Duration::from_secs(60))
         .await
@@ -334,7 +323,6 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
         .body;
     assert_eq!(before, after, "restart loads the exact saved view");
 
-    // A new recipe applies through an explicit rebuild into generation 2.
     let bigger = app
         .owner(
             "PATCH",
@@ -348,7 +336,6 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
         .await;
     assert_eq!(started.status, StatusCode::ACCEPTED);
     assert_eq!(started.body["building_generation"], 2);
-    // Appends during the rebuild reach both generations.
     for n in 40..50 {
         add(&app, bot_id, &format!("s{n}"), &format!("s{n}")).await;
     }
@@ -399,9 +386,6 @@ async fn restart_keeps_the_saved_view_and_a_rebuild_catches_up_and_switches() {
     assert_eq!(recipe["node_bytes"], 128);
 }
 
-/// Review fixes: truncation is explicit, long backlogs keep publishing,
-/// rebuilds switch only after catching up, the compaction view is saved,
-/// and damaged views are reported, not normalized.
 #[tokio::test(flavor = "multi_thread")]
 async fn cut_text_is_marked_with_where_the_rest_is() {
     let app = TestApp::installed().await;
@@ -462,7 +446,6 @@ async fn a_backlog_longer_than_one_batch_keeps_publishing() {
     let app = TestApp::installed().await;
     let bot: Uuid = app.create_bot("Backlog").await.parse().unwrap();
     add(&app, bot, "first", "first").await;
-    // Seed 10,050 built leaves behind a stalled first leaf.
     sqlx::query("UPDATE memory_store SET next_seq = 10050 WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
@@ -509,7 +492,6 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
     for n in 0..5 {
         add(&app, bot_id, &format!("u{n}"), &format!("u{n}")).await;
     }
-    // Nothing built or published yet; the rebuild must not switch at once.
     let started = app
         .owner("POST", &format!("/v1/bots/{bot}/memory/rebuild"), None)
         .await;
@@ -528,7 +510,6 @@ async fn a_rebuild_switches_only_after_reaching_the_append_watermark() {
     assert_eq!(view["generation"], 2);
     assert_eq!(view["published_seq"], 4);
 
-    // A leaf that needs a summary holds the rebuild open; nothing is lost.
     add(&app, bot_id, "long", &"long ".repeat(40)).await;
     let started = app
         .owner("POST", &format!("/v1/bots/{bot}/memory/rebuild"), None)
@@ -582,7 +563,6 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
         .body;
     assert_eq!(before["context_nodes"], after["context_nodes"]);
 
-    // A malformed element is reported and preserved, never normalized.
     sqlx::query(
         "UPDATE memory_store SET view_nodes = json_insert(view_nodes, '$[#]', 'damaged') WHERE bot_id = ?1",
     )
@@ -611,7 +591,6 @@ async fn the_compaction_view_is_saved_and_damaged_views_are_reported() {
         .unwrap();
     assert_eq!(kept, damaged, "publication paused instead of rewriting");
 
-    // A view pointing at a generation that does not exist is invalid.
     let other: Uuid = app.create_bot("Gen").await.parse().unwrap();
     add(&app, other, "g", "g").await;
     sqlx::query("UPDATE memory_store SET generation = 999 WHERE bot_id = ?1")

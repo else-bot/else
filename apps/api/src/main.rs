@@ -1,5 +1,3 @@
-//! else.bot API executable: command parsing and process composition only.
-
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -34,7 +32,6 @@ rollback-computer  switch a bot back to the computer its last upgrade replaced\n
 version  print this build's version\n";
 
 fn main() -> ExitCode {
-    // Before anything else: the installer reads it without a configuration.
     if matches!(
         std::env::args().nth(1).as_deref(),
         Some("version" | "--version" | "-V")
@@ -42,10 +39,6 @@ fn main() -> ExitCode {
         println!("else-api {}", else_api::VERSION);
         return ExitCode::SUCCESS;
     }
-    // A local `.env` is a development convenience. Existing process variables
-    // take precedence, and a missing file is not an error. Any other problem
-    // fails startup rather than silently ignoring settings. Line contents are
-    // not printed because they may hold credentials.
     if let Err(err) = dotenvy::dotenv() {
         if !err.not_found() {
             let detail = match &err {
@@ -139,7 +132,6 @@ fn backup_parts(
 )> {
     let url = config.require_database().context("invalid configuration")?;
     let params = else_api::backup::DatabaseParams::parse(url.expose())?;
-    // A missing key is an error; backups never generate one.
     let key = credentials::load_secret_key(&config.secret_key)?;
     Ok((params, Arc::new(key)))
 }
@@ -222,7 +214,6 @@ fn run_upgrade_computer(
             config.computers.clone(),
         );
         manager.reconcile_startup().await?;
-        // Leases and job records the stopped API left behind.
         manager.settle_offline(bot_id).await?;
         let report = match image {
             Some(image) => manager.upgrade_image(bot_id, image, network).await?,
@@ -274,8 +265,6 @@ fn run_restore_remote(
     let config = load_config()?;
     let (_, key) = backup_parts(&config)?;
     let downloads = config.data_dir.join("restore-download");
-    // Only the bucket is needed to download: the source database may not
-    // exist on a replacement server.
     let s3 = else_api::backup::s3::S3::new(
         config
             .s3
@@ -307,8 +296,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
             dir.is_absolute(),
             "the new installation directory must be absolute"
         );
-        // An exclusive create: a second restore to the same path fails here
-        // and never touches this one's files.
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -319,7 +306,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
                     dir.display()
                 )
             })?;
-        // Credentials first, so a failure here leaves no restored database.
         let written = credentials::write_secret_key(&dir.join("secret-key"), &key)
             .and_then(|_| credentials::provision_owner_token(&dir.join("owner-token")).map(|_| ()));
         if let Err(err) = written {
@@ -328,8 +314,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
         }
     }
     let result = runtime()?.block_on(async {
-        // Without Microsandbox a set with computers is refused; one with
-        // only the database and host state still restores.
         let runtime: Option<Arc<dyn else_api::computers::ComputerRuntime>> = match &new_dir {
             Some(dir) => {
                 match else_api::computers::runtime::Msb::detect(dir, config.msb_bin.clone()) {
@@ -380,8 +364,6 @@ fn run_restore(set_dir: &str, target: &str, new_data_dir: Option<&str>) -> anyho
             .downcast_ref::<else_api::backup::BackupError>()
             .is_some_and(|e| matches!(e, else_api::backup::BackupError::Leftover(_)));
         if let Some(dir) = new_dir.as_ref().filter(|_| !leftover) {
-            // Only the directory this restore created, and only when
-            // nothing it started may still run.
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -447,7 +429,6 @@ fn run_setup() -> anyhow::Result<()> {
 fn run_serve() -> anyhow::Result<()> {
     let config = load_config()?;
     let lock = lock(&config)?;
-    // Credentials load before the listener opens. Neither is logged.
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
     let secret_key = Arc::new(credentials::load_secret_key(&config.secret_key)?);
     runtime()?.block_on(async {
@@ -456,14 +437,10 @@ fn run_serve() -> anyhow::Result<()> {
         let listener = TcpListener::bind(config.bind)
             .await
             .with_context(|| format!("binding {}", config.bind))?;
-        // Port 0 binds an ephemeral port; providers and the manifest need
-        // the one actually bound.
         let config = Config {
             bind: listener.local_addr()?,
             ..config
         };
-        // Terminate provider processes left by an earlier API process
-        // before anything is reconciled or dispatched.
         let swept = else_api::providers::host::Host::new(&config.data_dir, &config.bots_dir)
             .sweep_orphans()?;
         if swept > 0 {
@@ -473,7 +450,6 @@ fn run_serve() -> anyhow::Result<()> {
             );
         }
         let (registry, summarizer) = else_api::providers::build(&config);
-        // Reconcile interrupted work before the scheduler admits anything.
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
         else_api::connectors::store::recover(&pool).await?;
         if requeued + uncertain > 0 {
@@ -486,7 +462,6 @@ fn run_serve() -> anyhow::Result<()> {
                 .clone()
                 .run(stop_scheduler.clone(), config.shutdown_grace),
         );
-        // Builds memory tree nodes; stops with the scheduler.
         let compactor = match summarizer {
             Some(summarizer) => else_api::memory_worker::Compactor::with_summaries(
                 pool.clone(),
@@ -501,8 +476,6 @@ fn run_serve() -> anyhow::Result<()> {
                 .run(stop_scheduler.clone()),
         );
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
-        // Bot computers: inspect the runtime (never waking or recreating
-        // anything), then maintain leases and idle computers.
         let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events)
             .with_secret_key(secret_key.clone());
         let mut computer_task = None;
@@ -522,7 +495,6 @@ fn run_serve() -> anyhow::Result<()> {
             }
             Err(err) => tracing::warn!(error = %err, "bot computers unavailable"),
         }
-        // The serialized backup worker (scheduled local sets).
         let backup_task = match config
             .database_url
             .as_ref()
@@ -564,9 +536,6 @@ fn run_serve() -> anyhow::Result<()> {
         let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state).await;
         drop(published);
-        // Stop provider work after HTTP so no new message is accepted. The
-        // singleton lock is held until every worker that changes runtime
-        // state has stopped, so a successor never overlaps with them.
         stop_scheduler.cancel();
         let _ = tokio::join!(
             scheduler_task,
@@ -619,8 +588,6 @@ async fn serve(
 
     }
     tracing::info!("shutdown requested; draining connections");
-    // Upgraded desktop streams are outside axum's drain and would otherwise
-    // be dropped with the runtime, leaving keys held in the guest.
     let streams = state.stop_desktop_streams();
     let _ = stop_tx.send(true);
     let deadline = tokio::time::Instant::now() + config.shutdown_grace;
@@ -633,8 +600,6 @@ async fn serve(
     match tokio::time::timeout_at(deadline, &mut server).await {
         Ok(result) => result.context("server task")?.context("serving HTTP")?,
         Err(_) => {
-            // Long-lived streams may not finish on their own. Dropping the
-            // server task closes the listener and remaining connections.
             tracing::warn!(
                 grace_secs = config.shutdown_grace.as_secs(),
                 "grace period elapsed; closing remaining connections"

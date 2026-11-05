@@ -1,7 +1,3 @@
-//! The single in-process scheduler. SQLite rows are the queue; this
-//! loop claims eligible turns, runs them through their adapters, and records
-//! outcomes. Handlers only write requests and call [`Scheduler::wake`].
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,7 +16,6 @@ use crate::db::turn_sink::{FLUSH_INTERVAL, SqliteSink};
 use crate::db::turns;
 use crate::grants::{Grants, Tool};
 
-/// Longer than a provider turn's own deadline.
 const TOOL_GRANT_TTL: Duration = Duration::from_secs(40 * 60);
 use crate::providers::Registry;
 
@@ -31,17 +26,12 @@ pub struct Scheduler {
     pool: SqlitePool,
     registry: Registry,
     wake: Notify,
-    /// Cancellation handles of turns running in this process, by turn ID.
     running: Actor<HashMap<Uuid, CancellationToken>>,
     cancel_grace: Duration,
     tasks: TaskTracker,
     grants: Arc<Grants>,
-    /// Provider slots in use: turns (reserved before their claim) and
-    /// memory summaries share one count, so together they never exceed
-    /// `max_active`.
     slots: Arc<Semaphore>,
     summaries: AtomicUsize,
-    /// Closed while a coordinated backup runs: no turn is claimed.
     gate: Arc<crate::maintenance::Gate>,
 }
 
@@ -49,7 +39,6 @@ pub struct Scheduler {
 pub struct SummaryPermit {
     scheduler: Arc<Scheduler>,
     slot: Option<OwnedSemaphorePermit>,
-    /// A summary is admitted work: a backup waits for it.
     _admission: crate::maintenance::Admission,
 }
 
@@ -202,13 +191,9 @@ impl Scheduler {
     }
 
     async fn dispatch(self: &Arc<Self>) -> Result<(), sqlx::Error> {
-        // Redeliver interruption: a stop or deletion committed even if its
-        // request never reached `interrupt` (for example, a lost response).
         for turn_id in turns::cancelling(&self.pool).await? {
             self.interrupt(turn_id).await;
         }
-        // Claims below insert into `running` before the next scan, so every
-        // turn missing from it here has no provider task.
         let live: Vec<Uuid> = self
             .running
             .call(|running| running.keys().copied().collect())
@@ -234,10 +219,6 @@ impl Scheduler {
                 tracing::warn!(error = %err, "admitting email deliveries failed");
             }
         }
-        // The slot is reserved before the claim, so a summary cannot take
-        // it while the claim is in flight. Each claim is admitted through
-        // the maintenance gate until its turn is registered as running, so
-        // a backup either sees it in the drain or it is never claimed.
         loop {
             let Some(_admission) = self.gate.enter() else {
                 break;
@@ -255,13 +236,8 @@ impl Scheduler {
                     return Err(err);
                 }
             };
-            // Start each claim before the next query, so an error in a later
-            // claim cannot strand this one.
             let token = CancellationToken::new();
             let this = self.clone();
-            // Registration and task creation are one accepted operation.
-            // Cancelling the dispatcher cannot leave a registered turn
-            // without its provider task (or release its slot too early).
             self.running
                 .call(move |running| {
                     running.insert(turn_id, token.clone());
@@ -296,8 +272,6 @@ impl Scheduler {
             Ok(loaded) => loaded,
             Err(err) => {
                 tracing::error!(turn = %turn_id, error = %err, "loading turn failed");
-                // Nothing was sent, so ending the turn is safe. Retry so a
-                // transient error cannot leave the bot's slot occupied.
                 let mut delay = Duration::from_millis(100);
                 for _ in 0..FINISH_ATTEMPTS {
                     let message = "The message could not be prepared. Send it again.";
@@ -313,9 +287,6 @@ impl Scheduler {
                 return;
             }
         };
-        // A delegated task reads its own bot's memory, and other bots only
-        // where both the delegating bot and its own bot may: delegation
-        // never widens what the original request could reach.
         let memory_scope = match input.delegation.delegated_by {
             Some((parent, _)) if input.delegation.delegated_task => {
                 match delegated_scope(&self.pool, parent, input.bot_id).await {
@@ -333,7 +304,6 @@ impl Scheduler {
             }
             _ => None,
         };
-        // Tools for this turn only; revoked when it ends (see dispatch).
         input.tool_grant = Some(
             self.grants
                 .issue_scoped(
@@ -346,16 +316,12 @@ impl Scheduler {
                 )
                 .await,
         );
-        // A provider switch: freeze settled history and prepare the
-        // checkpoint before anything is sent.
         if self.registry.get(&provider_id).is_some() {
             match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, &cancel)
                 .await
             {
                 Ok(handoff) => input.handoff = handoff,
                 Err(err) => {
-                    // Without a durable record nothing is handed off; the
-                    // turn still gets the recorded history it missed.
                     tracing::warn!(turn = %turn_id, error = %err, "preparing a handoff failed");
                 }
             }
@@ -369,9 +335,6 @@ impl Scheduler {
             Some(provider) => {
                 let provider = provider.clone();
                 let done = CancellationToken::new();
-                // The turn actor completes accepted persistence operations,
-                // so abandoning an adapter that ignores interruption never
-                // cuts a database commit short.
                 let run = async {
                     let watchdog = async {
                         cancel.cancelled().await;
@@ -390,8 +353,6 @@ impl Scheduler {
                     done.cancel();
                     outcome
                 };
-                // Request periodic flushes from the turn actor. Stop only
-                // between requests, after the last accepted flush completes.
                 let flusher = async {
                     loop {
                         tokio::select! {
@@ -400,7 +361,6 @@ impl Scheduler {
                             _ = sink.flush_wanted() => {}
                         }
                         if sink.flush().await.is_err() {
-                            // Fenced: the turn was stopped or the bot deleted.
                             cancel.cancel();
                         }
                     }
@@ -409,8 +369,6 @@ impl Scheduler {
             }
         };
         tracing::info!(turn = %turn_id, provider = %provider_id, ?outcome, "turn finished");
-        // The terminal outcome must not be lost to a transient database
-        // error; otherwise the bot's slot would stay occupied until restart.
         let mut delay = Duration::from_millis(100);
         for attempt in 1..=FINISH_ATTEMPTS {
             match sink.finish(&outcome).await {

@@ -1,4 +1,4 @@
-//! Named fault points for recovery tests (POC-019).
+//! Named fault points for recovery tests.
 //!
 //! An armed point makes the operation that reaches it stop right there, as
 //! if the API process died at that moment: the operation returns without

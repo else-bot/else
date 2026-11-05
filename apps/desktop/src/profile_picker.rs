@@ -1,5 +1,3 @@
-//! One catalog-backed profile picker for onboarding and bot dialogs.
-
 use std::collections::HashSet;
 
 use gpui_kit::assets::IconName;
@@ -500,7 +498,6 @@ pub fn model_label(id: &str) -> String {
     let mut words: Vec<String> = Vec::new();
     for part in id.split('-') {
         match words.last_mut() {
-            // Version parts join with a dot: 5-5 -> 5.5.
             Some(last)
                 if part.chars().all(|c| c.is_ascii_digit())
                     && last.chars().all(|c| c.is_ascii_digit() || c == '.') =>

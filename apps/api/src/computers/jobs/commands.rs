@@ -1,5 +1,3 @@
-//! Foreground command execution and interruption.
-
 use super::{
     Acquire, CommandOutput, ComputerError, ComputerManager, Env, FILTER, Foreground, Inspect, KILL,
     REDACT_MARGIN, RUN, RUNS_DIR, TAIL_BYTES, env_input, parse_run, redact, tail, with_env,
@@ -21,7 +19,7 @@ impl ComputerManager {
             .await
     }
 
-    /// [`Self::run_command`] with task-secret variables (POC-026), sent on
+    /// [`Self::run_command`] with task-secret variables, sent on
     /// the runtime's stdin, and its output filtered in the guest and
     /// redacted again here (before the tail is cut).
     ///
@@ -47,7 +45,7 @@ impl ComputerManager {
             .await
     }
 
-    /// A desktop input batch (POC-029): a foreground command that, under the
+    /// A desktop input batch: a foreground command that, under the
     /// operation lock, also requires that the owner's desktop session is not
     /// open (desktop admission takes the same lock, so they exclude each
     /// other).
@@ -77,9 +75,6 @@ impl ComputerManager {
             return Ok(Err(acquired));
         };
         let (bot, runtime_name, op) = self.checked(lease_id).await?;
-        // Decided again under the lock: a request that waited behind other
-        // work must not run after its turn was stopped, or (for input) once
-        // the owner opened the desktop.
         let turn: Option<Uuid> = holder.strip_prefix("turn:").and_then(|t| t.parse().ok());
         if let Some(turn) = turn {
             let live: bool = sqlx::query_scalar(
@@ -156,8 +151,6 @@ impl ComputerManager {
         let parsed = out.as_ref().ok().and_then(parse_run);
         let mut end_reason = "returned";
         if parsed.is_none() {
-            // Cut off (its timeout) or the reply was lost: the group may
-            // still run. End it before retiring the record.
             end_reason = "killed after timeout";
             let (kill_program, mut kill_args) = self.as_guest_user(KILL);
             kill_args.push(dir.clone());
@@ -176,7 +169,6 @@ impl ComputerManager {
                 tracing::warn!(bot = %bot_id, run = %run_id, "a timed-out command's group may survive");
             }
         }
-        // Retired while the operation lock is still held.
         alive.call(|alive| *alive = false).await;
         self.foreground
             .call(move |foreground| foreground.remove(&run_id))
@@ -196,7 +188,6 @@ impl ComputerManager {
         let out = out?;
         let redaction = env.redaction();
         let mut result = parsed.unwrap_or(CommandOutput {
-            // The command was killed before reporting (its timeout).
             exit_code: None,
             stdout: String::new(),
             stderr: tail(&out.stderr, TAIL_BYTES),
@@ -235,8 +226,6 @@ impl ComputerManager {
                 .foreground
                 .call(move |foreground| foreground.get(&run_id).cloned())
                 .await;
-            // A command of this process without a turn (an operator or test
-            // holder) is not the orphan loop's to end.
             if registered.as_ref().is_some_and(|f| f.turn_id.is_none()) {
                 continue;
             }
@@ -317,8 +306,6 @@ impl ComputerManager {
         }
     }
 
-    /// Kill a command this process runs. `None` when it already returned
-    /// (its own path retires it).
     async fn kill_registered(
         &self,
         run: &Foreground,
@@ -337,7 +324,6 @@ impl ComputerManager {
                     let out = runtime
                         .exec(&run.runtime_name, &program, &all, Duration::from_secs(30))
                         .await?;
-                    // The command's own path records the end once its call returns.
                     Ok(if out.stdout.contains("stopped") {
                         None
                     } else {
@@ -348,7 +334,6 @@ impl ComputerManager {
             .await
     }
 
-    /// Kill a command an earlier API process left, under the operation lock.
     async fn kill_left_over(
         &self,
         bot_id: Uuid,

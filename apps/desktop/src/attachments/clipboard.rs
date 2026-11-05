@@ -48,7 +48,6 @@ fn read_list(pipe: &mut (impl Read + AsRawFd)) -> Result<String, String> {
             events: libc::POLLIN,
             revents: 0,
         };
-        // The pipe owns the descriptor throughout this poll call.
         let ready = unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis() as i32) };
         if ready == 0 {
             return Err("Reading the copied file list timed out. Paste again.".into());

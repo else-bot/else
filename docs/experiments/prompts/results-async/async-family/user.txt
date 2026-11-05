@@ -1,1 +1,0 @@
-Have the family bot suggest a pickup checklist. Submit it, then end this attempt so the scheduler can run the child. Tell me its task ID and that it is pending.

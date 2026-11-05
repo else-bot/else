@@ -1,1 +1,0 @@
-The handoff reports pickup at 16:30, citing source `synthetic-email-1`.

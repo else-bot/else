@@ -1,8 +1,4 @@
-# Disposable services for the native E2E lanes. The runner always supplies a
-# unique project name. SQLite files belong to each disposable test/installation.
 services:
-  # Owns the network namespace and the kernel-assigned host port, so the
-  # endpoint survives the outage tests stopping and restarting seaweedfs.
   s3:
     image: chrislusf/seaweedfs:4.50
     platform: linux/arm64

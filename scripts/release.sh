@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Start an else.bot release: cut release/vX.Y.Z from main and open its pull
-# request to main.
-#
-#   scripts/release.sh [-y] patch|minor|major
-#
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

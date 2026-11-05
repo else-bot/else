@@ -1,13 +1,3 @@
-//! POC-024: assistant POC acceptance against the real application. The real
-//! `else-api` binary runs with the owner's Codex and Claude logins, real
-//! Microsandbox VMs with the desktop image, and the Compose S3 emulator; the
-//! scenario drives it only through the documented HTTP API and operator
-//! commands. It consumes subscription quota and boots VMs, so it runs only
-//! with `ELSE_LIVE_ACCEPTANCE=1` (and needs the guest image build from
-//! `docs/implementation/acceptance.md` and `docker compose up -d --wait`):
-//!
-//! ELSE_LIVE_ACCEPTANCE=1 cargo test -p else-api --test acceptance_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -34,7 +24,6 @@ fn test_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set in .env"))
 }
 
-/// One installation: its data directory, database URL, and bucket.
 struct Install {
     data: PathBuf,
     database_url: String,
@@ -45,7 +34,6 @@ struct Install {
 impl Install {
     fn command(&self, args: &[&str]) -> std::process::Command {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_else-api"));
-        // The owner's real HOME: the host provider logins live there.
         command
             .current_dir(common::without_dotenv(self.data.parent().unwrap()))
             .env_clear()
@@ -75,7 +63,6 @@ impl Install {
         command
     }
 
-    /// Run an operator command; its output is kept in the log.
     fn run(&self, args: &[&str]) -> String {
         let out = self.command(args).output().unwrap();
         let text = format!(
@@ -182,7 +169,6 @@ impl Api {
         body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// SIGTERM and wait: a normal shutdown.
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             // SAFETY: signalling our own child.
@@ -202,7 +188,6 @@ impl Drop for Api {
     }
 }
 
-/// Wait for a turn's final state; returns (status, error, assistant text).
 async fn finish(
     db: &sqlx::SqlitePool,
     turn: Uuid,
@@ -251,7 +236,6 @@ async fn wait_status(db: &sqlx::SqlitePool, turn: Uuid, wanted: &str) {
     panic!("turn {turn} never became {wanted}");
 }
 
-/// Every observation goes to stderr and to the evidence log.
 static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 fn note(text: &str) {
@@ -282,7 +266,6 @@ async fn no_provider_processes(within: Duration) {
     }
 }
 
-/// The runtime's own view: (name, status). Fails if `msb` fails.
 fn runtime_states(home: &Path) -> Vec<(String, String)> {
     let out = std::process::Command::new(msb())
         .env("MSB_HOME", home)
@@ -306,9 +289,6 @@ fn runtime_states(home: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Everything the run creates outside its temporary directory, removed
-/// even when an assertion fails: computers in both runtime homes (confirmed
-/// gone), the restored database, and the bucket's objects.
 struct Cleanup {
     homes: std::sync::Mutex<Vec<PathBuf>>,
     databases: std::sync::Mutex<Vec<String>>,
@@ -400,8 +380,6 @@ fn version(program: &str) -> String {
         .unwrap_or_else(|e| e.to_string())
 }
 
-/// A computer manager over an installation's database and runtime, used
-/// with the API stopped to read guest bytes directly (not through a model).
 async fn guest_sha256(pool: &sqlx::SqlitePool, data: &Path, bot: &str, file: &str) -> String {
     use else_api::computers::{Acquire, ComputerConfig, ComputerManager, runtime::Msb};
     let manager = ComputerManager::new(
@@ -438,7 +416,6 @@ async fn guest_sha256(pool: &sqlx::SqlitePool, data: &Path, bot: &str, file: &st
         .unwrap()
         .unwrap();
     manager.release(lease_id).await.unwrap();
-    // Leave it as found: stopped, with the owner's intent restored.
     if stopped {
         manager.owner_stop(bot).await.unwrap();
     } else {
@@ -511,7 +488,6 @@ async fn the_assistant_poc_works_end_to_end() {
         bucket,
         log: log.clone(),
     };
-    // The desktop image in this installation's runtime home.
     std::fs::create_dir_all(&home).unwrap();
     let tar = dir.path().join("guest.tar");
     assert!(
@@ -740,7 +716,6 @@ async fn the_assistant_poc_works_end_to_end() {
         "the job runs in the guest before the switch"
     );
     let job = jobs[0].0;
-    // Access did not widen: no other bot's memory, host file, or login.
     let activity = tool_activity(&pool, &builder).await;
     note(&format!("builder tool activity: {activity:?}"));
     for leaked in [
@@ -769,7 +744,6 @@ async fn the_assistant_poc_works_end_to_end() {
         .await
         .unwrap_or(0);
     assert_eq!(grants, 0, "no memory access was granted");
-    // Owner credentials are not task grants and vice versa.
     let mcp = format!("{}/tools/v1/mcp", api.base);
     let probe = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                         "params": { "name": "memory_read", "arguments": { "bot_id": main } } });
@@ -872,13 +846,11 @@ async fn the_assistant_poc_works_end_to_end() {
         finish(&pool, long, Duration::from_secs(120)).await.0,
         "interrupted"
     );
-    // The request is kept, and any reply text streamed before the stop.
     let kept = items_of(&pool, &travel).await;
     assert!(
         kept == travel_items + 1 || kept == travel_items + 2,
         "the request and any partial reply are kept: {travel_items} -> {kept}"
     );
-    // A bot with guest work and a running turn is deleted.
     let scratch = create("Scratch").await;
     let job_turn = api
         .send(&scratch, "codex", "On your computer start a background job running `sleep 900` and tell me its ID. Do not wait.")
@@ -908,8 +880,6 @@ async fn the_assistant_poc_works_end_to_end() {
         finish(&pool, doomed, Duration::from_secs(120)).await.0,
         "interrupted"
     );
-    // While the API still runs: the deletion settles, the deleted bot's job
-    // ends, its computer stops, and no provider process remains.
     let mut settled = false;
     for _ in 0..120 {
         let (status, jobs_live): (String, i64) = sqlx::query_as(
@@ -932,7 +902,6 @@ async fn the_assistant_poc_works_end_to_end() {
         items_of(&pool, &scratch).await >= scratch_items,
         "the deleted bot's history is retained"
     );
-    // The owner stops Builder's computer (its job ends with it).
     let (status, body) = api
         .call(
             reqwest::Method::POST,
@@ -1113,9 +1082,6 @@ async fn the_assistant_poc_works_end_to_end() {
         text.contains("Thursday") && text.contains("15:00"),
         "{text}"
     );
-    // Native sub-agents stay disabled after restore, for both providers, in
-    // fresh and resumed sessions: a turn that tried would fail as a policy
-    // violation; each provider's tool inventory is checked every turn.
     let challenge = "Spawn three parallel sub-agents to count to three and merge their answers.";
     for (bot, provider) in [(&main, "codex"), (&travel, "claude"), (&travel, "claude")] {
         let turn = api3.send(bot, provider, challenge).await;
@@ -1192,7 +1158,6 @@ async fn the_assistant_poc_works_end_to_end() {
     assert!(text.contains("BLUEFIN"), "{text}");
     api4.stop();
     no_provider_processes(Duration::from_secs(10)).await;
-    // The restored guest bytes, read directly.
     let secret_after = guest_sha256(&rpool, &restored_dir, &builder, "secret.txt").await;
     note(&format!("secret.txt sha256 after restore: {secret_after}"));
     assert_eq!(

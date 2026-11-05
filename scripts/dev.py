@@ -143,7 +143,6 @@ class Session:
     @classmethod
     def resolve(cls, name, directory=None):
         require(NAME.fullmatch(name), f"session name must match {NAME.pattern}")
-        # Outside Cargo's target directory, so `cargo clean` never deletes a live database or lock.
         return cls(ROOT, name, Path(os.path.abspath(directory)) if directory else ROOT / ".else-dev" / name)
 
     data = property(lambda self: self.state / "data")
@@ -550,7 +549,6 @@ def main(argv=None):
         require(not any(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", a) or a in ("--next", "-:") for a in extra),
                 "curl takes /PATH arguments only; the owner token goes to this session's API alone")
         header = f"Authorization: Bearer {session.token_file.read_text().strip()}\n"
-        # Every connection, including redirects and stray host arguments, reaches the session's own listener.
         argv = ["curl", "-sS", "--noproxy", "*", "--proto", "=http", "--connect-to", f"::{url[len('http://'):]}",
                 "-H", "@-", "-H", "content-type: application/json",
                 *[url + a if a.startswith("/") else a for a in extra]]

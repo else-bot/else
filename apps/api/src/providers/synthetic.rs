@@ -91,7 +91,6 @@ impl Synthetic {
     }
 }
 
-/// Split into chunks of at most `size` characters (never inside a char).
 fn chunks(text: &str, size: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     chars.chunks(size).map(|c| c.iter().collect()).collect()
@@ -164,7 +163,6 @@ impl Provider for Synthetic {
                 message: "The synthetic provider refused the message.".into(),
             };
         }
-        // Resume the recorded session unless it is gone or incompatible.
         let session = input.session.clone();
         let resumed = self
             .state

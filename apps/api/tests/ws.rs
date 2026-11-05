@@ -1,7 +1,3 @@
-//! The WebSocket channel API over a real TCP listener against SQLite:
-//! snapshots plus `bot:<id>` replay, the `bots` channel, reconnects, cursor
-//! errors, deletion, and authentication.
-
 mod common;
 
 use std::collections::HashMap;
@@ -42,7 +38,6 @@ impl Server {
         reply.body
     }
 
-    /// Open a socket; `Err` carries the HTTP status of a refused upgrade.
     async fn connect(&self, token: Option<&str>, origin: Option<&str>) -> Result<Socket, u16> {
         let mut request = format!("ws://{}/v1/ws", self.addr)
             .into_client_request()
@@ -82,7 +77,6 @@ async fn subscribe_bot(socket: &mut Socket, bot: &str, cursor: &str) {
     .await;
 }
 
-/// The next JSON message, or `None` on close or after `wait` of silence.
 async fn next(socket: &mut Socket, wait: Duration) -> Option<Value> {
     loop {
         match tokio::time::timeout(wait, socket.next()).await {
@@ -93,8 +87,6 @@ async fn next(socket: &mut Socket, wait: Duration) -> Option<Value> {
     }
 }
 
-/// The client model: applies only contiguous events per bot and checks
-/// UTF-8 offsets, like the desktop reducer.
 struct Model {
     prefix: String,
     applied: i64,
@@ -201,7 +193,6 @@ fn latest_seq(snapshot: &Value) -> i64 {
         .unwrap()
 }
 
-/// Apply `bot:<id>` messages until `done`.
 async fn read_until(socket: &mut Socket, model: &mut Model, done: impl Fn(&Model) -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !done(model) {
@@ -232,7 +223,6 @@ async fn snapshot_then_subscribe_replays_everything_in_between() {
     let bot = server.app.main_bot().await;
     let snapshot = server.snapshot(&bot).await;
     let mut model = Model::from_snapshot(&snapshot);
-    // A full exchange commits after the snapshot, before subscribing.
     let sent = server
         .app
         .send(
@@ -270,7 +260,6 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
             Some("synthetic"),
         )
         .await;
-    // Drop the connection in the middle of the reply.
     read_until(&mut socket, &mut model, |m| {
         m.items.values().any(|i| i["kind"] == "assistant")
     })
@@ -287,7 +276,6 @@ async fn live_events_reconnect_and_replay_without_duplicates() {
         snapshot_texts(&latest),
         "no duplicated or corrupted bubble"
     );
-    // Resubscribing from the start replays duplicates that change nothing.
     let before = model.texts();
     subscribe_bot(&mut socket, &bot, &start).await;
     read_until(&mut socket, &mut model, |m| m.duplicates >= target as usize).await;
@@ -360,7 +348,6 @@ async fn bots_channel_pushes_list_changes() {
         .map(|b| b["id"].clone())
         .collect();
     assert!(ids.contains(&json!(created)));
-    // Activity changes are pushed too.
     let sent = server
         .app
         .send(
@@ -387,7 +374,6 @@ async fn bots_channel_pushes_list_changes() {
     }
     assert!(saw_working);
     let _ = sent;
-    // Deleting a bot is pushed too.
     server
         .app
         .owner("DELETE", &format!("/v1/bots/{created}"), None)
@@ -411,8 +397,6 @@ async fn bots_channel_pushes_list_changes() {
     assert!(removed, "deleting a bot reaches subscribers");
 }
 
-/// A reply to a bot nobody has open reaches the sidebar through the `bots`
-/// channel alone, once per change, and reading it is pushed back.
 #[tokio::test(flavor = "multi_thread")]
 async fn bots_channel_carries_background_replies_and_reads() {
     let server = Server::start().await;
@@ -540,7 +524,6 @@ async fn cursor_errors_are_reported_per_channel() {
 async fn ended_channels_do_not_use_up_the_subscription_limit() {
     let server = Server::start().await;
     let mut socket = server.connect(Some(TOKEN), None).await.unwrap();
-    // 40 channels that end at once (no cursor) leave no subscription behind.
     for _ in 0..40 {
         op(
             &mut socket,
@@ -584,7 +567,6 @@ async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
         .owner("DELETE", &format!("/v1/bots/{bot}"), None)
         .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    // Read everything: the channel ends with bot_deleted and nothing follows.
     let mut ended = false;
     while let Some(message) = next(&mut socket, Duration::from_millis(1500)).await {
         assert!(!ended, "no message after bot_deleted: {message}");
@@ -593,7 +575,6 @@ async fn deletion_ends_a_bot_channel_even_for_a_stalled_reader() {
         }
     }
     assert!(ended);
-    // Subscribing again is refused.
     subscribe_bot(&mut socket, &bot, &cursor).await;
     let reply = next(&mut socket, Duration::from_secs(5)).await.unwrap();
     assert_eq!(reply["error"]["code"], "bot_deleted");
@@ -618,7 +599,6 @@ async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
         Some(403)
     );
     assert!(server.connect(Some(TOKEN), None).await.is_ok());
-    // Event payloads never carry internals.
     let bot = server.app.main_bot().await;
     let cursor = server.snapshot(&bot).await["event_cursor"]
         .as_str()
@@ -639,9 +619,6 @@ async fn upgrade_requires_the_owner_token_and_no_browser_origin() {
     }
 }
 
-/// POC-030: every connected client gets committed category changes,
-/// including renaming or deleting an empty category, and a reconnect
-/// returns a consistent category and bot snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn bots_channel_carries_categories_to_every_client() {
     let server = Server::start().await;
@@ -653,7 +630,6 @@ async fn bots_channel_carries_categories_to_every_client() {
         assert_eq!(first["data"]["categories"], json!([]));
         clients.push(socket);
     }
-    /// The next snapshot on each client that satisfies `check`.
     async fn each(clients: &mut [Socket], check: impl Fn(&Value) -> bool) -> Value {
         let mut last = Value::Null;
         for socket in clients.iter_mut() {
@@ -706,8 +682,6 @@ async fn bots_channel_carries_categories_to_every_client() {
             None,
         )
         .await;
-    // Deletion hides the category first, then unassigns its bots; clients
-    // reach the settled snapshot (an unknown category reads as none).
     let after = each(&mut clients, |d| {
         d["categories"] == json!([]) && d["bots"][0]["category_id"].is_null()
     })
@@ -717,7 +691,6 @@ async fn bots_channel_carries_categories_to_every_client() {
         Value::Null,
         "same snapshot"
     );
-    // Creating and deleting an empty category both reach every client.
     let empty = server
         .app
         .owner(
@@ -738,7 +711,6 @@ async fn bots_channel_carries_categories_to_every_client() {
         )
         .await;
     let after = each(&mut clients, |d| d["categories"] == json!([])).await;
-    // A reconnect sees the same state.
     let mut again = server.connect(Some(TOKEN), None).await.unwrap();
     op(&mut again, json!({ "op": "subscribe", "channel": "bots" })).await;
     let fresh = next(&mut again, Duration::from_secs(5)).await.unwrap();

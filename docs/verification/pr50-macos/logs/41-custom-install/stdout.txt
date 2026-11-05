@@ -1,8 +1,0 @@
-
-==> Configuration (/Users/lume/pr50/custom install/config/.env)
-    ✓ written (mode 0600)
-
-==> API service
-    ✓ launchd agent, starts with: elsebot start (--autostart to start it at login)
-
-==> else-api setup

@@ -1,4 +1,4 @@
-//! Explicit image upgrades of existing computers (POC-025).
+//! Explicit image upgrades of existing computers.
 //!
 //! A computer keeps the image it was created with: ordinary startup and use
 //! never replace a disk or reset a profile, so a new image reaches only new
@@ -27,21 +27,10 @@ use uuid::Uuid;
 use super::runtime::valid_image;
 use super::{ComputerError, ComputerManager, DESKTOP_GUEST_PORT, RuntimeState, Spec};
 
-/// Archiving or unpacking a large home directory.
 const COPY_TIMEOUT: Duration = Duration::from_secs(1800);
-/// Where the old computer writes its archive.
 const GUEST_STAGING: &str = "/var/tmp/else-upgrade.tar";
-/// Where the archive is copied into the new computer before it boots.
 const GUEST_ARCHIVE: &str = "/var/lib/elsebot-upgrade/data.tar";
 
-/// Archive the user's data on the old computer: print the archive size,
-/// SHA-256, and the user's numeric ID. It refuses unless the disk has room
-/// for the archive with a margin, and removes a partial archive on any
-/// failure, so the old computer never comes back with a full disk. Sparse
-/// files stay sparse. The host project mounted at `~/work` is another file
-/// system and stays out; a computer created before that mount still has
-/// `~/work` on its disk, and unpacking it moves those files into the new
-/// computer's mount, the bot's host project directory.
 const PACK: &str = r#"set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
@@ -79,9 +68,6 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep 0.1
 done"#;
 
-/// Verify and unpack the archive on the new computer as the same user ID,
-/// then print the new image's description. It refuses unless the disk has
-/// room for the unpacked data; the archive is removed either way.
 const UNPACK: &str = r#"set -e
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /
@@ -110,8 +96,6 @@ pub struct UpgradeReport {
     pub image_description: String,
 }
 
-/// A completed upgrade: id, previous runtime and image, data size and
-/// digest, previous network profile.
 type UpgradeRow = (
     Uuid,
     String,
@@ -180,10 +164,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// At startup (no upgrade can be in progress while the API runs): stop
-    /// any replacement an interrupted upgrade left running, so it holds no
-    /// resources or port. It stays on disk, recorded as `started`, until
-    /// the next upgrade attempt for that bot removes it.
     pub(super) async fn stop_interrupted_replacements(&self) -> Result<(), ComputerError> {
         let started: Vec<String> = sqlx::query_scalar(
             "SELECT to_runtime_name FROM computer_upgrades WHERE state = 'started'",
@@ -202,8 +182,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Remove replacements left by an upgrade whose process died: they were
-    /// created by else.bot and never handed to the bot.
     async fn clear_interrupted_upgrades(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let started: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT id, to_runtime_name FROM computer_upgrades
@@ -236,8 +214,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Whether the budget admits booting this computer now (the upgrade's
-    /// one VM at a time counts like the computer itself would).
     async fn admit(&self, bot_id: Uuid, row: &super::Row) -> Result<(), ComputerError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let admitted = self.admits(&mut tx, bot_id, row).await?;
@@ -251,8 +227,6 @@ impl ComputerManager {
         }
     }
 
-    /// Remove the old computer's archive if it is running (best effort; a
-    /// killed archive step cannot run its own cleanup).
     async fn remove_guest_archive(&self, name: &str) {
         if matches!(
             self.runtime.state(name).await,
@@ -270,7 +244,6 @@ impl ComputerManager {
         }
     }
 
-    /// Stop a computer the upgrade booted, confirming it is stopped.
     async fn stop_confirmed(&self, name: &str) -> Result<(), ComputerError> {
         if self.runtime.state(name).await? != Some(RuntimeState::Stopped) {
             self.runtime.stop(name).await?;
@@ -351,8 +324,6 @@ impl ComputerManager {
             return Err(refused("the network profile is not valid"));
         }
         let _op = self.op(bot_id).await;
-        // A replacement an interrupted attempt left is never used; it goes
-        // even when the bot was deleted since.
         self.clear_interrupted_upgrades(bot_id).await?;
         let active: Option<bool> =
             sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")
@@ -419,8 +390,6 @@ impl ComputerManager {
         let (bytes, sha256, description) = match copied {
             Ok(done) => done,
             Err(err) => {
-                // The old computer stays the bot's; it was booted only to
-                // read its disk, and keeps no archive.
                 self.remove_guest_archive(&row.runtime_name).await;
                 let _ = self.stop_confirmed(&row.runtime_name).await;
                 let discarded = self.discard_replacement(&to_runtime_name).await;
@@ -441,7 +410,6 @@ impl ComputerManager {
             }
         };
 
-        // Switch inside an immediate transaction, only if nothing changed meanwhile.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = Self::row(&mut tx, bot_id).await?.expect("exists");
         let held: bool = sqlx::query_scalar(
@@ -519,8 +487,6 @@ impl ComputerManager {
             .create(staging)
             .map_err(io)?;
 
-        // Read the old disk: booted without its desktop services, within
-        // the computer budget like any other start.
         self.admit(bot_id, row).await?;
         self.runtime.start(&row.runtime_name).await?;
         let out = self
@@ -545,7 +511,6 @@ impl ComputerManager {
             return Err(refused("the old computer's archive report was unreadable"));
         };
         let archive: PathBuf = staging.join("data.tar");
-        // The copy is verified below; a cut-off transfer is retried.
         let mut copied = Err(super::RuntimeError::Unavailable("not attempted".into()));
         for attempt in 1..=3 {
             let _ = std::fs::remove_file(&archive);
@@ -570,8 +535,6 @@ impl ComputerManager {
             ));
         }
 
-        // The replacement: same resources, network, and desktop port and
-        // password, booted with the archive in place.
         let mut ports = Vec::new();
         let mut files = vec![(archive.clone(), GUEST_ARCHIVE.to_owned())];
         if self.config.desktop {

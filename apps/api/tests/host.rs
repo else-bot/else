@@ -1,9 +1,3 @@
-//! POC-010: provider CLIs on the host, and the task-grant tool boundary.
-//!
-//! The launch tests run a shell the way providers run. The Codex check uses
-//! the installed CLI and the owner's existing login without running
-//! inference. Process discovery runs on Linux and macOS.
-
 mod common;
 
 use std::ffi::OsString;
@@ -87,7 +81,6 @@ async fn runs_start_in_the_project_with_the_users_session_environment() {
     );
     let vars: Vec<(&str, &str)> = env.lines().filter_map(|l| l.split_once('=')).collect();
     let get = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
-    // The owner's session: host work sees their home and tools.
     assert_eq!(get("HOME"), std::env::var("HOME").ok().as_deref());
     assert_eq!(get("PATH"), std::env::var("PATH").ok().as_deref());
     assert_eq!(get("PROVIDER_SETTING"), Some("allowed"));
@@ -95,7 +88,6 @@ async fn runs_start_in_the_project_with_the_users_session_environment() {
         get(MARKER_VAR),
         Some(format!("{}:{}", fx.host.marker_prefix(), spec.turn_id).as_str())
     );
-    // Nothing of the API's own environment (cargo's, here) passes.
     let session = [
         "HOME",
         "USER",
@@ -150,8 +142,6 @@ async fn termination_reaps_the_whole_process_group() {
     assert_eq!(fx.host.live_processes(spec.turn_id), Vec::<i32>::new());
 }
 
-/// A run whose supervisor vanished (as after an API crash) is found and
-/// terminated by the startup sweep.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn orphans_are_swept() {
@@ -199,14 +189,12 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
             dirs.provider_home.to_string_lossy().into_owned(),
         )],
     };
-    // The configuration is valid for the installed version.
     let out = output(
         &fx,
         &launch(&["--strict-config", "app-server", "--print-startup-config"]),
     )
     .await;
     assert!(out.contains("\"appServerVersion\""), "{out}");
-    // Native sub-agents and other tool families are off; the shell is on.
     let out = output(&fx, &launch(&["features", "list"])).await;
     let state = |feature: &str| {
         out.lines()
@@ -223,7 +211,6 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
         "{}",
         state("shell_tool")
     );
-    // The supported login works without copying credentials.
     let status = fx
         .host
         .command(&launch(&["login", "status"]))
@@ -351,9 +338,6 @@ fn offered_tools(request: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// The tools the first model request offers when the installed CLI runs
-/// one `codex exec` turn in the bot's prepared home, without a login (the
-/// model provider is the local mock), and the MCP calls it made.
 async fn first_model_request(
     fx: &Fixture,
     codex: &Path,
@@ -420,10 +404,6 @@ async fn first_model_request(
     (offered_tools(&requests[0]), calls)
 }
 
-/// A connector event's launch, on the real CLI and without a login: the
-/// configuration is valid, the shell is off, and the first model request
-/// carries no native file-edit or command tool while else.bot's MCP tools
-/// stay callable from code mode. The owner's launch keeps both.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_offers_a_connector_event_no_native_tools() {
     let Some(codex) = codex_on_path() else {
@@ -681,7 +661,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         vec![json!("[synthetic:hang]")],
         "only its own conversation"
     );
-    // Identity cannot be chosen by the request.
     let forged = tool(
         &app,
         &format!("/tools/v1/history?bot_id={other}"),
@@ -700,7 +679,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::NOT_FOUND,
         "foreign objects look missing"
     );
-    // Grants and owner tokens never cross route groups.
     let owner = app.call("GET", "/v1/bots", None, Some(&token)).await;
     assert_eq!(
         (owner.status, owner.body["error"]["code"].clone()),
@@ -741,7 +719,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::UNAUTHORIZED
     );
 
-    // A grant without the tool is refused.
     let narrow = grants
         .issue(
             bot.parse().unwrap(),
@@ -756,7 +733,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::FORBIDDEN
     );
 
-    // Stop work revokes the grant.
     let stop_request = Uuid::new_v4();
     app.owner(
         "POST",
@@ -769,8 +745,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::UNAUTHORIZED
     );
 
-    // A grant for a turn that is no longer running is refused even if it
-    // was never revoked in memory (for example, after reconciliation).
     app.wait_turn(&turn.to_string(), &["interrupted"]).await;
     let stale = grants
         .issue(
@@ -786,7 +760,6 @@ async fn task_grants_are_scoped_to_their_turn() {
         StatusCode::UNAUTHORIZED
     );
 
-    // Retrying the completed stop leaves a newer turn's grant alone.
     let (newer, conversation) = hanging_turn(&app, &bot).await;
     let newer_grant = grants
         .issue(
@@ -848,8 +821,6 @@ async fn tool(app: &TestApp, path: &str, token: Option<&str>) -> common::Reply {
     app.call("GET", path, None, token).await
 }
 
-/// Environment values given to a provider (such as its task grant) reach it
-/// but never appear on any host command line, which other users can read.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_secrets_stay_off_host_command_lines() {

@@ -1,4 +1,4 @@
-//! Replication of completed local sets to an S3 or R2 bucket (POC-023).
+//! Replication of completed local sets to an S3 or R2 bucket.
 //!
 //! Remote layout: `<prefix>sets/<set id>/<object>`. For each completed local
 //! set without a verified remote completion, the worker aborts abandoned
@@ -20,7 +20,6 @@ use super::s3::{Put, S3, S3Error};
 use super::{BackupError, COMPLETE, Completion, MANIFEST};
 use crate::credentials::SecretKey;
 
-/// Objects at or below this size are uploaded whole.
 const PART_BYTES: u64 = 16 * 1024 * 1024;
 
 impl From<S3Error> for BackupError {
@@ -100,7 +99,6 @@ impl Replicator {
         Ok(())
     }
 
-    /// Sets this installation verified as complete at this destination.
     async fn verified(&self) -> Result<Vec<(String, bool)>, BackupError> {
         Ok(sqlx::query_as(
             "SELECT set_id, whole_assistant FROM backup_remote
@@ -114,7 +112,6 @@ impl Replicator {
     /// Local sets whose remote completion is not verified at this
     /// destination.
     pub async fn awaiting(&self, dir: &Path) -> Result<Vec<String>, BackupError> {
-        // Completed here, or retired from here by remote retention.
         let done: Vec<String> = sqlx::query_scalar(
             "SELECT set_id FROM backup_remote
              WHERE destination = ?1 AND state IN ('completed', 'retired')",
@@ -201,7 +198,6 @@ impl Replicator {
                 let etag = self.s3.upload_part(key, &upload, number, part).await?;
                 parts.push((number, etag));
                 if crate::faults::hit("replication.after_part") {
-                    // A simulated crash: the multipart upload stays open.
                     return Err(BackupError::Interrupted);
                 }
                 number += 1;
@@ -218,8 +214,6 @@ impl Replicator {
         result
     }
 
-    /// Replicate one set; returns its whole-assistant flag once every
-    /// object and the completion record are verified remotely.
     async fn replicate_set(
         &self,
         set_dir: &Path,
@@ -234,7 +228,6 @@ impl Replicator {
         let local_complete =
             super::read_regular(&set_dir.join(COMPLETE), super::MAX_COMPLETE_BYTES)?;
         let complete_key = self.set_key(&set_id, COMPLETE);
-        // Validates the set and lists its objects.
         let (completion, manifest, _) = super::restore::open_set(set_dir, key)?;
         let whole = manifest.coverage.whole_assistant;
         let mut objects: Vec<(String, u64, String)> = vec![(
@@ -249,9 +242,6 @@ impl Replicator {
                 a.ciphertext_sha256.clone(),
             )
         }));
-        // An existing completion record must be this set's own; it is never
-        // replaced. Its objects are still verified (and repaired) below: a
-        // record alone does not prove the payload.
         let published = match self.s3.head(&complete_key).await? {
             Some(_) => {
                 let remote = self
@@ -267,7 +257,6 @@ impl Replicator {
             }
             None => false,
         };
-        // A crashed earlier attempt may have left multipart uploads.
         for (upload_key, upload_id) in self.s3.list_multipart(&self.set_key(&set_id, "")).await? {
             self.s3.abort_multipart(&upload_key, &upload_id).await?;
             stats.aborted += 1;
@@ -284,7 +273,6 @@ impl Replicator {
         if let Some(hook) = &self.before_publish {
             hook(set_id.clone()).await;
         }
-        // Every byte is checked again right before publication.
         for (object, bytes, sha256) in &objects {
             if !self
                 .verify(&self.set_key(&set_id, object), *bytes, sha256)
@@ -327,7 +315,6 @@ impl Replicator {
         Ok(whole)
     }
 
-    /// Remote sets: (set id, has completion, every key).
     async fn remote_sets(&self) -> Result<Vec<(String, bool, Vec<String>)>, BackupError> {
         let root = self.s3.key("sets/");
         let mut sets: std::collections::BTreeMap<String, (bool, Vec<String>)> = Default::default();
@@ -362,13 +349,6 @@ impl Replicator {
             .collect())
     }
 
-    /// Keep the newest `keep` remote sets this installation verified at
-    /// this destination (never fewer than one) and the newest verified
-    /// whole-assistant set; remove older verified sets, completion record
-    /// first. A set with a completion record this installation did not
-    /// verify is never counted as a recovery point and never removed.
-    /// Incomplete remote sets are removed only when no local set awaits
-    /// them.
     async fn apply_remote_retention(&self, dir: &Path) -> Result<Vec<String>, BackupError> {
         let (sets, verified) = tokio::join!(self.remote_sets(), self.verified());
         let sets = sets?;
@@ -457,7 +437,6 @@ pub async fn download_set(
                 "the remote completion record names another set".into(),
             ));
         }
-        // The record is unauthenticated: its sizes are bounded first.
         if completion.manifest.ciphertext_bytes > super::MAX_MANIFEST_BYTES + 64 * 1024 {
             return Err(BackupError::Invalid(
                 "the remote manifest is too large".into(),

@@ -1,5 +1,3 @@
-//! Sending owner messages and resolving lost send responses.
-
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -118,8 +116,6 @@ async fn send(
         })?;
     let registry = state.scheduler.registry();
     let requested = body.provider_id.as_deref();
-    // Without a named provider: the bot's own, else the installation's
-    // default, else the first available one.
     let chosen = match requested {
         Some(_) => None,
         None => crate::db::bot_profiles::provider_for(&state.db, bot_id)
@@ -138,8 +134,6 @@ async fn send(
         uses_profile: false,
         open_draft: body.open_draft.as_ref(),
     };
-    // A matching retry returns its saved result even if the provider has
-    // since become unavailable; provider checks apply to new messages only.
     let accepted = match turns::existing_send(&state.db, &request)
         .await
         .map_err(|err| with_id(err.into()))?
@@ -231,7 +225,6 @@ async fn cancel(
             }
             .with_request_id(body.request_id)
         })?;
-    // A retried stop returns its old receipt and must not touch newer work.
     if receipt.created {
         state.scheduler.grants().revoke_bot(bot_id).await;
     }

@@ -114,7 +114,6 @@ impl Snapshot {
         )
     }
 
-    /// Why an install may not start now, if it may not.
     fn install_refusal(&self) -> Option<String> {
         if let Some(why) = &self.unavailable {
             return Some(why.clone());
@@ -182,7 +181,6 @@ enum Command {
 pub struct Commands {
     tx: mpsc::Sender<Command>,
     state: watch::Receiver<Snapshot>,
-    /// An install or restart was sent and the actor has not taken it yet.
     pending: Arc<AtomicBool>,
 }
 
@@ -257,7 +255,6 @@ struct Settings {
     work_every: Duration,
     check_limit: Duration,
     work_limit: Duration,
-    /// How long a relaunched app must keep running to count as started.
     relaunch_grace: Duration,
 }
 
@@ -340,7 +337,6 @@ struct Actor {
     events: mpsc::Sender<Event>,
     log: output::Log,
     client: Option<(OwnerToken, Arc<Client>)>,
-    /// The release the last successful install switched to.
     ready: Option<Version>,
     checking: bool,
     counting: bool,
@@ -511,7 +507,6 @@ impl Actor {
         });
     }
 
-    /// Reuses the client while the owner key stays the same.
     fn counter(&mut self) -> Counter {
         let Some(server) = self.installation.server() else {
             return Counter::AppOnly;
@@ -612,8 +607,6 @@ struct Report {
 }
 
 impl Counter {
-    /// An app-only installation stops no server, so remote work never
-    /// blocks its update.
     async fn count(self) -> Work {
         let (server, client, limit) = match self {
             Self::AppOnly => return Work::Idle,
@@ -654,8 +647,6 @@ impl Counter {
     }
 }
 
-/// The installation's own environment, as for `elsebot start`, and never a
-/// prompt: no terminal, no stdin, and git told not to ask.
 fn child_env(home: &Path) -> Vec<(OsString, OsString)> {
     let mut env = service_env(std::env::vars_os(), home);
     env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
@@ -710,9 +701,6 @@ fn detached(
     Ok(command)
 }
 
-/// Runs `bin/elsebot update --yes --version <target>` to the end, sending
-/// its output as it is written. Success means it exited cleanly and
-/// `current` now names the target.
 async fn run_installer(
     home: &Path,
     target: Version,
@@ -770,7 +758,6 @@ async fn run_installer(
     }
 }
 
-/// The installer's last error line, and what to do about it.
 fn failure(log: &Path, status: &str) -> String {
     let mut tail = Vec::new();
     if let Ok(mut file) = std::fs::File::open(log) {
@@ -812,8 +799,6 @@ fn failure(log: &Path, status: &str) -> String {
     )
 }
 
-/// Opens the installed app as the launcher or Finder would, so it outlives
-/// this process and its terminal.
 async fn relaunch(home: &Path, grace: Duration) -> Result<(), String> {
     if cfg!(target_os = "macos") {
         return open_bundle(home).await;
@@ -901,7 +886,6 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
-    /// Stable tags up to v0.0.20, plus a newer prerelease and an annotated tag.
     fn releases(dir: &Path) -> String {
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1201,7 +1185,6 @@ mod tests {
         }
     }
 
-    /// Answers the work report with the current status code and counts.
     async fn server(answer: Arc<AtomicU16>) -> Origin {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();

@@ -73,7 +73,6 @@ pub async fn defaults(state: &AppState) -> Result<Option<Value>, ApiError> {
     let chosen = crate::db::bot_profiles::default_provider(&mut conn)
         .await?
         .and_then(|id| registry.get(&id).map(|p| p.id()));
-    // Else the first available provider that takes a profile.
     let first = registry
         .all()
         .iter()
@@ -91,7 +90,6 @@ async fn show_defaults(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     Ok(Json(json!({ "defaults": defaults(&state).await? })))
 }
 
-/// Set the default provider and its saved profile (created if missing).
 async fn set_defaults(
     State(state): State<Arc<AppState>>,
     ApiJson(body): ApiJson<ProfileChoice>,
@@ -181,7 +179,6 @@ async fn update(
     if !saved && !adapter.is_some_and(|p| p.uses_profile()) {
         return Err(ApiError::not_found());
     }
-    // Only the provider's adapter can say which exact values it applies.
     let provider = state
         .scheduler
         .registry()
@@ -195,8 +192,6 @@ async fn update(
         })?
         .clone();
     if !saved {
-        // A first profile is set explicitly and completely: nothing is
-        // inherited from a CLI default.
         let (Some(model), Some(reasoning_effort), Some(service_tier)) =
             (&body.model, &body.reasoning_effort, &body.service_tier)
         else {

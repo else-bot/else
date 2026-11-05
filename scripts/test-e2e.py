@@ -67,7 +67,6 @@ def snapshot(destination):
         names = capture(["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"], cwd=ROOT).split("\0")
         paths = [ROOT / name for name in names if name]
     else:
-        # Container input has already been filtered by the host.
         paths = [p for p in ROOT.rglob("*") if p.is_file() or p.is_symlink()]
     for source in paths:
         if not source.exists() and not source.is_symlink():
@@ -139,7 +138,6 @@ def application_tests(cargo, selected, args, env, work, result):
         with log.open("w") as stream:
             try:
                 test_args = ["--test-threads", str(args.test_threads)]
-                # S3 tests are optional for ordinary Cargo runs, mandatory here.
                 if name == "replication":
                     test_args += ["--ignored"]
                 run(cargo + flags + ["--", *test_args],
@@ -151,7 +149,6 @@ def application_tests(cargo, selected, args, env, work, result):
 
     with ThreadPoolExecutor(max_workers=args.test_jobs) as pool:
         pending = {}
-        # Start the longest integration target early so it overlaps other work.
         jobs.sort(key=lambda job: job[0] != "replication")
         for name, flags in jobs:
             cancel = queue.Queue(maxsize=1)
@@ -198,10 +195,6 @@ def worker(args):
 
         try:
             if args.suite in ["verification", "all"]:
-                phase("runner_checks", [sys.executable, str(ROOT / ".agents/skills/verify-else/test_verify.py")])
-                phase("development_checks", [sys.executable, str(ROOT / "scripts/test-dev.py")])
-                phase("installer_checks", [sys.executable, str(ROOT / "scripts/test-install-config.py")])
-                phase("e2e_checks", [sys.executable, "-m", "unittest", "discover", "-s", "scripts/e2e", "-p", "test_*.py"])
                 phase("verification", [sys.executable, str(ROOT / ".agents/skills/verify-else/verify.py"),
                                        "--backend", "process", "--build-dir", str(cache / "build"),
                                        "--jobs", str(args.test_jobs), "--test-threads", str(args.test_threads),
@@ -290,7 +283,6 @@ def native_cache(cache):
     for name in ["index", "cache"]:
         if (registry / name).exists() and not (dest / name).exists():
             shutil.copytree(registry / name, dest / name)
-    # A private copy can be upgraded by the installer without modifying the host.
     msb = shutil.which("msb")
     if msb and not (cache / "microsandbox").exists():
         prefix = Path(msb).resolve().parent.parent
@@ -370,7 +362,6 @@ def lane(args, variant, output, image, volume, cancel):
         result = {"variant": variant, "status": "failed"}
         try:
             run(compose + ["up", "-d", "--wait"], cancel=cancel, env=env, stdout=log, stderr=subprocess.STDOUT)
-            # Neither native lane reads the owner's ignored checkout .env.
             source = work / "source"
             snapshot(source)
             (source / ".else-source.json").write_text(json.dumps({
@@ -521,8 +512,6 @@ def main():
         output.mkdir()
         start = time.perf_counter()
         failed = False
-        # At most two independent platform actors. Only this coordinator owns
-        # the report; no shared .env file, mutable checkout, or global lock.
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:
             pending = {}
             mailboxes = []

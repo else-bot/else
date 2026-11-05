@@ -1,5 +1,3 @@
-//! Stopped-disk capture for backups.
-
 use super::{
     ComputerError, ComputerManager, DiskCapture, GUEST_CHECKPOINT, GUEST_PROJECT, ROOT_PROJECT,
     Reason, Row, RuntimeState,
@@ -8,7 +6,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 impl ComputerManager {
-    /// Export a bot's computer disk for a backup (POC-022), under its
+    /// Export a bot's computer disk for a backup, under its
     /// operation lock. An idle running or paused computer is stopped first
     /// through the normal stop (a desktop checkpoints Chromium); a stopped
     /// one, including an owner-stopped one, is exported without being
@@ -59,11 +57,6 @@ impl ComputerManager {
         })
     }
 
-    /// Stop an idle computer for a whole-disk operation (a backup capture
-    /// or an image upgrade), through the normal stop so a desktop
-    /// checkpoints Chromium first; a stopped one is left as it is. A held
-    /// or transitioning computer is `Busy`. Returns once the runtime
-    /// confirms it stopped. The caller holds the bot's operation lock.
     pub(super) async fn stop_for_disk(&self, bot_id: Uuid, row: &Row) -> Result<(), ComputerError> {
         match row.observed_state.as_str() {
             "absent" | "missing" => {
@@ -71,10 +64,6 @@ impl ComputerManager {
             }
             "stopped" => {}
             "running" | "paused" => {
-                // A turn's lease outlives the turn until it expires; a turn
-                // or job that has ended holds nothing, so its lease ends
-                // here instead of deferring the operation for minutes. Any
-                // other holder (a desktop session) still counts.
                 let leases: Vec<(Uuid, String)> = sqlx::query_as(
                     "SELECT id, holder FROM computer_leases
                      WHERE bot_id = ?1 AND released_at IS NULL",
@@ -104,8 +93,6 @@ impl ComputerManager {
                     return Err(ComputerError::Busy("in use".into()));
                 }
                 if self.config.desktop {
-                    // The browser must close cleanly before its profile is
-                    // captured; a paused desktop is resumed to do so.
                     if row.observed_state == "paused" {
                         self.runtime.resume(&row.runtime_name).await?;
                         let mut conn = self.pool.acquire().await?;
@@ -134,7 +121,6 @@ impl ComputerManager {
             }
             other => return Err(ComputerError::Busy(format!("state {other}"))),
         }
-        // The runtime must agree it is stopped before its disk is read.
         if self.runtime.state(&row.runtime_name).await? != Some(RuntimeState::Stopped) {
             return Err(ComputerError::Busy(
                 "the runtime does not report it stopped".into(),

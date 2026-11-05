@@ -105,7 +105,6 @@ impl AppServer {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Provider logs can contain request details; they are not kept.
             .stderr(Stdio::null());
         let mut process =
             Supervised::spawn(command).map_err(|err| RpcError::Spawn(err.to_string()))?;
@@ -206,9 +205,6 @@ impl AppServer {
     }
 }
 
-// Only this actor owns stdin and the response registry. The reader has a
-// bounded mailbox too; neither cancelled calls nor a noisy provider can
-// grow the pending map or output backlog without limit.
 async fn io_loop(
     stdout: impl AsyncRead + Unpin + Send + 'static,
     mut stdin: impl AsyncWrite + Unpin,
@@ -283,8 +279,6 @@ async fn io_loop(
         }
     }
     reader.abort();
-    // Dropping pending fails outstanding requests and releases their slots;
-    // dropping stdin closes any partially written stream.
 }
 
 async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {

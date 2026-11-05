@@ -1,4 +1,4 @@
-//! Owner-provided credentials for a bot's guest scripts (POC-026).
+//! Owner-provided credentials for a bot's guest scripts.
 //!
 //! A task secret is a named set of environment variables for one bot, for
 //! example the SMTP settings a mailing script needs. Values are encrypted at
@@ -30,8 +30,6 @@ pub const MAX_PER_COMMAND: usize = 4;
 /// text); the owner is told so when storing one.
 pub const MIN_REDACTED: usize = 4;
 
-/// Variables a secret may not set: they change how the guest runs the
-/// command rather than giving it data.
 const RESERVED: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "IFS", "ENV", "BASH_ENV",
     "DISPLAY", "TERM", "TMPDIR", "LANG", "PS4",
@@ -79,7 +77,6 @@ impl Env {
                 value: v.clone(),
             })
             .collect();
-        // Longest first, so a value containing another is replaced whole.
         set.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
         set
     }
@@ -363,8 +360,6 @@ mod tests {
             "login [secret SMTP_PASSWORD] ok; again:[secret SMTP_PASSWORD]."
         );
         assert_eq!(redact("nothing here", &set), "nothing here");
-        // A cut-off copy (a tail starting mid-value) is not a full match,
-        // and a long output is scanned in linear time.
         assert_eq!(redact("2-é-pass", &set), "2-é-pass");
         let long = format!("{}hunter2-é-pass", "x".repeat(1_000_000));
         let started = std::time::Instant::now();

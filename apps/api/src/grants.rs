@@ -70,8 +70,6 @@ pub struct Grants {
 #[derive(Default)]
 struct State {
     by_digest: HashMap<[u8; 32], Grant>,
-    /// Turns whose current attempt delegated or asked for a secret: every further tool call of
-    /// that attempt is refused (it must end). A new attempt's grant clears it.
     parked: std::collections::HashSet<Uuid>,
 }
 
@@ -105,7 +103,6 @@ impl Grants {
     ) -> String {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).expect("system random source");
-        // A distinct prefix keeps grants and owner tokens visibly different.
         let token = format!("tg_{}", URL_SAFE_NO_PAD.encode(bytes));
         let key = digest(&token);
         self.state

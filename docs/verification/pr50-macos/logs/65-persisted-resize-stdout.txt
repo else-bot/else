@@ -1,3 +1,0 @@
-/Users/lume/.else/config/desktop.layout.json
-desktop.layout.json {'sidebar_width': 310.0, 'details_width': 336.0, 'category_order': [], 'collapsed': []}
-desktop.json {'origin': 'http://127.0.0.1:7878'}

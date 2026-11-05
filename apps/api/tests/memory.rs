@@ -1,6 +1,3 @@
-//! POC-013: the original memory log and scoped retrieval, against real
-//! SQLite and the real router.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -43,7 +40,6 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     let a: Uuid = app.create_bot("A").await.parse().unwrap();
     let b: Uuid = app.create_bot("B").await.parse().unwrap();
 
-    // 30 distinct appends and 10 retries of one key, across two bots, at once.
     let mut tasks = tokio::task::JoinSet::new();
     for i in 0..30 {
         let pool = app.db.pool.clone();
@@ -83,7 +79,6 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
         1,
         "every retry returned the same sequence"
     );
-    // Bot-local, contiguous, zero-based.
     assert_eq!(seqs(&app, a).await, (0..21).collect::<Vec<i64>>());
     assert_eq!(seqs(&app, b).await, (0..10).collect::<Vec<i64>>());
     let retries: i64 = sqlx::query_scalar(
@@ -95,13 +90,11 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     .unwrap();
     assert_eq!(retries, 1);
 
-    // Same key, different content: a conflict, nothing written.
     assert!(matches!(
         append(&app, a, &entry("retry", "other content")).await,
         Err(AppendError::Conflict)
     ));
 
-    // A rolled-back append consumes no sequence.
     let mut tx = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     memory::append(&mut tx, a, &entry("rolled", "rolled back"))
         .await
@@ -118,8 +111,7 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
             .unwrap();
     assert_eq!(rolled, 0);
 
-    // Long originals split at UTF-8 boundaries and reassemble exactly.
-    let long = "é€x".repeat(25_000); // 150,000 bytes
+    let long = "é€x".repeat(25_000);
     let parts = append(&app, a, &entry("long", &long)).await.unwrap();
     assert_eq!(parts, vec![22, 23, 24]);
     let bodies: Vec<String> = sqlx::query_scalar(
@@ -132,7 +124,6 @@ async fn concurrent_appends_retries_and_rollbacks_keep_order_and_content() {
     assert!(bodies.iter().all(|b| b.len() <= memory::MAX_PART_BYTES));
     assert_eq!(bodies.concat(), long);
 
-    // Originals are immutable.
     for statement in [
         "UPDATE memory_entry SET body = 'changed' WHERE seq = 0",
         "DELETE FROM memory_entry WHERE seq = 0",
@@ -156,7 +147,6 @@ async fn conversation_messages_enter_memory_once_with_their_source() {
     assert_eq!(sent.status, StatusCode::ACCEPTED);
     app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    // A retried send is not a new memory.
     let retried = app
         .send(&bot, request, "My locker code is 4417.", Some("synthetic"))
         .await;
@@ -175,7 +165,6 @@ async fn conversation_messages_enter_memory_once_with_their_source() {
     assert_eq!(entries[1]["kind"], "assistant_message");
     assert_eq!(entries[1]["authority"], "assistant");
     assert_eq!(entries[1]["source"]["turn_id"], sent.body["turn"]["id"]);
-    // A rejected send (deleted bot) adds nothing.
     app.owner("DELETE", &format!("/v1/bots/{bot}"), None).await;
     let rejected = app
         .send(&bot, Uuid::new_v4(), "after deletion", Some("synthetic"))
@@ -231,17 +220,14 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
             Some(json!({ "request_id": Uuid::new_v4(), "supersedes_seq": seq, "text": text })),
         )
     };
-    // The assistant's reply (seq 1) is not an owner assertion.
     let refused = correct(1, "no").await;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
     assert_eq!(refused.body["error"]["code"], "invalid_correction");
-    // Unknown sequence in this bot (the other bot's entry does not count).
     assert_eq!(correct(9, "no").await.status, StatusCode::BAD_REQUEST);
     let accepted = correct(0, "Dentist moved to Thursday.").await;
     assert_eq!(accepted.status, StatusCode::CREATED, "{}", accepted.body);
     assert_eq!(accepted.body["seq"], 2);
 
-    // Model or tool text cannot become an owner correction, even in SQL.
     let forged = sqlx::query(
         "INSERT INTO memory_entry (bot_id, seq, request_key, request_fingerprint, kind, authority,
              body, body_sha256, source, original_sha256, supersedes_seq)
@@ -252,7 +238,6 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
     .execute(&app.db.pool)
     .await;
     assert!(forged.is_err());
-    // Nor can a correction point at another bot's entry.
     assert!(matches!(
         append(
             &app,
@@ -269,11 +254,9 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
         Err(AppendError::InvalidCorrection)
     ));
 
-    // Search hides the replaced entry unless asked; reads show the link.
     let page = memory::search(&app.db.pool, bot_id, "dentist", false, None, 0)
         .await
         .unwrap();
-    // The synthetic reply (seq 1) echoes the text; the replaced owner entry is hidden.
     let mut found: Vec<i64> = page.hits.iter().map(|h| h.seq).collect();
     found.sort();
     assert_eq!(found, vec![1, 2]);
@@ -287,7 +270,6 @@ async fn only_explicit_owner_corrections_supersede_owner_entries() {
     assert_eq!(original.superseded_by, vec![2]);
 }
 
-/// The owner's original among the hits (synthetic replies echo the text).
 fn owner_hit(hits: &Value) -> Value {
     hits["structuredContent"]["hits"]
         .as_array()
@@ -318,7 +300,6 @@ async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Value {
     .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let mut result = reply.body["result"].clone();
-    // Results travel once, as JSON text; expose it parsed for assertions.
     assert!(
         result.to_string().len() <= memory::RESPONSE_BUDGET,
         "budget"
@@ -330,7 +311,6 @@ async fn tool(app: &TestApp, token: &str, name: &str, args: Value) -> Value {
     result
 }
 
-/// A running turn of `bot` and a memory grant for it.
 async fn running_grant(app: &TestApp, bot: &str) -> (Uuid, String) {
     let reply = app
         .send(bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
@@ -375,7 +355,6 @@ async fn responses_stay_within_budget_even_with_escaped_text() {
     let app = TestApp::installed().await;
     let bot = app.create_bot("Big").await;
     let bot_id: Uuid = bot.parse().unwrap();
-    // Quotes and control characters double or sextuple when escaped twice.
     let body = "\"\u{1}".repeat(400);
     for i in 0..20 {
         append(
@@ -408,11 +387,9 @@ async fn responses_stay_within_budget_even_with_escaped_text() {
         .unwrap()
         .len();
     assert!(hits >= 1 && hits <= 20);
-    // A long entry pages exactly: offsets inside a character are normalized
-    // and `next_offset` continues without loss.
     let long = format!("é{}", "x".repeat(30_000));
     let seq = append(&app, bot_id, &entry("long", &long)).await.unwrap()[0];
-    let mut offset = 1; // inside "é"
+    let mut offset = 1;
     let mut text = String::new();
     loop {
         let page = tool(
@@ -461,7 +438,6 @@ async fn search_pages_ignore_corrections_made_after_the_first_page() {
     let seen: Vec<i64> = first.hits.iter().map(|h| h.seq).collect();
     let missing: Vec<i64> = (0..21).filter(|s| !seen.contains(s)).collect();
     assert_eq!(missing.len(), 1);
-    // A correction of a hit on the first page, made between pages.
     append(
         &app,
         bot,
@@ -487,7 +463,6 @@ async fn search_pages_ignore_corrections_made_after_the_first_page() {
 async fn an_append_racing_a_deletion_never_lands_after_it() {
     let app = TestApp::installed().await;
     let bot: Uuid = app.create_bot("Race").await.parse().unwrap();
-    // A deletion in progress holds the bot row.
     let mut deletion = app.db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
     sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
         .bind(bot)
@@ -586,7 +561,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     app.wait_turn(own.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
 
-    // A running turn of `me` holds the grant.
     let reply = app
         .send(&me, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -638,8 +612,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     let mut expected = else_api::app::tools::TOOL_NAMES.to_vec();
     expected.sort();
     assert_eq!(sorted, expected);
-    // Memory tools and listings only read; delegation, routine changes, and
-    // guest actions say they act.
     for tool in listed.body["result"]["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
         let read_only = name.starts_with("memory_")
@@ -655,7 +627,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }
 
-    // Own memory, with provenance outside the text.
     let hits = tool(&app, &token, "memory_search", json!({ "query": "pickup" })).await;
     let hit = &owner_hit(&hits);
     assert_eq!(hit["body"], "School pickup is at 15:30.");
@@ -663,7 +634,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     assert_eq!(hit["bot_id"], me);
     assert_eq!(hit["source"]["item_id"], own.body["item"]["id"]);
 
-    // Another bot's memory needs the owner's grant.
     let denied = tool(
         &app,
         &token,
@@ -710,7 +680,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
     );
     assert_eq!(read["structuredContent"]["length"], 2);
 
-    // Each call was logged to the caller's memory as tool activity only.
     let logged: Vec<(String, String)> = sqlx::query_as(
         "SELECT kind, authority FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'",
     )
@@ -727,7 +696,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         "reads never write the target's memory"
     );
 
-    // Deleting the target retains its memory and ends shared access.
     app.owner("DELETE", &format!("/v1/bots/{work}"), None).await;
     let gone = tool(
         &app,
@@ -743,7 +711,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         .await;
     assert_eq!(owner_read.status, StatusCode::GONE);
 
-    // A grant without the memory tool, the owner token, and a forged grant are refused.
     let history_only = grants
         .issue(
             me.parse().unwrap(),
@@ -772,7 +739,6 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         StatusCode::UNAUTHORIZED
     );
 
-    // When the turn ends its grant stops working.
     app.owner(
         "POST",
         &format!("/v1/bots/{me}/cancel"),

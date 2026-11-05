@@ -1,5 +1,3 @@
-//! Reconciliation, owner stops, idle policy, and maintenance loops.
-
 use super::{
     ComputerError, ComputerManager, GUEST_CHECKPOINT, IdleAction, Ordering, Reason, RuntimeState,
 };
@@ -13,8 +11,6 @@ impl ComputerManager {
     /// revoked and the computer stops; its disk is kept.
     pub async fn owner_stop(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        // The bot row serializes this with a first acquisition creating
-        // the computer row; the upsert records the intent either way.
         sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
@@ -39,11 +35,7 @@ impl ComputerManager {
         .bind(bot_id)
         .execute(&mut *tx)
         .await?;
-        // The intent and revoked leases commit before the runtime is asked
-        // to stop, so nothing can acquire the computer in between.
         tx.commit().await?;
-        // A foreground command (an input batch, a script) holds the
-        // operation lock while it runs: end it first rather than wait for it.
         self.end_bot_commands(bot_id).await;
         let _op = self.op(bot_id).await;
         self.stop_held(bot_id, Reason::MustStop).await.map(|_| ())
@@ -60,9 +52,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Stop or pause if `reason` still holds, re-checked inside an immediate transaction
-    /// together with any lease revocation. The caller holds the bot's
-    /// operation lock. Returns whether it acted.
     pub(super) async fn stop_held(
         &self,
         bot_id: Uuid,
@@ -148,8 +137,6 @@ impl ComputerManager {
             return Err(ComputerError::Interrupted);
         }
         tracing::info!(bot = %bot_id, ?reason, "computer transition");
-        // A desktop closes its browser cleanly first, so the profile is
-        // flushed and keeps no lock (pausing keeps processes as they are).
         if self.config.desktop && action == IdleAction::Stop && row.observed_state == "running" {
             let checkpointed = self
                 .runtime
@@ -161,8 +148,6 @@ impl ComputerManager {
                 )
                 .await
                 .is_ok_and(|out| out.status == Some(0));
-            // Recorded so a backup of the stopped computer knows whether
-            // its browser profile was left consistent.
             sqlx::query("UPDATE bot_computers SET browser_checkpoint = ?2 WHERE bot_id = ?1")
                 .bind(bot_id)
                 .bind(if checkpointed { "ok" } else { "failed" })
@@ -180,8 +165,6 @@ impl ComputerManager {
                 Ok(true)
             }
             Err(err) => {
-                // Not proven stopped: record what the runtime says; an
-                // unknown state keeps the reservation and is retried.
                 self.observe_after_failure(bot_id, &err.to_string()).await?;
                 Ok(false)
             }
@@ -219,7 +202,6 @@ impl ComputerManager {
                 .bind(bot)
                 .execute(&mut *tx)
                 .await?;
-            // Only if it is still expired: a renewal meanwhile wins.
             sqlx::query(
                 "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'expired'
                  WHERE id = ?1 AND released_at IS NULL AND expires_at < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
@@ -229,7 +211,6 @@ impl ComputerManager {
             .await?;
             tx.commit().await?;
         }
-        // Uncertain or interrupted states: look again.
         let uncertain: Vec<Uuid> = sqlx::query_scalar(
             "SELECT bot_id FROM bot_computers WHERE observed_state IN
                  ('error', 'creating', 'starting', 'resuming', 'stopping', 'pausing')",
@@ -283,14 +264,10 @@ impl ComputerManager {
             self.stop_held(bot, Reason::Idle(self.config.idle_action))
                 .await?;
         }
-        // Complete stops and deletions whose last job ended or whose
-        // computer is now confirmed down, whichever path ended it.
         crate::db::stop::settle_all(&self.pool).await?;
         Ok(())
     }
 
-    /// Whether a lease holder's work is still live. Turns are live while
-    /// they run; holders this version does not know end with their lease.
     pub(super) async fn holder_is_live(&self, holder: &str) -> Result<bool, sqlx::Error> {
         let Some((kind, id)) = holder.split_once(':') else {
             return Ok(false);
@@ -364,8 +341,6 @@ impl ComputerManager {
             tracing::warn!(error = %err, "an interrupted upgrade's replacement was not stopped");
             return Ok(());
         }
-        // Work that survived (jobs in a still-running computer) keeps its
-        // leases on the new generation; maintenance probes it from there.
         sqlx::query(
             "UPDATE computer_leases AS l SET generation = c.generation
              FROM bot_computers c
@@ -380,9 +355,6 @@ impl ComputerManager {
 
     /// Maintenance loop until cancelled.
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
-        // Ending foreground commands of stopped turns runs on its own: a
-        // maintenance pass can wait on a bot's operation lock, which the
-        // command itself holds.
         let orphans = {
             let manager = self.clone();
             let cancel = cancel.clone();

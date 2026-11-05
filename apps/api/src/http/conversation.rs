@@ -1,6 +1,3 @@
-//! Conversation snapshots and event cursors. Live events are delivered over
-//! the WebSocket channel API in `ws.rs`.
-
 use std::sync::Arc;
 
 use axum::extract::{Query, State};

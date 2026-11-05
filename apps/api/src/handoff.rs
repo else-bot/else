@@ -1,4 +1,4 @@
-//! Provider switching (POC-020). When an owner turn is bound to a different
+//! Provider switching. When an owner turn is bound to a different
 //! provider than the turn before it, and the receiving native session has
 //! not seen all settled history, the API freezes that history at the
 //! previous owner turn, asks the outgoing provider for a bounded checkpoint
@@ -27,11 +27,9 @@ pub async fn prepare(
     if input.history.is_empty() {
         return Ok(None);
     }
-    // Already prepared for this attempt (for example before a restart).
     if let Some(existing) = handoffs::existing(pool, input.turn_id, input.attempt).await? {
         return Ok(Some(existing));
     }
-    // A continuation of a turn whose handoff was accepted needs none.
     if input.attempt > 1 && handoffs::accepted_for_turn(pool, input.turn_id).await? {
         return Ok(None);
     }
@@ -44,7 +42,6 @@ pub async fn prepare(
         return Ok(None);
     }
     let boundary = input.history.last().map_or(0, |e| e.turn_no);
-    // Nothing missed: the receiving session already considered it all.
     if input
         .session
         .as_ref()

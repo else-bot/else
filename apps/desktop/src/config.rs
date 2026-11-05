@@ -282,7 +282,6 @@ pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {
     let shown = path.display();
     let mut file = match OpenOptions::new()
         .read(true)
-        // Non-blocking so a FIFO cannot hang startup before validation.
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
@@ -535,7 +534,6 @@ mod tests {
                 .unwrap_err()
                 .contains("else-api setup")
         );
-        // A FIFO is refused instead of blocking startup.
         let fifo = dir.path().join("fifo");
         let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
         // SAFETY: valid NUL-terminated path.

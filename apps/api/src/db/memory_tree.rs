@@ -1,4 +1,4 @@
-//! Persistence of the memory summary tree and saved view (POC-014).
+//! Persistence of the memory summary tree and saved view.
 //!
 //! Jobs are claimed with an opaque lease token; completion presents it in
 //! the same transaction that inserts the immutable node, so a worker whose
@@ -131,8 +131,6 @@ async fn bodies(
     generation: i32,
     ids: &[NodeId],
 ) -> Result<HashMap<NodeId, String>, sqlx::Error> {
-    // Drive indexed lookups from the requested nodes, avoiding a quadratic
-    // join of parallel JSON arrays for large publication backlogs.
     let rows: Vec<(i64, i64, String)> = sqlx::query_as(
         "SELECT n.start_seq, n.span, n.body FROM json_each(?3) w CROSS JOIN memory_node n
          WHERE n.bot_id = ?1 AND n.generation = ?2
@@ -230,7 +228,6 @@ pub async fn complete(
     .bind(job.node.span)
     .execute(&mut *tx)
     .await?;
-    // A parent is queued only once both children exist.
     let sibling = job.node.sibling();
     let sibling_built = !bodies(&mut *tx, job.bot_id, job.generation, &[sibling])
         .await?
@@ -329,8 +326,6 @@ fn ancestors(nodes: &[NodeId], count: i64) -> Vec<NodeId> {
     seen.into_iter().collect()
 }
 
-/// Decode a saved view strictly: any malformed element makes the whole
-/// record invalid, so it is reported and preserved instead of normalized.
 fn decode_view(value: &Value) -> Option<Vec<NodeId>> {
     value
         .as_array()?
@@ -372,7 +367,6 @@ pub async fn publish(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, 
         row;
     let (Some(main_nodes), Some(context_ids)) = (decode_view(&nodes), decode_view(&context_nodes))
     else {
-        // Never rewrite a damaged record; load_view reports it.
         tracing::warn!(bot = %bot_id, "saved memory view is malformed; publication paused");
         return Ok(false);
     };
@@ -449,15 +443,12 @@ pub async fn publish(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, 
     Ok(true)
 }
 
-/// Leaves published per step; a longer ready run continues in later steps.
 const PUBLISH_BATCH: i64 = 10_000;
 
 /// Publish for one bot whose next leaf is already built but unpublished
 /// (a backlog longer than one batch, or completions that raced). Returns
 /// whether anything was published.
 pub async fn advance(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-    // Several candidates, so one bot whose view cannot publish (a damaged
-    // record) never starves the others.
     let candidates: Vec<Uuid> = sqlx::query_scalar(
         "SELECT s.bot_id FROM memory_store s JOIN bots b ON b.id = s.bot_id
          WHERE b.status = 'active' AND EXISTS (
@@ -562,9 +553,6 @@ pub async fn start_rebuild(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<i32
     Ok(Some(new))
 }
 
-/// Switch to the generation being rebuilt once its contiguous leaves cover
-/// at least everything the active view covers. Its view is recomputed by
-/// replaying publication; the old generation and its nodes remain.
 async fn try_switch(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, sqlx::Error> {
     let (generation, building, next): (i32, Option<i32>, i64) = sqlx::query_as(
         "SELECT generation, building_generation, next_seq FROM memory_store WHERE bot_id = ?1",
@@ -590,8 +578,6 @@ async fn try_switch(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, s
     while bodies.contains_key(&NodeId::leaf(prefix)) {
         prefix += 1;
     }
-    // Every leaf through the current append watermark (checked under the
-    // store lock): a rebuild completes only after catching up.
     if prefix < next {
         return Ok(false);
     }
@@ -640,7 +626,6 @@ async fn try_switch(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<bool, s
     .bind(context.compacting)
     .execute(&mut *conn)
     .await?;
-    // Jobs of retired generations are never claimed; drop them.
     sqlx::query("DELETE FROM memory_job WHERE bot_id = ?1 AND generation <> ?2")
         .bind(bot_id)
         .bind(building)
@@ -743,7 +728,6 @@ pub async fn load_view(pool: &SqlitePool, bot_id: Uuid) -> Result<SavedView, sql
         .collect();
     let context_ids = context.clone().unwrap_or_default();
     let context_built = bodies(pool, bot_id, generation, &context_ids).await?;
-    // Every store row is created together with its first generation.
     let valid = decoded.is_some()
         && context.is_some()
         && generation_exists
@@ -810,7 +794,6 @@ pub async fn context_before(
     .fetch_one(pool)
     .await?;
     if active != generation {
-        // A rebuild's summaries get no context from another generation.
         return Ok((revision, Vec::new()));
     }
     let ids: Vec<NodeId> = decode_view(&nodes)
@@ -884,8 +867,6 @@ pub async fn session_context(
             kept.push((*node, body.clone()));
         }
         kept.reverse();
-        // Everything before the first kept node is omitted; with nothing
-        // kept (a single node larger than the budget), all of it is.
         omitted = Some(
             kept.first()
                 .map_or(saved.published_seq + 1, |(n, _)| n.start),

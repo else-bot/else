@@ -1,5 +1,3 @@
-//! Owner-uploaded files, stored whole in SQLite and scoped to one bot.
-
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};

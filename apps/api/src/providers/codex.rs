@@ -45,11 +45,8 @@ use crate::app::providers::{
 };
 
 pub const ID: &str = "codex";
-/// Bump when the developer instructions or packet format change.
 const PROMPT_VERSION: &str = "else-codex-v17";
-/// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
-/// How long an interrupted parked attempt may take to report its end.
 const PARK_STOP: Duration = Duration::from_secs(15);
 const MODELS: &[&str] = &[
     "gpt-6.1-sol",
@@ -68,9 +65,6 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
-/// Thread items a turn may not produce: tools other than the shell, files,
-/// and else.bot's, and native agents. (Commands and file changes are the
-/// host tools.)
 const FORBIDDEN_ITEMS: &[&str] = &[
     "dynamicToolCall",
     "collabAgentToolCall",
@@ -80,7 +74,6 @@ const FORBIDDEN_ITEMS: &[&str] = &[
     "imageView",
 ];
 
-/// Thread items of the host tools, forbidden in a turn without them.
 const HOST_TOOL_ITEMS: &[&str] = &["commandExecution", "fileChange"];
 
 pub struct Codex {
@@ -89,11 +82,9 @@ pub struct Codex {
     auth: Option<PathBuf>,
     version: String,
     unavailable: Option<String>,
-    /// else.bot's MCP endpoint, on loopback.
     tool_url: Option<String>,
 }
 
-/// Settings Codex reported for a thread or turn; absent fields are unknown.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Reported {
     model: Option<String>,
@@ -111,7 +102,6 @@ impl Reported {
         }
     }
 
-    /// Every field Codex did report must equal the request.
     fn mismatch(&self, profile: &Profile) -> Option<String> {
         let check = |field: &str, got: &Option<String>, want: &str| {
             got.as_ref()
@@ -139,9 +129,6 @@ impl Codex {
     /// missing piece makes the provider unavailable with a reason instead of
     /// failing startup. The version is only session identity.
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
-        // Run the version check the way turns run: this both reads the
-        // version and proves the executable starts with the passed
-        // environment.
         let version = match (&host, &program) {
             (Some(host), Some(program)) => {
                 host.probe(program, &["--version"], &[]).unwrap_or_default()
@@ -178,8 +165,6 @@ impl Codex {
         self
     }
 
-    /// Compatibility of a native thread: anything that would make resuming
-    /// it unsafe or stale is part of the fingerprint.
     fn fingerprint(&self, profile: &Profile, input: &TurnInput, account: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
@@ -244,7 +229,6 @@ fn turn_input(segments: &[prompt::Segment<'_>], project: &std::path::Path) -> Va
     Value::Array(items)
 }
 
-/// Ask Codex to stop a turn; the terminal event still decides the outcome.
 async fn interrupt(server: &AppServer, thread_id: &str, native_turn: &str) {
     let params = json!({ "threadId": thread_id, "turnId": native_turn });
     let _ = server.request("turn/interrupt", params, RPC_TIMEOUT).await;
@@ -417,8 +401,6 @@ impl Provider for Codex {
 }
 
 impl Codex {
-    /// The effective MCP servers must be exactly else.bot's, offering
-    /// exactly its tools, or none when tools are not configured.
     fn check_servers(&self, servers: &Value, with_tools: bool) -> Result<(), String> {
         let servers = servers.as_array().cloned().unwrap_or_default();
         if !with_tools || self.tool_url.is_none() {
@@ -478,8 +460,6 @@ impl Codex {
                 .is_some_and(|t| crate::app::tools::TOOL_NAMES.contains(&t))
     }
 
-    /// Checks that need the running server: no effective MCP servers, and
-    /// the account identity for session compatibility.
     async fn preflight(&self, server: &AppServer) -> Result<String, TurnOutcome> {
         let status = server
             .request("mcpServerStatus/list", json!({}), RPC_TIMEOUT)
@@ -499,7 +479,6 @@ impl Codex {
                 "Codex is not logged in on the host (run `codex login`).",
             ));
         }
-        // Only a digest of the identity is kept, inside the fingerprint.
         Ok(format!(
             "{}:{}",
             account["type"].as_str().unwrap_or_default(),
@@ -527,7 +506,6 @@ impl Codex {
             "developerInstructions": prompt::instructions(input, &server.cwd),
             "config": config,
         });
-        // Resume a compatible session; anything else starts a new one.
         if let Some(session) = input
             .session
             .as_ref()
@@ -584,23 +562,18 @@ impl Codex {
                 Ok(opened) => opened,
                 Err(outcome) => return outcome,
             };
-        // Reject silent substitution of the requested settings.
         if let Some(mismatch) = reported.mismatch(profile) {
             return failed("profile_mismatch", mismatch);
         }
         if cancel.is_cancelled() {
             return TurnOutcome::Interrupted;
         }
-        // Record which native session this attempt uses before sending, so
-        // an uncertain delivery retires it instead of being resumed with a
-        // stale coverage cursor.
         let resumed_session = input.session.as_ref().filter(|s| s.native_id == thread_id);
         let inject = prompt::memory_for(input.memory.as_ref(), resumed_session);
         let mut state = SessionState {
             native_id: thread_id.clone(),
             fingerprint,
             considered_through_turn: considered,
-            // Recorded as received only once Codex accepts the turn below.
             memory_revision: resumed_session.and_then(|s| s.memory_revision),
         };
         if sink.session(&state).await.is_err() {
@@ -611,7 +584,6 @@ impl Codex {
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        // From here a crash leaves delivery uncertain.
         if sink.sending().await.is_err() {
             return TurnOutcome::Interrupted;
         }
@@ -637,7 +609,6 @@ impl Codex {
                     };
                 }
             },
-            // An explicit refusal means nothing was accepted.
             Err(RpcError::Remote { message, .. }) => return failed("provider_refused", message),
             Err(err) => {
                 return TurnOutcome::Uncertain {
@@ -645,8 +616,6 @@ impl Codex {
                 };
             }
         };
-        // Accepted. A stop or deletion racing with acceptance still drains
-        // the turn to its terminal event below.
         if sink.running().await.is_err() {
             cancel.cancel();
         }
@@ -677,8 +646,6 @@ impl Codex {
         };
         let host_tools = input.delegation.host_tools();
         let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        // After a pending delegation the attempt must end; enforced here,
-        // independently of the model.
         let mut park_at: Option<tokio::time::Instant> = None;
         let mut interrupted = false;
         let mut violation: Option<(&str, String)> = None;
@@ -698,15 +665,11 @@ impl Codex {
                     tracing::info!(turn = %native_turn, "parent kept going after delegating; interrupting");
                     interrupted = true;
                     interrupt(server, thread_id, native_turn).await;
-                    // The interrupt must end the turn soon; otherwise the
-                    // attempt ends anyway (the caller reaps the process) and
-                    // the request waits for its child.
                     park_at = Some(tokio::time::Instant::now() + PARK_STOP);
                     continue;
                 }
                 _ = tokio::time::sleep_until(park_at.unwrap_or(deadline)), if park_at.is_some() && interrupted => {
                     tracing::warn!(turn = %native_turn, "parked attempt did not stop; ending it");
-                    // Its native turn never finished: never resume it.
                     sink.retire_session().await;
                     return TurnOutcome::Interrupted;
                 }
@@ -724,13 +687,11 @@ impl Codex {
             };
             let (method, params) = match message {
                 Incoming::Refused { method } => {
-                    // Already refused by the client; nothing it asked for ran.
                     flag("policy_violation", format!("Codex requested {method}"));
                     (String::new(), Value::Null)
                 }
                 Incoming::Notification { method, params } => (method, params),
             };
-            // Names and types only: item payloads carry conversation text.
             if !method.ends_with("/delta") {
                 tracing::debug!(
                     %method,
@@ -739,7 +700,6 @@ impl Codex {
                     "codex event"
                 );
             }
-            // Only events of this thread and turn concern this attempt.
             let thread = params["threadId"].as_str();
             let turn = params["turnId"].as_str().or(params["turn"]["id"].as_str());
             let other_thread = thread.is_some_and(|t| t != thread_id);
@@ -1423,7 +1383,6 @@ for line in sys.stdin:
                 failed("policy_violation", format!("Codex attempted a {kind} item")),
             );
         }
-        // An owner's turn keeps its host commands and file changes.
         for kind in ["commandExecution", "fileChange"] {
             let dir = tempfile::tempdir().unwrap();
             let (codex, _) = fake_codex_with(dir.path(), &elsebot_server(), Some(kind));

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#   scripts/build-guest-base.sh [--builder NAME] [--platform OS/ARCH]... [--skip-build]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

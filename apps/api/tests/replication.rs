@@ -1,10 +1,3 @@
-//! POC-023: bucket replication, end to end against a SeaweedFS emulator.
-//! Run through `scripts/test-replication.py`, which starts a private
-//! emulator per run and passes its endpoint, synthetic credentials, and
-//! Compose project; these optional tests are `#[ignore]`d otherwise. Each
-//! test uses its own bucket. Normal operations share access to the run's
-//! emulator; tests that stop or restart its container take exclusive access.
-
 mod common;
 
 use std::collections::HashMap;
@@ -29,8 +22,6 @@ use else_api::credentials::SecretKey;
 use sqlx::Connection;
 use uuid::Uuid;
 
-// The emulator belongs to this test process (one runner, one Compose
-// project); the per-test buckets are not shared.
 static EMULATOR: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 fn root() -> PathBuf {
@@ -54,7 +45,6 @@ fn s3_config(bucket: &str) -> S3Config {
     }
 }
 
-/// A fresh bucket on the emulator; fails clearly if it is not running.
 async fn bucket() -> S3 {
     let name = format!("else-test-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let s3 = S3::new(s3_config(&name)).unwrap();
@@ -69,8 +59,6 @@ async fn bucket() -> S3 {
 }
 
 fn compose(args: &[&str]) {
-    // Outages target only the Compose project this run owns, never a
-    // service another checkout or developer shares.
     let status = std::process::Command::new("docker")
         .current_dir(root())
         .args([
@@ -159,7 +147,6 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
             .await
             .unwrap();
     assert_eq!(run.as_deref(), Some("completed"));
-    // Every remote object hashes to the manifest's ciphertext SHA-256.
     for artifact in &summary.manifest.artifacts {
         let (len, sha) = s3
             .get_with(
@@ -177,8 +164,6 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
             )
         );
     }
-    // A second publication of the completion record is refused and the
-    // first one stays.
     let complete = set_key(&s3, &summary.set_id, "complete.json");
     let before = s3.get_bytes(&complete, 1 << 16).await.unwrap();
     assert_eq!(
@@ -192,7 +177,6 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
         before,
         std::fs::read(summary.path.join("complete.json")).unwrap()
     );
-    // Nothing to do on the next pass.
     let again = worker.replicate_now().await.unwrap().unwrap();
     assert_eq!(again.uploaded + again.completed.len(), 0);
 }
@@ -210,7 +194,6 @@ async fn an_object_altered_before_publication_is_detected() {
         let s3 = target.clone();
         Box::pin(async move {
             let key = s3.key(&format!("sets/{set}/{}", backup::DATABASE));
-            // Same length, one byte different: only the SHA-256 tells.
             let mut bytes = s3.get_bytes(&key, 1 << 30).await.unwrap();
             let at = bytes.len() / 2;
             bytes[at] ^= 0x01;
@@ -241,7 +224,6 @@ async fn an_object_altered_before_publication_is_detected() {
         remote_state(&app, &summary.set_id).await.unwrap().0,
         "failed"
     );
-    // A clean pass repairs and publishes it.
     let worker = worker(&app, dir.path(), replicator(&app, &s3));
     let stats = worker.replicate_now().await.unwrap().unwrap();
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
@@ -255,8 +237,6 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
-    // A dump of several parts: S3 (and the emulator) need parts of at
-    // least 5 MiB, so the database gets incompressible bulk first.
     sqlx::query("CREATE TABLE scratch (b text)")
         .execute(&app.db.pool)
         .await
@@ -284,7 +264,6 @@ async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
             .unwrap(),
         None
     );
-    // The worker restarts: the same set completes.
     let restarted = BackupWorker::new(
         app.db.pool.clone(),
         DatabaseParams::parse(app.db.url.expose()).unwrap(),
@@ -342,11 +321,8 @@ async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
             "failed"
         );
     }
-    // With keep 1, both awaiting sets are kept locally.
     let local = backup::completed_sets(&dir.path().join("backups")).unwrap();
     assert_eq!(local, [first.set_id.clone(), second.set_id.clone()]);
-    // The emulator may need a moment after it reports healthy; the worker
-    // retries the same way, with the same sets.
     let mut done = false;
     for _ in 0..30 {
         match w.replicate_now().await {
@@ -385,7 +361,6 @@ async fn remote_retention_keeps_the_newest_complete_sets() {
         ids.push(w.run_once().await.unwrap().set_id);
     }
     assert_eq!(r.completed_remote().await.unwrap(), ids[2..].to_vec());
-    // Older sets left no objects behind.
     let keys = s3.list(&s3.key("sets/")).await.unwrap();
     assert!(
         keys.iter()
@@ -397,8 +372,6 @@ async fn remote_retention_keeps_the_newest_complete_sets() {
     );
 }
 
-/// A computer runtime that keeps disks in memory (the real one is covered
-/// by the live VM tests).
 #[derive(Default)]
 struct Fake {
     computers: Mutex<HashMap<String, (RuntimeState, String)>>,
@@ -527,15 +500,12 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         .fetch_all(&db.pool)
         .await
         .unwrap();
-    // Local artifacts and the original runtime are gone; the emulator
-    // restarts in between.
     std::fs::remove_dir_all(dir.path().join("backups")).unwrap();
     drop(app);
     drop(manager);
     drop(fake);
     compose(&["restart", "seaweedfs"]);
     compose(&["up", "-d", "--wait", "seaweedfs"]);
-    // It may answer 500 for a moment after its health check passes.
     let mut listed = None;
     for _ in 0..30 {
         match r.completed_remote().await {
@@ -547,7 +517,6 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         }
     }
     assert_eq!(listed.unwrap(), std::slice::from_ref(&summary.set_id));
-    // The emulator can still answer 500 right after its restart.
     let mut downloaded = None;
     for attempt in 0..10 {
         match else_api::backup::replicate::download_set(
@@ -616,7 +585,6 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
         Some("GUEST-DISK".into()),
         "the computer's disk came from the bucket"
     );
-    // A forged or incomplete remote set is not downloaded.
     let missing = else_api::backup::replicate::download_set(
         &r.s3,
         "20000101T000000000Z-00000000",
@@ -631,11 +599,6 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
     );
 }
 
-/// Optional: the same upload, verification, conditional publication, and
-/// remote download against a real R2 or S3 bucket the owner authorized, with
-/// `ELSE_LIVE_S3=1` and `ELSE_LIVE_S3_ENDPOINT`, `_REGION`, `_BUCKET`,
-/// `_PREFIX` (an isolated prefix), `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`.
-/// Routine runs never contact a real bucket.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn a_real_bucket_round_trip_when_authorized() {
@@ -685,7 +648,6 @@ async fn a_real_bucket_round_trip_when_authorized() {
     .await
     .unwrap();
     else_api::backup::restore::open_set(&downloaded, &key()).unwrap();
-    // Leave the isolated prefix empty.
     for (key, _) in s3.list(&s3.key("")).await.unwrap() {
         s3.delete(&key).await.unwrap();
     }
@@ -701,8 +663,6 @@ async fn a_recorded_completion_is_not_trusted_without_its_payload() {
     let w = worker(&app, dir.path(), replicator(&app, &s3));
     let summary = w.run_once().await.unwrap();
     assert!(matches!(summary.remote, Some(Ok(_))));
-    // A crash after publication lost the record, and the remote dump was
-    // damaged (same length) meanwhile.
     sqlx::query("DELETE FROM backup_remote")
         .execute(&app.db.pool)
         .await
@@ -788,7 +748,6 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
     let s3 = bucket().await;
     let mut r = replicator(&app, &s3);
     r.keep = 1;
-    // A whole-assistant set first.
     let whole = worker(&app, dir.path(), r.clone())
         .with_coordinator(Coordinator {
             scheduler: Some(app.scheduler.clone()),
@@ -802,12 +761,10 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
         .await
         .unwrap();
     assert!(whole.manifest.coverage.whole_assistant);
-    // A forged newer remote set with a completion record of its own.
     let forged = "29991231T235959999Z-ffffffff";
     s3.put(&set_key(&s3, forged, "complete.json"), b"{}".to_vec(), true)
         .await
         .unwrap();
-    // Then a database-only (partial) set, with keep 1.
     let mut partial_worker = worker(&app, dir.path(), r.clone());
     partial_worker.config.keep = 1;
     let partial = partial_worker.run_once().await.unwrap();
@@ -835,7 +792,6 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let dir = tempfile::tempdir().unwrap();
-    // An unreachable bucket: captures still happen on schedule.
     let unreachable = S3::new(S3Config {
         endpoint: "http://127.0.0.1:9".into(),
         ..s3_config("nowhere")
@@ -851,8 +807,6 @@ async fn the_schedule_keeps_capturing_while_the_bucket_is_down_and_uploads_at_st
     task.await.unwrap();
     let sets = backup::completed_sets(&dir.path().join("backups")).unwrap();
     assert!(sets.len() >= 2, "captures continued: {sets:?}");
-    // A restarted worker with a reachable bucket uploads them at once,
-    // before its next capture is due.
     let s3 = bucket().await;
     let mut w = worker(&app, dir.path(), replicator(&app, &s3));
     w.config.interval = Duration::from_secs(3600);
@@ -896,7 +850,6 @@ async fn restore_remote_works_without_the_source_database() {
         .await
         .unwrap();
     assert!(matches!(summary.remote, Some(Ok(_))));
-    // A replacement server: the configured database does not exist.
     let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
     let absent = format!("sqlite://{}", dir.path().join("absent.sqlite3").display());
     let data = dir.path().join("operator");

@@ -1,3 +1,0 @@
-Submitted to the family bot. Task ID: `synthetic-child-family`. Status: **pending**.
-
-Ending this attempt now. This synthetic fixture does not actually run a child or scheduler.

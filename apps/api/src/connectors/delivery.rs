@@ -66,8 +66,6 @@ pub async fn admit_pending(
     Ok(queued)
 }
 
-/// The provider and profile a new turn of this bot would use, if it can run
-/// now. The same choice routine runs make.
 async fn provider(
     conn: &mut SqliteConnection,
     registry: &Registry,

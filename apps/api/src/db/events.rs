@@ -36,7 +36,6 @@ async fn append(
 
 /// Wake streams for this bot once the transaction commits.
 pub async fn notify(_conn: &mut SqliteConnection, _bot_id: Uuid) -> Result<(), sqlx::Error> {
-    // EventHub observes committed database versions. Never wake on uncommitted state.
     Ok(())
 }
 
@@ -107,7 +106,6 @@ pub async fn item_delta(
     Ok(())
 }
 
-/// Whether a conversation holds delegated task work.
 async fn is_task(conn: &mut SqliteConnection, conversation_id: Uuid) -> Result<bool, sqlx::Error> {
     let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM conversations WHERE id = ?1")
         .bind(conversation_id)

@@ -1,229 +1,104 @@
 # else.bot
 
-else.bot is a personal AI agent that learns to reflect its owner. One main assistant understands your personal, family, and work context, remembers what matters, and delegates tasks to other bots when needed.
+else.bot is a personal AI assistant with a native desktop app. Chat with your assistant, create bots for different tasks, and switch between Codex and Claude Code. Bots keep their conversations and memory, delegate work, and use their own computers with a browser and terminal.
 
-You should be able to talk to it without choosing the right bot or repeating your circumstances each time. The assistant learns from daily use and becomes proactive enough to suggest what to do next.
-
-POC-001 through POC-032 are marked complete: the GPUI messaging app, Rust API, SQLite storage, memory, delegation, bot computers, provider switching, backup/recovery, guest programming tools and script workflows with task secrets, visual desktop control (screenshots and input), CDP scripting against the visible browser, and sidebar categories are implemented. The [acceptance record](docs/implementation/acceptance.md) describes the checks and their limits.
-
-The first version is a messaging app for one owner. It should let you talk to multiple bots, create a bot, and delete a bot. Provider continuity and persistent memory support those conversations. Email, projects, notes, routines, mobile apps, and additional desktop views come later. The [research review](docs/research/README.md) records the starting design and verification results.
-
-## Why I want to build it
-
-I like how Grok Bot works. It is easy to use, has many connectors, and lets bots share memories and talk to each other. Its mobile and desktop apps have notifications built in. Talking to a bot and having it do things feels like the right starting point.
-
-But I struggle to use it for everything. I am tied to one provider, which makes moving to another AI provider difficult. I also have to choose between multiple bots instead of talking to one main assistant that knows me and decides who should handle the task.
-
-I also find myself needing separate apps for projects and notes so the bots can use them. I want those tools inside else.bot, alongside email and conversation.
-
-## One assistant across family life and work
-
-For example:
-
-> Remind me to pick up the kids on Friday because my wife works late that day.
-
-else.bot should recognize the family context and create the reminder in the right place. The same assistant should understand your job, companies, and ongoing work, then help decide what to tackle next.
-
-Each bot has its own memory and responsibilities. The main assistant knows which bots exist and can delegate work or retrieve relevant context through their skills.
-
-## The tools belong in the conversation
-
-Messaging is the main entry point. The broader product should add mobile clients, notifications, and views for the things the assistant works with:
-
-- Email, with help organizing messages, creating reminders, and drafting replies.
-- Projects and kanban boards for tracking work across multiple projects.
-- Notes you can ask bots to write and retrieve later.
-- Routines that run on a schedule or respond to events through webhooks.
-
-Each bot also has an isolated computer with Chromium, a desktop, and a terminal. You can open its desktop through VNC. Its files and browser state persist between tasks while idle computers can release system resources.
-
-Each bot has a project directory on the host (`~/.else/bots/<bot id>`), mounted as `~/work` in its computer. Bots work in their computers by default. When you ask, a bot can also work on your machine: edit the spreadsheets in a folder you name, or change your system's settings.
-
-## Provider choice and ownership
-
-else.bot should work with AI providers through CLIs installed on the host and your existing subscriptions. The CLIs run on the host as your user, starting in the bot's project directory, with their own shell and file tools; bots operate their isolated computers through scoped tools. Keeping host work to what you ask for is up to the bot's instructions, not a sandbox: a bot can read and change what your user can. The [decision record](docs/decisions/0001-providers-run-on-the-host.md) explains this trade-off. You can switch providers during a task while keeping one conversation and handing over the context needed to continue.
-
-The starting Codex profile is GPT 6.1 Sol Medium Fast. Provider/model settings are saved in SQLite and can be updated by the owner. Provider-native sub-agents are disabled for the POC. See the [execution policy](docs/providers.md#saved-execution-profile).
-
-The assistant runs on a server or dedicated hardware at home. Its memory, configuration, conversations, and bot computers belong to the owner. Encrypted backups should let you restore the assistant on a new machine and resume from the latest completed backup.
+The server stores your data on your machine. Provider CLIs run as your user and can access your host files. Bot computers are isolated VMs; the provider processes themselves have your user account's permissions.
 
 ## Install
 
-On Linux (Debian 12 or newer, Ubuntu 24.04 or newer, Arch Linux / Omarchy; x86_64):
+Supported hosts are Linux with Debian 12+, Ubuntu 24.04+, or Arch Linux / Omarchy, and macOS on Apple silicon. On macOS, install Xcode and its Metal toolchain before installing the desktop app. Linux bot computers need access to `/dev/kvm`.
+
+Run as your normal user:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash
 ```
 
-It first asks what this machine runs. Press Enter for both, or skip the question with `--both`, `--server-only`, or `--app-only` (for example `curl … | bash -s -- --app-only`):
+Choose what this machine runs:
 
-- **both**: the server and the app on one machine.
-- **server**: the API, bot computers, and everything bots need, on home hardware or a VPS.
-- **app**: only the desktop app, which connects to a server on another machine. It needs no Docker, KVM, Microsandbox, provider CLIs, or API service.
+- Both the server and app, the default for a single machine.
+- Server only, for home hardware or a VPS.
+- App only, to connect to a server elsewhere.
 
-Updates keep what is installed without asking. Adding a component keeps what is installed: `--app-only` on a server installs both, and nothing is deleted.
+To choose without the prompt, append `-s -- --both`, `-s -- --server-only`, or `-s -- --app-only` to `bash`.
 
-It installs the latest release into `~/.else`, asking once before it installs any missing system package with sudo:
+The installer builds the release under `~/.else` with a private Rust toolchain. It asks before installing missing system packages and whether to start the server automatically. It also installs Microsandbox and downloads the bot computer image for server installations. App-only installations do not need the VM runtime or provider CLIs.
 
-- build tools, the SQLite CLI for optional SQL inspection, and the desktop's libraries;
-- in `~/.else`: its own Rust toolchain (your Rust is not touched), Microsandbox 0.7.13 (checksum-verified), and release builds of `else-api` and `else-desktop`;
-- SQLite bundled into the API, with its database at `~/.else/data/else.sqlite3`;
-- a prebuilt guest VM image from public GHCR, pinned by the release to an immutable digest and downloaded through Microsandbox; skip it with `--skip-guest-image`;
-- `else-api setup`, and the `else-api` systemd user service on `127.0.0.1:7878`. The installer asks once whether the API should start at boot; if yes, it turns on lingering for your user with `loginctl enable-linger`, using sudo if needed. `--autostart` and `--no-autostart` choose without asking, and the choice is kept for updates.
+Install the Codex CLI or Claude Code on the server and sign in as the user who runs else.bot. For Codex, run `codex login`. For Claude Code, run `claude` and finish sign-in. The installer checks for these CLIs but does not install them.
 
-With the server, bot computers need `/dev/kvm`, and the installer offers to add you to the `kvm` group. Log in again after a group change. Install and log in to the Codex CLI (`codex login`) and, optionally, Claude Code; the installer checks for them but does not install them. Then open the app with `elsebot desktop` or from your launcher (else.bot).
+On Linux, log out and back in if the installer adds you to the `kvm` group. On macOS, bot computers use Apple's Hypervisor framework.
 
-On macOS (Apple silicon), the same command installs everything on the Mac itself: the API, the desktop, SQLite, Microsandbox, and the guest image. Before running it, install:
+## Start chatting
 
-- Xcode with the Metal toolchain (the desktop compiles Metal shaders).
+Open else.bot from your launcher, `~/Applications/else.bot.app` on macOS, or:
 
-Bot computers use the Hypervisor framework, so there is no `/dev/kvm` step. The API runs as a launchd agent (`elsebot start`, `stop`, `logs`), and launchd restarts it if it crashes. The installer asks whether it should start when you log in; then the agent is in `~/Library/LaunchAgents`. The API does not need Docker to run. It starts at login rather than at boot because Claude Code keeps its login in your Keychain, which is only available in your session. arm64 Linux is not tested yet.
+```sh
+elsebot desktop
+```
 
-### Connect the app to a server
+For a local server, choose **Start local**. The app reads this installation's owner key and starts the server if needed. Complete the welcome screen to name your assistant and choose its provider and model.
 
-When the app opens for the first time on a machine with the server, it shows this machine's address and that its owner key is loaded. **Start local** reads the key, starts the API if it is stopped (with `elsebot start`), checks that the server accepts the key, saves the connection, and opens the app. Later launches use the saved connection and start this machine's API again if needed. On macOS the installer puts the app in `~/Applications/else.bot.app`, so it opens from Finder, the Dock, or `elsebot desktop` and keeps running after the terminal closes.
+Select a bot and type a message. Enter sends; Shift+Enter adds a line. Use the bot settings to change its provider or model, and open its computer to see its desktop. Closing the app leaves the server running.
 
-For a server on another machine, choose **Edit configuration** (an app-only installation offers only this). Print the token on the server:
+Use Ctrl on Linux and Command on macOS for these shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl/Command+Shift+N | Create a bot |
+| Ctrl/Command+Shift+X | Stop the selected bot's work |
+| Ctrl/Command+Shift+B | Open bot settings |
+| Ctrl/Command+Shift+G | Create a sidebar category |
+| Ctrl/Command+Shift+M | Move a bot to a category |
+| Ctrl/Command+, | Open app settings |
+
+## Connect to another machine
+
+The server listens on `127.0.0.1:7878`. Use an SSH tunnel to reach it from your app machine:
+
+```sh
+ssh -N -L 7878:127.0.0.1:7878 you@server
+```
+
+Keep the tunnel open. On the server, read the owner key:
 
 ```sh
 cat ~/.else/data/owner-token
 ```
 
-Then enter the address and paste the token, and press **Connect to server**. The connection is saved only after the server accepts that exact address and token. **Change server**, at the top of the window, opens the same form at any time. A failed connection keeps the current one. Local keys are never filled into this form. Changing the address clears a prefilled remote key.
+In the app, choose **Edit configuration**, enter `127.0.0.1:7878`, paste the key, and choose **Connect to server**. The app saves a connection after the server accepts it. Use **Change server** to connect elsewhere.
 
-The app saves the server in `~/.else/config/desktop.json` (mode 0600). This saved choice wins over the launcher's defaults.
+For access through a domain, put an HTTPS reverse proxy in front of the server. It must forward HTTP and WebSocket requests to `127.0.0.1:7878` and rewrite the upstream `Host` header to that address. The app requires HTTPS for non-loopback addresses and verifies the server certificate. Keep the owner key private; it grants access to your installation.
 
-The API listens only on `127.0.0.1` and accepts only loopback `Host` names. The app sends the owner token over plain `http://` only to this machine. Reach a remote server in one of two ways:
-
-- An SSH tunnel. Run `ssh -N -L 7878:127.0.0.1:7878 you@server` and keep it open. Then use `127.0.0.1:7878` as the address.
-- HTTPS through a reverse proxy on the server that forwards to `127.0.0.1:7878` and rewrites `Host` to it. A minimal [Caddy configuration](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#headers), with a certificate it obtains for your domain:
-
-  ```text
-  else.example.com {
-      reverse_proxy 127.0.0.1:7878 {
-          header_up Host {upstream_hostport}
-      }
-  }
-  ```
-
-  Then use `https://else.example.com` as the address. A bare address such as `else.example.com` means `https://`. The app checks the certificate against the system's trust store and never follows redirects.
-
-### Update
-
-Run the same command again, or `elsebot update`. For SQLite installations, it builds the new release while the current one keeps running, then:
-- refuses, changing nothing, while a bot is working (a turn running or a command running in a bot computer); run it again later;
-- otherwise stops the API from taking new work, stops it, backs up first when the release changes the database, switches to the new release, and starts it; if it does not come up, it switches back;
-- keeps the previous release in `~/.else/versions`.
-
-Messages queued during the update run afterwards; background jobs in the bot computers keep running. `elsebot update --version 0.0.1` (or `ELSE_VERSION=0.0.1`) installs a given release.
-
-Alpha installations with a non-SQLite database URL stop the API and set up SQLite at `~/.else/data/else.sqlite3`, or `ELSE_DATABASE_URL` if set. Previous database history is not imported. Other settings, credentials, and files are kept. This setup skips the previous release's database backup and rollback.
-
-### Where things are
-
-```text
-~/.else/
-  src/          the release's source (git checkout at the release tag)
-  versions/     built releases; current -> versions/<version>
-  bin/          elsebot, else-api, else-desktop
-  config/       .env (server settings, 0600), elsebot.env (service settings),
-                components (what this machine runs), desktop.json (the app's server, 0600)
-  data/         else.sqlite3, credentials, bot computers, artifacts, backups
-  bots/         each bot's project directory (bots/<bot id>), mounted as ~/work in its computer
-  toolchain/    Rust, only for building else.bot
-  microsandbox/ the VM runtime
-  build/        build cache
-  logs/         install, update, and build logs
-```
-
-`elsebot db` opens this installation's SQLite database in read-only mode, for example `elsebot db 'select count(*) from bots'`.
-
-Outside `~/.else`: the system packages, the systemd unit `~/.config/systemd/user/else-api.service`, and the links `~/.local/bin/elsebot` and `~/.local/share/applications/else-bot.desktop`.
-
-### elsebot
-
-| Command | What it does |
-| --- | --- |
-| `elsebot status` | Installed and running versions; whether the API is up |
-| `elsebot desktop` | Open the app (the first launch offers this machine's server or another) |
-| `elsebot update` | Install the latest release (see above) |
-| `elsebot start`, `stop`, `restart` | The API service; `stop` is graceful |
-| `elsebot logs` | Follow the API log |
-| `elsebot api backup` | Any `else-api` command with this installation's settings |
-| `elsebot db` | Read-only SQL on the installation's database (`sqlite3 -readonly`), for example `elsebot db 'select count(*) from bots'` |
-| `elsebot paths` | Where everything is |
-
-### Versions and releases
-
-There is one version for else.bot, `[workspace.package] version` in `Cargo.toml`; both binaries report it (`else-api version`, `else-desktop --version`, and `/healthz`). All pull requests target `main`, the default branch, and are squash merged. Run `scripts/release.sh patch` (or `minor`, `major`) to open a version-bump PR from `main`. Actions builds and tests changed guest inputs on native AMD64 and ARM64 runners, or reuses the previous image, then pins its GHCR digest. Squash the release PR as `chore(release): vX.Y.Z`. Actions verifies the image, tags that single release commit, and publishes the GitHub release. Installations see the update only once the tag exists. See [Release else.bot](docs/releasing.md) for setup and recovery.
-
-`scripts/test-install.sh [debian-12|debian-13|ubuntu-24.04|ubuntu-26.04|arch]` installs and updates in fresh containers through a pipe, as an unprivileged sudo user, against releases built from the working tree (see its header).
-
-## Try the POC
-
-You need Rust and a logged-in `codex` CLI (`codex login`). From the repository root, start a development session:
+## Update and manage the server
 
 ```sh
-scripts/dev.py api
-scripts/dev.py desktop
+elsebot update
 ```
 
-Leave the API running and start the desktop in another terminal. Each checkout and named session owns its database, credentials, projects, and kernel-assigned API port. Use the same `--session NAME` on both commands for an additional session. SQLite is bundled; no database service is needed. Agent UI checks use `scripts/dev.py run`, which creates and cleans up its own isolated omabox. Optional S3 tests use `scripts/test-replication.py`, which owns its emulator and port.
+Updates require bots to finish their current work first. If an update reports that the server is busy, run it again later. The installer keeps your settings and data, backs up before database changes, and rolls back if the new server fails to start.
 
-The window lists your bots. Press Ctrl+Shift+N to create one, select it, and type in the composer; Enter sends. Replies stream from Codex (GPT 6.1 Sol Medium Fast by default). Ctrl+Shift+X stops work and Ctrl+Shift+D deletes the selected bot while keeping its history. Each Codex session runs on the host in the bot's project directory, with its own shell and file tools, scoped else.bot tools, and no native sub-agents. For a throwaway installation that does not touch your data, use `scripts/demo.sh` as described in the [development guide](docs/development.md#run-the-desktop). The [smoke procedure](docs/implementation/smoke.md) walks through every POC behavior.
+| Command | Action |
+| --- | --- |
+| `elsebot status` | Show installed and running versions |
+| `elsebot start` | Start the server |
+| `elsebot stop` | Stop the server and running turns |
+| `elsebot restart` | Restart the server |
+| `elsebot logs` | Follow server logs |
+| `elsebot paths` | Show installation paths |
+| `elsebot db` | Open the database for read-only SQL |
 
-## Repository and local setup
+## Data and backups
 
-The Cargo workspace separates the API and desktop client. Development services live under `infra/`.
+Conversations, memory, credentials, and bot computer state live under `~/.else/data`. Bot project files live under `~/.else/bots`. Server settings are in `~/.else/config/.env`; the app saves its connection in `~/.else/config/desktop.json`.
 
-```text
-Cargo.toml
-Cargo.lock
-apps/
-	api/          Axum API, scheduler, SQLite store, provider adapters, migrations
-	desktop/      GPUI desktop client
-infra/
-	compose.yaml  optional S3 test emulator
-scripts/
-	dev.py        isolated development and boxed UI sessions
-	demo.sh       compatibility commands for development sessions
-docs/
-.env.example
-```
-
-Check and test the workspace (database tests use temporary SQLite files; live Codex tests run only with `ELSE_LIVE_CODEX=1`):
+The server makes encrypted backups daily and keeps seven completed sets by default in `~/.else/data/backups`. To make one manually, stop the server first:
 
 ```sh
-cargo fmt --all -- --check
-cargo check --workspace --locked
-cargo test --workspace --locked
+elsebot stop
+elsebot api backup
+elsebot start
 ```
 
-See [local development](docs/development.md) for prerequisites, configuration, run commands, and database persistence. The [architecture notes](docs/architecture.md#repository-boundaries) explain directory ownership and the intended dependency direction.
+Keep a separate, secure copy of `~/.else/data/secret-key` with your recovery material. Backups need that key to restore. Copy completed backup sets off the machine. To see the restore commands and their arguments, run `elsebot api --help`.
 
-## Implementation backlog
-
-[TODO.md](TODO.md) is the ordered queue for implementation. The three POC milestones are marked complete, the last being [POC-025 through POC-032](docs/implementation/05-vm-automation-and-categories.md), VM automation and sidebar categories. Each task has dependencies, references, and acceptance checks.
-
-The [agent runbook](docs/implementation/README.md) explains how to select a task, verify it, commit progress, and continue. The [handoff log](docs/implementation/progress.md) records active work and evidence across sessions.
-
-## Design notes
-
-The detailed notes separate requirements, decisions, proposals, and research results. Experiments and validation work are marked where they remain incomplete.
-
-| Topic | Details |
-| --- | --- |
-| [Implementation backlog](TODO.md) | Ordered POC tasks, completion gates, and autonomous-agent handoff. |
-| [Local development](docs/development.md) | Workspace commands, SQLite setup, configuration, and database lifecycle. |
-| [Research review](docs/research/README.md) | Seven research tracks, local evidence, the starting design, and remaining integration checks. |
-| [Product requirements](docs/product.md) | Context recognition, delegation, built-in tools, and bot computers. |
-| [Architecture](docs/architecture.md) | Rust API, desktop client, and the preference for native iOS. |
-| [Providers and conversations](docs/providers.md) | Codex and Claude integration, T3 Code research, sessions, and provider switching. |
-| [System prompts](docs/prompts.md) | Prompt structure, bot roles, summary and continuation drafts, and validation. |
-| [Security and secrets](docs/security.md) | Prompt injection controls, isolation, the master key, and open recovery design. |
-| [Routines and webhooks](docs/routines.md) | Scheduled work, event inputs, and independent webhook bearer tokens. |
-| [Memory and storage](docs/memory.md) | UniiChat-based memory, saved views, and SQLite storage. |
-| [Bot computers](docs/sandboxes.md) | Runtime research, Rust deployment, VM locks, and resource limits. |
-| [Backup design](docs/backups.md) | Database exports, VM snapshots, encryption, retention, and size estimates. |
-| [Restore procedure](docs/restore.md) | Planned recovery on a new server and startup that preserves saved state. |
-| [VM verification](docs/experiments/bot-vm-verification.md) | Local desktop, lifecycle, snapshot, and Rust SDK checks, including measured backup sizes. |
+For source builds, development sessions, tests, and releases, see [CONTRIBUTING.md](CONTRIBUTING.md).

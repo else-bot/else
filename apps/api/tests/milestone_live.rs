@@ -1,21 +1,3 @@
-//! POC-032: the VM automation and sidebar categories milestone, end to end,
-//! against the real application: the `else-api` binary with the owner's
-//! Codex and Claude logins, two real `else-guest:2` computers, local
-//! fixtures (a capture-only SMTP server, a search site, a randomized visual
-//! page), no mocked screenshots, DOM-only automation, or synthetic provider
-//! replies. A Codex bot writes and runs code and sends exactly ten captured
-//! messages through a lost acknowledgment; Claude writes a CDP script that
-//! searches the visible browser; a second Codex bot completes a randomized
-//! visual task and types into a terminal; the bots are organized into
-//! categories, one moved while it runs a job across an API restart; a
-//! coordinated backup is restored into a new installation and checked for
-//! categories, project files, usable tooling, and browser state; isolation,
-//! the host boundary, owner stop, and disabled native sub-agents are checked.
-//! It consumes subscription quota and boots VMs, so it runs only with
-//! `ELSE_LIVE_MILESTONE=1`:
-//!
-//! ELSE_LIVE_MILESTONE=1 cargo test -p else-api --test milestone_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -57,8 +39,6 @@ fn note(text: &str) {
     }
 }
 
-/// Run a process to completion within `limit`: past it the process is
-/// killed and reaped and an error returned, so no step can hang the run.
 fn bounded(
     command: std::process::Command,
     limit: Duration,
@@ -66,7 +46,6 @@ fn bounded(
     bounded_with(command, None, limit)
 }
 
-/// `bounded`, writing `input` to the process's standard input first.
 fn bounded_with(
     mut command: std::process::Command,
     input: Option<&str>,
@@ -95,7 +74,6 @@ fn bounded_with(
     };
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
         let input = input.to_owned();
-        // A writer thread: a process that never reads cannot block us.
         std::thread::spawn(move || {
             let _ = stdin.write_all(input.as_bytes());
         });
@@ -158,7 +136,6 @@ impl Install {
         command
     }
 
-    /// Operator commands (setup, backup, restore) get 15 minutes.
     fn run(&self, args: &[&str]) {
         let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
         assert!(
@@ -168,7 +145,6 @@ impl Install {
         );
     }
 
-    /// Run an operator command and return its output.
     fn run_output(&self, args: &[&str]) -> String {
         let out = bounded(self.command(args), Duration::from_secs(900)).unwrap();
         let text = format!(
@@ -258,7 +234,6 @@ impl Api {
         body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// SIGTERM and wait: a normal shutdown.
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             // SAFETY: signalling our own child.
@@ -279,7 +254,6 @@ impl Api {
         }
     }
 
-    /// An abrupt end (SIGKILL): the API gets no chance to clean up.
     fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -294,11 +268,6 @@ impl Drop for Api {
     }
 }
 
-/// Removes every computer in each runtime home and the restored database.
-/// `finish` does it before the run reports success and fails unless the
-/// runtime lists nothing and the database is gone; `Drop` repeats it after
-/// a failed assertion. When removal cannot be confirmed the temporary
-/// directory (runtime homes included) is kept for inspection.
 struct Cleanup {
     homes: Vec<PathBuf>,
     databases: std::sync::Mutex<Vec<String>>,
@@ -329,7 +298,6 @@ fn listed(home: &Path) -> Result<Vec<String>, String> {
 }
 
 impl Cleanup {
-    /// Remove, then confirm; returns what could not be confirmed.
     fn clean(&self) -> Vec<String> {
         let mut problems = Vec::new();
         for home in &self.homes {
@@ -378,7 +346,6 @@ impl Cleanup {
         problems
     }
 
-    /// Keep the directory when removal was not confirmed.
     fn settle(&self, problems: &[String]) -> Option<PathBuf> {
         let dir = self.dir.lock().unwrap().take()?;
         if problems.is_empty() {
@@ -389,7 +356,6 @@ impl Cleanup {
         }
     }
 
-    /// Checked cleanup before the run reports success.
     fn finish(&self) {
         self.done.store(true, std::sync::atomic::Ordering::SeqCst);
         let problems = self.clean();
@@ -418,7 +384,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// Wait for a turn's final state; returns (status, assistant text).
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
@@ -449,8 +414,6 @@ async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String
     }
 }
 
-/// Run a command in the guest directly (the test's own fixture setup and
-/// inspection, not the bot's tools), as `elsebot` unless `root`.
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
     let mut command = std::process::Command::new(msb());
     command
@@ -469,7 +432,6 @@ fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool)
             script,
         ]);
     }
-    // msb's own limit is 120 s; the process gets a little more.
     let out = bounded_with(command, input, Duration::from_secs(150)).unwrap();
     assert!(
         out.status.success(),
@@ -487,7 +449,6 @@ async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
         .unwrap()
 }
 
-/// Every captured message: (recipients, sender, data).
 fn messages(home: &Path, name: &str) -> Vec<(Vec<String>, String, String)> {
     let text = guest(
         home,
@@ -545,7 +506,6 @@ fn dir_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Send and wait; records the latency.
 async fn ask(
     api: &Api,
     pool: &sqlx::SqlitePool,
@@ -569,8 +529,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     let run_started = Instant::now();
     let evidence = root().join("target/acceptance");
     std::fs::create_dir_all(&evidence).unwrap();
-    // On disk, not tmpfs (two installations and a 1.3 GB set do not fit),
-    // and short: the runtime's socket paths live under it.
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
     let tmp = dir.path().to_path_buf();
     let log = evidence.join("milestone.log");
@@ -765,8 +723,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         sent.iter()
             .all(|(_, from, data)| from == "owner@example.test" && data.contains("Riverside Park"))
     );
-    // r07's outcome is unknown (the server may have taken the message).
-    // Asked plainly, the bot must name exactly r07, from its own records.
     let (_, status, unknown) = ask(
         &api,
         &pool,
@@ -1030,7 +986,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    // Identities before the move, while the job runs.
     let before = api.call(reqwest::Method::GET, "/v1/bots", None).await.1;
     let (status, body) = api
         .call(
@@ -1058,7 +1013,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
             })
             .collect()
     };
-    // The move changed exactly Scripter's category, to the one requested.
     let mut expected = project(&before);
     for bot in expected.iter_mut().filter(|b| b.0 == scripter) {
         assert_eq!(bot.2, categories[0], "Scripter started in Automation");
@@ -1154,9 +1108,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
                   sha256sum ~/work/inventory/report.csv | cut -d' ' -f1";
     let tooling_before = guest(&home, &sname, checks, None, false);
     note(&format!("tooling before backup:\n{tooling_before}"));
-    // Environments that must survive as they are: a venv inside the
-    // project and a built Cargo project, used once, then the whole tree of
-    // ~/work recorded (every file's SHA-256, plus the source file list).
     guest(
         &home,
         &sname,
@@ -1215,7 +1166,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
             .get_filename()
             .display()
     );
-    // The original computers stop for good (no ports or names collide).
     for name in [&sname, &hname] {
         let mut stop = std::process::Command::new(msb());
         stop.env("MSB_HOME", &home).args(["stop", name.as_str()]);
@@ -1254,7 +1204,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
     assert_eq!(status, "completed");
     let rhome = restored_dir.join("microsandbox");
     tokio::time::sleep(Duration::from_secs(4)).await;
-    // Nothing in ~/work has run yet: every file is exactly as backed up.
     let manifest_after = guest(&rhome, &sname, manifest, None, false);
     assert_eq!(manifest_after, manifest_before, "the whole ~/work tree");
     let used_after = guest(&rhome, &sname, use_project, None, false);
@@ -1286,7 +1235,6 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         read.contains(&format!("KEPT={marker}")),
         "browser profile: {read}"
     );
-    // CDP and input sessions are not portable: a fresh script reconnects.
     guest(
         &rhome,
         &sname,

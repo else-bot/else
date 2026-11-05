@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A capture-only SMTP server for else.bot's live script tests (POC-026).
+"""A capture-only SMTP server for else.bot's live script tests.
 
 It runs inside the bot's guest on loopback and delivers nothing: every
 accepted message is appended to a JSON lines capture file. It requires
@@ -121,7 +121,6 @@ class Session(socketserver.StreamRequestHandler):
                     drop = [r for r in rcpts if r in args.drop_ack and r not in DROPPED]
                     if drop:
                         DROPPED.update(drop)
-                        # Stored, but the sender never learns it.
                         return
                     self.send("250 ok queued")
                     sender, rcpts = None, []

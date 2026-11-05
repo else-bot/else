@@ -1,5 +1,3 @@
-//! Transcript loading, committed events, paging, and row reconciliation.
-
 use super::ElseApp;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
@@ -15,9 +13,7 @@ use uuid::Uuid;
 pub(super) enum RowKey {
     Item(Uuid),
     Pending(Uuid),
-    /// A bot's request for credentials, by request ID.
     SecretRequest(Uuid),
-    /// A bot's question or approval request, by question ID.
     Question(Uuid),
     Draft(Uuid),
 }
@@ -118,7 +114,6 @@ pub(super) struct ReplyLayout {
     pub bounds: Bounds<Pixels>,
 }
 
-/// The selected bot's transcript and its live subscription.
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
     pub(super) conversation: Option<Conversation>,
@@ -129,11 +124,9 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
-    /// An answer in flight, or its failure, per pending question.
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
     pub(super) expanded_drafts: HashSet<Uuid>,
-    /// The end of the latest loaded reply was on screen at the last check.
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
     pub(super) _load: Option<Task<()>>,
@@ -190,7 +183,6 @@ impl ElseApp {
         }));
     }
 
-    /// Returns the cursor to subscribe from.
     fn apply_snapshot(
         &mut self,
         bot: Uuid,
@@ -219,7 +211,6 @@ impl ElseApp {
             Err(err) => {
                 view.stream_problem = Some(format!("Could not load history: {err}"));
                 cx.notify();
-                // Retry shortly; the poll loop also keeps the list current.
                 let retry = cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(Duration::from_secs(2)).await;
                     let _ = this.update_in(cx, |app, window, cx| {
@@ -241,7 +232,6 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Events for a conversation no longer open are ignored.
         let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
             return;
         };
@@ -253,7 +243,6 @@ impl ElseApp {
                 match conversation.apply(&frame) {
                     Ok(Applied::Duplicate) => {}
                     Ok(Applied::Changed) => {
-                        // The channel's activity is fresher than the list.
                         let activity = conversation.activity.clone();
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
                             self.stopping.remove(&bot);
@@ -266,7 +255,6 @@ impl ElseApp {
                         self.sync_rows(window, cx);
                     }
                     Err(_) => {
-                        // Drop this subscription and reload a snapshot.
                         self.live_command(LiveCommand::Unsubscribe { bot });
                         self.load_conversation(window, cx);
                     }
@@ -314,16 +302,12 @@ impl ElseApp {
         cx.notify();
     }
 
-    /// Rebuild the row list from the model and pending sends, splicing only
-    /// what changed so scroll position and measurements are kept.
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
         let bot = view.bot_id;
-        // Pending sends are shown even before history has loaded.
         let conversation = view.conversation.as_ref();
-        // A pending send disappears once its canonical item is present.
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
@@ -487,7 +471,6 @@ impl ElseApp {
                 view.list.remeasure_items(ix..ix + 1);
             }
         }
-        // Create or update the selectable text of each row.
         let mut changed = Vec::new();
         let mut created = false;
         for (key, text, format, parts) in texts {
@@ -540,8 +523,6 @@ impl ElseApp {
         self.check_reading(window, cx);
         cx.notify();
     }
-
-    // ----- Sending ----------------------------------------------------------
 }
 
 #[cfg(test)]

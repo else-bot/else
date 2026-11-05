@@ -139,7 +139,6 @@ pub async fn append_welcome(
 
 pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    // Serialize concurrent setups so the main bot is created once.
 
     let mut seeded_profiles = Vec::new();
     for (provider_id, profile) in default_profiles() {
@@ -167,7 +166,6 @@ pub async fn setup(pool: &SqlitePool) -> Result<SetupReport, InstallError> {
     let main_bot = match existing {
         Some(default) => MainBot::AlreadyInstalled(default),
         None => {
-            // Never treat saved bots as a fresh database.
             let bots: i64 = sqlx::query_scalar("SELECT count(*) FROM bots")
                 .fetch_one(&mut *tx)
                 .await?;

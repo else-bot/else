@@ -1,9 +1,3 @@
-//! The messaging window: bot sidebar, selected conversation, and composer.
-//!
-//! All network work runs on the API client's runtime; GPUI tasks only await
-//! results and apply them to this view. The conversation model accepts only
-//! contiguous committed events, and any inconsistency reloads a snapshot.
-
 mod attachments;
 mod bot_mention;
 mod bot_menu;
@@ -174,7 +168,6 @@ pub enum Connection {
     InvalidCredentials(String),
 }
 
-/// An owner message not yet confirmed by the server.
 #[derive(Debug, Clone)]
 struct PendingSend {
     request_id: Uuid,
@@ -184,10 +177,7 @@ struct PendingSend {
     provider_id: Option<String>,
     reaction: Option<Reaction>,
     open_draft: Option<crate::model::DraftAttachment>,
-    /// `None` while sending; otherwise why the outcome is unknown.
     unknown: Option<String>,
-    /// Set when the server definitely refused it. The text stays here until
-    /// the owner restores or dismisses it, so it is never lost.
     rejected: Option<String>,
 }
 
@@ -208,9 +198,7 @@ pub struct ElseApp {
     pending: HashMap<Uuid, Vec<PendingSend>>,
     stopping: HashSet<Uuid>,
     inbox: crate::inbox::Inbox,
-    /// Names this connection in notification tags.
     scope: Uuid,
-    /// Covered by the connection editor.
     hidden: bool,
     _alerts: Option<Task<()>>,
     deleting: HashSet<Uuid>,
@@ -222,10 +210,7 @@ pub struct ElseApp {
     category_form: Option<Entity<CategoryFormHolder>>,
     model_dialog: Option<Entity<ModelDialog>>,
     _category_enter: Option<Subscription>,
-    /// Bots with a move in flight: one at a time per bot, so an earlier
-    /// choice can never land after a later one.
     moving: HashSet<Uuid>,
-    /// The last category operation's failure, shown in the sidebar.
     category_notice: Option<String>,
     preferences: crate::preferences::Preferences,
     _save_preferences: Option<Task<()>>,
@@ -327,11 +312,6 @@ impl ElseApp {
         app
     }
 
-    // ----- Bot list ---------------------------------------------------------
-
-    /// Open the live connection. The `bots` channel keeps the sidebar
-    /// current; `bot:<id>` channels stream the open conversation.
-    /// Capabilities are fetched over HTTP each time the connection opens.
     fn start_live(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let Live {
@@ -372,17 +352,14 @@ impl ElseApp {
                         self.load_conversation(window, cx);
                     }
                 }
-                // Resolve sends whose outcome became unknown while offline.
                 self.resolve_unknown_sends(window, cx);
                 self.resume_reads(cx);
             }
             LiveEvent::Disconnected(reason) => {
-                // Keep whatever was loaded; show the problem and keep retrying.
                 self.connection = Connection::Disconnected(reason.clone());
                 if let Some(view) = self.view.as_mut() {
                     view.stream_problem = Some(format!("Reconnecting… {reason}"));
                 }
-                // Values typed into a secret form do not outlive the connection.
                 self.clear_secret_forms(window, cx);
                 self.sync_secret_forms(window, cx);
             }
@@ -424,8 +401,6 @@ impl ElseApp {
         cx.notify();
     }
 
-    /// Fetch the bot list once over HTTP, right after this window changed
-    /// it, without waiting for the `bots` channel.
     fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -461,8 +436,6 @@ impl ElseApp {
         self.bots.iter().filter(|bot| bot.is_active())
     }
 
-    /// Prefer the current selection, then the saved default, then the oldest
-    /// active bot. Navigation only: this never changes the saved default.
     fn reconcile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = |id: Option<Uuid>| id.filter(|id| self.active_bots().any(|b| b.id == *id));
         let next = active(self.selected)
@@ -473,8 +446,6 @@ impl ElseApp {
         }
     }
 
-    /// The owner chose this bot. Selection alone never reads it; the
-    /// replies it shows are read once they are on screen.
     fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.inbox.open(id);
         self.select(Some(id), window, cx);
@@ -485,7 +456,6 @@ impl ElseApp {
         if id == self.selected && self.view.is_some() {
             return;
         }
-        // Keep the draft of the bot being left.
         if let Some(previous) = self.selected {
             self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
         }
@@ -506,8 +476,6 @@ impl ElseApp {
             state.set_placeholder(placeholder, window, cx);
         });
         self.notice = None;
-        // Leaving a conversation unsubscribes from its channel and drops its
-        // fetch tasks; the bot's server work is unaffected.
         if let Some(old) = self.view.as_ref() {
             self.live_command(LiveCommand::Unsubscribe { bot: old.bot_id });
         }
@@ -521,7 +489,6 @@ impl ElseApp {
         }
         self.ensure_settings(window, cx);
         if id.is_some() {
-            // Pending sends show at once, even before history loads.
             self.sync_rows(window, cx);
             self.load_conversation(window, cx);
         }
@@ -529,7 +496,6 @@ impl ElseApp {
     }
 
     fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        // The order the sidebar shows.
         let ids = self
             .sidebar_layout()
             .visible_order(&self.preferences.collapsed);
@@ -548,8 +514,6 @@ impl ElseApp {
         self.selected
             .and_then(|id| self.bots.iter().find(|b| b.id == id))
     }
-
-    // ----- Conversation and stream -----------------------------------------
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected else { return };
@@ -611,7 +575,6 @@ impl ElseApp {
             text,
             parts,
             sent_at: Utc::now(),
-            // The bot's own provider and model, chosen by the API.
             provider_id: None,
             reaction,
             open_draft: if reaction.is_none() {
@@ -629,8 +592,6 @@ impl ElseApp {
         true
     }
 
-    /// POST a pending send. Retrying reuses its request ID and text, so the
-    /// server deduplicates it.
     fn submit(
         &mut self,
         bot: Uuid,
@@ -679,8 +640,6 @@ impl ElseApp {
                 cx.notify();
             }
             Err(err) => {
-                // Definitely rejected: nothing was accepted. Keep the text as a
-                // recoverable entry instead of touching the composer or drafts.
                 if let Some(p) = self
                     .pending
                     .get_mut(&bot)
@@ -710,8 +669,6 @@ impl ElseApp {
         self.sync_rows(window, cx);
     }
 
-    /// After reconnecting, ask the server about sends whose outcome is
-    /// unknown. Found ones are shown; missing ones stay retryable.
     fn resolve_unknown_sends(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
         for (bot, list) in &self.pending {
@@ -721,8 +678,6 @@ impl ElseApp {
                     let found = client.by_request(bot, request_id).await;
                     let _ = this.update_in(cx, |app, window, cx| match found {
                         Ok(Some(sent)) => app.accept_sent(bot, sent, window, cx),
-                        // Not received: resending the same request ID is safe
-                        // because the server deduplicates it.
                         Ok(None) => app.retry_pending_for(bot, request_id, window, cx),
                         Err(_) => {}
                     });
@@ -758,8 +713,6 @@ impl ElseApp {
         self.submit(bot, pending, window, cx);
     }
 
-    /// Remove a refused send; optionally put its text back in the composer,
-    /// after whatever is already there.
     fn take_rejected(
         &mut self,
         request_id: Uuid,
@@ -798,8 +751,6 @@ impl ElseApp {
         self.sync_rows(window, cx);
     }
 
-    // ----- Stop, create, delete ---------------------------------------------
-
     fn stop_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (client, Some(bot)) = (self.client.clone(), self.selected) else {
             return;
@@ -808,7 +759,6 @@ impl ElseApp {
         cx.notify();
         let request_id = Uuid::new_v4();
         cx.spawn_in(window, async move |this, cx| {
-            // A lost response is retried with the same request ID.
             let mut attempts = 0;
             let result = loop {
                 attempts += 1;
@@ -829,6 +779,4 @@ impl ElseApp {
         })
         .detach();
     }
-
-    // ----- Welcome ----------------------------------------------------------
 }

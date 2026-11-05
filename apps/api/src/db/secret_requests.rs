@@ -293,8 +293,6 @@ async fn load(
     row.map(info).ok_or(SettleError::NotFound)
 }
 
-/// What an answer does to a request already in `status`: a retry of the
-/// same answer is a no-op, any other is refused.
 fn answered(request: RequestInfo, wanted: Status) -> Result<Settled, SettleError> {
     if request.status == wanted {
         Ok(Settled {
@@ -307,8 +305,6 @@ fn answered(request: RequestInfo, wanted: Status) -> Result<Settled, SettleError
     }
 }
 
-/// Mark a pending request settled and continue its turn once nothing else
-/// holds it, in the caller's transaction.
 async fn settle_in(
     conn: &mut SqliteConnection,
     request: &RequestInfo,

@@ -1,6 +1,3 @@
-//! Releases are the `vX.Y.Z` tags of the source repository, compared as
-//! numbers, the same way the installer picks the latest one.
-
 use std::ffi::OsString;
 use std::fmt;
 use std::path::Path;
@@ -151,7 +148,6 @@ pub async fn latest(
         .ok_or_else(|| format!("No else.bot release (vX.Y.Z tag) was found at {repo}."))
 }
 
-/// Up to `max + 1` bytes; dropping the pipe after that stops the writer.
 async fn capped(pipe: Option<impl AsyncRead + Unpin>, max: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     if let Some(pipe) = pipe {

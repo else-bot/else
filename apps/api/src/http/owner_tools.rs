@@ -153,7 +153,6 @@ pub(super) async fn request_secret(state: &AppState, grant: &Grant, args: &Value
     }
 }
 
-/// The tool error for a refused question, with its code.
 pub(super) fn question_refused(err: crate::db::owner_questions::RequestError) -> Outcome {
     use crate::db::owner_questions::RequestError;
     let code = match err {

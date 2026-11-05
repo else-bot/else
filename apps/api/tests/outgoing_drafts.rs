@@ -34,7 +34,6 @@ async fn harness_with(mail: Option<Arc<FakeMail>>) -> Harness {
     Harness { app, synthetic }
 }
 
-/// A mail server that records each command it is sent.
 #[derive(Default)]
 struct FakeMail {
     commands: std::sync::Mutex<Vec<MailCommand>>,
@@ -94,7 +93,6 @@ impl MailTransport for FakeMail {
     }
 }
 
-/// Connect `address` as an account and give `bot` read, write, and send.
 async fn connect(app: &TestApp, bot: &str, address: &str, send: bool) -> Uuid {
     let config = MailConfig {
         provider: Provider::Imap,
@@ -284,7 +282,6 @@ async fn shown(app: &TestApp, bot: &str, turn: Uuid) -> Vec<Value> {
         .clone()
 }
 
-/// The latest journaled state of a draft, as a reconnecting app replays it.
 async fn journaled(app: &TestApp, bot: &str, draft: Uuid) -> Value {
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT kind, data FROM bot_events WHERE bot_id = ?1 ORDER BY seq")

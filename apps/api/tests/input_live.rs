@@ -1,14 +1,3 @@
-//! POC-029 against the real application: the `else-api` binary with the
-//! owner's Codex login and a real `else-guest:2` VM. The input helper is
-//! checked directly first (a known click lands, a stopped batch leaves no
-//! key or button pressed); then a Codex bot completes a visual web task
-//! whose button is placed at random, with only screenshots and pointer and
-//! keyboard input (no selectors, DOM text, or coordinates given), and
-//! operates a terminal window outside the browser. It consumes subscription
-//! quota and boots a VM, so it runs only with `ELSE_LIVE_INPUT=1`:
-//!
-//! ELSE_LIVE_INPUT=1 cargo test -p else-api --test input_live -- --nocapture
-
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
@@ -158,7 +147,6 @@ impl Api {
         body["turn"]["id"].as_str().unwrap().parse().unwrap()
     }
 
-    /// An abrupt end (SIGKILL): the API gets no chance to clean up.
     fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -173,7 +161,6 @@ impl Drop for Api {
     }
 }
 
-/// Stops and removes every computer in the installation's runtime home.
 struct Cleanup {
     home: PathBuf,
 }
@@ -200,7 +187,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// Wait for a turn's final state; returns (status, assistant text).
 async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String, String) {
     let started = Instant::now();
     loop {
@@ -231,8 +217,6 @@ async fn finish(db: &sqlx::SqlitePool, turn: Uuid, timeout: Duration) -> (String
     }
 }
 
-/// Run a command in the guest directly (the test's own fixture setup and
-/// inspection, not the bot's tools), as `elsebot` unless `root`.
 fn guest(home: &Path, name: &str, script: &str, input: Option<&str>, root: bool) -> String {
     use std::io::Write;
     let mut command = std::process::Command::new(msb());
@@ -286,7 +270,6 @@ async fn runtime_name(db: &sqlx::SqlitePool, bot: &str) -> String {
         .unwrap()
 }
 
-/// Tool activity bodies of one turn.
 async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT body FROM memory_entry WHERE bot_id = ?1 AND kind = 'tool_activity'
@@ -299,8 +282,6 @@ async fn turn_activity(db: &sqlx::SqlitePool, bot: &str, turn: Uuid) -> Vec<Stri
     .unwrap()
 }
 
-/// Run the guest input helper directly (the test's own check); the batch
-/// goes through the environment, as the API sends it.
 fn input(home: &Path, name: &str, batch: Value) -> String {
     guest(
         home,
@@ -311,7 +292,6 @@ fn input(home: &Path, name: &str, batch: Value) -> String {
     )
 }
 
-/// Which keys and buttons X reports as held (empty when nothing is).
 const HELD: &str = r#"python3 - <<'PY'
 import ctypes
 x = ctypes.cdll.LoadLibrary("libX11.so.6")
@@ -401,7 +381,6 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     let name = runtime_name(&pool, &bot).await;
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    // A random layout and secrets only the screen shows.
     let id = Uuid::new_v4();
     let b = id.as_bytes();
     let (x, y) = (300 + (b[0] as u32 * 3) % 700, 200 + (b[1] as u32 * 2) % 400);
@@ -447,15 +426,11 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
         false,
     );
     assert_eq!(viewport, "1", "the page is the visible window");
-    // A known click lands (the button disappears, the box appears), and the
-    // wheel scrolls (checked through the page itself, not given to a model).
     let page = |expr: &str| {
         format!(
             "python3 -c 'import sys; sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp\nwith elsecdp.connect() as b: print(b.page(url_prefix=\"http://127.0.0.1:8420/\").read(\"{expr}\"))'"
         )
     };
-    // The button's centre on screen: its page position plus where the page
-    // sits in the window (below the tab strip and toolbar).
     let at: Vec<f64> = serde_json::from_str(&guest(
         &home,
         &name,

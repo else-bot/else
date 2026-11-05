@@ -238,8 +238,6 @@ impl ElseApp {
         self.settings_open && self.selected_bot().is_some_and(|b| b.is_active())
     }
 
-    /// Loads the selected bot's details and model, which the composer shows
-    /// even while the details panel is closed.
     pub(super) fn ensure_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected_bot().filter(|b| b.is_active()).cloned() else {
             return;
@@ -573,7 +571,6 @@ impl ElseApp {
                     let _ = app_ok.update(cx, |app, cx| app.apply_model(window, cx));
                     false
                 })
-                // Dismissed: a late result must not close another dialog.
                 .on_close(move |_, _, cx| {
                     let _ = app_close.update(cx, |app, _| {
                         if app.model_dialog.as_ref() == Some(&mine) {

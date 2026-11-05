@@ -63,9 +63,9 @@ pub struct Config {
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
     pub computers: crate::computers::ComputerConfig,
-    /// Encrypted local database backups (POC-021).
+    /// Encrypted local database backups.
     pub backup: crate::backup::capture::BackupConfig,
-    /// Bucket replication of completed sets (POC-023), when configured.
+    /// Bucket replication of completed sets, when configured.
     pub s3: Option<crate::backup::s3::S3Config>,
 }
 
@@ -91,8 +91,6 @@ pub trait Source {
 pub struct ProcessEnv;
 
 impl Source for ProcessEnv {
-    /// An empty variable is returned as supplied, so an explicitly empty
-    /// override (for example `SECRET_KEY=`) is rejected rather than ignored.
     fn get(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
     }
@@ -113,7 +111,6 @@ impl Config {
             Some(path) => absolute_path("OWNER_TOKEN_FILE", path)?,
             None => data_dir.join("owner-token"),
         };
-        // SECRET_KEY is validated when credentials load; it is never echoed.
         let secret_key = match source.get("SECRET_KEY") {
             Some(value) => SecretKeySource::Env(value),
             None => SecretKeySource::File(match source.get("SECRET_KEY_FILE") {
@@ -282,7 +279,6 @@ impl Config {
     }
 }
 
-/// An explicit SQLite URL wins; otherwise the DB lives with private state.
 fn database_url(
     source: &dyn Source,
     data_dir: &std::path::Path,
@@ -302,8 +298,6 @@ impl Config {
     }
 }
 
-/// Relative paths resolve against the current directory once, so later
-/// directory changes cannot redirect credential reads.
 fn absolute_path(name: &'static str, value: String) -> Result<PathBuf, ConfigError> {
     std::path::absolute(&value).map_err(|err| invalid(name, err.to_string()))
 }
@@ -315,8 +309,6 @@ fn default_data_dir(source: &dyn Source) -> Result<PathBuf, ConfigError> {
     }
 }
 
-/// The API serves plaintext HTTP, so it may only listen on loopback. Remote
-/// access goes through an SSH tunnel or a TLS reverse proxy bound privately.
 fn parse_bind(value: Option<&str>) -> Result<SocketAddr, ConfigError> {
     const NAME: &str = "ELSE_API_BIND";
     let raw = value.unwrap_or(DEFAULT_BIND);

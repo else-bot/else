@@ -233,8 +233,6 @@ impl ElseApp {
                             .is_some_and(|i| i.id == id)
                     })
                     .and_then(|turn| self.render_turn_status(turn, view.bot_id, cx));
-                // A reaction's feedback prompt is generated for the bot. The
-                // badge on the reacted message stands for it.
                 if item.reaction.is_some() {
                     return status.map(|status| {
                         gpui_kit::component::v_flex()
@@ -515,7 +513,6 @@ fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> 
         .into_any_element()
 }
 
-/// A short public description of a turn's state. Returns (text, is_error).
 pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     let detail = turn
         .error
@@ -524,7 +521,6 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         .unwrap_or_default();
     match turn.status.as_str() {
         "queued" => ("Queued".into(), false),
-        // The status row animates the trailing dots.
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "cancelling" => ("Stopping…".into(), false),
         "waiting" if turn.secret_requests.iter().any(|r| r.is_pending()) => (
@@ -550,7 +546,6 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "waiting" if turn.questions.iter().any(|q| q.is_pending()) => {
             ("Waiting for your answer…".into(), false)
         }
-        // The main bot handed part of the request to another bot.
         "waiting" => ("Waiting for another bot…".into(), false),
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
@@ -566,7 +561,6 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     }
 }
 
-/// Three dots that brighten in a left-to-right wave after "Working".
 fn working_dots(turn: impl std::fmt::Display) -> impl IntoElement {
     h_flex().text_xs().children((0..3).map(move |ix| {
         div().child(".").with_animation(
@@ -579,7 +573,6 @@ fn working_dots(turn: impl std::fmt::Display) -> impl IntoElement {
     }))
 }
 
-/// Opacity of dot `ix` at normalized loop time `t`: dim, with one pulse each loop.
 fn dot_opacity(t: f32, ix: usize) -> f32 {
     let phase = (t - ix as f32 * 0.2).rem_euclid(1.);
     let pulse = if phase < 0.6 {

@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-/// Longest step one frame may integrate. A frame after a pause (the first
-/// one after rest, a stalled window) moves as if one frame passed.
 const MAX_STEP: f32 = 1. / 30.;
 const AFTER_GAP: f32 = 1. / 60.;
 const SUBSTEP: f32 = 1. / 240.;

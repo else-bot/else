@@ -21,7 +21,6 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
     let mut t = tracker();
     t.on(&init(claude_home::tool_names(), connected()));
     assert!(t.violation.is_none(), "{:?}", t.violation);
-    // Another message's echo is not acceptance.
     assert!(
         t.on(&json!({"type":"user","uuid":"other","isReplay":true}))
             .is_empty()
@@ -63,7 +62,6 @@ fn an_agent_tool_or_extra_server_in_the_inventory_is_refused() {
             json!([{ "name": "elsebot", "status": "connected" }, { "name": "other", "status": "connected" }]),
         ));
     assert!(t.violation.is_some());
-    // else.bot's server failing to connect is not a working inventory.
     let mut t = tracker();
     t.on(&init(
         claude_home::tool_names(),
@@ -117,8 +115,6 @@ fn a_pending_delegation_or_secret_request_is_noticed_from_its_tool_result() {
     let steps = t.on(&json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
     assert_eq!(steps, vec![Step::Parked]);
-    // A pending secret request parks the attempt the same way; other
-    // tools' results never do.
     let mut t = tracker();
     t.on(
         &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
@@ -279,14 +275,11 @@ fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
 
 #[test]
 fn only_a_provable_non_start_is_a_refusal() {
-    // No session could be opened: nothing ran.
     let t = tracker();
     assert!(matches!(
         decide(&t, &info(false, Some(0)), false, false),
         TurnOutcome::Failed { ref code, .. } if code == "provider_refused"
     ));
-    // A success, model output, or an unknown turn count without the
-    // echo may have consumed the message.
     assert!(matches!(
         decide(&t, &info(true, Some(1)), false, false),
         TurnOutcome::Uncertain { .. }
@@ -324,7 +317,6 @@ async fn an_abandoned_read_keeps_its_partial_line() {
     let (mut tx, rx) = tokio::io::duplex(64);
     let mut events = Events::new(BufReader::new(rx));
     tx.write_all(br#"{"type":"result","#).await.unwrap();
-    // A timer wins the select while half the line has been read.
     assert!(
         tokio::time::timeout(Duration::from_millis(50), events.next())
             .await
@@ -543,10 +535,6 @@ async fn files_reach_claude_in_order_with_images_inline() {
     );
 }
 
-/// A fake CLI whose `system/init` reports what the real one would offer:
-/// the built-ins named by `--tools` (or `builtins`, for a CLI that ignored
-/// the flag) and, with `--mcp-config`, else.bot's server tools. It records
-/// its arguments and the settings file it was given.
 fn fake_inventory_claude(dir: &std::path::Path, builtins: Option<&[&str]>) -> Claude {
     use std::os::unix::fs::PermissionsExt;
     let program = dir.join("claude");

@@ -1,4 +1,4 @@
-//! Commands and background jobs in a bot's computer (POC-018).
+//! Commands and background jobs in a bot's computer.
 //!
 //! A foreground command runs under the caller's lease. Its output goes to
 //! files in the guest and only bounded tails come back, so neither the
@@ -29,22 +29,12 @@ pub const MAX_JOB_DURATION: Duration = Duration::from_secs(6 * 3600);
 /// Bytes of a command's stdout and of its stderr returned (the end).
 pub const TAIL_BYTES: usize = 6_000;
 const JOBS_DIR: &str = "/var/lib/elsebot/jobs";
-/// A job still `starting` this long after creation was interrupted.
 const STALE_START: Duration = Duration::from_secs(120);
 
-/// Export task-secret variables sent on stdin as `NAME BASE64` lines
-/// (values never appear in arguments; see `db::task_secrets`), exactly as
-/// sent (a trailing newline survives the decoding), and list their names in
-/// `ELSE_REDACT_VARS` for the output filter.
 const ENV_FROM_STDIN: &str = r#"r=""
 while IFS=' ' read -r n v; do [ -n "$n" ] || continue; x=$(printf %s "$v" | /usr/bin/base64 -d; echo .); export "$n=${x%.}"; r="$r $n"; done
 export ELSE_REDACT_VARS="$r""#;
 
-/// Copies stdin to stdout replacing every value of the variables named in
-/// `ELSE_REDACT_VARS` (4 bytes or longer) with `[secret NAME]`, holding
-/// back just enough to catch a value split across reads. Task-secret
-/// output goes through it inside the guest, so no guest file the API
-/// manages ever holds a value.
 pub(crate) const FILTER: &str = r#"import os, sys
 names = os.environ.get("ELSE_REDACT_VARS", "").split()
 vals = sorted(((os.environb.get(n.encode(), b""), n) for n in names), key=lambda v: -len(v[0]))
@@ -66,14 +56,6 @@ while True:
         out.write(buf[:cut]); out.flush(); buf = buf[cut:]
 out.write(clean(buf)); out.flush()"#;
 
-/// Run `$1` in its own session (its pid, in `$3/pid`, is the process group,
-/// so Stop work can end it and its descendants) with its output in
-/// temporary files, through the secret filter (`$4`) when task secrets were
-/// sent; print the exit code, both sizes, then the last `$2` bytes of each,
-/// separated by a NUL line. Whatever the command left running in its group
-/// is ended with it. The run directory records the guest boot, so a kill
-/// after a reboot never targets a reused process ID. The user's own tool
-/// directories come first only for the user's command.
 const RUN: &str = r#"cd "$HOME/work" 2>/dev/null || cd "$HOME"
 @ENV@
 mkdir -p "$3"; cat /proc/sys/kernel/random/boot_id > "$3/boot" 2>/dev/null
@@ -91,10 +73,6 @@ printf '%s\n%s\n%s\n' "$c" "$(wc -c < "$o")" "$(wc -c < "$e")"
 tail -c "$2" "$o"; printf '\n\000\n'; tail -c "$2" "$e"
 rm -f "$o" "$e"; rm -rf "$3""#;
 
-/// Launch `$2` detached in its own session (its pid is the process group),
-/// recording pid, boot, exit status, and output in `$1`. Task-secret
-/// variables on stdin are exported to it, and its output then goes through
-/// the secret filter (`$3`) before it reaches the output file.
 const LAUNCH: &str = r#"mkdir -p "$1" && { cd "$HOME/work" 2>/dev/null || cd "$HOME"; }
 @ENV@
 cat /proc/sys/kernel/random/boot_id > "$1/boot" 2>/dev/null
@@ -105,16 +83,10 @@ else
 fi
 echo $! > "$1/pid"; echo launched"#;
 
-/// Where foreground commands record their process group.
 const RUNS_DIR: &str = "/var/lib/elsebot/runs";
-/// Output bytes read beyond a returned tail, so a secret value cut by the
-/// tail boundary is still seen whole and redacted before the cut.
 const REDACT_MARGIN: usize = crate::db::task_secrets::MAX_VALUE + 64;
-/// The bytes of job output kept.
 const JOB_TAIL: usize = 4000;
 
-/// Report a job: `done <code>`, `running`, or `lost` (also when the guest
-/// rebooted since it started), then the end of its output.
 const PROBE: &str = r#"b=$(cat "$1/boot" 2>/dev/null) && [ "$b" != "$(cat /proc/sys/kernel/random/boot_id)" ] && [ ! -f "$1/exit" ] && { echo lost; exit 0; }
 if [ -f "$1/exit" ]; then echo "done $(cat "$1/exit")"; elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running; else echo lost; fi; tail -c "$2" "$1/out" 2>/dev/null"#;
 
@@ -158,17 +130,13 @@ pub enum Started {
 
 enum Launch {
     Launched,
-    /// Proven not started.
     NotLaunched(String),
-    /// The guest may have started it.
     Uncertain(String),
     Interrupted,
 }
 
-/// What the guest says, if it can.
 enum Inspect {
     Out(ExecOutput),
-    /// The computer is confirmed not running.
     Gone,
     Paused,
     Unknown,
@@ -193,12 +161,10 @@ fn tail(text: &str, max: usize) -> String {
     text[start..].to_owned()
 }
 
-/// A script with the task-secret prologue in place.
 fn with_env(script: &str) -> String {
     script.replace("@ENV@", ENV_FROM_STDIN)
 }
 
-/// Task-secret variables as `NAME BASE64` lines for `ENV_FROM_STDIN`.
 fn env_input(env: &Env) -> Vec<u8> {
     use base64::Engine;
     let mut input = Vec::new();
@@ -215,18 +181,15 @@ fn env_input(env: &Env) -> Vec<u8> {
     input
 }
 
-/// A foreground command while it runs.
 #[derive(Clone)]
 pub(super) struct Foreground {
     bot_id: Uuid,
     turn_id: Option<Uuid>,
     runtime_name: String,
     dir: String,
-    /// True until the command returned; held while killing it.
     alive: crate::actor::Actor<bool>,
 }
 
-/// Parse the output of `RUN`.
 fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
     let mut lines = out.stdout.splitn(4, '\n');
     let exit_code = lines.next()?.trim().parse::<i32>().ok();
@@ -244,11 +207,9 @@ fn parse_run(out: &ExecOutput) -> Option<CommandOutput> {
 }
 
 impl ComputerManager {
-    /// The guest user and its program prefix for running a script.
     pub(super) fn as_guest_user(&self, script: &str) -> (String, Vec<String>) {
         if self.config.desktop {
             (
-                // Absolute paths: root resolves nothing through a PATH.
                 "/usr/sbin/runuser".into(),
                 vec![
                     "-u".into(),
@@ -299,7 +260,7 @@ impl ComputerManager {
             .await
     }
 
-    /// [`Self::start_job`] with task-secret variables (POC-026), exported to
+    /// [`Self::start_job`] with task-secret variables, exported to
     /// the job at launch over stdin, its output filtered in the guest. The
     /// job records which secrets it used (names), never their values.
     pub async fn start_job_with(
@@ -313,7 +274,6 @@ impl ComputerManager {
     ) -> Result<Started, ComputerError> {
         let id = Uuid::new_v4();
         let duration = max_duration.min(MAX_JOB_DURATION);
-        // Reserve a slot atomically before anything else.
         {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let bot: Option<(bool, bool)> =
@@ -350,8 +310,6 @@ impl ComputerManager {
             if running >= MAX_JOBS {
                 return Ok(Started::TooMany);
             }
-            // The computer row exists once a lease can be taken; create it
-            // the way acquisition would if this is the first use.
             sqlx::query(
                 "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib, network)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
@@ -387,7 +345,6 @@ impl ComputerManager {
                 .await?;
             return Ok(Started::NotReady(acquired));
         };
-        // Only while still starting: a stop meanwhile already ended it.
         let attached = sqlx::query(
             "UPDATE guest_jobs SET lease_id = ?2 WHERE id = ?1 AND status = 'starting'",
         )
@@ -414,8 +371,6 @@ impl ComputerManager {
                 self.release(lease_id).await?;
             }
             Launch::Uncertain(error) => {
-                // The guest may have accepted it. It keeps its lease and
-                // stays `starting`; maintenance looks at its directory.
                 sqlx::query("UPDATE guest_jobs SET error = ?2 WHERE id = ?1")
                     .bind(id)
                     .bind(super::bounded(
@@ -430,8 +385,6 @@ impl ComputerManager {
         Ok(Started::Job(id))
     }
 
-    /// Launch a job under its lease and the bot's operation lock, only
-    /// while it is still `starting` (a kill holds the same lock).
     async fn launch(&self, lease: Uuid, id: Uuid, command: &str, env: &Env) -> Launch {
         let checked = match self.checked(lease).await {
             Ok(checked) => checked,
@@ -478,15 +431,11 @@ impl ComputerManager {
         }
         match launched {
             Ok(out) if out.stdout.contains("launched") => Launch::Launched,
-            // The script may have started the job before failing or being
-            // cut off, or the reply may have been lost: not proof either way.
             Ok(out) => Launch::Uncertain(out.stderr),
             Err(err) => Launch::Uncertain(err.to_string()),
         }
     }
 
-    /// End a job that never got a lease (so never launched) or failed to
-    /// launch.
     async fn fail_start(&self, id: Uuid, error: &str) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE guest_jobs SET status = 'failed', error = ?2, finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -533,11 +482,6 @@ impl ComputerManager {
         }))
     }
 
-    /// Run a job script in the bot's computer, under its operation lock,
-    /// if the computer is running. This asks the guest for evidence about
-    /// work already started, so it needs no lease and works for a stopped
-    /// or deleted bot; it never wakes a computer. The caller holds the
-    /// operation lock.
     async fn inspect_held(
         &self,
         bot_id: Uuid,
@@ -555,7 +499,6 @@ impl ComputerManager {
         };
         match state.as_str() {
             "running" => {}
-            // A stopped VM runs nothing; its jobs died with it.
             "absent" | "stopped" | "missing" => return Ok(Inspect::Gone),
             "paused" => return Ok(Inspect::Paused),
             _ => return Ok(Inspect::Unknown),
@@ -576,8 +519,6 @@ impl ComputerManager {
         }
     }
 
-    /// Ask the guest about a job and record what it reports. Without an
-    /// answer (paused, uncertain) the job keeps its status and lease.
     async fn probe_job(
         &self,
         bot_id: Uuid,
@@ -625,9 +566,6 @@ impl ComputerManager {
         }
     }
 
-    /// A job's output with its task-secret values redacted (the guest
-    /// filter already removed them; this is a second check). The values
-    /// are decrypted again by name: nothing derived from them is stored.
     async fn redact_job(&self, job_id: Uuid, output: &str) -> Result<String, ComputerError> {
         let row: Option<(Uuid, sqlx::types::Json<Vec<String>>)> =
             sqlx::query_as("SELECT bot_id, secrets FROM guest_jobs WHERE id = ?1")
@@ -701,9 +639,6 @@ impl ComputerManager {
         self.load_job(job_id).await
     }
 
-    /// Kill a job under the bot's operation lock (which a launch also
-    /// holds). A job without a lease never launched and no longer can.
-    /// With `stop_paused`, a paused computer holding the job is stopped.
     async fn kill_job(
         &self,
         bot_id: Uuid,
@@ -736,7 +671,6 @@ impl ComputerManager {
                 return self.finish_job(job_id, "lost", None, "", Some(lease)).await;
             }
             Inspect::Paused if stop_paused => {
-                // Stopping the computer ends the job; the next pass sees it.
                 self.stop_held(bot_id, super::Reason::ForJobs).await?;
                 "the computer was paused; stopping it".into()
             }
@@ -751,10 +685,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Maintenance: refresh running jobs, kill jobs a bot-wide stop or
-    /// deletion is cancelling, enforce deadlines, resolve jobs interrupted
-    /// while starting, release the leases of jobs that ended. A failure on
-    /// one job does not stop the others.
     pub(super) async fn poll_jobs(&self, cancel: &CancellationToken) -> Result<(), ComputerError> {
         let jobs: Vec<(Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as(
             "SELECT id, bot_id, lease_id, status, deadline < strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') FROM guest_jobs
@@ -773,8 +703,6 @@ impl ComputerManager {
                     return self.kill_job(bot, job, lease, true).await;
                 }
                 let Some(lease) = lease else {
-                    // Interrupted before it had a lease: nothing launched
-                    // (a launch needs the lease).
                     sqlx::query(
                         "UPDATE guest_jobs SET status = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
                              error = 'interrupted before launch'
@@ -793,8 +721,6 @@ impl ComputerManager {
                     self.kill_job(bot, job, Some(lease), false).await
                 } else {
                     if status == "starting" {
-                        // Interrupted or unconfirmed launch: look at what
-                        // the guest has (`lost` if it never started).
                         sqlx::query(
                             "UPDATE guest_jobs SET status = 'running' WHERE id = ?1 AND status = 'starting'",
                         )

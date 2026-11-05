@@ -25,9 +25,5 @@ RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n' \
       > /etc/elsebot/image.json
 
 ENV DISPLAY=:99
-# Only root-owned directories: the API runs root commands (runuser, the
-# init and upgrade scripts) with this PATH, so nothing the bot can write may
-# shadow them. The bot's own commands get ~/.cargo/bin and ~/.local/bin
-# prepended after the switch to elsebot (see apps/api/src/computers/jobs.rs).
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /home/elsebot/work

@@ -1,6 +1,3 @@
-//! Each bot's own provider and model, and the installation's defaults that
-//! bots without one use.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -12,7 +9,6 @@ fn choice(effort: &str, tier: &str) -> serde_json::Value {
     json!({ "provider_id": "codex", "model": "gpt-6.1-sol", "reasoning_effort": effort, "service_tier": tier })
 }
 
-/// The profile snapshot a turn was accepted with.
 async fn turn_profile(app: &TestApp, turn: &str) -> serde_json::Value {
     sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(
         "SELECT profile FROM turns WHERE id = ?1",
@@ -25,7 +21,6 @@ async fn turn_profile(app: &TestApp, turn: &str) -> serde_json::Value {
 }
 
 async fn send(app: &TestApp, bot: &str) -> String {
-    // No provider named: the bot's own (or the defaults) apply.
     let reply = app.send(bot, Uuid::new_v4(), "hello", None).await;
     assert!(reply.status.is_success(), "{}", reply.body);
     reply.body["turn"]["id"].as_str().unwrap().to_owned()
@@ -35,7 +30,6 @@ async fn send(app: &TestApp, bot: &str) -> String {
 async fn bots_use_their_own_model_or_the_defaults() {
     let app = TestApp::installed().await;
 
-    // Setup seeds Codex's default; the owner changes it.
     let defaults = app.owner("GET", "/v1/settings/defaults", None).await;
     assert_eq!(defaults.body["defaults"]["provider_id"], "codex");
     assert_eq!(defaults.body["defaults"]["reasoning_effort"], "medium");
@@ -59,7 +53,6 @@ async fn bots_use_their_own_model_or_the_defaults() {
     assert_eq!(codex["cli_available"], true);
     assert!(codex["catalog"]["models"].is_array());
 
-    // Values the adapter does not apply exactly are refused.
     let invalid = app
         .owner(
             "PUT",
@@ -78,7 +71,6 @@ async fn bots_use_their_own_model_or_the_defaults() {
         .await;
     assert_eq!(unknown.body["error"]["code"], "unknown_provider");
 
-    // A bot created with its own profile, and one without.
     let own = app
         .owner(
             "POST",
@@ -120,14 +112,12 @@ async fn bots_use_their_own_model_or_the_defaults() {
     assert_eq!(shown.body["profile"]["own"], false);
     assert_eq!(shown.body["profile"]["reasoning_effort"], "low");
 
-    // Turns snapshot the bot's own profile, else the defaults.
     let turn = send(&app, &own).await;
     assert_eq!(turn_profile(&app, &turn).await["reasoning_effort"], "high");
     assert_eq!(turn_profile(&app, &turn).await["service_tier"], "priority");
     let turn = send(&app, &plain).await;
     assert_eq!(turn_profile(&app, &turn).await["reasoning_effort"], "low");
 
-    // Changing a bot's profile applies to its next message only.
     let changed = app
         .owner(
             "PUT",
@@ -171,8 +161,6 @@ async fn creation_is_atomic_and_retries_never_overwrite_later_choices() {
         "profile": choice("high", "priority"), "category_id": category,
         "avatar": { "shape": "cloud", "color": "pink" }
     });
-    // A failure after inserting the bot must roll back its receipt, profile,
-    // category, conversation, and notification along with it.
     sqlx::query(
         "CREATE TRIGGER reject_profile BEFORE INSERT ON bot_profiles
                  BEGIN SELECT RAISE(ABORT, 'test profile failure'); END",

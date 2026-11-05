@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 const KEY_BYTES: usize = 32;
-/// Credential files are tiny; anything larger is not one of ours.
 const MAX_FILE_BYTES: u64 = 4096;
 
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +102,6 @@ impl fmt::Debug for SecretKey {
 }
 
 impl SecretKey {
-    /// Input key material for purpose-separated derivations.
     pub(crate) fn bytes(&self) -> &[u8; KEY_BYTES] {
         &self.bytes
     }
@@ -248,15 +246,12 @@ fn create_private_file(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         check_dir(parent, "credential directory")?;
     }
-    // `create_new` refuses any existing path, including a symlink, so a
-    // concurrent setup cannot be tricked into overwriting another file.
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(io)?;
-    // The umask can only remove bits, but make the intent explicit.
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(io)?;
     file.write_all(contents).map_err(io)?;
@@ -276,12 +271,9 @@ fn read_private_file(path: &Path, what: &'static str) -> Result<String, Credenti
         path: path.to_owned(),
         error,
     };
-    // A replaceable parent directory would let another user swap the file.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         check_dir(parent, "credential directory")?;
     }
-    // Open once without following a final symlink, then validate the opened
-    // descriptor itself, so the checked file is the file that is read.
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -321,7 +313,6 @@ fn read_private_file(path: &Path, what: &'static str) -> Result<String, Credenti
     Ok(text)
 }
 
-/// A single trailing newline is tolerated; any other whitespace is malformed.
 fn strip_newline(text: &str) -> &str {
     text.strip_suffix('\n').unwrap_or(text)
 }
@@ -418,7 +409,6 @@ mod tests {
             load_owner_token(&link).unwrap_err(),
             CredentialError::Unsafe { .. }
         ));
-        // A symlinked parent directory that others can write is refused.
         let shared = tempfile::tempdir().unwrap();
         fs::set_permissions(shared.path(), fs::Permissions::from_mode(0o777)).unwrap();
         let moved = shared.path().join("owner-token");
@@ -428,7 +418,6 @@ mod tests {
             load_owner_token(&moved).unwrap_err(),
             CredentialError::Unsafe { .. }
         ));
-        // Setup refuses to write through a dangling symlink as well.
         let dangling = dir.path().join("dangling");
         std::os::unix::fs::symlink(dir.path().join("target"), &dangling).unwrap();
         assert!(provision_owner_token(&dangling).is_err());
@@ -466,7 +455,6 @@ mod tests {
         let token_text = fs::read_to_string(&token_path).unwrap();
         let key_text = fs::read_to_string(dir.path().join("secret-key")).unwrap();
         assert_ne!(token_text, key_text);
-        // The master key is not a valid owner credential.
         let token = load_owner_token(&token_path).unwrap();
         assert!(!token.matches(key_text.trim_end()));
     }

@@ -1,6 +1,3 @@
-//! The welcome screen's step: name the main bot and choose its provider
-//! and model, which become the defaults.
-
 mod common;
 
 use axum::http::StatusCode;
@@ -16,7 +13,6 @@ async fn onboarding_names_the_main_bot_and_sets_its_model_and_the_defaults() {
     let profile = json!({ "provider_id": "codex", "model": "gpt-6.1-sol",
                           "reasoning_effort": "high", "service_tier": "priority" });
 
-    // Refused input changes nothing.
     let bad = app
         .owner(
             "POST",

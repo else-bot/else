@@ -1,5 +1,3 @@
-//! Provider adapters and the registry the API exposes through capabilities.
-
 pub mod attachments;
 pub mod claude;
 pub mod claude_home;
@@ -31,7 +29,6 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     );
-    // Providers reach the API over loopback.
     let mut tool_addr = config.bind;
     if tool_addr.ip().is_unspecified() {
         tool_addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
@@ -41,8 +38,6 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
         codex::Codex::detect(Some(host.clone()), program, auth).with_tools(tool_url.clone()),
     );
     providers.push(codex.clone());
-    // Claude is listed too; it is used only once an explicit Claude
-    // profile is saved (no default is seeded).
     let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let home = std::env::var("HOME").ok();
     let claude = claude::Claude::detect(
@@ -82,8 +77,6 @@ fn executable(configured: Option<&std::path::Path>, name: &str) -> Option<std::p
     }
 }
 
-/// The real file behind `path`; for a mise shim, the executable mise
-/// selects for `name`.
 fn resolve_native(path: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     let found = std::fs::canonicalize(path).ok()?;
     if found.file_name().is_some_and(|f| f == "mise") {
@@ -156,7 +149,6 @@ mod executable_tests {
         let native = dir.path().join("installs/codex/1.0/bin/codex");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         std::fs::write(&native, "native").unwrap();
-        // A stand-in for mise: `mise which codex` prints the native path.
         let mise = dir.path().join("bin/mise");
         std::fs::create_dir_all(mise.parent().unwrap()).unwrap();
         std::fs::write(
@@ -174,7 +166,6 @@ mod executable_tests {
 
         let native = std::fs::canonicalize(&native).unwrap();
         assert_eq!(executable(Some(&shim), "codex"), Some(native.clone()));
-        // A real binary stays itself; an unresolvable path is kept as given.
         assert_eq!(executable(Some(&native), "codex"), Some(native));
         let missing = dir.path().join("nope/codex");
         assert_eq!(executable(Some(&missing), "codex"), Some(missing));

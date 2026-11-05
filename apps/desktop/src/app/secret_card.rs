@@ -76,7 +76,6 @@ impl SecretForm {
         Ok(env)
     }
 
-    /// Forget every value typed or pasted into this form.
     pub(super) fn clear(&mut self, window: &mut Window, cx: &mut App) {
         for field in &mut self.fields {
             field.captured = None;
@@ -88,8 +87,6 @@ impl SecretForm {
 }
 
 impl ElseApp {
-    /// Keep one form per pending request of the open conversation, and
-    /// clear the forms of requests answered elsewhere.
     pub(super) fn sync_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
@@ -119,8 +116,6 @@ impl ElseApp {
         }
     }
 
-    /// Clear every open form, e.g. when the connection drops. Pending
-    /// requests get empty forms again on the next sync.
     pub(super) fn clear_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_mut() {
             for (_, mut form) in view.secret_forms.drain() {
@@ -174,7 +169,6 @@ impl ElseApp {
         self.remeasure_row(RowKey::SecretRequest(request), cx);
     }
 
-    /// Send the form's values, or decline the request with `None`.
     fn answer_secret(
         &mut self,
         request: Uuid,

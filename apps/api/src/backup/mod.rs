@@ -1,4 +1,4 @@
-//! Encrypted database backups and non-destructive restore (POC-021).
+//! Encrypted database backups and non-destructive restore.
 //!
 //! A backup set is a directory `<backup dir>/<set id>/` holding separately
 //! age-encrypted objects (`database.dump.age`, a SQLite image, and
@@ -35,7 +35,6 @@ pub const SCHEMA_VERSION: u32 = 2;
 pub const FORMAT: &str = "age-encryption.org/v1";
 pub const KDF: &str = "HKDF-SHA-256";
 pub const PURPOSE: &str = "else.bot/backups/v1";
-/// Derives the opaque, non-secret identifier recorded with each set.
 const KEY_ID_PURPOSE: &[u8] = b"else.bot/key-id/v1";
 pub const COMPLETE: &str = "complete.json";
 pub const MANIFEST: &str = "manifest.json.age";
@@ -452,7 +451,6 @@ pub fn seal(
                 .write_all(&buf[..n])
                 .map_err(|e| BackupError::io(path.display(), e))?;
         }
-        // The authenticated final chunk: without it the file is invalid.
         let cipher = writer
             .finish()
             .map_err(|e| BackupError::io(path.display(), e))?;
@@ -606,7 +604,6 @@ pub fn new_set_id() -> String {
 /// directories carrying it are ever removed.
 pub const MARKER: &str = ".else-backup";
 
-/// A real directory (not a symlink) under `dir` that this application made.
 fn owned_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
         && fs::symlink_metadata(path.join(MARKER)).is_ok_and(|m| m.is_file())
@@ -692,7 +689,6 @@ pub fn apply_retention_protecting(
     awaiting: &[String],
 ) -> Result<Vec<String>, BackupError> {
     let mut sets = completed_sets(dir)?;
-    // The newest whole-assistant set is never replaced by lower coverage.
     let newest_whole = sets
         .iter()
         .rev()
@@ -731,7 +727,6 @@ pub struct DirLock(File);
 
 impl Drop for DirLock {
     fn drop(&mut self) {
-        // Process-spawn copies must not keep a completed backup locked.
         let _ = self.0.unlock();
     }
 }
@@ -852,7 +847,6 @@ mod tests {
         let last = flipped.len() - 100;
         flipped[last] ^= 1;
         assert!(open_small(&flipped, &id, 1 << 20).is_err(), "corrupted");
-        // Never replaces, and a too-large input leaves nothing behind.
         assert!(seal(&path, &id, &mut data.as_slice(), 1 << 20).is_err());
         let big = dir.path().join("big.age");
         assert!(matches!(

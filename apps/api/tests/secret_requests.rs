@@ -1,8 +1,3 @@
-//! Secret requests: a bot asks for credentials over MCP, the owner answers
-//! through the owner API, and the same turn continues. Values reach only
-//! the encrypted task secret, never items, events, memory, request rows,
-//! provider packets, or response bodies.
-
 mod common;
 
 use std::sync::Arc;
@@ -16,9 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 const CANARY: &str = "CANARY-7f3a9c";
-/// A multiline private key: the value must survive byte for byte.
 const PEM: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nCANARY-7f3a9c-line-one+/=\nsecond line\twith tab\n-----END OPENSSH PRIVATE KEY-----\n";
-/// Long enough (a few seconds) to call tools while it streams.
 const SLOW: &str = "[synthetic:slow] deploy the site; I need the server login for it.";
 
 struct Harness {
@@ -37,7 +30,6 @@ async fn harness() -> Harness {
     }
 }
 
-/// Start a slow turn on `bot` and return it with a grant for its attempt.
 async fn running(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid, String) {
     let sent = app.send(bot, Uuid::new_v4(), SLOW, Some("synthetic")).await;
     let turn = sent.body["turn"]["id"].as_str().unwrap().to_owned();
@@ -236,8 +228,6 @@ async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
         .unwrap()
 }
 
-/// Every row of every table, as text, must not contain the canary. Task
-/// secret ciphertext is included: it must not reveal the value either.
 async fn assert_canary_absent_from_database(app: &TestApp) {
     let mut conn = app.db.pool.acquire().await.unwrap();
     let tables: Vec<String> = sqlx::query_scalar(
@@ -652,13 +642,11 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
     );
 }
 
-/// A grant for a new running main-bot turn that may delegate.
 async fn grant_with_delegate(app: &TestApp, main: &str) -> String {
     let (turn, _) = running(app, main, owner_tools()).await;
     grant(app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await
 }
 
-/// Post a body that is not valid JSON with the owner token.
 async fn raw_post(app: &TestApp, path: &str, body: String) -> (StatusCode, String) {
     use http_body_util::BodyExt;
     use tower::ServiceExt;

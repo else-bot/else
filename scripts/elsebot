@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# elsebot: manage the else.bot installation in ~/.else (installed by
-# install.sh as ~/.else/bin/elsebot, linked from ~/.local/bin).
 set -euo pipefail
 
 usage() {
@@ -20,7 +18,6 @@ Usage: elsebot <command>
 EOF
 }
 
-# ~/.else from this script's own location (bin/elsebot), unless ELSE_HOME.
 self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 ELSE_HOME="${ELSE_HOME:-$(cd "$(dirname "$self")/.." && pwd -P)}"
 CONFIG="$ELSE_HOME/config"
@@ -64,7 +61,6 @@ running_version() {
 	curl -fsS --max-time 3 "http://$(api_addr)/healthz" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
 }
 
-# --- The API service ---------------------------------------------------------
 
 unit_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$ELSEBOT_SERVICE.service"; }
 
@@ -136,7 +132,6 @@ launchd_install() {
 EOF
 	plutil -lint -s "$plist.tmp" || { rm -f "$plist.tmp"; die "the launchd agent is not a valid property list"; }
 	mv -f "$plist.tmp" "$plist"
-	# The other place's copy, from before the autostart choice changed.
 	if [ "$plist" = "$(login_plist)" ]; then rm -f "$CONFIG/$LABEL.plist"; else rm -f "$(login_plist)"; fi
 }
 
@@ -203,7 +198,6 @@ EOF
 
 pid_file() { echo "$RUN/$ELSEBOT_SERVICE.pid"; }
 
-# The pid of the API this script started, if it still runs.
 process_pid() {
 	local pid
 	pid="$(cat "$(pid_file)" 2>/dev/null)" || return 1
@@ -214,7 +208,6 @@ process_pid() {
 	esac
 }
 
-# The API binary, or why there is none.
 need_api() {
 	[ -x "$CURRENT/bin/else-api" ] && return 0
 	[ -x "$CURRENT/bin/else-desktop" ] &&
@@ -245,7 +238,6 @@ start() {
 	)
 }
 
-# Graceful: SIGTERM, then the API's own shutdown (up to 90 s).
 stop() {
 	case "$ELSEBOT_MANAGER" in
 	systemd) systemctl --user stop "$ELSEBOT_SERVICE.service"; return ;;
@@ -271,7 +263,6 @@ is_active() {
 	esac
 }
 
-# --- Commands ----------------------------------------------------------------
 
 cmd="${1:-status}"
 [ $# -gt 0 ] && shift
@@ -294,7 +285,6 @@ status)
 version) installed else-api || installed else-desktop || die "not installed" ;;
 update)
 	[ -f "$ELSE_HOME/src/install.sh" ] || die "no source in $ELSE_HOME/src; run the curl installer again"
-	# A copy: the update replaces the checkout it runs from.
 	tmp="$(mktemp)"
 	trap 'rm -f "$tmp"' EXIT
 	cp "$ELSE_HOME/src/install.sh" "$tmp"
@@ -308,13 +298,9 @@ desktop)
 	if [ "$(uname -s)" = Darwin ]; then
 		[ -n "$ELSEBOT_APP" ] && [ -d "$ELSEBOT_APP" ] ||
 			die "the app is missing${ELSEBOT_APP:+ at $ELSEBOT_APP}; publish it again with: elsebot update"
-		# macOS runs it like Finder does: it outlives this terminal, and it
-		# finds this installation from the app itself.
 		if [ $# -gt 0 ]; then exec open -a "$ELSEBOT_APP" --args "$@"; fi
 		exec open -a "$ELSEBOT_APP"
 	fi
-	# This installation's settings only: none of a development shell's, and
-	# from / so no checkout's .env applies.
 	ELSE_HOME="$ELSE_HOME" exec "$CURRENT/bin/else-desktop" "$@"
 	;;
 start) start ;;

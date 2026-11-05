@@ -1,1 +1,0 @@
-Work bot task `synthetic-child-work` is **pending**; no plan has completed. The scheduling rule requires ending this attempt without polling. This synthetic fixture has no running child or scheduler.

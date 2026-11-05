@@ -283,7 +283,6 @@ async fn connector_turns(db: &TestDb, bot: Uuid) -> Vec<(Uuid, String)> {
     .unwrap()
 }
 
-/// An active account whose first, quiet scan set the cursor to uid 10.
 async fn watched(db: &TestDb, address: &str) -> (Uuid, i64) {
     let account = store::create(&db.pool, &key(), &config(address), &password(PASSWORD))
         .await

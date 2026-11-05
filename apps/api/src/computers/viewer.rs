@@ -18,7 +18,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 /// The view-only server's desktop name (`x11vnc -desktop`), which tells a
 /// guest image with a watch server apart from an older one.
 pub const WATCH_NAME: &str = "else-watch";
-/// The largest screen the viewer accepts, as the desktop client does.
 const MAX_SIDE: u16 = 4096;
 const MAX_PIXELS: u32 = 8 * 1024 * 1024;
 
@@ -106,7 +105,6 @@ pub async fn connect(port: u16, password: &str, target: Target) -> Result<Connec
     })
 }
 
-/// Copy bytes between the RFB side and the WebSocket until either ends.
 async fn bridge<S>(ws: tokio_tungstenite::WebSocketStream<S>, mut rfb: DuplexStream)
 where
     S: AsyncRead + AsyncWrite + Unpin,

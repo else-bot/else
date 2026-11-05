@@ -81,9 +81,6 @@ enum ClientMessage {
     },
 }
 
-/// One message queued for the client. Channel messages carry the
-/// subscription generation that produced them, so the writer drops anything
-/// from a subscription that was since replaced, unsubscribed, or revoked.
 struct Outgoing {
     tag: Option<Tag>,
     body: Value,
@@ -94,27 +91,18 @@ struct Tag {
     channel: String,
     generation: u64,
     bot: Option<Uuid>,
-    /// The subscription's final message (an error). Delivering it retires
-    /// the subscription.
     last: bool,
 }
 
-/// Subscription state shared by the reader, the channel workers, and the
-/// writer of one connection.
 #[derive(Default)]
 struct Registry {
-    /// The current subscription of each channel.
     channels: HashMap<String, Entry>,
-    /// Bots seen deleted on this connection. Their data is never written
-    /// again, even after a new subscription.
     deleted: HashSet<Uuid>,
     next_generation: u64,
 }
 
 struct Entry {
     generation: u64,
-    /// Whether its worker still runs; only running ones count against the
-    /// subscription limit.
     running: bool,
 }
 
@@ -136,8 +124,6 @@ impl Registry {
         self.channels.values().filter(|e| e.running).count()
     }
 
-    /// Whether the writer may send this message; retires the subscription
-    /// when its final message goes out.
     fn admit(&mut self, tag: &Tag) -> bool {
         let current = self
             .channels
@@ -156,7 +142,6 @@ impl Registry {
 
 type Shared = Actor<Registry>;
 
-/// A channel worker's handle on its own subscription.
 struct Sub {
     channel: String,
     generation: u64,
@@ -179,8 +164,6 @@ impl Sub {
         }
     }
 
-    /// Queue a message. False once the subscription or connection ended;
-    /// a worker never stays blocked on a full queue after it is retired.
     async fn send(&self, body: Value) -> bool {
         let message = self.message(body, false);
         tokio::select! {
@@ -189,7 +172,6 @@ impl Sub {
         }
     }
 
-    /// End the subscription with an error, its final message.
     async fn fail(&self, code: &str, message: &str) {
         let channel = self.channel.clone();
         let generation = self.generation;
@@ -211,8 +193,6 @@ impl Sub {
         }
     }
 
-    /// End a bot's subscription because the bot was deleted. Data already
-    /// queued for it is dropped by the writer from now on.
     async fn deleted(&self, bot: Uuid) {
         self.registry
             .call(move |registry| registry.deleted.insert(bot))
@@ -227,7 +207,6 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
     let registry: Shared = Actor::default();
     let closed = CancellationToken::new();
 
-    // Writer: the only task touching the sink.
     let writer_registry = registry.clone();
     let writer_closed = closed.clone();
     let writer = tokio::spawn(async move {
@@ -253,11 +232,9 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
             }
         }
         writer_closed.cancel();
-        // Closing flushes; a peer that stopped reading must not hold it open.
         let _ = tokio::time::timeout(CLOSE_LIMIT, sink.close()).await;
     });
 
-    // Tokens of subscriptions started by this reader, by channel.
     let mut tokens: HashMap<String, CancellationToken> = HashMap::new();
     loop {
         let next = tokio::select! {
@@ -266,7 +243,6 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
         };
         let message = match next {
             Ok(Some(Ok(message))) => message,
-            // Silent too long, failed, or closed.
             _ => break,
         };
         let text = match message {
@@ -365,13 +341,10 @@ async fn connection(state: Arc<AppState>, socket: WebSocket) {
 
 enum Read<T> {
     Done(T),
-    /// The subscription ended while reading.
     Cancelled,
-    /// The read failed or took too long.
     Failed,
 }
 
-/// Run a database read unless the subscription ends or it takes too long.
 async fn guarded<T>(
     token: &CancellationToken,
     fut: impl std::future::Future<Output = Result<T, sqlx::Error>>,
@@ -392,7 +365,6 @@ async fn guarded<T>(
     }
 }
 
-/// Wait for a wake hint (for `bot`, or any bot when `None`) or the fallback.
 async fn wait(
     wake: &mut broadcast::Receiver<Uuid>,
     bot: Option<Uuid>,
@@ -417,9 +389,6 @@ async fn wait(
     }
 }
 
-/// `bots`: the full list (with deletion receipts still pending) and the
-/// default pointer, sent on subscribe and whenever it changes. A failed read
-/// is retried.
 async fn bots_channel(state: Arc<AppState>, sub: Sub) {
     let mut wake = state.events.subscribe();
     let mut last: Option<Value> = None;
@@ -448,8 +417,6 @@ async fn bots_channel(state: Arc<AppState>, sub: Sub) {
     }
 }
 
-/// Whether the bot is still active. Otherwise the subscription has been
-/// ended with the matching error (or was cancelled).
 async fn still_active(state: &AppState, bot_id: Uuid, sub: &Sub) -> bool {
     match guarded(&sub.token, bot_is_active(state, bot_id)).await {
         Read::Done(Some((true, _))) => true,
@@ -470,9 +437,6 @@ async fn still_active(state: &AppState, bot_id: Uuid, sub: &Sub) -> bool {
     }
 }
 
-/// `bot:<id>`: committed journal events after the cursor, in order. Any
-/// failure ends the subscription with an error, so the client resubscribes
-/// or reloads instead of waiting on a silent channel.
 async fn bot_channel(state: Arc<AppState>, bot_id: Uuid, cursor: Option<String>, sub: Sub) {
     let mut wake = state.events.subscribe();
     let Some(cursor) = cursor else {
@@ -519,8 +483,6 @@ async fn bot_channel(state: Arc<AppState>, bot_id: Uuid, cursor: Option<String>,
                     .await;
             }
         };
-        // Checked after the read: a deletion committed meanwhile is seen
-        // before any of these rows are sent.
         if !still_active(&state, bot_id, &sub).await {
             return;
         }
@@ -532,9 +494,6 @@ async fn bot_channel(state: Arc<AppState>, bot_id: Uuid, cursor: Option<String>,
                 "event": kind,
                 "data": data,
             });
-            // A slow reader must not delay revocation: while waiting for
-            // queue space, recheck on this bot's wake hints and on the
-            // fallback timer.
             let mut sending = std::pin::pin!(sub.send(body));
             let mut fallback = tokio::time::interval_at(
                 tokio::time::Instant::now() + POLL_FALLBACK,
@@ -588,11 +547,9 @@ mod tests {
         let mut registry = Registry::default();
         let old = registry.open("bot:x", true);
         let new = registry.open("bot:x", true);
-        // A queued error or event of the replaced subscription is dropped.
         assert!(!registry.admit(&tag("bot:x", old, None, true)));
         assert!(!registry.admit(&tag("bot:x", old, None, false)));
         assert!(registry.admit(&tag("bot:x", new, None, false)));
-        // Unsubscribed: nothing more.
         registry.channels.remove("bot:x");
         assert!(!registry.admit(&tag("bot:x", new, None, false)));
     }
@@ -604,12 +561,10 @@ mod tests {
         let mut registry = Registry::default();
         let first = registry.open(&channel, true);
         registry.deleted.insert(bot);
-        // Data queued before the deletion is dropped; the final error goes out.
         assert!(!registry.admit(&tag(&channel, first, Some(bot), false)));
         let second = registry.open(&channel, true);
         assert!(!registry.admit(&tag(&channel, second, Some(bot), false)));
         assert!(registry.admit(&tag(&channel, second, Some(bot), true)));
-        // Other bots are unaffected.
         let other = Uuid::new_v4();
         let g = registry.open(&format!("bot:{other}"), true);
         assert!(registry.admit(&tag(&format!("bot:{other}"), g, Some(other), false)));
@@ -621,7 +576,6 @@ mod tests {
         let g = registry.open("bot:a", true);
         registry.open("bot:b", false);
         assert_eq!(registry.running(), 1);
-        // Delivering the final message retires the subscription.
         assert!(registry.admit(&tag("bot:a", g, None, true)));
         assert!(!registry.channels.contains_key("bot:a"));
     }

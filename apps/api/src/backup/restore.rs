@@ -71,13 +71,9 @@ pub struct RestoreReport {
 }
 
 fn options(params: &DatabaseParams) -> SqliteConnectOptions {
-    // SQLx's own parse of the URL: TLS mode, certificates, and overrides
-    // apply to every connection the restore makes.
     params.options.clone()
 }
 
-/// Remove decrypted staging left by a restore that was killed (the caller
-/// holds the staging lock, so no live restore's files are touched).
 fn clean_stale(parent: &Path) -> Result<(), BackupError> {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return Ok(());
@@ -126,7 +122,6 @@ pub fn open_set(
     if completion.manifest.object != MANIFEST {
         return Err(BackupError::Invalid("unexpected manifest object".into()));
     }
-    // A wrong key is recognized before anything is decrypted.
     let identity = super::identity_for(key, &completion.encryption)?;
     let ciphertext = super::read_regular(
         &set_dir.join(MANIFEST),
@@ -154,9 +149,6 @@ pub fn open_set(
     Ok((completion, manifest, identity))
 }
 
-/// Exactly one database dump first, then one disk archive and one project
-/// archive per bot whose entry names them, and host artifacts, at the
-/// expected object names; nothing else.
 fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let invalid = |why: &str| Err(BackupError::Invalid(format!("unexpected artifacts: {why}")));
     let Some((first, rest)) = manifest.artifacts.split_first() else {
@@ -226,8 +218,6 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Check the encrypted dump and decrypt it into `target` (created new),
-/// verifying length and hash of both forms.
 fn verify_and_decrypt(
     set_dir: &Path,
     artifact: &super::Artifact,
@@ -242,7 +232,6 @@ fn verify_and_decrypt(
             "the dump's size does not match the manifest".into(),
         ));
     }
-    // Ciphertext first, so a corrupted file is refused before decrypting.
     let mut hasher = super::Tee::new(std::io::sink());
     let mut file =
         std::fs::File::open(&source).map_err(|e| BackupError::io(source.display(), e))?;
@@ -295,7 +284,6 @@ fn verify_and_decrypt(
     Ok(())
 }
 
-/// Removes the staging directory however the restore ends.
 struct Staging(PathBuf);
 
 impl Drop for Staging {
@@ -337,8 +325,6 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
             "this set includes bot computers; restoring them needs Microsandbox (msb)".into(),
         ));
     }
-    // One restore at a time per staging directory; stale staging from a
-    // killed restore is removed under the same lock.
     let _lock = super::try_lock(request.staging_parent)?
         .ok_or_else(|| BackupError::Refused("another restore is running".into()))?;
     clean_stale(request.staging_parent)?;
@@ -362,10 +348,8 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         .map_err(|e| BackupError::Io(e.to_string()))??;
     }
 
-    // The target must be new; an existing database is never touched.
     let target = request.server.with_database(request.target_database);
     let path = target.options.get_filename();
-    // Reserve exclusively: a competing restore cannot overwrite an existing file.
     let reserved = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -391,7 +375,6 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
         restored = Err(err);
     }
     if restored.is_err() {
-        // Only files belonging to the database exclusively created above.
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
@@ -424,7 +407,6 @@ async fn load_and_check(
     {
         return Err(BackupError::Invalid("foreign key check failed".into()));
     }
-    // Exactly the captured rows, before migrations may change any.
     let digests = super::capture::table_digests(&mut conn).await?;
     if digests != manifest.tables {
         let differing: Vec<String> = manifest
@@ -454,8 +436,6 @@ async fn load_and_check(
         .map_err(|e| BackupError::Invalid(format!("connector restore: {e}")))?;
     sqlx::query("UPDATE turns SET status=CASE WHEN status IN ('queued','preparing') THEN 'interrupted' ELSE 'uncertain' END, effect_uncertain=effect_uncertain OR status NOT IN ('queued','preparing'), error_code='connector_restored', error_message='Restored email work will not resume automatically. Inspect action receipts for prior effects.', finished_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE status IN ('queued','preparing','sending','running','cancelling','waiting') AND EXISTS (SELECT 1 FROM connector_deliveries d WHERE d.turn_id=turns.id)")
         .execute(&mut conn).await?;
-    // Restored settings must still satisfy the adapters' rules: no profile
-    // can enable native sub-agents or select an unsupported model.
     let profiles: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT provider_id, model, reasoning_effort, service_tier FROM provider_profiles",
     )
@@ -486,12 +466,6 @@ async fn load_and_check(
     Ok(version)
 }
 
-/// Restore every included computer into the new runtime (left stopped),
-/// write its desktop password into the new installation, then record in the
-/// restored database what the new installation actually has: restored
-/// computers stopped, computers not in the set `missing` (never recreated),
-/// every native provider session retired (not included, so context is
-/// rebuilt from SQLite), and the run that made this set completed.
 async fn restore_computers(
     request: &RestoreRequest<'_>,
     manifest: &Manifest,
@@ -510,8 +484,6 @@ async fn restore_computers(
     )
     .await;
     if let Err(err) = result {
-        // Nothing this restore started may keep running once its state is
-        // removed: stop every computer it tried to create and confirm it.
         let mut running = Vec::new();
         if let Some(runtime) = request.computers.as_ref().and_then(|t| t.runtime.as_ref()) {
             for name in &attempted {
@@ -542,7 +514,6 @@ async fn restore_runtime(
     attempted: &mut Vec<String>,
 ) -> Result<(), BackupError> {
     if let Some(target) = &request.computers {
-        // Project directories first: restored computers mount them.
         let projects = projects_dir(target.data_dir);
         for artifact in manifest.artifacts[1..]
             .iter()
@@ -622,8 +593,6 @@ async fn restore_runtime(
                     .map(|p| vec![(p, crate::computers::DESKTOP_GUEST_PORT)])
                     .unwrap_or_default(),
                 files: Vec::new(),
-                // A computer made with a project mount is restored with the
-                // restored project bound at the same guest path.
                 mounts: match &entry.project_mount {
                     Some(mount) => {
                         ensure_private(&projects)?;
@@ -662,7 +631,6 @@ async fn restore_runtime(
     Ok(())
 }
 
-/// Create `dir` (mode 0700) unless it already exists.
 fn ensure_private(dir: &Path) -> Result<(), BackupError> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
@@ -701,7 +669,6 @@ async fn reconcile(
     )
     .execute(&mut *tx)
     .await?;
-    // No memory worker of the old installation survives: leases end.
     sqlx::query(
         "UPDATE memory_job SET lease_token = NULL, lease_until = NULL
          WHERE lease_token IS NOT NULL",

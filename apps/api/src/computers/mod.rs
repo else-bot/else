@@ -1,5 +1,4 @@
-//! Bot computers: one persistent micro-VM per bot, started on demand
-//! (POC-017).
+//! Bot computers: one persistent micro-VM per bot, started on demand.
 //!
 //! SQLite holds each computer's identity, configuration, owner intent
 //! (`desired_state`), what the API last established (`observed_state`), a
@@ -144,7 +143,7 @@ pub enum ComputerError {
     /// The computer holds live work or is mid-transition (a backup defers).
     #[error("the computer is busy: {0}")]
     Busy(String),
-    /// An explicit owner operation that does not apply (POC-025 upgrades).
+    /// An explicit owner operation that does not apply (image upgrades).
     #[error("{0}")]
     Refused(String),
 }
@@ -175,11 +174,9 @@ pub enum DiskCapture {
     Missing,
 }
 
-/// States that hold a budget reservation: anything that is or may be live.
 const RESERVING: &str = "('creating', 'starting', 'running', 'pausing', 'paused', 'resuming', \
                          'stopping', 'error')";
 
-/// Columns of a computer row used for decisions.
 #[derive(Debug, sqlx::FromRow)]
 struct Row {
     runtime_name: String,
@@ -189,14 +186,12 @@ struct Row {
     desired_state: String,
     observed_state: String,
     generation: i64,
-    /// The network profile it was created with (unrecorded before POC-025).
     network: Option<String>,
 }
 
 const ROW: &str =
     "runtime_name, image, cpus, memory_mib, desired_state, observed_state, generation, network";
 
-/// The runtime operation a start decision needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wake {
     Create,
@@ -204,22 +199,14 @@ enum Wake {
     Resume,
 }
 
-/// Why a computer should stop or pause; re-checked under the lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reason {
-    /// The owner stopped it or the bot is no longer active.
     MustStop,
-    /// No lease and unused since the idle timeout.
     Idle(IdleAction),
-    /// A backup stops an idle running or paused computer for a consistent
-    /// disk capture (only while no lease holds it).
     Backup,
-    /// A paused computer holds jobs a bot-wide stop is cancelling: stopping
-    /// it ends them. Leases stay; their generation no longer matches.
     ForJobs,
 }
 
-/// Text cut to at most `max` bytes on a character boundary.
 fn bounded(text: &str, max: usize) -> String {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
@@ -241,20 +228,12 @@ pub struct ComputerManager {
     pool: SqlitePool,
     runtime: Arc<dyn ComputerRuntime>,
     config: ComputerConfig,
-    /// One runtime operation at a time per bot.
     ops: Actor<HashMap<Uuid, std::sync::Weak<Semaphore>>>,
-    /// The startup inspection succeeded; until then nothing is used.
     inspected: AtomicBool,
-    /// Foreground commands while they run (POC-026), so Stop work can end
-    /// them.
     foreground: Actor<HashMap<Uuid, jobs::Foreground>>,
-    /// Foreground commands being killed now (each kill once at a time).
     killing: Actor<std::collections::HashSet<Uuid>>,
-    /// The master key, to decrypt a job's task secrets for redaction.
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
-    /// Input batches per turn (POC-029), to bound unattended iterations.
     input_batches: Actor<HashMap<Uuid, u32>>,
-    /// The stream that controls each bot's desktop (at most one).
     controllers: Actor<HashMap<Uuid, Uuid>>,
 }
 
@@ -285,8 +264,6 @@ impl ComputerManager {
             .call_async(move |batches| {
                 Box::pin(async move {
                     if batches.len() >= 10_000 {
-                        // Retire only settled turns. Clearing the entire cache
-                        // would give every running turn a fresh input allowance.
                         let live: Vec<Uuid> = sqlx::query_scalar(
                             "SELECT id FROM turns WHERE status IN
                          ('queued', 'preparing', 'sending', 'running', 'cancelling', 'waiting')",
@@ -366,7 +343,6 @@ impl ComputerManager {
             });
         }
         let _op = self.op(bot_id).await;
-        // At most one inspection of an uncertain state, then decide again.
         for _ in 0..2 {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let active: Option<bool> =
@@ -397,8 +373,6 @@ impl ComputerManager {
                 "running" => {
                     let lease = self.lease(&mut tx, bot_id, holder, row.generation).await?;
                     tx.commit().await?;
-                    // A boot whose services never started (a failed or
-                    // interrupted init) is retried on use.
                     self.ensure_services(bot_id, &row.runtime_name).await?;
                     return Ok(Acquire::Ready {
                         lease_id: lease,
@@ -416,7 +390,6 @@ impl ComputerManager {
                 "absent" => Wake::Create,
                 "stopped" => Wake::Start,
                 "paused" => Wake::Resume,
-                // Unknown or interrupted: look at the runtime, then decide.
                 _ => {
                     drop(tx);
                     self.observe(bot_id).await?;
@@ -430,7 +403,6 @@ impl ComputerManager {
         })
     }
 
-    /// Start, create, or resume under the bot's operation lock.
     async fn wake(
         &self,
         mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -457,11 +429,8 @@ impl ComputerManager {
             return Err(ComputerError::Interrupted);
         }
 
-        // The runtime call happens outside the database locks.
         let result = match wake {
             Wake::Create => {
-                // A port taken between allocation and the runtime's bind
-                // is retried with another one.
                 let mut outcome = Err(RuntimeError::Unavailable("not attempted".into()));
                 for _ in 0..3 {
                     let resources = match self.desktop_resources(bot_id).await {
@@ -503,8 +472,6 @@ impl ComputerManager {
             Wake::Resume => self.runtime.resume(&row.runtime_name).await,
         };
         if let Err(err) = result {
-            // What is actually there now? Record it; unknown keeps the
-            // reservation until maintenance can tell.
             self.observe_after_failure(bot_id, &err.to_string()).await?;
             return Ok(Acquire::Unavailable {
                 reason: err.to_string(),
@@ -519,14 +486,11 @@ impl ComputerManager {
         let row = Self::row(&mut tx, bot_id).await?.expect("exists");
         self.set_state(&mut tx, bot_id, "running", None, None)
             .await?;
-        // Running again: the last checkpoint no longer describes its disk.
         sqlx::query("UPDATE bot_computers SET browser_checkpoint = NULL WHERE bot_id = ?1")
             .bind(bot_id)
             .execute(&mut *tx)
             .await?;
         if active != Some(true) || row.desired_state == "stopped" {
-            // Deleted or stopped by the owner while starting: it does not
-            // stay up, and no lease is granted.
             tx.commit().await?;
             self.stop_held(bot_id, Reason::MustStop).await?;
             return Ok(if active != Some(true) {
@@ -549,9 +513,6 @@ impl ComputerManager {
         })
     }
 
-    /// The bot's host project directory (created if missing), mounted at
-    /// `~/work` of the user that runs the bot's commands
-    /// ([`Self::as_guest_user`]), owned there by that user.
     pub(crate) fn project_mounts(&self, bot_id: Uuid) -> Result<Vec<Mount>, RuntimeError> {
         let Some(root) = &self.config.projects_dir else {
             return Ok(Vec::new());
@@ -595,8 +556,6 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Record the runtime's actual state for a bot's computer. The caller
-    /// holds the bot's operation lock.
     async fn observe(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         let row: Option<(String, String)> = sqlx::query_as(
             "SELECT runtime_name, observed_state FROM bot_computers WHERE bot_id = ?1",
@@ -612,7 +571,6 @@ impl ComputerManager {
             Ok(Some(RuntimeState::Paused)) => "paused",
             Ok(Some(RuntimeState::Stopped)) => "stopped",
             Ok(Some(RuntimeState::Failed)) | Err(_) => "error",
-            // Gone: never created (absent) or lost (missing).
             Ok(None) if matches!(was.as_str(), "absent" | "creating") => "absent",
             Ok(None) => "missing",
         };
@@ -623,8 +581,6 @@ impl ComputerManager {
 
     async fn observe_after_failure(&self, bot_id: Uuid, error: &str) -> Result<(), ComputerError> {
         let mut conn = self.pool.acquire().await?;
-        // Keep a create that may not have happened distinguishable from a
-        // lost computer: `creating` stays until observed.
         sqlx::query(
             "UPDATE bot_computers SET last_error = ?2,
                  observed_state = CASE WHEN observed_state = 'creating' THEN 'creating' ELSE 'error' END,
@@ -639,14 +595,12 @@ impl ComputerManager {
         self.observe(bot_id).await
     }
 
-    /// Whether starting this computer stays within the global budget.
     async fn admits(
         &self,
         tx: &mut SqliteConnection,
         bot_id: Uuid,
         row: &Row,
     ) -> Result<bool, sqlx::Error> {
-        // Serialize admission across computers.
         let (cpus, memory): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT coalesce(sum(cpus), 0), coalesce(sum(memory_mib + ?2), 0)
              FROM bot_computers WHERE bot_id <> ?1 AND observed_state IN {RESERVING}"
@@ -666,7 +620,7 @@ impl ComputerManager {
 mod tests {
     #[test]
     fn errors_are_cut_by_bytes_on_character_boundaries() {
-        let text = "é".repeat(1500); // 3,000 bytes
+        let text = "é".repeat(1500);
         let cut = super::bounded(&text, 2000);
         assert!(cut.len() <= 2000 && cut.chars().all(|c| c == 'é'));
         assert_eq!(super::bounded("short", 2000), "short");

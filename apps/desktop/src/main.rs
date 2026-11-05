@@ -1,5 +1,3 @@
-//! else.bot desktop: a native GPUI messaging client for the else.bot API.
-
 mod api;
 mod app;
 mod appearance;
@@ -141,7 +139,6 @@ fn main() {
         println!("else-desktop {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // HTTP and streaming run on this runtime, separate from GPUI's executor.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -162,7 +159,6 @@ fn main() {
             appearance::init(cx);
             app::bind_keys(cx);
             app::install_menus(cx);
-            // Closing the window ends the desktop only; API work continues.
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

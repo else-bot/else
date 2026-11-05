@@ -1,3 +1,0 @@
-Family memory reports the pickup time as **16:30 (4:30 PM)**.
-
-Source: `synthetic-email-1` (`external_email`), memory entry `memory-1`. It says: “Pickup time reported as 16:30.”

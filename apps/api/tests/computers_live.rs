@@ -1,11 +1,3 @@
-//! POC-017 against the real Microsandbox runtime (`msb` v0.7.13, KVM). It
-//! boots small VMs, so it runs only with `ELSE_LIVE_VM=1`:
-//!
-//! ELSE_LIVE_VM=1 cargo test -p else-api --test computers_live -- --nocapture
-//!
-//! It uses a private runtime home in a temporary directory and removes its
-//! own computers at the end; the owner's ~/.microsandbox is not touched.
-
 mod common;
 
 use std::sync::Arc;
@@ -79,7 +71,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     assert_eq!(sh(&manager, lease_b, "cat /root/marker").await, "BETA-FILE");
     assert_eq!(sh(&manager, lease_a, "nproc").await, "1");
 
-    // Idle: both stop once released; their workers are gone.
     manager.release(lease_a).await.unwrap();
     manager.release(lease_b).await.unwrap();
     manager
@@ -94,7 +85,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         );
     }
 
-    // An API restart only inspects: nothing wakes.
     let restarted = ComputerManager::new(app.db.pool.clone(), msb(), config.clone());
     restarted.reconcile_startup().await.unwrap();
     let states = restarted.runtime_list().await.unwrap();
@@ -103,7 +93,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         "{states:?}"
     );
 
-    // Reuse after restart: the same computer with its file.
     let (lease_a, _) = ready(&restarted, a, "test:a2").await;
     assert_eq!(
         sh(&restarted, lease_a, "cat /root/marker").await,
@@ -111,7 +100,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     );
     restarted.release(lease_a).await.unwrap();
 
-    // Owner stop: no implicit wake.
     restarted.owner_stop(a).await.unwrap();
     assert_eq!(
         restarted.acquire(a, "test:a3").await.unwrap(),
@@ -122,7 +110,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
         Some(RuntimeState::Stopped)
     );
 
-    // Idle pause keeps the process; resume continues with the file.
     let pausing = ComputerManager::new(
         app.db.pool.clone(),
         msb(),
@@ -157,7 +144,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     assert_eq!(sh(&pausing, lease_b, "cat /root/marker").await, "BETA-FILE");
     pausing.release(lease_b).await.unwrap();
 
-    // Cleanup of this test's own runtime home only.
     for name in [&name_a, &name_b] {
         let _ = std::process::Command::new(
             std::env::var("HOME")
@@ -178,9 +164,6 @@ async fn two_named_computers_keep_their_files_across_stop_pause_and_restart() {
     }
 }
 
-/// POC-018: the desktop image, guest tools, jobs, artifacts, the browser,
-/// desktop access, isolation, and persistence across stop and start. Needs
-/// the image built: `docker build --build-arg BASE="$(python3 scripts/guest-release.py --base pinned)" -t else-guest:2 infra/guest`.
 #[tokio::test(flavor = "multi_thread")]
 async fn guest_tools_desktop_and_isolation() {
     if !live() {
@@ -238,7 +221,6 @@ async fn guest_tools_desktop_and_isolation() {
         manager.run_command(bot, "test:turn", command, Duration::from_secs(60))
     };
 
-    // Commands run as the unprivileged guest user in its work directory.
     let out = run("whoami; pwd; echo GUEST-OK > made.txt; cat made.txt")
         .await
         .unwrap()
@@ -249,7 +231,6 @@ async fn guest_tools_desktop_and_isolation() {
         "{}",
         out.stderr
     );
-    // Services came up (supervised, after the boot).
     tokio::time::sleep(Duration::from_secs(4)).await;
     let services = run("ps -eo comm | sort -u | tr '\\n' ' '")
         .await
@@ -260,8 +241,6 @@ async fn guest_tools_desktop_and_isolation() {
         assert!(services.contains(service), "{service} missing: {services}");
     }
 
-    // Isolation: no host credentials or runtime tools; metadata, private,
-    // and host networks are denied; the public internet works.
     let checks = run(
         "ls /root/.codex /home/elsebot/.codex /run/secrets 2>&1 | grep -cE 'No such|Permission denied'; \
          command -v msb codex claude docker || echo none; \
@@ -277,7 +256,6 @@ async fn guest_tools_desktop_and_isolation() {
     assert_eq!(lines[0], "3", "no credential directory is readable");
     assert_eq!(lines[1], "none", "no runtime or provider tools");
     assert!(lines[2..6].iter().all(|l| *l == "denied"), "{lines:?}");
-    // A host canary listening on every interface sees nothing.
     let canary = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
     canary.set_nonblocking(true).unwrap();
     let port = canary.local_addr().unwrap().port();
@@ -300,7 +278,6 @@ async fn guest_tools_desktop_and_isolation() {
         out.stdout
     );
 
-    // A background job outlives the turn's lease, then releases the computer.
     let started = manager
         .start_job(
             bot,
@@ -346,7 +323,6 @@ async fn guest_tools_desktop_and_isolation() {
         ("completed", Some(0))
     );
 
-    // Artifact transfer to the host store.
     let (lease, _) = ready(&manager, bot, "test:turn2").await;
     let (artifact, size, sha, preview) = manager
         .fetch_artifact(lease, bot, None, "/home/elsebot/work/job.txt", 1 << 20)
@@ -368,7 +344,6 @@ async fn guest_tools_desktop_and_isolation() {
         .collect();
     assert_eq!(hex, sha);
 
-    // A directory is not an artifact, and nothing is left in the store.
     let refused = manager
         .fetch_artifact(lease, bot, None, "/home/elsebot/work", 1 << 20)
         .await
@@ -378,7 +353,6 @@ async fn guest_tools_desktop_and_isolation() {
         .unwrap()
         .collect();
     assert_eq!(stored.len(), 1, "only the earlier artifact");
-    // Exact byte reads.
     manager.write_file(lease, "utf.txt", "éABC").await.unwrap();
     let (size, bytes) = manager
         .read_file(lease, "utf.txt", 1, 3)
@@ -386,7 +360,6 @@ async fn guest_tools_desktop_and_isolation() {
         .unwrap()
         .unwrap();
     assert_eq!((size, bytes), (5, vec![0xA9, b'A', b'B']));
-    // Cancelling a job stops its whole process group.
     let started = manager
         .start_job(
             bot,
@@ -413,7 +386,6 @@ async fn guest_tools_desktop_and_isolation() {
         .unwrap()
         .unwrap();
     assert_eq!(left.stdout.trim(), "none", "the job's processes are gone");
-    // Output is bounded in the guest: only the end comes back.
     let noisy = manager
         .run_command(bot, "test:turn2", "seq 1 200000", Duration::from_secs(60))
         .await
@@ -422,7 +394,6 @@ async fn guest_tools_desktop_and_isolation() {
     assert!(noisy.stdout_bytes > 1_000_000 && noisy.stdout.len() <= 6_000);
     assert!(noisy.stdout.trim_end().ends_with("200000"));
 
-    // The browser operates a local page; its storage persists across a stop.
     let page = "<html><head><title>Probe Page</title></head><body>\
         <input id='q'><button id='b' onclick=\"localStorage.setItem('kept', document.getElementById('q').value); \
         document.body.insertAdjacentHTML('beforeend', '<p>CLICKED-' + document.getElementById('q').value + '</p>')\">go</button>\
@@ -436,7 +407,6 @@ async fn guest_tools_desktop_and_isolation() {
         .write_file(lease, "/home/elsebot/work/site/read.html", reader)
         .await
         .unwrap();
-    // A local site gives the pages one stable origin.
     manager
         .run_command(
             bot,
@@ -468,7 +438,6 @@ async fn guest_tools_desktop_and_isolation() {
         clicked.stdout
     );
 
-    // Desktop: loopback noVNC; VNC requires the password.
     let desktop = manager.desktop(bot).await.unwrap().unwrap();
     assert!(desktop.url.starts_with("http://127.0.0.1:"));
     let port: u16 = desktop
@@ -509,7 +478,6 @@ print(v.decode().strip(), list(t[1:1+t[0]]))"
     assert_eq!(desktop.password.len(), 8);
     manager.close_desktop(bot).await.unwrap();
 
-    // Stop and start: files and browser storage survive.
     manager.release(lease).await.unwrap();
     manager.owner_stop(bot).await.unwrap();
     manager.owner_resume(bot).await.unwrap();
@@ -548,7 +516,6 @@ print(v.decode().strip(), list(t[1:1+t[0]]))"
     );
     manager.release(lease).await.unwrap();
 
-    // Cleanup of this test's own runtime home only.
     let name = ComputerManager::runtime_name(bot);
     for args in [["stop", name.as_str()], ["rm", name.as_str()]] {
         let _ = std::process::Command::new(&msb_bin)
@@ -558,8 +525,6 @@ print(v.decode().strip(), list(t[1:1+t[0]]))"
     }
 }
 
-/// Stops and removes this test's computers from its own runtime home, even
-/// when the test fails (before the temporary home is deleted).
 struct Cleanup {
     msb: String,
     home: std::path::PathBuf,
@@ -580,8 +545,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// The real runtime with a gate in front of `create` and `start`, so a test
-/// can stop or delete a bot while its computer is booting.
 struct Gated {
     inner: Msb,
     entered: tokio::sync::Notify,
@@ -636,11 +599,6 @@ impl ComputerRuntime for Gated {
     }
 }
 
-/// POC-019: acquisition racing owner stop and deletion against the real
-/// runtime and SQLite. The stop or deletion commits while the VM is
-/// booting (held at the gate); the late start must not be granted, and the
-/// computer must already be stopped, before maintenance runs. Admission
-/// queues beyond the budget. Also reports VM worker memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     if !live() {
@@ -700,7 +658,6 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     let name_a = ComputerManager::runtime_name(a_id);
     let name_b = ComputerManager::runtime_name(b_id);
 
-    // Measure the worker while A runs; B queues behind the one-VM budget.
     gated.open.add_permits(1);
     let Acquire::Ready { lease_id, .. } = manager.acquire(a_id, "test:m").await.unwrap() else {
         panic!()
@@ -726,12 +683,10 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     manager.owner_stop(a_id).await.unwrap();
     manager.owner_resume(a_id).await.unwrap();
 
-    // Owner stop commits while the start is in flight.
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(a_id, "test:r").await.unwrap() });
     gated.entered.notified().await;
     let m = manager.clone();
-    // Its intent commits at once; it then waits for the start to finish.
     let stopping = tokio::spawn(async move { m.owner_stop(a_id).await.unwrap() });
     loop {
         let desired: String =
@@ -755,7 +710,6 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     );
     stopping.await.unwrap();
 
-    // Deletion commits while B's first boot is in flight.
     let m = manager.clone();
     let acquiring = tokio::spawn(async move { m.acquire(b_id, "test:d").await.unwrap() });
     gated.entered.notified().await;
@@ -782,11 +736,6 @@ async fn acquisition_races_stop_and_deletion_with_the_real_runtime() {
     );
 }
 
-/// POC-022 against the real runtime: one coordinated set captures two bots'
-/// computers (guest files and browser storage), chats, memory, and the
-/// database; the original runtime is destroyed; the set restores into a new
-/// installation directory, runtime home, and database; the recovered API
-/// starts twice without changing saved state or replaying anything.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     if !live() {
@@ -909,9 +858,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         bots.push(bot);
     }
     let (alpha, beta) = (bots[0], bots[1]);
-    // Beta's owner stops its computer; Alpha's stays up, idle.
     manager.owner_stop(beta).await.unwrap();
-    // An action whose delivery is unknown must never be replayed.
     let main = app.main_bot().await;
     let reply = app
         .send(
@@ -931,8 +878,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     .await;
     app.wait_turn(&stalled, &["uncertain"]).await;
     let alpha_password = std::fs::read_to_string(manager.desktop_password_file(alpha)).unwrap();
-    // Saved state beyond chats: a deleted bot, a changed default bot, a
-    // customized profile, and memory built into its tree and views.
     let gamma = app.create_bot("Gamma").await;
     assert!(
         app.owner("DELETE", &format!("/v1/bots/{gamma}"), None)
@@ -1021,7 +966,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .unwrap(),
         Some(RuntimeState::Stopped)
     );
-    // What the restored installation must show.
     let saved = |url: String| async move {
         let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
         let mut out = Vec::new();
@@ -1044,7 +988,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let source = saved(db.url.expose().to_owned()).await;
     drop(app);
 
-    // The original runtime is gone.
     for name in cleanup_old.names.lock().unwrap().iter() {
         for args in [["stop", name.as_str()], ["rm", name.as_str()]] {
             let _ = std::process::Command::new(&msb_bin)
@@ -1055,7 +998,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     }
     std::fs::remove_dir_all(&home).unwrap();
 
-    // Restore into a new installation directory, runtime home, and database.
     std::fs::create_dir(&new_dir).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1102,8 +1044,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         "bots, default, chats, turns, profiles, memory"
     );
 
-    // The restored computers: files, browser storage, desktop password,
-    // the owner's stop, and the network policy.
     let pool = sqlx::SqlitePool::connect(&target_url).await.unwrap();
     let recovered = ComputerManager::new(pool.clone(), restored_runtime.clone(), config(&new_dir));
     recovered.reconcile_startup().await.unwrap();
@@ -1141,9 +1081,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let desktop = recovered.desktop(alpha).await.unwrap().unwrap();
     assert_eq!(desktop.password, alpha_password.trim());
     recovered.close_desktop(alpha).await.unwrap();
-    // The restored network policy: public egress works, internal and
-    // metadata destinations get the runtime's denial, and the desktop's
-    // published port accepts only password-authenticated VNC.
     let (lease, _) = ready(&recovered, alpha, "test:net").await;
     recovered
         .write_file(lease, "/home/elsebot/work/probe.py", PROBE)
@@ -1205,7 +1142,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
             .unwrap();
     assert_eq!(sessions, 0, "context is rebuilt from SQLite");
 
-    // Start the recovered API twice: nothing saved changes, nothing replays.
     else_api::credentials::write_secret_key(&new_dir.join("secret-key"), &key).unwrap();
     else_api::credentials::provision_owner_token(&new_dir.join("owner-token")).unwrap();
     let before = saved(target_url.clone()).await;
@@ -1257,7 +1193,6 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     drop_target().await;
 }
 
-/// Network probe run inside a restored computer.
 const PROBE: &str = r#"import urllib.request, urllib.error
 for u in ['http://1.1.1.1/', 'http://10.0.0.1/', 'http://169.254.169.254/']:
     try:
@@ -1268,7 +1203,6 @@ for u in ['http://1.1.1.1/', 'http://10.0.0.1/', 'http://169.254.169.254/']:
         print(u, 'ERR', type(e).__name__)
 "#;
 
-/// A noVNC/RFB handshake that reports the offered security types.
 const RFB: &str = r#"import socket,base64,os
 s=socket.create_connection(('127.0.0.1',PORT),timeout=10)
 k=base64.b64encode(os.urandom(16)).decode()

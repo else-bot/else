@@ -781,8 +781,6 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     assert_eq!(listed[0]["last_run"]["skip_reason"], "overlap");
     h.app.wait_turn(&first.to_string(), &["completed"]).await;
 
-    // Rapid owner messages coalesce to one queued turn, so they never fill
-    // the queue a routine run needs.
     let (_, _) = h.owner_turn(&main).await;
     for _ in 0..else_api::app::messages::MAX_QUEUED_TURNS {
         let sent = h.app.send(&main, Uuid::new_v4(), "queued", None).await;
@@ -1112,7 +1110,6 @@ async fn the_routines_migration_preserves_existing_data() {
         .run(&db.pool)
         .await
         .unwrap();
-    // An installation saved by that build; today's setup writes newer columns.
     let main = Uuid::new_v4();
     for sql in [
         "INSERT INTO bots (id, name) VALUES (?1, 'Assistant')",
@@ -1121,8 +1118,6 @@ async fn the_routines_migration_preserves_existing_data() {
     ] {
         sqlx::query(sql).bind(main).execute(&db.pool).await.unwrap();
     }
-    // An owner message on the old schema (application code would already
-    // read the new tables).
     let root = Uuid::new_v4();
     let owner_item = Uuid::new_v4();
     sqlx::query(

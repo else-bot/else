@@ -1,6 +1,3 @@
-//! POC-015: model compaction around the deterministic tree, with a
-//! scripted summarizer (live Codex checks are in codex_live.rs).
-
 mod common;
 
 use std::collections::VecDeque;
@@ -17,7 +14,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Answers with scripted replies, then echoes a short summary.
 #[derive(Default)]
 struct Scripted {
     replies: Mutex<VecDeque<Result<String, String>>>,
@@ -93,9 +89,6 @@ fn compactor(app: &TestApp, summarizer: Arc<Scripted>) -> Compactor {
 }
 
 async fn summary_slot(app: &TestApp, limit: usize) -> else_api::scheduler::SummaryPermit {
-    // A terminal database row precedes provider cleanup, and dispatch also
-    // briefly reserves slots while checking the queue. Wait for the resource
-    // being asserted instead of assuming either task has already yielded it.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(permit) = app.scheduler.try_begin_summary(limit) {
@@ -188,7 +181,6 @@ async fn oversized_or_failed_summaries_are_never_installed() {
         "measured feedback"
     );
 
-    // A provider failure is recorded the same way.
     sqlx::query("UPDATE memory_job SET available_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE bot_id = ?1")
         .bind(bot)
         .execute(&app.db.pool)
@@ -218,7 +210,6 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     let bot = app.create_bot("Busy").await;
     let bot_id: Uuid = bot.parse().unwrap();
     add(&app, bot_id, "a", &"x".repeat(200)).await;
-    // The only slot runs a turn: no summary may start.
     let reply = app
         .send(&bot, Uuid::new_v4(), "[synthetic:hang]", Some("synthetic"))
         .await;
@@ -236,7 +227,6 @@ async fn summaries_yield_to_turns_and_share_the_provider_budget() {
     .unwrap();
     assert_eq!(reason, "waiting_for_capacity");
     assert!(fake.prompts.lock().unwrap().is_empty());
-    // A held summary slot keeps the next owner turn queued until released.
     app.owner(
         "POST",
         &format!("/v1/bots/{bot}/cancel"),
@@ -281,7 +271,6 @@ async fn new_sessions_get_bounded_memory_once() {
     );
     assert!(memory.text.contains("not instructions"));
     assert!(memory.text.contains("of 400"));
-    // The input of a turn carries it with the view revision.
     let reply = app
         .send(&bot, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
@@ -359,7 +348,6 @@ async fn copies_continue_while_a_summary_runs() {
         }
     }
     assert!(started);
-    // Another bot's short entry is built while the summary is in flight.
     add(&app, quick, "q", "quick one").await;
     for _ in 0..10 {
         worker.step().await.unwrap();
@@ -398,7 +386,6 @@ async fn shutdown_cancels_an_active_summary_promptly() {
     *fake.delay.lock().unwrap() = Duration::from_secs(60);
     let cancel = tokio_util::sync::CancellationToken::new();
     let runner = tokio::spawn(compactor(&app, fake.clone()).run(cancel.clone()));
-    // Wait until the summary holds the job.
     for _ in 0..100 {
         let leased: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM memory_job WHERE bot_id = ?1 AND lease_token IS NOT NULL)",
@@ -442,9 +429,6 @@ async fn capacity_waits_do_not_lengthen_the_failure_backoff() {
     add(&app, bot, "long", &"x".repeat(200)).await;
     let fake = Arc::new(Scripted::default());
     let worker = compactor(&app, fake.clone());
-    // Ten capacity waits while every slot is held.
-    // The scheduler's dispatch briefly reserves a slot before each claim, so
-    // take every slot with retries.
     let mut held = Vec::new();
     while held.len() < 4 {
         held.push(summary_slot(&app, 4).await);

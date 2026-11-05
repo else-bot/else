@@ -1,7 +1,0 @@
-{"type":"thread.started","thread_id":"01a19b0d-69c3-7d32-a0e3-852986ae54d8"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll check whether I can access the work bot’s project review memory."}}
-{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"memory_search","arguments":{"query":"project review","target_bot_id":"work"},"result":null,"error":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"elsebot","tool":"memory_search","arguments":{"query":"project review","target_bot_id":"work"},"result":{"content":[{"type":"text","text":"{\"status\": \"rejected\", \"code\": \"MEMORY_SCOPE_DENIED\"}"}],"structured_content":null},"error":null,"status":"failed"}}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I couldn’t access the work bot’s project review memory. The API rejected the request with `MEMORY_SCOPE_DENIED`; my memory access is limited to the family bot."}}
-{"type":"turn.completed","usage":{"input_tokens":44764,"cached_input_tokens":38016,"cache_write_input_tokens":0,"output_tokens":154,"reasoning_output_tokens":0}}
