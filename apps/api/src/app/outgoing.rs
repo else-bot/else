@@ -94,12 +94,22 @@ impl Outcome {
 #[serde(tag = "via", rename_all = "lowercase")]
 pub enum Delivery {
     /// A computer tool call declared external, with its loggable arguments.
-    Tool { tool: String, args: Value },
+    Tool {
+        tool: String,
+        args: Value,
+    },
     /// The bot's host tools, which the API cannot see.
     Host,
     /// The email's connected account, as one durable mail action: its
     /// receipt settles the draft (see the migration's triggers).
-    Mail { account_id: Uuid, action_id: Uuid },
+    Mail {
+        account_id: Uuid,
+        action_id: Uuid,
+    },
+    Social {
+        account_id: Uuid,
+        action_id: Uuid,
+    },
 }
 
 /// A platform a bot can draft a message or post for. The bot sends through
@@ -111,15 +121,17 @@ pub enum Platform {
     /// A post on X (Twitter).
     X,
     Telegram,
+    Discord,
 }
 
 impl Platform {
-    pub const ALL: [Self; 2] = [Self::X, Self::Telegram];
+    pub const ALL: [Self; 3] = [Self::X, Self::Telegram, Self::Discord];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::X => "x",
             Self::Telegram => "telegram",
+            Self::Discord => "discord",
         }
     }
 
@@ -132,13 +144,14 @@ impl Platform {
         match self {
             Self::X => "X post",
             Self::Telegram => "Telegram message",
+            Self::Discord => "Discord message",
         }
     }
 
     fn needs_destination(self) -> bool {
         match self {
             Self::X => false,
-            Self::Telegram => true,
+            Self::Telegram | Self::Discord => true,
         }
     }
 }
@@ -169,6 +182,10 @@ pub struct Email {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub platform: Platform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
     pub account: Option<String>,
     pub destination: Option<String>,
     pub body: String,
@@ -223,7 +240,7 @@ impl Content {
     pub fn account(&self) -> Option<Uuid> {
         match self {
             Self::Email(email) => email.account_id,
-            Self::Message(_) => None,
+            Self::Message(message) => message.account_id,
         }
     }
 
@@ -247,7 +264,9 @@ impl Content {
             (Self::Email(a), Self::Email(b)) => {
                 a.account_id == b.account_id && a.reply_to == b.reply_to
             }
-            (Self::Message(a), Self::Message(b)) => a.platform == b.platform,
+            (Self::Message(a), Self::Message(b)) => {
+                a.platform == b.platform && a.account_id == b.account_id && a.reply_to == b.reply_to
+            }
             _ => false,
         }
     }
@@ -451,20 +470,42 @@ impl Message {
     pub fn parse(args: &Value) -> Result<Self, &'static str> {
         only(
             args,
-            &["platform", "account", "destination", "body", "replaces"],
+            &[
+                "platform",
+                "account",
+                "destination",
+                "body",
+                "replaces",
+                "account_id",
+                "reply_to",
+            ],
             "use platform, body, and optionally account, destination, replaces (a message has \
              no subject or addresses; use draft_email for email)",
         )?;
         let platform = args["platform"]
             .as_str()
             .and_then(Platform::parse)
-            .ok_or("platform is x or telegram")?;
+            .ok_or("platform is x, telegram or discord")?;
         let destination = handle(args, "destination")?;
         if platform.needs_destination() && destination.is_none() {
-            return Err("a telegram message needs its destination chat");
+            return Err("a social message needs its destination chat or channel");
+        }
+        let account_id = args
+            .get("account_id")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("account_id must be a native social connection UUID")
+            })
+            .transpose()?;
+        if account_id.is_some() && platform == Platform::X {
+            return Err("X has no native social connector");
         }
         Ok(Self {
             platform,
+            account_id,
+            reply_to: handle(args, "reply_to")?,
             account: handle(args, "account")?,
             destination,
             body: body(args["body"].as_str().ok_or("body is text")?)?,
@@ -635,6 +676,8 @@ mod tests {
     #[test]
     fn edits_change_only_the_body_and_an_email_subject() {
         let message = Content::Message(Message {
+            account_id: None,
+            reply_to: None,
             platform: Platform::Telegram,
             account: None,
             destination: Some("Family".into()),
@@ -665,6 +708,8 @@ mod tests {
         );
         assert_eq!(serde_json::from_value::<Content>(wire).unwrap(), message);
         let post = Content::Message(Message {
+            account_id: None,
+            reply_to: None,
             platform: Platform::X,
             account: None,
             destination: None,

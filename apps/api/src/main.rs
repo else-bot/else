@@ -472,6 +472,7 @@ fn run_serve() -> anyhow::Result<()> {
         let (registry, summarizer) = else_api::providers::build(&config);
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
         else_api::connectors::store::recover(&pool).await?;
+        else_api::socials::store::recover(&pool).await?;
         if requeued + uncertain > 0 {
             tracing::info!(requeued, uncertain, "reconciled unfinished turns");
         }
@@ -543,6 +544,10 @@ fn run_serve() -> anyhow::Result<()> {
             .connectors
             .as_ref()
             .map(|connectors| tokio::spawn(connectors.clone().run(stop_scheduler.clone())));
+        let social_task = state
+            .socials
+            .as_ref()
+            .map(|m| tokio::spawn(m.clone().run(stop_scheduler.clone())));
         let state = Arc::new(state);
         let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state).await;
@@ -550,6 +555,11 @@ fn run_serve() -> anyhow::Result<()> {
         stop_scheduler.cancel();
         let _ = tokio::join!(
             scheduler_task,
+            async {
+                if let Some(task) = social_task {
+                    let _ = task.await;
+                }
+            },
             compactor,
             async {
                 if let Some(task) = connector_task {

@@ -40,6 +40,8 @@ pub struct TurnRecord {
     /// The bot's requests for secrets during this turn (metadata only).
     #[sqlx(skip)]
     pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
+    #[sqlx(skip)]
+    pub social_setups: Vec<crate::socials::store::Setup>,
     /// The bot's questions and approval requests to the owner during this turn.
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
@@ -381,10 +383,12 @@ pub async fn attach_owner_requests(
     turns: &mut [TurnRecord],
 ) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = turns.iter().map(|t| t.id).collect();
+    let mut socials = crate::socials::store::setups(conn, &ids).await?;
     let mut secrets = crate::db::secret_requests::for_turns(conn, &ids).await?;
     let mut questions = crate::db::owner_questions::for_turns(conn, &ids).await?;
     let mut drafts = crate::db::outgoing_drafts::for_turns(conn, &ids).await?;
     for turn in turns {
+        turn.social_setups = socials.remove(&turn.id).unwrap_or_default();
         turn.secret_requests = secrets.remove(&turn.id).unwrap_or_default();
         turn.questions = questions.remove(&turn.id).unwrap_or_default();
         turn.outgoing_drafts = drafts.remove(&turn.id).unwrap_or_default();
@@ -695,6 +699,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
+        social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         routine: crate::db::routines::run_of(&mut conn, turn_id).await?,

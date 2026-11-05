@@ -25,6 +25,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "routine_list",
     "routine_update",
     "routine_delete",
+    "social_connect",
+    "social_connections",
+    "social_action",
+    "social_action_status",
     "mail_accounts",
     "mail_action",
     "mail_action_status",
@@ -44,6 +48,8 @@ pub const TOOL_NAMES: &[&str] = &[
 /// for the outcome and continues in a new attempt. The computer tools park
 /// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
+    "social_connect",
+    "social_action",
     "delegate",
     "request_secret",
     "ask_owner",
@@ -97,7 +103,11 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
     use serde_json::{Value, json};
 
     match name {
-        "mail_accounts" => json!({}),
+        "mail_accounts" | "social_connections" => json!({}),
+        "social_connect" => json!({"provider":args["provider"],"reason":args["reason"]}),
+        "social_action" | "social_action_status" => {
+            json!({"connection_id":args["connection_id"],"action_id":args["action_id"],"operation":args["command"]["operation"]})
+        }
         "mail_action" => {
             json!({ "account_id": args["account_id"], "action_id": args["action_id"], "operation": args["command"]["operation"] })
         }

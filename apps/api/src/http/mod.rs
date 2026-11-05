@@ -19,6 +19,8 @@ mod owner_tools;
 pub mod questions;
 pub mod routines;
 pub mod settings;
+mod social_tools;
+pub mod socials;
 pub mod task_secrets;
 pub mod tools;
 pub mod turns;
@@ -58,6 +60,7 @@ pub struct AppState {
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     pub backups: Option<crate::backup::service::Backups>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
+    pub socials: Option<Arc<crate::socials::Manager>>,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     desktop_streams: desktop_stream::Streams,
 }
@@ -80,6 +83,7 @@ impl AppState {
             secret_key: None,
             connectors: None,
             backups: None,
+            socials: None,
             update_hold: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
         }
@@ -98,6 +102,10 @@ impl AppState {
             key.clone(),
             self.scheduler.clone(),
         )));
+        self.socials = Some(Arc::new(
+            crate::socials::Manager::new(self.db.clone(), key.clone())
+                .with_scheduler(self.scheduler.clone()),
+        ));
         self.secret_key = Some(key);
         self
     }
@@ -105,6 +113,11 @@ impl AppState {
     /// Replace the email connector manager, for a test mail transport.
     pub fn with_connectors(mut self, connectors: Arc<crate::connectors::ConnectorManager>) -> Self {
         self.connectors = Some(connectors);
+        self
+    }
+
+    pub fn with_socials(mut self, socials: Arc<crate::socials::Manager>) -> Self {
+        self.socials = Some(socials);
         self
     }
 
@@ -129,6 +142,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(memory::routes())
         .merge(computers::routes())
         .merge(connectors::routes())
+        .merge(socials::routes())
         .merge(settings::routes())
         .merge(backups::routes())
         .merge(task_secrets::routes())

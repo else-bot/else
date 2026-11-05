@@ -94,7 +94,7 @@ pub(super) fn schemas() -> Vec<Value> {
             "name": "draft_message",
             "description": format!("Show the owner a message or post you drafted for a \
                 messaging or social platform: x for a post on X (Twitter), telegram for a \
-                Telegram message. Use this whenever the owner asks to draft, write, revise, or \
+                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
                 send one you would send for the owner, instead of ask_permission or an approval \
                 card. It has no subject or addresses; use draft_email for email. They may edit \
                 its text. {REVIEW}"),
@@ -102,6 +102,8 @@ pub(super) fn schemas() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "platform": { "type": "string", "enum": platforms },
+                    "account_id": {"type":"string","format":"uuid","description":"Native social connection ID from social_connections. Sends through send_draft."},
+                    "reply_to": handle("Optional remote message ID being replied to."),
                     "account": handle("The account you will send from, as the platform shows \
                         it (for example @handle). Optional."),
                     "destination": handle("Where it goes, as the platform knows it: the \
@@ -395,6 +397,12 @@ async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome,
 async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
+    let social_draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id)
+        .await
+        .map_err(refused)?;
+    if matches!(&social_draft.content.0,Content::Message(m) if m.account_id.is_some()) {
+        return send_social(state, grant, social_draft).await;
+    }
     let manager = match (&state.connectors, grant.allows(Tool::Mail)) {
         (Some(manager), true) => manager,
         _ => {
@@ -494,6 +502,95 @@ async fn report(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome
     Ok((
         tool_result(json!({ "status": row.status, "draft_id": row.id, "medium": noun })),
         Some(log),
+    ))
+}
+
+async fn send_social(
+    state: &AppState,
+    grant: &Grant,
+    draft: OutgoingDraft,
+) -> Result<Outcome, Outcome> {
+    if !grant.allows(Tool::Social) {
+        return Err((
+            tool_error("SOCIAL_UNAVAILABLE: this task has no social tools."),
+            None,
+        ));
+    }
+    let manager = state.socials.as_ref().ok_or_else(|| {
+        (
+            tool_error("Native social connections are unavailable."),
+            None,
+        )
+    })?;
+    let Content::Message(message) = &draft.content.0 else {
+        return Err(refused(DraftError::NotConnected));
+    };
+    let account_id = message
+        .account_id
+        .ok_or_else(|| refused(DraftError::NotConnected))?;
+    let c = crate::socials::store::connection(&state.db, account_id)
+        .await
+        .map_err(|e| (tool_error(&e.to_string()), None))?;
+    let platform = match c.provider {
+        crate::socials::types::Provider::Telegram => outgoing::Platform::Telegram,
+        crate::socials::types::Provider::Discord => outgoing::Platform::Discord,
+    };
+    if message.platform != platform {
+        return Err((
+            tool_error("The connection belongs to another platform."),
+            None,
+        ));
+    }
+    let destination = message
+        .destination
+        .clone()
+        .ok_or_else(|| refused(DraftError::NotConnected))?;
+    let body = message.body.clone();
+    let reply_to = message.reply_to.clone();
+    let settled = matches!(
+        draft.status,
+        Status::Sent | Status::Failed | Status::Uncertain
+    ) && draft.send_turn_id == Some(grant.turn_id)
+        && matches!(draft.delivery.as_deref(), Some(Delivery::Social { .. }));
+    let row = if settled {
+        draft
+    } else {
+        let delivery = Delivery::Social {
+            account_id,
+            action_id: Uuid::new_v4(),
+        };
+        let row = outgoing_drafts::claim(&state.db, grant.turn_id, draft.id, &delivery)
+            .await
+            .map_err(refused)?;
+        let Some(Delivery::Social { action_id, .. }) = row.delivery.as_deref() else {
+            return Err(refused(DraftError::NotConnected));
+        };
+        let result = manager
+            .send(
+                account_id,
+                grant.bot_id,
+                grant.turn_id,
+                *action_id,
+                destination,
+                body,
+                reply_to,
+            )
+            .await;
+        outgoing_drafts::after_social_send(
+            &state.db,
+            row.id,
+            result.err().map(|e| e.to_string()).as_deref(),
+        )
+        .await
+        .map_err(refused)?
+    };
+    Ok((
+        tool_result(json!({"draft_id":row.id,"status":row.status,"detail":row.result_detail})),
+        Some(format!(
+            "native social draft {} {}",
+            row.id,
+            row.status.as_str()
+        )),
     ))
 }
 

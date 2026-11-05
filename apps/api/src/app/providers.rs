@@ -151,6 +151,7 @@ pub struct TurnInput {
     /// Owner decisions on this turn's outgoing drafts not yet received,
     /// and the draft open when the owner sent this turn's message.
     pub outgoing_drafts: Vec<super::outgoing::Note>,
+    pub social_setups: Vec<crate::socials::store::Setup>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -215,6 +216,7 @@ pub enum Origin {
     /// A scheduled run of a saved routine.
     RoutineRun,
     ConnectorEvent,
+    SocialEvent,
     /// Anything else, such as the greeting that opens a conversation.
     #[default]
     Other,
@@ -241,7 +243,7 @@ impl DelegationContext {
     /// Any bot's own conversation may hand work to another bot; a
     /// delegated task may not (one hop).
     pub fn can_delegate(&self) -> bool {
-        !self.delegated_task && self.origin != Origin::ConnectorEvent
+        !self.delegated_task && !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
     }
 
     /// A bot manages its own routines only for work rooted in an owner
@@ -254,7 +256,7 @@ impl DelegationContext {
     /// incoming connector event started: its content is untrusted, so it
     /// gets only the tools its task grant names.
     pub fn host_tools(&self) -> bool {
-        self.origin != Origin::ConnectorEvent
+        !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
     }
 }
 

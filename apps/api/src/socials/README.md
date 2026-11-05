@@ -1,0 +1,36 @@
+# Add a social provider
+
+Social connections belong to the API host. An owner connects a platform bot and grants individual else.bot assistants access to selected destinations. The assistant receives public identities, effective permissions, and the owner's behavior instructions through discovery. It never receives the platform token.
+
+## Implement the adapter
+
+1. Add the provider to `types::Provider`, its label and limitations, and `Provider::supports`. Keep the supported-operation matrix truthful. Unsupported operations must fail before network dispatch.
+2. Add an SDK-backed adapter under `providers` and implement `providers::Transport` through `Native`. Keep SDK types, request construction, pagination, and platform-specific permission checks inside the adapter.
+3. Normalize identity, destination, message, and incoming-event values into the social types. Preserve remote identifiers as strings in public JSON. Incoming events need a stable identity for deduplication.
+4. Use the adapter's cancellation token while receiving events and waiting for capacity. Wait for the receiver's storage acknowledgment before advancing a remote cursor. Let the SDK maintain gateway heartbeats independently of bot execution.
+5. Initialize TLS explicitly. Both Rustls crypto backends are present in the dependency graph, so SDK construction must not rely on an implicit backend choice or on an unrelated mail connection initializing it first.
+
+The transport is injectable for tests. A fake transport verifies API policy and lifecycle, while a disposable platform account verifies the SDK integration. Keep those results distinct.
+
+## Keep authority in the social domain
+
+Reuse `Manager` for bounded per-connection workers, dispatch, cancellation, and receipt handling. Reuse `store` for encrypted credentials, canonical remote identity, bot bindings, generation checks, event deduplication, and action receipts. HTTP handlers should not call platform SDKs directly.
+
+Owner management routes accept credentials through `SecretJson`. Task tools authenticate with the current turn's grant and resolve bot identity from the server. The requesting model cannot choose another bot's identity, submit a token, change a binding, or expand access through its behavior instructions.
+
+Sending uses the existing approved-draft lifecycle. Other externally visible mutations use an exact-action approval and a durable action ID. A failed response can leave the external result unknown. Return the stored uncertainty and do not repeat the effect with a new identity.
+
+Incoming social turns have restricted grants and are limited to their triggering destinations. Discovery, message reads, receipt reads, and mutations must apply that same scope. Pause, credential replacement, permission changes, Stop work, and bot deletion must invalidate queued work and interrupt SDK waits. Restored connections remain passive.
+
+## Add the owner experience
+
+1. Add a new database migration for any provider constraints or stored fields. Do not edit a released migration.
+2. Extend the desktop provider representation and token help in `apps/desktop/src/api/socials.rs`. Reuse the inline `SocialsView` for the private credential step, destination selection, behavior instructions, and connection management.
+3. Explain whose bot identity the token authenticates, what the API uses it for, and the platform's access limits. Keep credentials out of chat, task-secret storage, discovery, errors, and event metadata.
+4. If a new operation is needed, extend the typed command, its schema and capability catalog, and approval classification together. Keep provider tool inventories consistent with MCP discovery.
+
+## Verify the behavior
+
+Extend `apps/api/tests/socials.rs` with provider-specific cases alongside the shared owner/task isolation, encrypted identity, destination scope, approval, duplicate action, cancellation, cursor, and passive-restore checks. Verify that an ordinary write grant cannot bypass sending restrictions for an operation that creates a message.
+
+Drive the native setup card and Settings → Socials through the repository's isolated UI workflow. Check private input clearing on submission, navigation, and disconnect, plus stale responses, editable instructions, and the connected receipt. Use disposable platform accounts for the final live check.

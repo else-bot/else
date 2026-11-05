@@ -155,6 +155,12 @@ impl Scheduler {
             .await
     }
 
+    pub async fn cancellation(&self, turn_id: Uuid) -> Option<CancellationToken> {
+        self.running
+            .call(move |running| running.get(&turn_id).cloned())
+            .await
+    }
+
     pub async fn is_running(&self, turn_id: Uuid) -> bool {
         self.running
             .call(move |running| running.contains_key(&turn_id))
@@ -203,17 +209,21 @@ impl Scheduler {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
         if let Some(_admission) = self.gate.enter() {
-            let (admitted, mail) = tokio::join!(
+            let (admitted, mail, social) = tokio::join!(
                 crate::db::routines::admit_due(
                     &self.pool,
                     &self.registry,
                     chrono::Utc::now(),
                     crate::db::routines::ADMIT_BATCH,
                 ),
-                crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32)
+                crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32),
+                crate::socials::delivery::admit_pending(&self.pool, &self.registry, 32)
             );
             if let Err(err) = admitted {
                 tracing::warn!(error = %err, "admitting due routines failed");
+            }
+            if let Err(err) = social {
+                tracing::warn!(error=%err,"admitting social deliveries failed");
             }
             if let Err(err) = mail {
                 tracing::warn!(error = %err, "admitting email deliveries failed");
@@ -298,7 +308,11 @@ impl Scheduler {
                 }
             }
             _ if input.delegation.delegated_task
-                || input.delegation.origin == crate::app::providers::Origin::ConnectorEvent =>
+                || matches!(
+                    input.delegation.origin,
+                    crate::app::providers::Origin::ConnectorEvent
+                        | crate::app::providers::Origin::SocialEvent
+                ) =>
             {
                 Some(vec![input.bot_id])
             }
@@ -389,12 +403,15 @@ impl Scheduler {
 
 fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
     let delegation = &input.delegation;
+    if delegation.origin == crate::app::providers::Origin::SocialEvent {
+        return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
+    }
     if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Mail];
     }
     let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
     if !delegation.delegated_task {
-        tools.push(Tool::Mail);
+        tools.extend([Tool::Mail, Tool::Social]);
     }
     if delegation.can_delegate() {
         tools.extend([Tool::RequestSecret, Tool::AskOwner, Tool::Delegate]);

@@ -34,6 +34,7 @@ struct SinkState {
     delivered_secrets: Vec<Uuid>,
     delivered_questions: Vec<Uuid>,
     delivered_drafts: Vec<Uuid>,
+    delivered_socials: Vec<Uuid>,
 }
 
 pub struct SqliteSink {
@@ -58,6 +59,7 @@ impl SqliteSink {
                 attempt: input.attempt,
                 delivered: input.delegation.outcomes.iter().map(|o| o.id).collect(),
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
+                delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
                 delivered_drafts: input
                     .outgoing_drafts
@@ -410,6 +412,7 @@ impl SinkState {
                     || !self.delivered_secrets.is_empty()
                     || !self.delivered_questions.is_empty()
                     || !self.delivered_drafts.is_empty()
+                    || !self.delivered_socials.is_empty()
                 {
                     let marked = async {
                         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -441,6 +444,7 @@ impl SinkState {
                             &self.delivered_drafts,
                         )
                         .await?;
+                        sqlx::query("UPDATE social_setups SET delivered_attempt=?3 WHERE turn_id=?1 AND delivered_attempt IS NULL AND lower(hex(id)) IN (SELECT replace(value,'-','') FROM json_each(?2))").bind(self.turn_id).bind(sqlx::types::Json(&self.delivered_socials)).bind(self.attempt).execute(&mut *tx).await?;
                         tx.commit().await
                     }
                     .await;
