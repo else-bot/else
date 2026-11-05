@@ -169,6 +169,27 @@ async fn journaled(app: &TestApp, bot: &str, question: Uuid) -> Value {
         .expect("the question was journaled")
 }
 
+async fn sidebar_status(app: &TestApp, bot: &str) -> Value {
+    let list = app.owner("GET", "/v1/bots", None).await;
+    let status = list.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == bot)
+        .unwrap()["sidebar_status"]
+        .clone();
+    let data: String = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE bot_id = ?1 AND kind = 'bot.updated' ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(bot.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    let event: Value = serde_json::from_str(&data).unwrap();
+    assert_eq!(event["bot"]["sidebar_status"], status);
+    status
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     let Harness { app, synthetic } = harness().await;
@@ -195,6 +216,10 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(card["choices"][0]["label"], "Plain text");
     assert_eq!(card["answer"], Value::Null);
     assert_eq!(journaled(&app, &main, question).await["status"], "pending");
+    assert_eq!(
+        sidebar_status(&app, &main).await,
+        json!({ "kind": "waiting_for_answer", "preview": "Which template for the newsletter?" })
+    );
 
     let bad = answer(&app, &main, question, "c").await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
@@ -205,6 +230,7 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(chosen.body["question"]["answer"], "b");
     assert_eq!(chosen.body["requeued"], true);
     wait(&app, turn, "completed").await;
+    assert_eq!(sidebar_status(&app, &main).await, Value::Null);
     let shown = shown_turn(&app, &main, turn).await;
     assert_eq!(shown["questions"][0]["status"], "answered");
     assert_eq!(journaled(&app, &main, question).await["answer"], "b");
@@ -388,6 +414,10 @@ async fn destructive_file_writes_wait_for_owner_approval() {
     assert_eq!(card["kind"], "destructive");
     assert_eq!(card["title"], "Replace important.txt");
     assert_eq!(card["context"], "Write 11 bytes to important.txt");
+    assert_eq!(
+        sidebar_status(&app, &main).await,
+        json!({ "kind": "needs_approval", "preview": "Replace important.txt" })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

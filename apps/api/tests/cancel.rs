@@ -77,6 +77,11 @@ async fn stop_work_cancels_through_its_boundary_only() {
         assert_eq!(status, "interrupted");
         assert!(!uncertain);
     }
+    let bot_view = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(
+        bot_view.body["bot"]["sidebar_status"],
+        json!({ "kind": "stopped" })
+    );
     let user_items: i64 = sqlx::query_scalar("SELECT count(*) FROM items WHERE kind = 'user'")
         .fetch_one(&app.db.pool)
         .await
@@ -182,6 +187,11 @@ async fn a_provider_that_ignores_interruption_ends_uncertain() {
     assert_eq!(
         (status.as_str(), code.as_deref(), uncertain),
         ("uncertain", Some("delivery_uncertain"), true)
+    );
+    let bot_view = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(
+        bot_view.body["bot"]["sidebar_status"],
+        json!({ "kind": "uncertain" })
     );
 }
 

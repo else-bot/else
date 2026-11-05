@@ -10,11 +10,14 @@ use super::{
 };
 use crate::api::Bot;
 use crate::avatar::bot_avatar;
+use crate::sidebar::status::{Kind, Subtitle};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -280,11 +283,53 @@ impl ElseApp {
         let selected = self.selected == Some(id);
         let unread = self.is_unread(id);
         let pending = !bot.is_active();
-        let subtitle = if pending {
-            "Deleting…".to_owned()
+        let connected = self.connected();
+        let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
+        let color = if !connected {
+            theme.muted_foreground
         } else {
-            subtitle(bot, self.default_bot_id == Some(id))
+            match subtitle.kind {
+                Kind::Working => theme.primary,
+                Kind::Answer | Kind::Approval | Kind::Credentials => theme.warning,
+                Kind::Failed | Kind::Uncertain | Kind::Unavailable => theme.danger,
+                _ => theme.muted_foreground,
+            }
         };
+        let icon = match subtitle.kind {
+            Kind::Message => None,
+            Kind::Working => Some(IconName::LoaderCircle),
+            Kind::Queued => Some(IconName::Clock),
+            Kind::Answer => Some(IconName::CircleQuestionMark),
+            Kind::Approval => Some(IconName::BadgeCheck),
+            Kind::Credentials => Some(IconName::LockKeyhole),
+            Kind::Stopping => Some(IconName::Square),
+            Kind::Stopped => Some(IconName::Pause),
+            Kind::Failed => Some(IconName::CircleX),
+            Kind::Uncertain => Some(IconName::TriangleAlert),
+            Kind::Unavailable => Some(IconName::CircleOff),
+            Kind::Deleting => Some(IconName::Trash),
+        };
+        let tooltip = subtitle.text.clone();
+        let subtitle = h_flex()
+            .min_w_0()
+            .gap_1()
+            .items_center()
+            .text_xs()
+            .text_color(color)
+            .when_some(icon, |line, icon| {
+                line.child(div().flex_none().child(
+                    if subtitle.kind == Kind::Working && connected {
+                        Spinner::new()
+                            .icon(Icon::new(icon))
+                            .xsmall()
+                            .color(color)
+                            .into_any_element()
+                    } else {
+                        Icon::new(icon).xsmall().into_any_element()
+                    },
+                ))
+            })
+            .child(div().flex_1().min_w_0().truncate().child(subtitle.text));
         let mut avatar = bot_avatar("avatar", bot.avatar, px(30.));
         if pending {
             avatar = avatar.still();
@@ -297,6 +342,13 @@ impl ElseApp {
             .px_2()
             .py_1()
             .rounded(theme.radius)
+            .tooltip(move |window, cx| {
+                Tooltip::element({
+                    let text = tooltip.clone();
+                    move |_, _| div().max_w(rems(24.)).child(text.clone())
+                })
+                .build(window, cx)
+            })
             .child(avatar)
             .child(
                 v_flex()
@@ -313,13 +365,7 @@ impl ElseApp {
                             })
                             .child(bot.name.clone()),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(subtitle),
-                    ),
+                    .child(subtitle),
             )
             .children(unread.then(|| div().flex_none().size_2().rounded_full().bg(theme.primary)));
         if pending {

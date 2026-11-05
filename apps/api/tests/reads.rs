@@ -97,6 +97,50 @@ async fn a_reply_is_unread_until_read_and_the_read_survives_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sidebar_failure_clears_when_the_next_turn_starts_and_returns_to_the_reply() {
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Writer").await;
+    let sent = app
+        .send(&bot, Uuid::new_v4(), "[synthetic:fail]", Some("synthetic"))
+        .await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["failed"])
+        .await;
+    let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(
+        shown.body["bot"]["sidebar_status"],
+        json!({ "kind": "failed" })
+    );
+    assert!(
+        shown.body["bot"]["read_state"]["latest"]["preview"]
+            .as_str()
+            .unwrap()
+            .starts_with("Partial output")
+    );
+
+    let sent = app
+        .send(
+            &bot,
+            Uuid::new_v4(),
+            "[synthetic:slow] try again",
+            Some("synthetic"),
+        )
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    app.wait_turn(turn, &["running"]).await;
+    let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
+    app.wait_turn(turn, &["completed"]).await;
+    let shown = app.owner("GET", &format!("/v1/bots/{bot}"), None).await;
+    assert_eq!(shown.body["bot"]["sidebar_status"], Value::Null);
+    assert!(
+        shown.body["bot"]["read_state"]["latest"]["preview"]
+            .as_str()
+            .unwrap()
+            .starts_with("Synthetic reply")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reads_only_move_forward_and_must_point_into_a_reply() {
     let app = TestApp::installed().await;
     let bot = app.create_bot("Writer").await;
