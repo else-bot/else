@@ -19,6 +19,10 @@ RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuit
       python3-pip python3-venv rustc time unzip xz-utils zip \
  && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get -o Acquire::Check-Valid-Until=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
+
 # Desktop work runs as an unprivileged user; Chromium keeps its sandbox.
 RUN useradd --create-home --shell /bin/bash elsebot \
  && mkdir -p /var/lib/elsebot/jobs /home/elsebot/work \
@@ -43,7 +47,7 @@ RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/b
 # The image's identity and the exact toolchain versions it was built with.
 ARG IMAGE_TAG=else-guest:3
 RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n' \
-      cargo chromium g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
+      cargo chromium fonts-noto-cjk g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
       python3-venv rustc \
     | jq -R -s --arg tag "$IMAGE_TAG" --arg snapshot "$SNAPSHOT" \
       '{image: $tag, debian_snapshot: $snapshot, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}' \
