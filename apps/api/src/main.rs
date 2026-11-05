@@ -167,7 +167,7 @@ fn run_backup() -> anyhow::Result<()> {
         let mut worker = else_api::backup::worker::BackupWorker::new(
             pool.clone(),
             params,
-            key,
+            key.clone(),
             config.backup.clone(),
         )
         .with_coordinator(else_api::backup::capture::Coordinator {
@@ -177,8 +177,13 @@ fn run_backup() -> anyhow::Result<()> {
             exclusive: true,
             projects_dir: Some(config.bots_dir.clone()),
         });
-        if let Some(replicator) = replicator(&config, &pool)? {
-            worker = worker.with_replicator(replicator);
+        let saved = else_api::backup::settings::load_or_seed(&pool, &key, &config).await?;
+        if let Some(destination) = saved.destination {
+            worker = worker.with_replicator(else_api::backup::replicate::Replicator::new(
+                else_api::backup::s3::S3::new(destination.s3_config())?,
+                pool.clone(),
+                saved.keep,
+            ));
         }
         let summary = worker.run_once().await?;
         println!("backup set: {}", summary.path.display());
@@ -242,20 +247,6 @@ fn run_upgrade_computer(
     })
 }
 
-fn replicator(
-    config: &else_api::config::Config,
-    pool: &sqlx::SqlitePool,
-) -> anyhow::Result<Option<else_api::backup::replicate::Replicator>> {
-    let Some(s3) = config.s3.clone() else {
-        return Ok(None);
-    };
-    Ok(Some(else_api::backup::replicate::Replicator::new(
-        else_api::backup::s3::S3::new(s3)?,
-        pool.clone(),
-        config.backup.keep,
-    )))
-}
-
 /// Download a completed remote set, then restore it like a local one.
 fn run_restore_remote(
     set_id: &str,
@@ -265,12 +256,41 @@ fn run_restore_remote(
     let config = load_config()?;
     let (_, key) = backup_parts(&config)?;
     let downloads = config.data_dir.join("restore-download");
-    let s3 = else_api::backup::s3::S3::new(
-        config
-            .s3
-            .clone()
-            .context("no bucket is configured (set ELSE_S3_*)")?,
-    )?;
+    let saved = runtime()?.block_on(async {
+        let params = else_api::backup::DatabaseParams::parse(config.require_database()?.expose())?;
+        if !params.options.get_filename().exists() {
+            return Ok::<_, anyhow::Error>(None);
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(params.options.read_only(true).create_if_missing(false))
+            .await?;
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'backup_settings'")
+                .fetch_one(&pool)
+                .await?;
+        let saved = if exists > 0 {
+            else_api::backup::settings::load(&pool, &key).await?
+        } else {
+            None
+        };
+        pool.close().await;
+        Ok(saved)
+    });
+    let saved = match saved {
+        Ok(saved) => saved,
+        Err(_) if config.s3.is_some() => {
+            tracing::warn!("saved backup settings could not be read; using the environment destination for restore");
+            None
+        }
+        Err(error) => return Err(error.context("saved backup settings could not be read; set ELSE_S3_* to restore without the source database")),
+    };
+    let destination = match saved {
+        Some(settings) => settings.destination.map(|d| d.s3_config()),
+        None => config.s3.clone(),
+    }
+    .context("no bucket is configured; configure remote backups in Settings or set ELSE_S3_*")?;
+    let s3 = else_api::backup::s3::S3::new(destination)?;
     let set_dir = runtime()?.block_on(else_api::backup::replicate::download_set(
         &s3,
         set_id,
@@ -495,38 +515,29 @@ fn run_serve() -> anyhow::Result<()> {
             }
             Err(err) => tracing::warn!(error = %err, "bot computers unavailable"),
         }
-        let backup_task = match config
-            .database_url
-            .as_ref()
-            .map(|url| else_api::backup::DatabaseParams::parse(url.expose()))
+        let backup_task = match else_api::backup::service::Backups::start(
+            &config,
+            pool.clone(),
+            secret_key.clone(),
+            else_api::backup::capture::Coordinator {
+                scheduler: Some(state.scheduler.clone()),
+                computers: state.computers.clone(),
+                drain: std::time::Duration::from_secs(300),
+                exclusive: false,
+                projects_dir: Some(config.bots_dir.clone()),
+            },
+            stop_scheduler.clone(),
+        )
+        .await
         {
-            Some(Ok(params)) if !config.backup.interval.is_zero() => {
-                let mut worker = else_api::backup::worker::BackupWorker::new(
-                    pool.clone(),
-                    params,
-                    secret_key.clone(),
-                    config.backup.clone(),
-                )
-                .with_coordinator(else_api::backup::capture::Coordinator {
-                    scheduler: Some(state.scheduler.clone()),
-                    computers: state.computers.clone(),
-                    drain: std::time::Duration::from_secs(300),
-                    exclusive: false,
-                    projects_dir: Some(config.bots_dir.clone()),
-                });
-                match replicator(&config, &pool) {
-                    Ok(Some(replicator)) => worker = worker.with_replicator(replicator),
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!(error = %err, "backup replication disabled"),
-                }
-                let worker = Arc::new(worker);
-                Some(tokio::spawn(worker.run(stop_scheduler.clone())))
+            Ok((backups, task)) => {
+                state.backups = Some(backups);
+                Some(task)
             }
-            Some(Err(err)) => {
-                tracing::warn!(error = %err, "backups disabled");
+            Err(error) => {
+                tracing::warn!(error = %error, "backup service unavailable; API continues without backups");
                 None
             }
-            _ => None,
         };
         let connector_task = state
             .connectors

@@ -19,12 +19,8 @@ const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 pub enum S3Error {
     #[error("S3 request failed: {0}")]
     Transport(String),
-    #[error("S3 answered {status}: {code} {message}")]
-    Status {
-        status: u16,
-        code: String,
-        message: String,
-    },
+    #[error("S3 answered HTTP {status}")]
+    Status { status: u16, code: String },
     #[error("S3 response: {0}")]
     Protocol(String),
 }
@@ -277,8 +273,12 @@ impl S3 {
         let body = response.text().await.unwrap_or_default();
         Err(S3Error::Status {
             status,
-            code: tag(&body, "Code").unwrap_or_default(),
-            message: tag(&body, "Message").unwrap_or_default(),
+            code: match tag(&body, "Code").as_deref() {
+                Some("BucketAlreadyOwnedByYou") => "BucketAlreadyOwnedByYou",
+                Some("BucketAlreadyExists") => "BucketAlreadyExists",
+                _ => "RemoteError",
+            }
+            .to_owned(),
         })
     }
 
@@ -453,7 +453,9 @@ impl S3 {
             .map_err(|e| S3Error::Transport(e.to_string()))?;
         // A 200 response can still carry an error document.
         if body.contains("<Error>") {
-            return Err(S3Error::Protocol(tag(&body, "Message").unwrap_or(body)));
+            return Err(S3Error::Protocol(
+                "multipart completion was rejected by remote storage".into(),
+            ));
         }
         Ok(())
     }
