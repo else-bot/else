@@ -11,7 +11,8 @@ const SUMMARY_DEADLINE: Duration = Duration::from_secs(180);
 
 impl Codex {
     /// Run one summary attempt with no tools at all: no MCP server, no
-    /// code-mode host, no shell or agents, in an ephemeral thread under a
+    /// code-mode host, no shell, file edits, or agents (the catalog without
+    /// native tools, as for connector events), in an ephemeral thread under a
     /// separate per-bot home, with the saved profile. Any tool, command,
     /// file, or agent activity, or any server request, rejects the output.
     pub async fn summarize_once(
@@ -53,16 +54,21 @@ impl Codex {
             .bot_dirs(bot_id, "codex-summary")
             .map_err(|e| e.to_string())?;
         codex_home::prepare(&dirs, auth, None, false).map_err(|e| e.to_string())?;
-        let spec = LaunchSpec {
+        let mut spec = LaunchSpec {
             turn_id: uuid::Uuid::new_v4(),
             program: program.clone(),
-            args: vec![OsString::from("app-server")],
+            args: Vec::new(),
             env: vec![(
                 "CODEX_HOME".into(),
                 dirs.provider_home.to_string_lossy().into_owned(),
             )],
             dirs,
         };
+        spec.args = tokio::select! {
+            _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+            args = codex_home::no_native_tools(host, &spec, &profile.model) => args?,
+        };
+        spec.args.push(OsString::from("app-server"));
         let mut server = AppServer::start(host, &spec)
             .await
             .map_err(|e| e.to_string())?;
@@ -91,6 +97,9 @@ impl Codex {
             .await
             .map_err(|e| e.to_string())?;
         self.check_servers(&status["data"], false)?;
+        Self::check_catalog(server, &profile.model)
+            .await
+            .map_err(|reason| format!("policy_violation: {reason}"))?;
         let mut config = super::skills::config(server).await?;
         config["model_reasoning_effort"] = json!(profile.reasoning_effort);
         let started = server

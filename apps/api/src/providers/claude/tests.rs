@@ -186,7 +186,12 @@ fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         service_tier: "default".into(),
     };
     let args: Vec<String> = claude
-        .args(&profile, &Session::Resume("abc".into()), "SYSTEM", true)
+        .args(
+            &profile,
+            &Session::Resume("abc".into()),
+            "SYSTEM",
+            Tools::HostAndElsebot,
+        )
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();
@@ -202,7 +207,7 @@ fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         .split(',')
         .map(str::to_owned)
         .collect();
-    assert_eq!(allowed, claude.turn_tools());
+    assert_eq!(allowed, claude.offered_tools(Tools::HostAndElsebot));
     assert!(allowed.iter().all(|t| {
         claude_home::HOST_TOOLS.contains(&t.as_str()) || t.starts_with("mcp__elsebot__")
     }));
@@ -534,5 +539,160 @@ async fn files_reach_claude_in_order_with_images_inline() {
             prompt::file_reference(&report.attachment),
             prompt::file_reference(&huge.attachment)
         )
+    );
+}
+
+/// A fake CLI whose `system/init` reports what the real one would offer:
+/// the built-ins named by `--tools` (or `builtins`, for a CLI that ignored
+/// the flag) and, with `--mcp-config`, else.bot's server tools. It records
+/// its arguments and the settings file it was given.
+fn fake_inventory_claude(dir: &std::path::Path, builtins: Option<&[&str]>) -> Claude {
+    use std::os::unix::fs::PermissionsExt;
+    let program = dir.join("claude");
+    let launched = dir.join("launched.json");
+    let builtins =
+        builtins.map_or_else(|| "None".to_owned(), |b| serde_json::to_string(b).unwrap());
+    let server_tools = serde_json::to_string(&claude_home::tool_names()).unwrap();
+    std::fs::write(
+        &program,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:1] == ["--version"]: print("2.1.999 (Claude Code)"); sys.exit()
+if a[:1] == ["auth"]: print('{{"loggedIn":true}}'); sys.exit()
+out = lambda e: print(json.dumps(e), flush=True)
+settings = open(a[a.index("--settings") + 1]).read()
+with open({launched:?}, "w") as f: json.dump({{"args": a, "settings": json.loads(settings)}}, f)
+builtins = {builtins}
+if builtins is None: builtins = [t for t in a[a.index("--tools") + 1].split(",") if t]
+mcp = "--mcp-config" in a
+tools = builtins + ({server_tools} if mcp else [])
+out({{"type": "system", "subtype": "init", "model": a[a.index("--model") + 1],
+     "tools": tools,
+     "mcp_servers": [{{"name": "elsebot", "status": "connected"}}] if mcp else []}})
+msg = json.loads(sys.stdin.readline())
+out({{"type": "user", "uuid": msg["uuid"], "isReplay": True}})
+out({{"type": "result", "subtype": "success", "is_error": False, "result": "ok", "num_turns": 1}})
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = claude_home::HostConfig {
+        dir: dir.join("config"),
+        explicit: true,
+    };
+    Claude::detect(
+        Some(Host::new(dir, &dir.join("bots"))),
+        Some(program),
+        Some(config),
+        String::new(),
+    )
+    .with_tools("http://127.0.0.1:1/tools/v1/mcp".into())
+}
+
+fn turn_from(origin: crate::app::providers::Origin) -> TurnInput {
+    let mut turn = specialist_turn(None);
+    turn.tool_grant = Some("tg_test".into());
+    turn.delegation.origin = origin;
+    turn
+}
+
+#[tokio::test]
+async fn a_connector_event_launches_with_only_elsebot_tools() {
+    use crate::app::providers::Origin;
+    for (origin, host_tools) in [
+        (Origin::ConnectorEvent, false),
+        (Origin::OwnerRequest, true),
+        (Origin::RoutineRun, true),
+        (Origin::Other, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake_inventory_claude(dir.path(), None);
+        let sink = super::super::recording::Recorded::default();
+        let outcome = claude
+            .run(turn_from(origin), &sink, CancellationToken::new())
+            .await;
+        assert_eq!(outcome, TurnOutcome::Completed, "{origin:?}");
+        let launched: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("launched.json")).unwrap(),
+        )
+        .unwrap();
+        let args: Vec<&str> = launched["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
+        let allowed: Vec<&str> = after("--allowedTools").split(',').collect();
+        let deny: Vec<&str> = launched["settings"]["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert!(args.contains(&"--mcp-config"), "{origin:?}");
+        assert!(args.contains(&"--strict-mcp-config"), "{origin:?}");
+        assert_eq!(after("--setting-sources"), "", "{origin:?}");
+        if host_tools {
+            assert_eq!(
+                after("--tools"),
+                claude_home::HOST_TOOLS.join(","),
+                "{origin:?}"
+            );
+            assert!(allowed.contains(&"Bash"), "{origin:?}");
+            assert!(!deny.contains(&"Bash"), "{origin:?}");
+        } else {
+            assert_eq!(after("--tools"), "", "{origin:?}");
+            let mut expected = claude_home::tool_names();
+            expected.sort();
+            let mut allowed: Vec<String> = allowed.iter().map(|t| (*t).to_owned()).collect();
+            allowed.sort();
+            assert_eq!(allowed, expected);
+            for tool in claude_home::HOST_TOOLS {
+                assert!(deny.contains(tool), "{tool} denied in the settings");
+            }
+        }
+        for tool in ["Agent", "WebFetch", "WebSearch"] {
+            assert!(deny.contains(&tool), "{origin:?} {tool}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_connector_event_offered_host_tools_anyway_fails() {
+    use crate::app::providers::Origin;
+    for tool in ["Bash", "Read"] {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake_inventory_claude(dir.path(), Some(&[tool]));
+        let sink = super::super::recording::Recorded::default();
+        let outcome = claude
+            .run(
+                turn_from(Origin::ConnectorEvent),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { code, message }
+                if code == "policy_violation" && message.contains("unexpected tools")),
+            "{tool}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn a_connector_event_never_resumes_a_session_with_host_tools() {
+    use crate::app::providers::Origin;
+    let claude = Claude::detect(None, None, None, String::new())
+        .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
+    let owner = turn_from(Origin::OwnerRequest);
+    let event = turn_from(Origin::ConnectorEvent);
+    let profile = owner.profile.clone().unwrap();
+    assert_ne!(
+        claude.fingerprint(&profile, &owner),
+        claude.fingerprint(&profile, &event)
     );
 }

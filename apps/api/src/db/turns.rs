@@ -605,7 +605,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .fetch_one(&mut *conn)
         .await?;
     let (text, Json(parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
-        "SELECT text, coalesce(parts, '[]') FROM items WHERE id = ?1 AND kind IN ('user', 'routine')",
+        "SELECT text, coalesce(parts, '[]') FROM items WHERE id = ?1 AND kind IN ('user', 'routine', 'connector')",
     )
     .bind(turn.source_item_id)
     .fetch_one(&mut *conn)
@@ -615,7 +615,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             "SELECT t.turn_no, i.kind, i.text, t.status, coalesce(i.parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
-           AND i.kind IN ('user', 'routine', 'status', 'assistant')
+           AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')
            -- A child's reply reached this bot as its delegation outcome.
            AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
          ORDER BY t.turn_no, i.seq",

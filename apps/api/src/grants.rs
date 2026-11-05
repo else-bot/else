@@ -41,6 +41,7 @@ pub enum Tool {
     /// Manage the bot's own routines (work rooted in an owner message,
     /// including a task delegated for one; never a routine run or its tasks).
     Routines,
+    Mail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

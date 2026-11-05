@@ -211,6 +211,7 @@ pub enum Origin {
     OwnerRequest,
     /// A scheduled run of a saved routine.
     RoutineRun,
+    ConnectorEvent,
     /// Anything else, such as the greeting that opens a conversation.
     #[default]
     Other,
@@ -237,13 +238,20 @@ impl DelegationContext {
     /// Any bot's own conversation may hand work to another bot; a
     /// delegated task may not (one hop).
     pub fn can_delegate(&self) -> bool {
-        !self.delegated_task
+        !self.delegated_task && self.origin != Origin::ConnectorEvent
     }
 
     /// A bot manages its own routines only for work rooted in an owner
     /// message, never for a routine run or a task one delegated.
     pub fn can_manage_routines(&self) -> bool {
         self.origin == Origin::OwnerRequest
+    }
+
+    /// The provider's own host shell, file, and web tools. Never for work an
+    /// incoming connector event started: its content is untrusted, so it
+    /// gets only the tools its task grant names.
+    pub fn host_tools(&self) -> bool {
+        self.origin != Origin::ConnectorEvent
     }
 }
 

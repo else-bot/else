@@ -218,15 +218,20 @@ impl Scheduler {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
         if let Some(_admission) = self.gate.enter() {
-            let admitted = crate::db::routines::admit_due(
-                &self.pool,
-                &self.registry,
-                chrono::Utc::now(),
-                crate::db::routines::ADMIT_BATCH,
-            )
-            .await;
+            let (admitted, mail) = tokio::join!(
+                crate::db::routines::admit_due(
+                    &self.pool,
+                    &self.registry,
+                    chrono::Utc::now(),
+                    crate::db::routines::ADMIT_BATCH,
+                ),
+                crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32)
+            );
             if let Err(err) = admitted {
                 tracing::warn!(error = %err, "admitting due routines failed");
+            }
+            if let Err(err) = mail {
+                tracing::warn!(error = %err, "admitting email deliveries failed");
             }
         }
         // The slot is reserved before the claim, so a summary cannot take
@@ -321,7 +326,11 @@ impl Scheduler {
                     }
                 }
             }
-            _ if input.delegation.delegated_task => Some(vec![input.bot_id]),
+            _ if input.delegation.delegated_task
+                || input.delegation.origin == crate::app::providers::Origin::ConnectorEvent =>
+            {
+                Some(vec![input.bot_id])
+            }
             _ => None,
         };
         // Tools for this turn only; revoked when it ends (see dispatch).
@@ -422,7 +431,13 @@ impl Scheduler {
 
 fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
     let delegation = &input.delegation;
+    if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
+        return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Mail];
+    }
     let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
+    if !delegation.delegated_task {
+        tools.push(Tool::Mail);
+    }
     if delegation.can_delegate() {
         tools.extend([Tool::RequestSecret, Tool::AskOwner, Tool::Delegate]);
     }

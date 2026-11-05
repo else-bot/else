@@ -14,7 +14,10 @@
 //! gets the built-in shell and file tools ([`claude_home::HOST_TOOLS`], so
 //! the bot can work on the host) and else.bot's MCP tools, all pre-approved
 //! by name; nothing else (`--tools`, and the rest denied again in the
-//! settings), so no web, skills, or native sub-agents (the `Agent` tool). MCP
+//! settings), so no web, skills, or native sub-agents (the `Agent` tool).
+//! Work an incoming connector event started gets no built-in tools at all
+//! (`--tools ""`, the host tools denied in the settings too): only
+//! else.bot's MCP tools, which its grant narrows further. MCP
 //! comes only from else.bot's configuration (`--strict-mcp-config`), its
 //! tools authorized per call by the turn's task grant; no user, project, or
 //! local settings, hooks, or slash commands; an else.bot system prompt
@@ -58,7 +61,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "claude";
 /// Bump when the system prompt or packet format change.
-const PROMPT_VERSION: &str = "else-claude-v12";
+const PROMPT_VERSION: &str = "else-claude-v13";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -89,6 +92,32 @@ pub struct Claude {
     version: String,
     unavailable: Option<String>,
     tool_url: Option<String>,
+}
+
+/// What one CLI process may call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tools {
+    /// A checkpoint: nothing at all.
+    None,
+    /// else.bot's MCP tools only, for work an incoming connector event
+    /// started.
+    Elsebot,
+    /// The built-in shell and file tools and else.bot's.
+    HostAndElsebot,
+}
+
+impl Tools {
+    fn for_turn(input: &TurnInput) -> Self {
+        if input.delegation.host_tools() {
+            Self::HostAndElsebot
+        } else {
+            Self::Elsebot
+        }
+    }
+
+    fn host(self) -> bool {
+        self == Self::HostAndElsebot
+    }
 }
 
 enum Session {
@@ -156,6 +185,7 @@ impl Claude {
 
     fn fingerprint(&self, profile: &Profile, input: &TurnInput) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
         let registry = prompt::registry_text(input);
         let runtime = self
             .host
@@ -166,10 +196,11 @@ impl Claude {
             PROMPT_VERSION,
             &self.version,
             &runtime,
-            if self.tool_url.is_some() {
-                "tools:host+elsebot-v4"
-            } else {
-                "tools:host"
+            match (input.delegation.host_tools(), self.tool_url.is_some()) {
+                (true, true) => "tools:host+elsebot-v4",
+                (true, false) => "tools:host",
+                (false, true) => "tools:elsebot-v1",
+                (false, false) => "tools:none",
             },
             "agents:disabled",
             &self.account,
@@ -189,29 +220,29 @@ impl Claude {
             .collect()
     }
 
-    /// The tools a turn is offered: the host tools and else.bot's.
-    fn turn_tools(&self) -> Vec<String> {
-        let mut tools: Vec<String> = claude_home::HOST_TOOLS
-            .iter()
-            .map(|t| (*t).to_owned())
-            .collect();
-        if self.tool_url.is_some() {
-            tools.extend(claude_home::tool_names());
+    /// The exact tool inventory a process is offered: the host tools when
+    /// allowed, and else.bot's when configured.
+    fn offered_tools(&self, tools: Tools) -> Vec<String> {
+        let mut offered: Vec<String> = Vec::new();
+        if tools.host() {
+            offered.extend(claude_home::HOST_TOOLS.iter().map(|t| (*t).to_owned()));
         }
-        tools
+        if tools != Tools::None && self.tool_url.is_some() {
+            offered.extend(claude_home::tool_names());
+        }
+        offered
     }
 
     /// CLI arguments for one process, apart from the files in the bot's
-    /// provider home (added at launch). `tools` selects a turn's tools;
-    /// without them nothing at all can be called.
+    /// provider home (added at launch). `tools` selects what can be called.
     fn args(
         &self,
         profile: &Profile,
         session: &Session,
         system: &str,
-        tools: bool,
+        tools: Tools,
     ) -> Vec<OsString> {
-        let host_tools = if tools {
+        let host_tools = if tools.host() {
             claude_home::HOST_TOOLS.join(",")
         } else {
             String::new()
@@ -245,8 +276,9 @@ impl Claude {
         .iter()
         .map(OsString::from)
         .collect();
-        if tools {
-            args.extend(["--allowedTools".into(), self.turn_tools().join(",").into()]);
+        let offered = self.offered_tools(tools);
+        if !offered.is_empty() {
+            args.extend(["--allowedTools".into(), offered.join(",").into()]);
         }
         match session {
             Session::New(id) => args.extend(["--session-id".into(), id.into()]),
@@ -261,7 +293,7 @@ impl Claude {
         home: &str,
         bot_id: Uuid,
         args: Vec<OsString>,
-        tools: bool,
+        tools: Tools,
         grant: Option<&str>,
     ) -> Result<(Supervised, super::host::BotDirs), String> {
         let (Some(host), Some(program), Some(config)) = (&self.host, &self.program, &self.config)
@@ -269,8 +301,8 @@ impl Claude {
             return Err("Claude Code is not configured.".into());
         };
         let dirs = host.bot_dirs(bot_id, home).map_err(|e| e.to_string())?;
-        let tool_url = self.tool_url.as_deref().filter(|_| tools);
-        claude_home::prepare(&dirs, tool_url, tools).map_err(|e| e.to_string())?;
+        let tool_url = self.tool_url.as_deref().filter(|_| tools != Tools::None);
+        claude_home::prepare(&dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
         let mut args = args;
         let file = |name: &str| dirs.provider_home.join(name).into_os_string();
         args.extend(["--settings".into(), file(claude_home::SETTINGS_FILE)]);
@@ -535,7 +567,7 @@ impl Provider for Claude {
                 format!("The attached files could not be prepared: {err}"),
             );
         }
-        let tools = true;
+        let tools = Tools::for_turn(&input);
         let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
         let args = self.args(&profile, &session, &system, tools);
         let (mut child, _) = match self.launch(
@@ -554,7 +586,7 @@ impl Provider for Claude {
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
         let mut events = Events::new(BufReader::new(stdout));
         let message_uuid = Uuid::new_v4().to_string();
-        let expected = self.turn_tools();
+        let expected = self.offered_tools(tools);
         let mut tracker = Tracker::new(expected, &profile.model, &message_uuid);
 
         // From here a crash leaves delivery uncertain.
@@ -765,10 +797,16 @@ impl Claude {
         cancel: &CancellationToken,
     ) -> Result<String, String> {
         let session = Session::New(Uuid::new_v4().to_string());
-        let mut args = self.args(profile, &session, prompt::CHECKPOINT_SYSTEM, false);
+        let mut args = self.args(profile, &session, prompt::CHECKPOINT_SYSTEM, Tools::None);
         args.push("--no-session-persistence".into());
-        let (mut child, _) =
-            self.launch(Uuid::new_v4(), "claude-summary", bot_id, args, false, None)?;
+        let (mut child, _) = self.launch(
+            Uuid::new_v4(),
+            "claude-summary",
+            bot_id,
+            args,
+            Tools::None,
+            None,
+        )?;
         let mut stdin = child.child.stdin.take();
         let stdout = child.child.stdout.take().expect("piped");
         let stderr = collect_stderr(child.child.stderr.take().expect("piped"));

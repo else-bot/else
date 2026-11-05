@@ -8,15 +8,29 @@
 //! tools with full host access (`danger-full-access`, never asking for
 //! approval), else.bot's MCP tools, and nothing else: no web search,
 //! browser, apps, plugins, hooks, other MCP servers, image generation, or
-//! native sub-agents. A memory summary gets no tools at all and a read-only
-//! sandbox.
+//! native sub-agents. A turn started by an incoming connector event, and a
+//! memory summary, get no host tools: shell off, a read-only sandbox, and a
+//! model catalog without native tools. The event keeps else.bot's MCP
+//! tools; the summary gets none.
+//!
+//! Codex registers `apply_patch` from the model's catalog entry whatever the
+//! feature flags say, so the shell flag alone does not remove file edits.
+//! Those launches export the installed CLI's own catalog (`codex debug
+//! models`, under the launch's environment), keep only the selected model
+//! with its native tools removed, and start Codex on that file through the
+//! supported `model_catalog_json` override. A static catalog is never
+//! refreshed over.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use super::host::{BotDirs, link_login};
+use serde_json::{Value, json};
+
+use super::host::{BotDirs, Host, LaunchSpec, link_login};
 
 /// Feature flags forced off for every bot session. Native sub-agents
 /// (`multi_agent*`) are disabled by policy, not only by prompt. `shell_tool`
@@ -87,6 +101,9 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
     // Codex reaches MCP tools only through its code-mode host; without
     // else.bot tools there is nothing for it to call.
     text.push_str(&format!("code_mode_host = {}\n", tool_url.is_some()));
+    if !host_tools {
+        text.push_str("\n[tools]\nupdate_plan = { enabled = false }\nexperimental_request_user_input = { enabled = false }\n");
+    }
     text.push_str("\n[mcp_servers]\n");
     if let Some(url) = tool_url {
         let tools: Vec<String> = crate::app::tools::TOOL_NAMES
@@ -138,6 +155,87 @@ fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> 
     file.write_all(contents)?;
     file.sync_all()?;
     fs::rename(&temp, dir.join(name))
+}
+
+const CATALOG_FILE: &str = "no-native-tools-catalog.json";
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const EXPORT_LIMIT: usize = 8 << 20;
+
+/// Reduce the installed catalog to one model without native host tools.
+/// Missing models or required capability fields fail closed.
+pub fn no_native_catalog(exported: &[u8], model: &str) -> Result<Vec<u8>, String> {
+    let catalog: Value = serde_json::from_slice(exported)
+        .map_err(|e| format!("the Codex model catalog is not JSON: {e}"))?;
+    let models = catalog["models"]
+        .as_array()
+        .ok_or("the Codex model catalog lists no models")?;
+    let [entry] = models
+        .iter()
+        .filter(|m| m["slug"] == model)
+        .collect::<Vec<_>>()[..]
+    else {
+        return Err(format!(
+            "the Codex model catalog does not list {model} once"
+        ));
+    };
+    let mut entry = entry.clone();
+    let fields = entry
+        .as_object_mut()
+        .ok_or("the Codex model catalog entry is not an object")?;
+    for (field, without) in [
+        ("apply_patch_tool_type", Value::Null),
+        ("shell_type", json!("disabled")),
+        ("experimental_supported_tools", json!([])),
+    ] {
+        let Some(value) = fields.get_mut(field) else {
+            return Err(format!(
+                "the Codex catalog entry for {model} has no {field}"
+            ));
+        };
+        *value = without;
+    }
+    // Restricted launches cannot search deferred MCP schemas, so declare them up front.
+    fields.insert("supports_search_tool".into(), json!(false));
+    Ok(serde_json::to_vec(&json!({ "models": [entry] })).expect("JSON values serialize"))
+}
+
+/// Export the installed CLI's catalog under `launch`'s environment, write
+/// `model`'s entry without native tools into the provider home, and return
+/// the arguments that start Codex on it. The home's `config.toml` must
+/// already be prepared and must not name a catalog itself.
+pub async fn no_native_tools(
+    host: &Host,
+    launch: &LaunchSpec,
+    model: &str,
+) -> Result<Vec<OsString>, String> {
+    let export = LaunchSpec {
+        args: vec!["debug".into(), "models".into()],
+        ..launch.clone()
+    };
+    let exported = host
+        .bounded_output(&export, EXPORT_TIMEOUT, EXPORT_LIMIT)
+        .await
+        .map_err(|e| format!("`codex debug models` failed: {e}"))?;
+    let catalog = no_native_catalog(&exported, model)?;
+    let home = &launch.dirs.provider_home;
+    replace_file(home, CATALOG_FILE, &catalog).map_err(|e| e.to_string())?;
+    let path = home.join(CATALOG_FILE);
+    let path = path.to_str().ok_or("the provider home path is not UTF-8")?;
+    let path = serde_json::to_string(path).expect("strings serialize");
+    let arguments = vec!["-c".into(), format!("model_catalog_json={path}").into()];
+    let mut verify = launch.clone();
+    verify.args = arguments.clone();
+    verify.args.extend(["debug".into(), "models".into()]);
+    let loaded = host
+        .bounded_output(&verify, EXPORT_TIMEOUT, EXPORT_LIMIT)
+        .await?;
+    let loaded: Value = serde_json::from_slice(&loaded)
+        .map_err(|_| "Codex did not return the loaded model catalog")?;
+    let expected: Value = serde_json::from_slice(&catalog).expect("generated catalog is JSON");
+    if loaded != expected {
+        return Err("Codex did not load the catalog without native tools".into());
+    }
+    Ok(arguments)
 }
 
 /// Prepare the bot's Codex home: rewrite the config and point `auth.json`
@@ -192,6 +290,20 @@ mod tests {
     }
 
     #[test]
+    fn elsebot_tools_without_host_tools_keep_code_mode_and_drop_the_shell() {
+        let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"), false);
+        assert!(text.contains("shell_tool = false\n"));
+        assert!(text.contains("sandbox_mode = \"read-only\""));
+        assert!(text.contains("approval_policy = \"never\""));
+        assert!(text.contains("code_mode_host = true\n"));
+        assert!(text.contains("[mcp_servers.elsebot]"));
+        assert!(text.contains("web_search = \"disabled\""));
+        for feature in DISABLED_FEATURES {
+            assert!(text.contains(&format!("{feature} = false\n")), "{feature}");
+        }
+    }
+
+    #[test]
     fn config_offers_only_elsebot_tools_with_the_grant_from_the_environment() {
         assert!(!config_toml(None, true).contains("[mcp_servers."));
         let text = config_toml(Some("http://127.0.0.1:7878/tools/v1/mcp"), true);
@@ -240,6 +352,48 @@ mod tests {
         // A refresh writes through to the host login.
         fs::write(home.join("auth.json"), "REFRESHED").unwrap();
         assert_eq!(fs::read_to_string(&login).unwrap(), "REFRESHED");
+    }
+
+    #[test]
+    fn the_no_native_catalog_keeps_only_the_model_without_its_native_tools() {
+        let entry = |slug: &str| {
+            json!({
+                "slug": slug,
+                "context_window": 272000,
+                "apply_patch_tool_type": "freeform",
+                "shell_type": "unified_exec",
+                "experimental_supported_tools": ["clock"],
+            })
+        };
+        let exported = json!({ "models": [entry("a"), entry("b")] }).to_string();
+        let catalog: Value =
+            serde_json::from_slice(&no_native_catalog(exported.as_bytes(), "b").unwrap()).unwrap();
+        assert_eq!(
+            catalog,
+            json!({ "models": [{
+                "slug": "b",
+                "context_window": 272000,
+                "apply_patch_tool_type": null,
+                "shell_type": "disabled",
+                "experimental_supported_tools": [],
+                "supports_search_tool":false,
+            }] })
+        );
+        let mut missing = entry("b");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("apply_patch_tool_type");
+        for bad in [
+            "not json".to_owned(),
+            json!({ "data": [entry("b")] }).to_string(),
+            json!({ "models": [entry("a")] }).to_string(),
+            json!({ "models": [entry("b"), entry("b")] }).to_string(),
+            json!({ "models": ["b"] }).to_string(),
+            json!({ "models": [missing] }).to_string(),
+        ] {
+            assert!(no_native_catalog(bad.as_bytes(), "b").is_err(), "{bad}");
+        }
     }
 
     #[test]

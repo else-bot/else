@@ -124,6 +124,51 @@ impl Host {
             .filter(|s| !s.is_empty())
     }
 
+    /// Run a launch to completion like a provider run and return its stdout:
+    /// an error if it fails, writes more than `limit` bytes, or outlives
+    /// `timeout`. The process group is terminated on any early return.
+    pub async fn bounded_output(
+        &self,
+        spec: &LaunchSpec,
+        timeout: Duration,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        use tokio::io::AsyncReadExt;
+        let mut command = self.command(spec);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut process = Supervised::spawn(command).map_err(|e| e.to_string())?;
+        let stdout = process.child.stdout.take();
+        let run = async {
+            let mut out = Vec::new();
+            if let Some(stdout) = stdout {
+                stdout
+                    .take(limit as u64 + 1)
+                    .read_to_end(&mut out)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            if out.len() > limit {
+                return Err(format!("output exceeded {limit} bytes"));
+            }
+            let status = process.child.wait().await.map_err(|e| e.to_string())?;
+            if status.success() {
+                Ok(out)
+            } else {
+                Err(format!("exited with {status}"))
+            }
+        };
+        let result = tokio::time::timeout(timeout, run)
+            .await
+            .unwrap_or_else(|_| Err(format!("did not finish within {}s", timeout.as_secs())));
+        if result.is_err() {
+            process.terminate(Duration::ZERO).await;
+        }
+        result
+    }
+
     pub fn marker_prefix(&self) -> &str {
         &self.marker_prefix
     }
@@ -549,8 +594,7 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        // A dropped handle must not leave a provider process running.
-        if self.pgid > 0 && self.child.try_wait().ok().flatten().is_none() {
+        if self.pgid > 0 && self.child.id().is_some() {
             // SAFETY: signalling our own child's process group.
             unsafe {
                 libc::kill(-self.pgid, libc::SIGKILL);
