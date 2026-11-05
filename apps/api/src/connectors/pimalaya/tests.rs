@@ -438,6 +438,7 @@ async fn smtp_fixture_send(start_tls: bool) {
         subject: "fixture".into(),
         body: "Hello\n.hidden\n".into(),
         attachments: Vec::new(),
+        reply_to: None,
     };
     let bytes = compose("owner@example.org", &draft, None).unwrap();
     client
@@ -458,6 +459,26 @@ async fn smtp_fixture_send(start_tls: bool) {
     assert!(!body.to_ascii_lowercase().contains("bcc:"));
     assert!(!body.contains("blind@example.org"));
     assert!(body.contains("..hidden\r\n"));
+}
+
+#[test]
+fn an_exact_reply_draft_joins_the_thread_without_taking_its_recipients() {
+    let raw = b"From: sender@example.org\r\nTo: owner@example.org\r\nSubject: Hello\r\nMessage-ID: <original@example.org>\r\n\r\ntext";
+    let message = MessageParser::default().parse(raw).unwrap();
+    let draft = Draft {
+        to: vec!["ada@example.org".into()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: "Owner's own subject".into(),
+        body: "approved text".into(),
+        attachments: Vec::new(),
+        reply_to: None,
+    };
+    let bytes = compose("owner@example.org", &draft, Some(thread(&message))).unwrap();
+    let parsed = MessageParser::default().parse(&bytes).unwrap();
+    assert_eq!(parsed.in_reply_to().as_text(), Some("original@example.org"));
+    assert_eq!(parsed.subject(), Some("Owner's own subject"));
+    assert_eq!(super::mime::addresses(parsed.to()), vec!["ada@example.org"]);
 }
 
 #[test]
@@ -539,6 +560,7 @@ fn attachments_round_trip_and_forward_preserves_the_original_message() {
             media_type: "text/plain".into(),
             data_base64: STANDARD.encode(b"original attachment"),
         }],
+        reply_to: None,
     };
     let raw = compose("owner@example.org", &draft, None).unwrap();
     let parsed = MessageParser::default().parse(&raw).unwrap();

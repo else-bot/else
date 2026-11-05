@@ -403,6 +403,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         delegation: Default::default(),
         secrets: Vec::new(),
         questions: Vec::new(),
+        outgoing_drafts: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
         routine: None,

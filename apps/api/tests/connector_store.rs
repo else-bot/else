@@ -1050,6 +1050,7 @@ async fn an_action_is_dispatched_once_and_never_replayed_after_a_crash() {
         subject: "s".into(),
         body: "b".into(),
         attachments: vec![],
+        reply_to: None,
     };
     assert!(matches!(
         begin(Uuid::new_v4(), MailCommand::Send { draft }).await,

@@ -19,6 +19,7 @@ pub(super) enum RowKey {
     SecretRequest(Uuid),
     /// A bot's question or approval request, by question ID.
     Question(Uuid),
+    Draft(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for request in &turn.secret_requests {
                 turns.insert(RowKey::SecretRequest(request.id), turn.id);
             }
+            for draft in &turn.outgoing_drafts {
+                turns.insert(RowKey::Draft(draft.id), turn.id);
+            }
         }
     }
     let turns: Vec<_> = rows
@@ -57,7 +61,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
-            RowKey::Question(_) | RowKey::SecretRequest(_) => turns.get(key).copied(),
+            RowKey::Question(_) | RowKey::SecretRequest(_) | RowKey::Draft(_) => {
+                turns.get(key).copied()
+            }
             RowKey::Pending(_) => None,
         })
         .collect();
@@ -125,6 +131,8 @@ pub(super) struct ConversationView {
     pub(super) answered: HashSet<Uuid>,
     /// An answer in flight, or its failure, per pending question.
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
+    pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
+    pub(super) expanded_drafts: HashSet<Uuid>,
     /// The end of the latest loaded reply was on screen at the last check.
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
@@ -147,6 +155,8 @@ impl ConversationView {
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
+            draft_forms: HashMap::new(),
+            expanded_drafts: HashSet::new(),
             latest_seen: false,
             reply_layout: None,
             _load: None,
@@ -337,6 +347,17 @@ impl ElseApp {
                                 c.question_anchor(turn.id, question.settled_at),
                             )
                         }))
+                        .chain(
+                            turn.outgoing_drafts
+                                .iter()
+                                .filter(|d| d.status != crate::model::DraftStatus::Superseded)
+                                .map(move |draft| {
+                                    (
+                                        RowKey::Draft(draft.id),
+                                        c.question_anchor(turn.id, draft.settled_at),
+                                    )
+                                }),
+                        )
                 })
             })
             .collect();
@@ -398,7 +419,7 @@ impl ElseApp {
                             (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_) | RowKey::Question(_) => (None, None),
+                RowKey::SecretRequest(_) | RowKey::Question(_) | RowKey::Draft(_) => (None, None),
             })
             .collect();
         let routines = routine_rows(&rows, conversation);
@@ -419,6 +440,12 @@ impl ElseApp {
                 };
                 let state = conversation.and_then(|c| match key {
                     RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
+                    RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
+                        format!(
+                            "{}:{}:{:?}:{}",
+                            d.version, d.updated_at, d.status, d.can_approve
+                        )
+                    }),
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
                     RowKey::Item(id) => c
                         .item(id)
@@ -509,6 +536,7 @@ impl ElseApp {
         view.rows = rows;
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
+        self.sync_draft_forms(window, cx);
         self.check_reading(window, cx);
         cx.notify();
     }

@@ -46,7 +46,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v16";
+const PROMPT_VERSION: &str = "else-codex-v17";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.
@@ -194,9 +194,9 @@ impl Codex {
             &self.version,
             &runtime,
             match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                (true, true) => "tools:host+elsebot-v4",
+                (true, true) => "tools:host+elsebot-v5",
                 (true, false) => "tools:host",
-                (false, true) => "tools:elsebot-only-v2",
+                (false, true) => "tools:elsebot-only-v3",
                 (false, false) => "tools:none",
             },
             "agents:disabled",
@@ -869,6 +869,7 @@ mod tests {
             delegation: Default::default(),
             secrets: Vec::new(),
             questions: Vec::new(),
+            outgoing_drafts: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
             routine: None,

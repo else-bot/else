@@ -177,6 +177,14 @@ pub struct Harness {
 /// The real router and scheduler with `max_active` provider slots. New bots
 /// use the recorder as the installation's default provider.
 pub async fn harness(max_active: usize) -> Harness {
+    harness_with(max_active, None).await
+}
+
+/// [`harness`] with email connectors on a test mail transport.
+pub async fn harness_with(
+    max_active: usize,
+    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
+) -> Harness {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
@@ -195,10 +203,11 @@ pub async fn harness(max_active: usize) -> Harness {
         mailbox,
     });
     let registry = else_api::providers::Registry::new(vec![recorder.clone()]);
-    Harness {
-        app: TestApp::with_registry(db, max_active, registry),
-        recorder,
-    }
+    let app = match mail {
+        Some(mail) => TestApp::with_mail(db, max_active, registry, mail),
+        None => TestApp::with_registry(db, max_active, registry),
+    };
+    Harness { app, recorder }
 }
 
 impl Harness {

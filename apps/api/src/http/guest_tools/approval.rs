@@ -202,12 +202,29 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         Ok(effect) => effect,
         Err(message) => return (tool_error(&message), None),
     };
-    let note = match effect.and_then(Effect::approval) {
-        Some(kind) => match approve(state, grant, name, args, kind).await {
-            Ok(note) => note,
-            Err(outcome) => return outcome,
+    let note = match (effect, args.get("approved_draft").filter(|v| !v.is_null())) {
+        (Some(Effect::External), Some(_)) => {
+            match crate::http::outgoing_tools::claim_for_tool(state, grant, name, args).await {
+                Ok(note) => Some(note),
+                Err(outcome) => return outcome,
+            }
+        }
+        (_, Some(_)) => {
+            return (
+                tool_error(
+                    "approved_draft goes only with effect external: it names the approved \
+                     draft this call sends. Nothing was done.",
+                ),
+                None,
+            );
+        }
+        (effect, None) => match effect.and_then(Effect::approval) {
+            Some(kind) => match approve(state, grant, name, args, kind).await {
+                Ok(note) => note.map(str::to_owned),
+                Err(outcome) => return outcome,
+            },
+            None => None,
         },
-        None => None,
     };
     let (result, log) = super::execute(state, grant, name, args).await;
     match note {

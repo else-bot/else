@@ -148,6 +148,9 @@ pub struct TurnInput {
     /// The owner's answers to this turn's questions and approval requests
     /// that no attempt has received yet.
     pub questions: Vec<QuestionOutcome>,
+    /// Owner decisions on this turn's outgoing drafts not yet received,
+    /// and the draft open when the owner sent this turn's message.
+    pub outgoing_drafts: Vec<super::outgoing::Note>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt

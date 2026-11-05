@@ -32,6 +32,27 @@ pub(super) fn reply(
     if to.is_empty() {
         return Err(MailError::new("mail_reply_has_no_recipient"));
     }
+    let subject = parsed.subject().unwrap_or_default();
+    Ok((
+        Draft {
+            to,
+            cc,
+            bcc: Vec::new(),
+            subject: if subject.to_ascii_lowercase().starts_with("re:") {
+                subject.to_owned()
+            } else {
+                format!("Re: {subject}")
+            },
+            body: body.to_owned(),
+            attachments: Vec::new(),
+            reply_to: None,
+        },
+        thread(parsed),
+    ))
+}
+
+/// The headers that place an answer in `parsed`'s thread.
+pub(super) fn thread(parsed: &mail_parser::Message<'_>) -> ThreadHeaders {
     let id = parsed
         .message_id()
         .filter(|id| safe_message_id(id))
@@ -49,25 +70,10 @@ pub(super) fn reply(
     if !id.is_empty() {
         references.push(id.clone());
     }
-    let subject = parsed.subject().unwrap_or_default();
-    Ok((
-        Draft {
-            to,
-            cc,
-            bcc: Vec::new(),
-            subject: if subject.to_ascii_lowercase().starts_with("re:") {
-                subject.to_owned()
-            } else {
-                format!("Re: {subject}")
-            },
-            body: body.to_owned(),
-            attachments: Vec::new(),
-        },
-        ThreadHeaders {
-            in_reply_to: id,
-            references,
-        },
-    ))
+    ThreadHeaders {
+        in_reply_to: id,
+        references,
+    }
 }
 fn safe_message_id(value: &str) -> bool {
     !value.is_empty()

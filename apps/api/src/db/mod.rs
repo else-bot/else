@@ -12,6 +12,7 @@ pub mod handoffs;
 pub mod installation;
 pub mod memory;
 pub mod memory_tree;
+pub mod outgoing_drafts;
 pub mod owner_questions;
 pub mod profiles;
 pub mod reads;

@@ -113,6 +113,10 @@ pub struct Draft {
     pub body: String,
     #[serde(default)]
     pub attachments: Vec<OutgoingAttachment>,
+    /// The message this answers: only its thread headers are used, never
+    /// its recipients or subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

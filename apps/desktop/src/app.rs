@@ -13,6 +13,7 @@ mod conversation;
 mod create_bot;
 mod delete_dialog;
 mod dialogs;
+mod draft_card;
 mod layout;
 mod link_target;
 mod mentions;
@@ -182,6 +183,7 @@ struct PendingSend {
     sent_at: DateTime<Utc>,
     provider_id: Option<String>,
     reaction: Option<Reaction>,
+    open_draft: Option<crate::model::DraftAttachment>,
     /// `None` while sending; otherwise why the outcome is unknown.
     unknown: Option<String>,
     /// Set when the server definitely refused it. The text stays here until
@@ -612,6 +614,11 @@ impl ElseApp {
             // The bot's own provider and model, chosen by the API.
             provider_id: None,
             reaction,
+            open_draft: if reaction.is_none() {
+                self.outgoing_attachment(cx)
+            } else {
+                None
+            },
             unknown: None,
             rejected: None,
         };
@@ -641,6 +648,7 @@ impl ElseApp {
                     pending.provider_id.clone(),
                     pending.reaction,
                     pending.parts.clone(),
+                    pending.open_draft.clone(),
                 )
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {

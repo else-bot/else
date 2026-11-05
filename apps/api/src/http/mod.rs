@@ -14,6 +14,8 @@ pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;
+pub mod outgoing_drafts;
+pub(crate) mod outgoing_tools;
 mod owner_tools;
 pub mod questions;
 pub mod routines;
@@ -100,6 +102,12 @@ impl AppState {
         self
     }
 
+    /// Replace the email connector manager, for a test mail transport.
+    pub fn with_connectors(mut self, connectors: Arc<crate::connectors::ConnectorManager>) -> Self {
+        self.connectors = Some(connectors);
+        self
+    }
+
     pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
         self.computers = Some(computers);
         self
@@ -124,6 +132,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(settings::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
+        .merge(outgoing_drafts::routes())
         .merge(routines::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())

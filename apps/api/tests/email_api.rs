@@ -337,6 +337,7 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
                 subject: "Report".into(),
                 body: "Done".into(),
                 attachments: vec![],
+                reply_to: None,
             },
         };
         let first = manager
@@ -380,7 +381,11 @@ async fn duplicate_and_uncertain_send_retries_never_repeat_transport_effects() {
 
 #[tokio::test]
 async fn mail_event_origin_removes_computer_and_delegation_authority() {
-    let h = recorder::harness(4).await;
+    let transport = Arc::new(Transport {
+        sends: AtomicUsize::new(0),
+        uncertain: false,
+    });
+    let h = recorder::harness_with(4, Some(transport.clone())).await;
     let bot: Uuid = h.app.main_bot().await.parse().unwrap();
     let account = account(&h.app).await;
     store::set_permissions(&h.app.db.pool, account.id, bot, &permissions())
@@ -450,6 +455,26 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         assert!(!grant.allows(forbidden));
     }
     assert_eq!(grant.memory_scope, Some(vec![bot]));
+    let send = json!({ "account_id": account.id, "action_id": Uuid::new_v4(),
+                       "command": { "operation": "send", "draft": {
+                           "to": ["owner@example.com"], "subject": "New mail", "body": "Summary" } } });
+    let sent = tool(&h.app, &token, "mail_action", send).await;
+    assert!(!sent.error, "{}", sent.body);
+    assert_eq!(sent.result["status"], "succeeded", "{}", sent.body);
+    assert_eq!(
+        transport.sends.load(Ordering::SeqCst),
+        1,
+        "a standing send permission still sends"
+    );
+    for name in ["draft_email", "send_draft"] {
+        let refused = tool(&h.app, &token, name, json!({})).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::FORBIDDEN,
+            "{name}: {}",
+            refused.body
+        );
+    }
     let inputs = h.inputs(turn).await;
     assert_eq!(
         inputs[0].delegation.origin,

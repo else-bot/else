@@ -62,6 +62,7 @@ gpui_kit::assets::icon_assets!(
         CircleOff,
         Users,
         MessageSquareOff,
+        MessageSquare,
         Folder,
         ArrowRight,
         CalendarX,
