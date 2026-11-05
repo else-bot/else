@@ -7,8 +7,8 @@
 # installation to it; running it again is how you update (`elsebot update`
 # does the same). Linux (Debian 12+, Ubuntu 24.04+, Arch Linux / Omarchy;
 # x86_64) and macOS (Apple silicon) get the API, the desktop, and everything
-# they need. macOS needs Xcode, and a running Docker (OrbStack or Docker Desktop)
-# only when building the optional guest image. SQLite is bundled in the API.
+# they need. macOS needs Xcode. The guest image is downloaded from GHCR
+# through Microsandbox. SQLite is bundled in the API.
 #
 # On a fresh machine it asks what this machine runs (--both, --server-only,
 # --app-only; Enter or --yes: both); an update keeps what is installed
@@ -31,8 +31,8 @@
 #   build/      the build cache
 #   logs/       install and update logs; the API log without systemd
 # Outside it: system packages (with sudo, only when missing; Homebrew's
-# SQLite CLI for inspection on Linux), the optional guest image
-# in Docker, the API's service (Linux: the systemd user unit
+# SQLite CLI for inspection on Linux), the API's service (Linux: the systemd
+# user unit
 # ~/.config/systemd/user/else-api.service, and lingering for your user when
 # it starts at boot; macOS: the launchd agent
 # ~/Library/LaunchAgents/bot.else.else-api.plist), the link
@@ -69,7 +69,7 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
   --app-only           the app only, connecting to a server elsewhere
   --autostart          start the API by itself: at boot (Linux) or at login (macOS)
   --no-autostart       only start it with: elsebot start
-  --skip-guest-image   do not build the guest VM image (bot computers then use a plain image)
+  --skip-guest-image   do not download the guest VM image (bot computers then use a plain image)
   -h, --help           show this help
 EOF
 }
@@ -78,7 +78,7 @@ EOF
 
 MIN_RUST="1.94.0"
 MSB_VERSION="0.7.13"
-GUEST_TAG="else-guest:3"
+GUEST_IMAGE=""
 
 ELSE_HOME="${ELSE_HOME:-$HOME/.else}"
 REPO_URL="${ELSE_REPO:-https://github.com/else-bot/else.git}"
@@ -348,22 +348,12 @@ pacman_packages() {
 	echo "$list"
 }
 
-# Docker is only used to build the optional guest image.
-docker_packages() {
-    docker_needed || return 0
-    have docker && return 0
-    case "$DISTRO" in
-        debian | ubuntu) echo "docker.io" ;;
-        arch) echo "docker" ;;
-    esac
-}
-
 linux_packages() {
     step "System packages"
     local wanted="" missing
     case "$DISTRO" in
-        debian | ubuntu) wanted="$(apt_packages) $(docker_packages)" ;;
-        arch) wanted="$(pacman_packages) $(docker_packages)" ;;
+        debian | ubuntu) wanted="$(apt_packages)" ;;
+        arch) wanted="$(pacman_packages)" ;;
     esac
     # shellcheck disable=SC2086
     missing="$(missing_packages $wanted)"
@@ -378,42 +368,10 @@ linux_packages() {
     fi
 }
 
-# --- Docker, KVM, and the sandbox -------------------------------------------
-
-DOCKER_VIA_SG=0
 in_group() { case " $(id -nG "$USER" 2>/dev/null || true) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-active_in_session() { case " $(id -nG 2>/dev/null || true) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 has_systemd() { [ -d /run/systemd/system ]; }
 
-# docker ARGS…, through `sg docker` while the group is new to this session.
-docker_run() {
-	if [ "$DOCKER_VIA_SG" = 0 ]; then
-		docker "$@"
-	else
-		local quoted="" arg
-		for arg in "$@"; do quoted="$quoted $(printf '%q' "$arg")"; done
-		sg docker -c "docker$quoted"
-	fi
-}
-
 linux_access() {
-	if docker_needed && have docker; then
-		step "Docker, to build the guest image"
-		if has_systemd && ! systemctl is-active --quiet docker 2>/dev/null; then
-			sudo_ready
-			if $SUDO systemctl start docker >/dev/null 2>&1; then ok "Docker service started"; else warn "could not start the Docker service"; fi
-		fi
-		if ! in_group docker && getent group docker >/dev/null 2>&1; then
-			if confirm "Add $USER to the docker group (Docker without sudo)?"; then
-				sudo_ready
-				$SUDO usermod -aG docker "$USER"
-				ok "added to the docker group"
-				next "log out and back in so the docker group applies to new sessions"
-			fi
-		fi
-		if in_group docker && ! active_in_session docker; then DOCKER_VIA_SG=1; fi
-		if docker_run info >/dev/null 2>&1; then ok "Docker works"; else warn "Docker is not reachable from this session (no daemon running, or no permission)"; fi
-	fi
 	step "KVM"
 	if [ ! -e /dev/kvm ]; then
 		warn "/dev/kvm is missing: bot computers need hardware virtualization (VT-x/AMD-V, or nested virtualization in a VM)"
@@ -796,6 +754,18 @@ decide_guest_image() {
 		GUEST_IMAGE_STATE=skip
 		return 0
 	fi
+	local manifest="$SRC/infra/guest-image.json" schema
+	[ -f "$manifest" ] || die "the release has no guest image manifest: $manifest"
+	if [ "$DISTRO" = macos ]; then
+		schema="$(plutil -extract schema raw -o - "$manifest")" || die "invalid guest image manifest: $manifest"
+		GUEST_IMAGE="$(plutil -extract image raw -o - "$manifest")" || die "the release has no published guest image; use --skip-guest-image to install without bot desktops"
+	else
+		schema="$(jq -er '.schema' "$manifest")" || die "invalid guest image manifest: $manifest"
+		GUEST_IMAGE="$(jq -er '.image | strings' "$manifest")" || die "the release has no published guest image; use --skip-guest-image to install without bot desktops"
+	fi
+	[ "$schema" = 1 ] || die "unsupported guest image manifest schema: $schema"
+	[[ "$GUEST_IMAGE" =~ ^ghcr\.io/else-bot/else-guest@sha256:[0-9a-f]{64}$ ]] ||
+		die "the guest image must be pinned to a GHCR digest in $manifest"
 	GUEST_IMAGE_STATE=missing
 	local home="$DATA/microsandbox" images
 	[ -d "$home" ] || return 0
@@ -805,33 +775,29 @@ decide_guest_image() {
 		images="$(MSB_HOME="$home" "$MSB" image list --format json)" ||
 			die "could not list the guest images in $home with $MSB"
 	fi
-	case "$images" in *"\"$GUEST_TAG\""*) GUEST_IMAGE_STATE=cached ;; esac
+	case "$images" in *"\"$GUEST_IMAGE\""*) GUEST_IMAGE_STATE=cached ;; esac
 }
-docker_needed() { [ "$GUEST_IMAGE_STATE" = missing ]; }
 
-build_guest_image() {
-	step "Guest VM image $GUEST_TAG"
+prepare_guest_image() {
+	step "Guest VM image"
 	case "$GUEST_IMAGE_STATE" in
 	skip)
 		ok "not needed (no guest image)"
 		return 0
 		;;
-	cached) ok "already loaded" ;;
+	cached) ok "already downloaded" ;;
 	missing)
-		info "Building it and loading it into $DATA/microsandbox (about 15 minutes the first time)"
+		info "Downloading $GUEST_IMAGE into $DATA/microsandbox"
 		local log="$LOGS/guest-image.log"
-		if [ "$DOCKER_VIA_SG" = 0 ]; then
-			ELSE_GUEST_TAG="$GUEST_TAG" ELSE_MSB_BIN="$MSB" "$SRC/scripts/build-guest-image.sh" "$DATA" >"$log" 2>&1
-		else
-			sg docker -c "ELSE_GUEST_TAG=$GUEST_TAG ELSE_MSB_BIN=$(printf '%q' "$MSB") $(printf '%q' "$SRC/scripts/build-guest-image.sh") $(printf '%q' "$DATA")" >"$log" 2>&1
-		fi || {
+		mkdir -p "$DATA/microsandbox"
+		MSB_HOME="$DATA/microsandbox" "$MSB" pull "$GUEST_IMAGE" >"$log" 2>&1 || {
 			tail -20 "$log" >&2
-			die "the guest image build failed; the full log is $log"
+			die "the guest image download failed; the full log is $log"
 		}
-		ok "loaded"
+		ok "downloaded"
 		;;
 	esac
-	config_set ELSE_VM_IMAGE "$GUEST_TAG"
+	config_set ELSE_VM_IMAGE "$GUEST_IMAGE"
 	config_set ELSE_VM_DESKTOP 1
 }
 
@@ -998,15 +964,6 @@ macos_prerequisites() {
 	else
 		ok "command line tools"
 	fi
-	docker_needed || return 0
-	step "Docker, to build the guest image"
-	if ! have docker; then
-		die "Docker is missing: install OrbStack (https://orbstack.dev) or Docker Desktop, start it, then run the installer again"
-	elif ! docker info >/dev/null 2>&1; then
-		die "Docker is not running: start OrbStack or Docker Desktop, then run the installer again"
-	else
-		ok "Docker works ($(docker info --format '{{.OperatingSystem}}' 2>/dev/null || echo running))"
-	fi
 }
 
 NO_MSB=0
@@ -1041,7 +998,6 @@ stage2() {
 	current) info "else.bot $target is installed; checking the installation ($COMPONENTS)" ;;
 	esac
 
-	if want_server; then decide_guest_image; else GUEST_IMAGE_STATE=skip; fi
 	if [ "$DISTRO" = macos ]; then
 		macos_prerequisites
 	else
@@ -1049,7 +1005,12 @@ stage2() {
 		if want_server; then linux_access; fi
 	fi
 	ensure_rust
-	if want_server && [ "$NO_MSB" != 1 ]; then ensure_msb; fi
+	if want_server; then
+		decide_guest_image
+		if [ "$NO_MSB" != 1 ]; then ensure_msb; fi
+	else
+		GUEST_IMAGE_STATE=skip
+	fi
 	build_release "$target"
 	if want_server; then
 		install_server "$mode" "$installed" "$target"
@@ -1089,7 +1050,7 @@ install_server() {
 	write_config
 	ensure_bots_dir
 	refresh_provider_paths
-	build_guest_image
+	prepare_guest_image
 
 	if [ "$mode" = update ] && [ -n "$installed" ]; then
 		step "Switch $installed -> $target"

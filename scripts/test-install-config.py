@@ -161,7 +161,7 @@ linux_packages() {
     esac
 }
 for step in linux_access ensure_msb decide_guest_image write_config ensure_bots_dir \
-    refresh_provider_paths build_guest_image setup_service run_setup start_api \
+    refresh_provider_paths prepare_guest_image setup_service run_setup start_api \
     check_providers api_running prepare_running_api backup_if_migrating; do
     eval "$step() { echo $step >>\"\$ELSE_HOME/events\"; }"
 done
@@ -699,7 +699,7 @@ class DotenvConfigTests(unittest.TestCase):
 # at the configured bind; only the service commands and the build are stubbed.
 GATE_HARNESS = DEFINITIONS + r"""
 elsebot() { echo "elsebot $1" >>"$ELSE_HOME/events"; }
-for step in refresh_provider_paths build_guest_image backup_if_migrating install_commands \
+for step in refresh_provider_paths prepare_guest_image backup_if_migrating install_commands \
     setup_service run_setup check_providers; do
     eval "$step() { echo $step >>\"\$ELSE_HOME/events\"; }"
 done
