@@ -1,8 +1,8 @@
 # else.bot guest computer image: a desktop with Chromium for each bot's
 # micro-VM (POC-018) and a programming toolchain (POC-025): Node.js and npm,
 # Python 3 with pip and venv, Rust with Cargo, Git, a C/C++ compiler, and
-# task utilities. Built by scripts/build-guest-image.sh and loaded into
-# else.bot's private Microsandbox home. The base is pinned by digest and
+# task utilities. Release CI publishes it to GHCR for Microsandbox to pull.
+# scripts/build-guest-image.sh builds it locally. The base is pinned by digest and
 # every package comes from one Debian snapshot, so a rebuild installs the
 # same versions; /etc/elsebot/image.json records them.
 ARG BASE=debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
