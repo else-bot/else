@@ -85,7 +85,7 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
-Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Human changes require a pull request. GitHub Actions can push directly for automation, but force pushes, branch deletion, and non-linear history remain blocked for everyone.
+Every pull request to `main` runs the `cargo-test` workflow on Ubuntu with stable Rust. The `cargo-test` and `release-ready` checks must pass before merging. Changes require a pull request; force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
 
 Use a focused target while developing, for example:
 
