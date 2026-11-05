@@ -26,9 +26,15 @@ from pathlib import Path
 import sys
 
 state = Path(os.environ["ELSE_TEST_RELEASE_STATE"])
+latest = Path(os.environ["ELSE_TEST_LATEST_RELEASE"])
 data = json.loads(state.read_text()) if state.exists() else None
 command = sys.argv[2]
 if command == "view":
+    if sys.argv[3] == "--json":
+        if not latest.exists():
+            sys.exit("release not found")
+        print(json.dumps({"isDraft": False, "assets": [], "tagName": latest.read_text()}))
+        sys.exit(0)
     if data is None:
         sys.exit("release not found")
     print(json.dumps(data))
@@ -53,6 +59,8 @@ elif command == "edit":
     assert "--draft=false" in sys.argv
     if os.environ.get("ELSE_TEST_PUBLISH_FAIL") == "1":
         sys.exit("simulated publication failure")
+    if "--latest" in sys.argv:
+        latest.write_text(sys.argv[3])
     data["isDraft"] = False
     state.write_text(json.dumps(data))
 else:
@@ -151,9 +159,12 @@ class Publication(unittest.TestCase):
         (fake_bin / "gh").write_text(FAKE_GH)
         (fake_bin / "gh").chmod(0o755)
         self.state = self.root / "release.json"
+        self.latest = self.root / "latest-release"
+        self.latest.write_text("v0.0.1")
         environment = patch.dict(os.environ, {
             "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
             "ELSE_TEST_RELEASE_STATE": str(self.state),
+            "ELSE_TEST_LATEST_RELEASE": str(self.latest),
         })
         environment.start()
         self.addCleanup(environment.stop)
@@ -248,6 +259,32 @@ class Publication(unittest.TestCase):
         with self.assertRaisesRegex(release.Fail, "is not on origin/main"):
             self.finalize()
         self.assertNotIn("refs/tags/v0.0.2", self.git("ls-remote", "--tags", "origin"))
+
+    def older_draft_with_newer_tag(self):
+        with patch.dict(os.environ, {"ELSE_TEST_PUBLISH_FAIL": "1"}):
+            with self.assertRaises(release.Fail):
+                self.finalize()
+        self.commit_version("0.0.3")
+        self.git("tag", "-a", "v0.0.3", "-m", "newer version")
+        self.git("push", "origin", "main", "--tags")
+        self.git("checkout", "--detach", "v0.0.2")
+
+    def test_resuming_an_older_draft_cannot_downgrade_latest(self):
+        self.older_draft_with_newer_tag()
+        self.latest.write_text("v0.0.3")
+        self.finalize()
+        self.assertFalse(json.loads(self.state.read_text())["isDraft"])
+        self.assertEqual(self.latest.read_text(), "v0.0.3")
+
+    def test_an_unpublished_newer_tag_does_not_block_latest_promotion(self):
+        self.older_draft_with_newer_tag()
+        self.finalize()
+        self.assertEqual(self.latest.read_text(), "v0.0.2")
+
+    def test_no_previous_github_release(self):
+        self.latest.unlink()
+        self.finalize()
+        self.assertEqual(self.latest.read_text(), "v0.0.2")
 
 
 if __name__ == "__main__":

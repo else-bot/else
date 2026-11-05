@@ -456,12 +456,13 @@ def release_context(remote, main):
     return head, version, tag, tags
 
 
-def github_release(tag):
-    result = subprocess.run(["gh", "release", "view", tag, "--json", "isDraft,assets"], capture_output=True, text=True)
+def github_release(tag=None):
+    target = [tag] if tag is not None else []
+    result = subprocess.run(["gh", "release", "view", *target, "--json", "isDraft,assets,tagName"], capture_output=True, text=True)
     if result.returncode:
         if "release not found" in result.stderr.lower() or "HTTP 404" in result.stderr:
             return None
-        raise Fail(f"cannot look up release {tag}: {result.stderr.strip()}")
+        raise Fail(f"cannot look up release {tag or 'latest'}: {result.stderr.strip()}")
     return json.loads(result.stdout)
 
 
@@ -503,7 +504,15 @@ def cmd_finalize(remote, main, assets_dir):
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
         raise Fail(f"tag {tag} is ready, but uploading its release binaries failed: {result.stderr.strip()}")
-    result = subprocess.run(["gh", "release", "edit", tag, "--draft=false", "--latest"], capture_output=True, text=True)
+    latest = github_release()
+    promote = True
+    if latest is not None:
+        latest_version = latest["tagName"].removeprefix("v")
+        if not VERSION.fullmatch(latest_version):
+            raise Fail(f"cannot compare the latest release tag {latest['tagName']} with {tag}")
+        promote = version_key(version) >= version_key(latest_version)
+    result = subprocess.run(["gh", "release", "edit", tag, "--draft=false",
+                             "--latest" if promote else "--latest=false"], capture_output=True, text=True)
     if result.returncode:
         raise Fail(f"tag {tag} has binaries, but publishing its GitHub release failed: {result.stderr.strip()}")
     print(f"published the GitHub release for {tag} with all release binaries")
