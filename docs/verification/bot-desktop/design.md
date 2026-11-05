@@ -1,15 +1,15 @@
 # Bot computer viewer
 
-The right sidebar shows the bot's computer. Selecting the Computer tab checks its state without starting it. The Details tab holds no viewer lease. Clicking a sleeping card explicitly resumes and wakes it. A running computer streams a thumbnail. Opening the thumbnail expands the same session inside the app window.
+The sidebar's Computer tab inspects state without waking the VM. Clicking an asleep card wakes it and expands the viewer inside the app. Watching is the default. Take over forwards input only after server acknowledgement.
 
-Watching is the default. Pointer movement, clicks, keys, and scrolling stay local. Take over waits for a server acknowledgement before forwarding input. Focus loss releases held input. Closing the expanded viewer returns to watching. Leaving the Computer tab, closing the sidebar, switching bots, or closing the window drops the connection and its lease.
+The API speaks RFB to the guest's existing VNC server and streams PNG frames over an authenticated WebSocket. The GPUI client paints those frames and sends input messages. The guest password and private endpoint stay on the API host. This avoids native WebView overlay and Linux display-server restrictions.
 
-## Transport choice
+## Ownership and input
 
-The guest already uses Xvfb, x11vnc, and websockify. The API terminates VNC and streams PNG frames through an authenticated WebSocket. The native client paints frames with GPUI and sends typed input messages. The VNC password and private guest endpoint stay on the API host. Input and frame queues are bounded.
+- `apps/api/src/computers/desktop.rs` owns viewer admission, leases, and control claims. Leaving Computer, closing the sidebar, switching bots, and closing the window end the viewer lease.
+- `apps/api/src/computers/viewer.rs` implements the RFB handshake and guest WebSocket bridge. `apps/api/src/http/desktop_stream.rs` owns stream queues, held input, control transitions, and shutdown cleanup.
+- `apps/desktop/src/app/computer.rs` owns Watching/Take over UI state, letterbox coordinate mapping, focus release, and native keyboard input. `computer/text_input.rs` handles macOS committed text and composition.
+- Guest port 5901 is view-only. Port 5900 controls input through the browser lock shared with CDP helpers. `infra/guest/vnc/else_vnc_targets.py` retains that lock until x11vnc acknowledges input cleanup.
+- `infra/guest/x11vnc/keymap-settle.patch` settles new key mappings, recycles unheld added keycodes, and releases input before acknowledging a departed controller. Its X-level regression suite covers both keyboard mapping paths and reconnects.
 
-An embedded noVNC browser would reuse more guest UI, but the pinned GPUI WebView requires X11 on Linux and has native overlay restrictions. A native viewer keeps this app on Wayland and uses the same layout and controls as the rest of the application.
-
-[Voxl](https://github.com/tembo/voxl) is a possible video transport for a later performance pass. It captures X11 and streams H.264 over WebSocket. Its web client decodes with WebCodecs. This application would need a native H.264 decoding path or an embedded browser, plus guest image changes and x264, libyuv, Opus, and PulseAudio dependencies. No Voxl performance claim has been independently measured here.
-
-The chosen protocol reuses the installed desktop stack. It favors a smaller integration over video compression. The frame rate is capped and idle frames are not resent. Video playback and high motion can warrant a later transport change.
+Frames are capped at five changed frames per second. High-motion video needs a different transport. See the [wire protocol and limits](protocol.md) and [verification guide](handoff.md).

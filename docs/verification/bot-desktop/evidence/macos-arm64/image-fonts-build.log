@@ -1,107 +1,0 @@
-#0 building with "orbstack" instance using docker driver
-
-#1 [internal] load build definition from Dockerfile
-#1 transferring dockerfile: 3.97kB done
-#1 DONE 0.0s
-
-#2 [internal] load metadata for docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-#2 DONE 0.0s
-
-#3 [internal] load .dockerignore
-#3 transferring context: 2B done
-#3 DONE 0.0s
-
-#4 [ 1/16] FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
-#4 resolve docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 0.0s done
-#4 DONE 0.0s
-
-#5 [ 2/16] RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n\nTypes: deb\nURIs: http://snapshot.debian.org/archive/debian-security/%s\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' "20261101T000000Z" "20261101T000000Z" > /etc/apt/sources.list.d/debian.sources  && apt-get -o Acquire::Check-Valid-Until=false update  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       ca-certificates chromium curl fonts-dejavu-core novnc openbox procps       python3 python3-websocket supervisor websockify x11vnc xterm xvfb       bzip2 cargo g++ gcc git jq libc6-dev make nodejs npm pkg-config       python3-pip python3-venv rustc time unzip xz-utils zip  && rm -rf /var/lib/apt/lists/*
-#5 CACHED
-
-#6 [internal] load build context
-#6 transferring context: 557B done
-#6 DONE 0.0s
-
-#7 [ 3/16] RUN apt-get -o Acquire::Check-Valid-Until=false update  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-noto-cjk  && rm -rf /var/lib/apt/lists/*
-#7 0.945 Get:1 http://snapshot.debian.org/archive/debian/20261101T000000Z trixie InRelease [140 kB]
-#7 1.091 Get:2 http://snapshot.debian.org/archive/debian/20261101T000000Z trixie-updates InRelease [47.3 kB]
-#7 1.149 Get:3 http://snapshot.debian.org/archive/debian-security/20261101T000000Z trixie-security InRelease [43.4 kB]
-#7 1.318 Get:4 http://snapshot.debian.org/archive/debian/20261101T000000Z trixie/main arm64 Packages [9614 kB]
-#7 5.903 Get:5 http://snapshot.debian.org/archive/debian/20261101T000000Z trixie-updates/main arm64 Packages [1108 B]
-#7 5.961 Get:6 http://snapshot.debian.org/archive/debian-security/20261101T000000Z trixie-security/main arm64 Packages [292 kB]
-#7 6.481 Fetched 10.1 MB in 6s (1594 kB/s)
-#7 6.481 Reading package lists...
-#7 6.759 Reading package lists...
-#7 7.020 Building dependency tree...
-#7 7.097 Reading state information...
-#7 7.212 Suggested packages:
-#7 7.212   fonts-noto-cjk-extra
-#7 7.223 The following NEW packages will be installed:
-#7 7.224   fonts-noto-cjk
-#7 8.277 0 upgraded, 1 newly installed, 0 to remove and 1 not upgraded.
-#7 8.277 Need to get 56.7 MB of archives.
-#7 8.277 After this operation, 93.4 MB of additional disk space will be used.
-#7 8.277 Get:1 http://snapshot.debian.org/archive/debian/20261101T000000Z trixie/main arm64 fonts-noto-cjk all 1:20240730+repack1-1 [56.7 MB]
-#7 21.79 Fetched 56.7 MB in 14s (4000 kB/s)
-#7 21.81 Selecting previously unselected package fonts-noto-cjk.
-#7 21.81 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 56687 files and directories currently installed.)
-#7 21.91 Preparing to unpack .../fonts-noto-cjk_1%3a20240730+repack1-1_all.deb ...
-#7 21.93 Unpacking fonts-noto-cjk (1:20240730+repack1-1) ...
-#7 22.66 Setting up fonts-noto-cjk (1:20240730+repack1-1) ...
-#7 22.67 Processing triggers for fontconfig (2.15.0-2.3) ...
-#7 DONE 22.8s
-
-#8 [ 4/16] RUN useradd --create-home --shell /bin/bash elsebot  && mkdir -p /var/lib/elsebot/jobs /home/elsebot/work  && chown -R elsebot:elsebot /var/lib/elsebot /home/elsebot
-#8 DONE 0.2s
-
-#9 [ 5/16] COPY supervisord.conf /etc/elsebot/supervisord.conf
-#9 DONE 0.0s
-
-#10 [ 6/16] COPY else-browser /usr/local/bin/else-browser
-#10 DONE 0.0s
-
-#11 [ 7/16] COPY else-init /usr/local/bin/else-init
-#11 DONE 0.0s
-
-#12 [ 8/16] COPY else-checkpoint /usr/local/bin/else-checkpoint
-#12 DONE 0.0s
-
-#13 [ 9/16] COPY else-capabilities /usr/local/bin/else-capabilities
-#13 DONE 0.1s
-
-#14 [10/16] COPY else-screenshot /usr/local/bin/else-screenshot
-#14 DONE 0.1s
-
-#15 [11/16] COPY else-input /usr/local/bin/else-input
-#15 DONE 0.0s
-
-#16 [12/16] COPY cdp/ /usr/local/lib/elsebot/cdp/
-#16 DONE 0.1s
-
-#17 [13/16] COPY vnc/else_vnc_targets.py /usr/local/lib/elsebot/vnc/
-#17 DONE 0.1s
-
-#18 [14/16] RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint       /usr/local/bin/else-capabilities /usr/local/bin/else-screenshot /usr/local/bin/else-input  && chmod 0755 /usr/local/lib/elsebot/cdp /usr/local/lib/elsebot/vnc  && chmod 0644 /usr/local/lib/elsebot/cdp/* /usr/local/lib/elsebot/vnc/*
-#18 DONE 0.1s
-
-#19 [15/16] RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n'       cargo chromium fonts-noto-cjk g++ gcc git jq make nodejs npm pkg-config python3 python3-pip       python3-venv rustc     | jq -R -s --arg tag "else-guest:3" --arg snapshot "20261101T000000Z"       '{image: $tag, debian_snapshot: $snapshot, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}'       > /etc/elsebot/image.json
-#19 DONE 0.1s
-
-#20 [16/16] WORKDIR /home/elsebot/work
-#20 DONE 0.0s
-
-#21 exporting to image
-#21 exporting layers
-#21 exporting layers 1.8s done
-#21 exporting manifest sha256:a9f3f0762d5cf70b7c57d5879b7866825a503104419fced82c17f7276fc68511
-#21 exporting manifest sha256:a9f3f0762d5cf70b7c57d5879b7866825a503104419fced82c17f7276fc68511 done
-#21 exporting config sha256:7ada405b32542600edc9ce3667d011ecd4cea4b1454c94fccf300b56d0a36256 done
-#21 exporting attestation manifest sha256:7e7c3665805d0d823f3fabee34a1be953a81d6cdf9c4ad3f4eb326daac8bdf82 done
-#21 exporting manifest list sha256:c362a5cb8b4f470d909815bb548658b7dbf6de5e1d90ee8b543ee5d89bac0f34 done
-#21 naming to moby-dangling@sha256:c362a5cb8b4f470d909815bb548658b7dbf6de5e1d90ee8b543ee5d89bac0f34 done
-#21 unpacking to moby-dangling@sha256:c362a5cb8b4f470d909815bb548658b7dbf6de5e1d90ee8b543ee5d89bac0f34
-#21 unpacking to moby-dangling@sha256:c362a5cb8b4f470d909815bb548658b7dbf6de5e1d90ee8b543ee5d89bac0f34 0.5s done
-#21 DONE 2.4s
-  ✓ Loaded              else-guest:3
-Image ID: sha256:c362a5cb8b4f470d909815bb548658b7dbf6de5e1d90ee8b543ee5d89bac0f34
-Loaded else-guest:3 into /private/tmp/else62-arm64-fd6449/microsandbox (set ELSE_VM_IMAGE=else-guest:3).

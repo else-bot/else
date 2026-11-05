@@ -1,8 +1,0 @@
-{
-  "infra/guest/Dockerfile": "5a9b51758d3159f5724671015e58ea63dff0429762d21c3742bc47ba8076fa8d",
-  "infra/guest/supervisord.conf": "da26ecba8eb389f20f6fc27a7d32b7b90b14b13f8892ce18c796ea57f8e8b067",
-  "infra/guest/vnc/else_vnc_targets.py": "96fa879f2443d90115625af6e00130238372dbed4ab19242798cb5ae69984b1a",
-  "infra/guest/vnc/test_else_vnc_targets.py": "0ae2c340daf53fd99a6361577f2b05fbb3db2418d1a03426b2d30f1377379314",
-  "infra/guest/x11vnc/test_keymap_settle.py": "24e111ed85a32af9e7dbd66f6aa0bf451d66872e8a1d5c14bed33a003be1f010",
-  "infra/guest/x11vnc/keymap-settle.patch": "1f5975f7044445dda34c340ab730539953b5d08629c532479df9b6c8ec5a3f21"
-}

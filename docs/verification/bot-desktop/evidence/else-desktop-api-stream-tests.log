@@ -1,9 +1,0 @@
-
-running 5 tests
-test an_older_image_can_be_taken_over_but_not_watched ... ok
-test control_sends_input_releases_it_and_excludes_other_controllers ... ok
-test the_stream_authenticates_and_never_wakes_unless_asked ... ok
-test watching_sends_frames_and_no_input_reaches_the_desktop ... ok
-test streams_renew_their_lease_and_end_on_owner_stop_or_delete ... ok
-
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.19s

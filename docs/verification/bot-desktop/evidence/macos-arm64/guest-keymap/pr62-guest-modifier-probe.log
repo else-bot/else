@@ -1,9 +1,0 @@
-{"extra": [], "before_close": [[50], 0]}
-{"extra": [], "after_close": [[], 0]}
-{"extra": [], "after_reconnect_a": [[], 0], "events": [{"t": 139187.42063821, "down": true, "ks": 65505, "kc": 50}, {"t": 139187.722252843, "down": false, "ks": 65505, "kc": 50}, {"t": 139188.037218095, "down": true, "ks": 97, "kc": 38}, {"t": 139188.037325749, "down": false, "ks": 97, "kc": 38}]}
-{"extra": ["-xkb"], "before_close": [[50], 0]}
-{"extra": ["-xkb"], "after_close": [[], 0]}
-{"extra": ["-xkb"], "after_reconnect_a": [[], 0], "events": [{"t": 139190.194088822, "down": true, "ks": 65505, "kc": 50}, {"t": 139190.499460606, "down": false, "ks": 65505, "kc": 50}, {"t": 139190.81997265, "down": true, "ks": 97, "kc": 38}, {"t": 139190.820085642, "down": false, "ks": 97, "kc": 38}]}
-{"extra": ["-noxkb"], "before_close": [[50], 0]}
-{"extra": ["-noxkb"], "after_close": [[], 0]}
-{"extra": ["-noxkb"], "after_reconnect_a": [[50], 0], "events": [{"t": 139192.981581552, "down": true, "ks": 65505, "kc": 50}, {"t": 139193.285238994, "down": false, "ks": 65505, "kc": 50}, {"t": 139193.604818046, "down": true, "ks": 97, "kc": 38}, {"t": 139193.60505883, "down": true, "ks": 65505, "kc": 50}, {"t": 139193.605083472, "down": false, "ks": 65, "kc": 38}]}

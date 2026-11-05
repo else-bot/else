@@ -1,3 +1,0 @@
-127.0.0.1 - - [05/Nov/2026 04:30:03] "GET /key-event?run=keyup-fixed&type=keydown&ctrl=true HTTP/1.1" 404 -
-127.0.0.1 - - [05/Nov/2026 04:30:04] "GET /key-event?run=keyup-fixed&type=keyup&ctrl=false HTTP/1.1" 404 -
-{"x": 640, "y": 400, "mask": 0, "held_keycodes": []}

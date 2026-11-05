@@ -1,3 +1,0 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
-     Running `.else-dev/.build/debug/else-pr62-commit-barrier-proof barrier`
-barrier=true, cleanup saw 1, remaining leases=0
