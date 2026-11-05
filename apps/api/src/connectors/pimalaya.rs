@@ -2,7 +2,7 @@ mod mime;
 mod session;
 
 use mime::{
-    ThreadHeaders, addresses, compose, compose_draft, compose_forward, reply, smtp_address,
+    ThreadHeaders, addresses, compose, compose_draft, compose_forward, reply, smtp_address, thread,
 };
 use session::{Imap, Smtp};
 
@@ -414,7 +414,9 @@ async fn execute(
     auth: &Auth,
     command: &MailCommand,
 ) -> Result<Value, MailError> {
-    if let MailCommand::Send { draft } = command {
+    if let MailCommand::Send { draft } = command
+        && draft.reply_to.is_none()
+    {
         return send(config, auth, draft, None).await;
     }
     let mut client = Imap::open(&config.imap, auth).await?;
@@ -587,7 +589,23 @@ async fn execute(
                 .map_err(failure)?;
             Ok(json!({"message":message,"deleted":true}))
         }
-        MailCommand::Draft { draft } => client.draft(config, draft, None).await,
+        MailCommand::Draft { draft } | MailCommand::Send { draft } => {
+            let thread = match &draft.reply_to {
+                Some(message) => {
+                    let raw = client.body(message).await?;
+                    let parsed = MessageParser::default()
+                        .parse(&raw)
+                        .ok_or_else(|| MailError::new("invalid_email_message"))?;
+                    Some(thread(&parsed))
+                }
+                None => None,
+            };
+            if matches!(command, MailCommand::Send { .. }) {
+                send(config, auth, draft, thread).await
+            } else {
+                client.draft(config, draft, thread).await
+            }
+        }
         MailCommand::Reply {
             message,
             body,
@@ -620,6 +638,7 @@ async fn execute(
                 cc: Vec::new(),
                 bcc: Vec::new(),
                 attachments: Vec::new(),
+                reply_to: None,
                 subject: format!("Fwd: {}", parsed.subject().unwrap_or_default()),
                 body: format!(
                     "{body}\n\n---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
@@ -651,7 +670,6 @@ async fn execute(
             client.delete(mailbox(folder)?).await.map_err(failure)?;
             Ok(json!({"deleted":true}))
         }
-        MailCommand::Send { .. } => unreachable!(),
     }
 }
 

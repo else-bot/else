@@ -154,6 +154,26 @@ impl TestApp {
         registry: else_api::providers::Registry,
         computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
     ) -> Self {
+        Self::build(db, max_active, registry, computers, None)
+    }
+
+    /// With email connectors that use `mail` instead of real servers.
+    pub fn with_mail(
+        db: std::sync::Arc<TestDb>,
+        max_active: usize,
+        registry: else_api::providers::Registry,
+        mail: std::sync::Arc<dyn else_api::connectors::types::MailTransport>,
+    ) -> Self {
+        Self::build(db, max_active, registry, None, Some(mail))
+    }
+
+    fn build(
+        db: std::sync::Arc<TestDb>,
+        max_active: usize,
+        registry: else_api::providers::Registry,
+        computers: Option<std::sync::Arc<else_api::computers::ComputerManager>>,
+        mail: Option<std::sync::Arc<dyn else_api::connectors::types::MailTransport>>,
+    ) -> Self {
         use std::sync::Arc;
         // `RUST_LOG=warn cargo test -- --nocapture` shows API logs.
         let _ = tracing_subscriber::fmt()
@@ -183,10 +203,21 @@ impl TestApp {
             state = state.with_computers(computers);
         }
         // A fixed test master key, for task secrets.
-        state = state.with_secret_key(Arc::new(
+        let key = Arc::new(
             else_api::credentials::SecretKey::parse("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
                 .unwrap(),
-        ));
+        );
+        state = state.with_secret_key(key.clone());
+        if let Some(mail) = mail {
+            state = state.with_connectors(Arc::new(
+                else_api::connectors::ConnectorManager::with_transport(
+                    db.pool.clone(),
+                    key,
+                    scheduler.clone(),
+                    mail,
+                ),
+            ));
+        }
         let state = Arc::new(state);
         let router = else_api::http::router(&config, state.clone());
         Self {

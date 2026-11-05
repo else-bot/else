@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::{TestApp, TestDb};
+use else_api::connectors::{store, types::*};
 use else_api::grants::{DEFAULT_TTL, Tool};
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
@@ -18,14 +19,133 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
+    harness_with(None).await
+}
+
+async fn harness_with(mail: Option<Arc<FakeMail>>) -> Harness {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let synthetic = Arc::new(Synthetic::new(Duration::from_millis(5)));
     let registry = else_api::providers::Registry::new(vec![synthetic.clone()]);
-    Harness {
-        app: TestApp::with_registry(db, 4, registry),
-        synthetic,
+    let app = match mail {
+        Some(mail) => TestApp::with_mail(db, 4, registry, mail),
+        None => TestApp::with_registry(db, 4, registry),
+    };
+    Harness { app, synthetic }
+}
+
+/// A mail server that records each command it is sent.
+#[derive(Default)]
+struct FakeMail {
+    commands: std::sync::Mutex<Vec<MailCommand>>,
+    connection_lost: std::sync::atomic::AtomicBool,
+}
+
+impl FakeMail {
+    fn sends(&self) -> Vec<Draft> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MailCommand::Send { draft } => Some(draft.clone()),
+                _ => None,
+            })
+            .collect()
     }
+}
+
+#[async_trait::async_trait]
+impl MailTransport for FakeMail {
+    async fn execute(
+        &self,
+        _: &MailConfig,
+        _: &Auth,
+        command: &MailCommand,
+    ) -> Result<Value, MailError> {
+        self.commands.lock().unwrap().push(command.clone());
+        if self
+            .connection_lost
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MailError::new("connection_lost"));
+        }
+        Ok(json!({ "sent": true }))
+    }
+    async fn scan(&self, _: &MailConfig, _: &Auth, _: Option<&Cursor>) -> Result<Scan, MailError> {
+        Ok(Scan {
+            cursor: Cursor {
+                uid_validity: 1,
+                last_uid: 0,
+            },
+            arrivals: vec![],
+            more: false,
+        })
+    }
+    async fn wait(
+        &self,
+        _: &MailConfig,
+        _: &Auth,
+        _: &Cursor,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> Result<(), MailError> {
+        stop.cancelled().await;
+        Ok(())
+    }
+}
+
+/// Connect `address` as an account and give `bot` read, write, and send.
+async fn connect(app: &TestApp, bot: &str, address: &str, send: bool) -> Uuid {
+    let config = MailConfig {
+        provider: Provider::Imap,
+        address: address.into(),
+        username: address.into(),
+        imap: Endpoint {
+            host: "mail.example.com".into(),
+            port: 993,
+            start_tls: false,
+        },
+        smtp: Endpoint {
+            host: "mail.example.com".into(),
+            port: 465,
+            start_tls: false,
+        },
+        archive_folder: "Archive".into(),
+        trash_folder: "Trash".into(),
+        drafts_folder: "Drafts".into(),
+        sent_folder: "Sent".into(),
+    };
+    let account = store::create(
+        &app.db.pool,
+        app.state.secret_key.as_ref().unwrap(),
+        &config,
+        &Credential::Password {
+            password: "private-app-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+    if send {
+        permit(app, account.id, bot, true).await;
+    }
+    account.id
+}
+
+async fn permit(app: &TestApp, account: Uuid, bot: &str, send: bool) {
+    let path = format!("/v1/connectors/email/accounts/{account}/bots/{bot}");
+    let saved = if send {
+        let all = json!({ "read": true, "write": true, "send": true, "wake": false });
+        app.owner("PUT", &path, Some(all)).await
+    } else {
+        app.owner("DELETE", &path, None).await
+    };
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+}
+
+fn connected_reply(account: Uuid) -> Value {
+    json!({ "account_id": account, "reply_to": { "folder": "INBOX", "uid_validity": 7, "uid": 42 },
+            "to": ["ada@example.com"], "cc": ["bob@example.com"], "subject": "Re: Lunch",
+            "body": "Hi Ada,\n\nFriday at noon works.\n\nMain" })
 }
 
 async fn grant(app: &TestApp, turn_id: Uuid) -> String {
@@ -41,7 +161,7 @@ async fn grant(app: &TestApp, turn_id: Uuid) -> String {
             bot,
             conversation,
             turn_id,
-            vec![Tool::ReadMemory, Tool::AskOwner, Tool::Computer],
+            vec![Tool::ReadMemory, Tool::AskOwner, Tool::Computer, Tool::Mail],
             DEFAULT_TTL,
         )
         .await
@@ -1103,4 +1223,352 @@ async fn a_chat_approval_binds_the_open_message_version_only() {
     let send = tool(&app, &token, "computer_run", send_args(id)).await;
     assert!(refusal(&send).starts_with("DRAFT_SETTLED"));
     assert_eq!(journaled(&app, &main, id).await["status"], "pending");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connected_email_sends_the_owners_approved_edit_once_through_its_account() {
+    let mail = Arc::new(FakeMail::default());
+    let Harness { app, synthetic } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let unpermitted = connect(&app, &main, "other@owner.example", false).await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+
+    let direct = tool(
+        &app,
+        &token,
+        "mail_action",
+        json!({ "account_id": account, "action_id": Uuid::new_v4(),
+                "command": { "operation": "send", "draft": {
+                    "to": ["ada@example.com"], "subject": "Hi", "body": "Unapproved" } } }),
+    )
+    .await;
+    assert_eq!(refusal(&direct), "mail_send_needs_approved_draft");
+    let reply = tool(
+        &app,
+        &token,
+        "mail_action",
+        json!({ "account_id": account, "action_id": Uuid::new_v4(),
+                "command": { "operation": "reply", "body": "Unapproved", "send": true,
+                             "message": { "folder": "INBOX", "uid_validity": 7, "uid": 42 } } }),
+    )
+    .await;
+    assert_eq!(refusal(&reply), "mail_send_needs_approved_draft");
+    assert!(
+        mail.commands.lock().unwrap().is_empty(),
+        "nothing reached the server"
+    );
+    let forbidden = tool(&app, &token, "draft_email", connected_reply(unpermitted)).await;
+    assert!(
+        refusal(&forbidden).starts_with("MAIL_FORBIDDEN"),
+        "{}",
+        forbidden.body
+    );
+    let mut spoofed = connected_reply(account);
+    spoofed["from"] = json!("ceo@owner.example");
+    assert!(
+        refusal(&tool(&app, &token, "draft_email", spoofed).await).starts_with("INVALID_DRAFT")
+    );
+
+    let paused = connect(&app, &main, "paused@owner.example", true).await;
+    let paused_response = app
+        .owner(
+            "PATCH",
+            &format!("/v1/connectors/email/accounts/{paused}"),
+            Some(json!({"active":false})),
+        )
+        .await;
+    assert_eq!(paused_response.status, StatusCode::OK);
+    assert!(
+        refusal(&tool(&app, &token, "draft_email", connected_reply(paused)).await)
+            .starts_with("MAIL_FORBIDDEN")
+    );
+
+    let folder = "Projects/\"urgent\"/INBOX";
+    let mut args = connected_reply(account);
+    args["reply_to"]["folder"] = json!(folder);
+    let id = draft(&app, &token, args).await;
+    wait(&app, turn, "waiting").await;
+    let card = shown(&app, &main, turn).await[0].clone();
+    assert_eq!(
+        card["content"]["from"], "main@owner.example",
+        "the account's own address"
+    );
+    assert_eq!(card["content"]["account_id"], account.to_string());
+    assert_eq!(card["content"]["reply_to"]["uid"], 42);
+    assert!(!card.to_string().contains("private-app-password"));
+
+    let approved = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 1, "subject": "Re: Lunch Friday", "body": "Friday at noon. Main" }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    wait(&app, turn, "running").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains(&format!("account_id=\"{account}\"")),
+        "{packet}"
+    );
+    assert!(packet.contains("send it now with send_draft"), "{packet}");
+    assert!(
+        !packet.contains(" reply_to=\""),
+        "the folder must not break tag attributes: {packet}"
+    );
+    let reference = packet
+        .lines()
+        .find_map(|line| line.strip_prefix("Reply to message: "))
+        .unwrap();
+    let reference: Value = serde_json::from_str(reference).unwrap();
+    assert_eq!(reference["folder"], folder);
+
+    let token = grant(&app, turn).await;
+    for (name, args) in [
+        ("computer_run", send_args(id)),
+        ("start_draft_send", json!({ "draft_id": id })),
+    ] {
+        let other = tool(&app, &token, name, args).await;
+        assert!(
+            refusal(&other).starts_with("CONNECTED_ACCOUNT"),
+            "{name}: {}",
+            other.body
+        );
+    }
+    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let again = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(
+        tool_text(&again)["status"],
+        "sent",
+        "a repeat reads the receipt"
+    );
+    let contradicted = tool(
+        &app,
+        &token,
+        "report_draft_send",
+        json!({ "draft_id": id, "status": "failed" }),
+    )
+    .await;
+    assert!(refusal(&contradicted).starts_with("DRAFT_SETTLED"));
+
+    let sends = mail.sends();
+    assert_eq!(sends.len(), 1, "one transport send");
+    assert_eq!(sends[0].to, ["ada@example.com"]);
+    assert_eq!(sends[0].cc, ["bob@example.com"]);
+    assert_eq!(sends[0].subject, "Re: Lunch Friday");
+    assert_eq!(sends[0].body, "Friday at noon. Main");
+    assert_eq!(sends[0].reply_to.as_ref().unwrap().folder, folder);
+    assert_eq!(
+        sends[0].reply_to.as_ref().map(|m| (m.uid_validity, m.uid)),
+        Some((7, 42))
+    );
+    let receipt = journaled(&app, &main, id).await;
+    assert_eq!(receipt["status"], "sent");
+    assert_eq!(receipt["delivery"]["via"], "mail");
+    assert_eq!(receipt["delivery"]["account_id"], account.to_string());
+    let (status, operation, action_turn, action_id): (String, String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT status, operation, turn_id, action_id FROM connector_actions
+             WHERE account_id = ?1",
+    )
+    .bind(account)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), operation.as_str(), action_turn),
+        ("succeeded", "send", turn)
+    );
+    assert_eq!(
+        receipt["delivery"]["action_id"],
+        action_id.to_string(),
+        "the card names the mail action receipt"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uncertain_revoked_and_revised_connected_emails_never_send_twice() {
+    let mail = Arc::new(FakeMail::default());
+    mail.connection_lost
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let id = draft(&app, &token, connected_reply(account)).await;
+    wait(&app, first, "waiting").await;
+    owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    wait(&app, first, "running").await;
+    let token = grant(&app, first).await;
+    let lost = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(tool_text(&lost)["status"], "uncertain", "{}", lost.body);
+    let again = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    assert_eq!(tool_text(&again)["status"], "uncertain");
+    assert_eq!(mail.sends().len(), 1, "an uncertain send is never repeated");
+    wait(&app, first, "completed").await;
+    assert_eq!(journaled(&app, &main, id).await["status"], "uncertain");
+
+    mail.connection_lost
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (second, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] I checked Sent, it is not there. Send it again.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let confirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&confirmed)["status"],
+        "approved",
+        "{}",
+        confirmed.body
+    );
+    permit(&app, account, &main, false).await;
+    let revoked = tool(&app, &token, "send_draft", json!({ "draft_id": id })).await;
+    let revoked = tool_text(&revoked);
+    assert_eq!(revoked["status"], "failed", "{revoked}");
+    assert!(
+        revoked["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing was sent"),
+        "{revoked}"
+    );
+    assert_eq!(mail.sends().len(), 1, "a revoked account sends nothing");
+    wait(&app, second, "completed").await;
+
+    permit(&app, account, &main, true).await;
+    let (third, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Make it shorter.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let mut unbound = connected_reply(account);
+    unbound["account_id"] = Value::Null;
+    unbound["reply_to"] = Value::Null;
+    unbound["from"] = json!("main@owner.example");
+    unbound["replaces"] = json!(id);
+    let changed = tool(&app, &token, "draft_email", unbound).await;
+    assert!(
+        refusal(&changed).starts_with("CHANNEL_CHANGED"),
+        "{}",
+        changed.body
+    );
+    let mut revision = connected_reply(account);
+    revision["body"] = json!("Friday works.");
+    revision["replaces"] = json!(id);
+    let revised = draft(&app, &token, revision).await;
+    wait(&app, third, "waiting").await;
+    let card = shown(&app, &main, third).await[0].clone();
+    assert_eq!(card["id"], revised.to_string());
+    assert_eq!(card["status"], "pending", "a revision is approved afresh");
+    assert_eq!(card["content"]["account_id"], account.to_string());
+    owner_action(&app, &main, revised, "approve", json!({ "version": 1 })).await;
+    wait(&app, third, "running").await;
+    let token = grant(&app, third).await;
+    let sent = tool(&app, &token, "send_draft", json!({ "draft_id": revised })).await;
+    assert_eq!(tool_text(&sent)["status"], "sent", "{}", sent.body);
+    let sends = mail.sends();
+    assert_eq!(sends.len(), 2);
+    assert_eq!(sends[1].body, "Friday works.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_ends() {
+    use else_api::app::outgoing::Delivery;
+    use else_api::db::outgoing_drafts;
+    let mail = Arc::new(FakeMail::default());
+    let Harness { app, .. } = harness_with(Some(mail.clone())).await;
+    let main = app.main_bot().await;
+    let bot: Uuid = main.parse().unwrap();
+    let account = connect(&app, &main, "main@owner.example", true).await;
+    let generation = store::account(&app.db.pool, account)
+        .await
+        .unwrap()
+        .unwrap()
+        .generation;
+    let mut outcomes = Vec::new();
+    for dispatched in [false, true] {
+        let (turn, token) = running(&app, &main, SLOW, None).await;
+        let mut args = connected_reply(account);
+        args["body"] = json!(format!("Dispatched: {dispatched}"));
+        let id = draft(&app, &token, args).await;
+        wait(&app, turn, "waiting").await;
+        owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+        wait(&app, turn, "running").await;
+        let action_id = Uuid::new_v4();
+        let claimed = outgoing_drafts::claim(
+            &app.db.pool,
+            turn,
+            id,
+            &Delivery::Mail {
+                account_id: account,
+                action_id,
+            },
+        )
+        .await
+        .unwrap();
+        if dispatched {
+            let email = match &claimed.content.0 {
+                else_api::app::outgoing::Content::Email(email) => email.clone(),
+                _ => unreachable!(),
+            };
+            let started = store::begin_action(
+                &app.db.pool,
+                account,
+                generation,
+                bot,
+                turn,
+                action_id,
+                &email.send_command(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(started, store::ActionStart::Dispatch));
+        }
+        wait(&app, turn, "completed").await;
+        let ended = journaled(&app, &main, id).await;
+        outcomes.push((id, action_id, ended["status"].as_str().unwrap().to_owned()));
+        assert!(ended["result_detail"].is_string(), "{ended}");
+    }
+    assert_eq!(outcomes[0].2, "failed", "never recorded, so never sent");
+    assert_eq!(outcomes[1].2, "uncertain", "dispatched without a receipt");
+    let (id, action_id, _) = outcomes[1];
+    assert!(
+        store::finish_action(
+            &app.db.pool,
+            account,
+            action_id,
+            store::ActionStatus::Succeeded,
+            &json!({ "action_id": action_id, "status": "succeeded" }),
+        )
+        .await
+        .unwrap()
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM outgoing_drafts WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "sent", "the late receipt settles it");
+    assert_eq!(
+        journaled(&app, &main, id).await["status"],
+        "sent",
+        "the late receipt reaches the live conversation without a reload"
+    );
+    assert!(
+        mail.sends().is_empty(),
+        "the test drove the action receipts itself"
+    );
 }

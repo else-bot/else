@@ -19,6 +19,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "draft_message",
     "confirm_draft_approval",
     "start_draft_send",
+    "send_draft",
     "report_draft_send",
     "routine_create",
     "routine_list",

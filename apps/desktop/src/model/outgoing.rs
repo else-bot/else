@@ -211,6 +211,37 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn connected_email_cards_keep_edits_and_read_mail_receipts() {
+        let card: OutgoingDraft = serde_json::from_value(json!({
+            "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+            "content": {"channel":"email", "from":"owner@example.com",
+                "to":["ada@example.com"], "cc":[], "bcc":[],
+                "subject":"Edited reply", "body":"Friday works.",
+                "account_id":Uuid::nil(),
+                "reply_to":{"folder":"INBOX","uid_validity":7,"uid":42}},
+            "version":2,"status":"sent","can_approve":false,
+            "delivery":{"via":"mail","account_id":Uuid::nil(),"action_id":Uuid::nil()},
+            "result_detail":"The mail server accepted it from the connected account.",
+            "updated_at":"2026-11-05T12:00:00Z","settled_at":"2026-11-05T12:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(card.edit().subject.as_deref(), Some("Edited reply"));
+        assert_eq!(card.edit().body, "Friday works.");
+        assert_eq!(card.edit().version, 2);
+        assert_eq!(card.status, DraftStatus::Sent);
+        assert_eq!(
+            card.result_detail.as_deref(),
+            Some("The mail server accepted it from the connected account.")
+        );
+        assert_eq!(card.status.label(&card.content), "Sent email");
+        assert!(
+            card.content
+                .metadata()
+                .contains(&("From", "owner@example.com".into()))
+        );
+    }
+
+    #[test]
     fn message_edits_and_metadata_have_no_email_fields() {
         for platform in ["x", "telegram", "future-platform"] {
             let content: DraftContent = serde_json::from_value(json!({"channel":"message", "platform":platform, "account":"@team", "destination":"Project chat", "body":"Edited message"})).unwrap();

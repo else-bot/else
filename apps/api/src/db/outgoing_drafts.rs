@@ -102,6 +102,12 @@ pub enum DraftError {
     NotInContext,
     #[error("this draft was approved for another request")]
     OtherRequest,
+    #[error(
+        "this email goes from its connected account: send it with send_draft, which records its receipt"
+    )]
+    Connected,
+    #[error("this draft has no connected account: send it with a computer tool or your host tools")]
+    NotConnected,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -122,6 +128,8 @@ impl DraftError {
             Self::NotRunning => "NOT_RUNNING",
             Self::NotInContext => "NOT_IN_CONTEXT",
             Self::OtherRequest => "OTHER_REQUEST",
+            Self::Connected => "CONNECTED_ACCOUNT",
+            Self::NotConnected => "NOT_CONNECTED",
             Self::Db(_) => "UNAVAILABLE",
         }
     }
@@ -141,6 +149,15 @@ async fn load(
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(DraftError::NotFound)
+}
+
+/// One of an active bot's drafts.
+pub async fn load_for(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    draft_id: Uuid,
+) -> Result<OutgoingDraft, DraftError> {
+    load(&mut *pool.acquire().await?, bot_id, draft_id).await
 }
 
 async fn reload(conn: &mut SqliteConnection, draft_id: Uuid) -> Result<OutgoingDraft, sqlx::Error> {
@@ -223,7 +240,7 @@ pub async fn propose(
         Some(old) => {
             let old = load(&mut tx, caller.bot_id, old).await?;
             if !old.content.same_channel(content) {
-                return Err(DraftError::ChannelChanged(old.content.noun()));
+                return Err(DraftError::ChannelChanged(old.content.channel()));
             }
             if !matches!(old.status, Status::Pending | Status::Failed) {
                 return Err(DraftError::Settled(old.status));
@@ -535,7 +552,10 @@ pub async fn confirm(
 
 /// Claim an approved draft for the one call that sends it, atomically, in
 /// the request allowed to send it. A second claim is refused: sending again
-/// needs a new approval.
+/// needs a new approval. An email bound to a connected account is claimed
+/// only for that account's mail action. A repeated mail claim in the same
+/// request returns the first, so its retry reuses the same action ID and
+/// the connector's receipt.
 pub async fn claim(
     pool: &SqlitePool,
     turn_id: Uuid,
@@ -545,6 +565,18 @@ pub async fn claim(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
+    match (draft.content.account(), delivery) {
+        (Some(bound), Delivery::Mail { account_id, .. }) if bound == *account_id => {}
+        (None, Delivery::Tool { .. } | Delivery::Host) => {}
+        (Some(_), _) => return Err(DraftError::Connected),
+        (None, Delivery::Mail { .. }) => return Err(DraftError::NotConnected),
+    }
+    if draft.status == Status::Sending
+        && draft.send_turn_id == Some(turn_id)
+        && matches!(draft.delivery.as_deref(), Some(Delivery::Mail { .. }))
+    {
+        return Ok(draft);
+    }
     if draft.status != Status::Approved {
         return Err(DraftError::Settled(draft.status));
     }
@@ -582,8 +614,10 @@ pub async fn report(
     if draft.send_turn_id != Some(turn_id) {
         return Err(DraftError::OtherRequest);
     }
+    let connected = draft.content.account().is_some();
     match (draft.status, outcome) {
         (status, outcome) if status == outcome.status() => return Ok((draft, false)),
+        (Status::Sending, _) if connected => return Err(DraftError::Connected),
         (Status::Sending, _) | (Status::Approved, Outcome::Failed) => {}
         (status, _) => return Err(DraftError::Settled(status)),
     }
@@ -602,6 +636,48 @@ pub async fn report(
     let draft = reload(&mut tx, draft_id).await?;
     tx.commit().await?;
     Ok((draft, true))
+}
+
+/// After a connector send returned: a send the mail connector refused
+/// before recording its action (`refused`) never reached the mail server,
+/// so it fails; otherwise the action receipt already settled it, or will.
+/// Announces the draft's current state.
+pub async fn after_mail_send(
+    pool: &SqlitePool,
+    draft_id: Uuid,
+    refused: Option<&str>,
+) -> Result<OutgoingDraft, DraftError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let draft = reload(&mut tx, draft_id).await?;
+    if let (
+        Some(code),
+        Status::Sending,
+        Some(Delivery::Mail {
+            account_id,
+            action_id,
+        }),
+    ) = (refused, draft.status, draft.delivery.as_deref())
+    {
+        sqlx::query(
+            "UPDATE outgoing_drafts SET status = 'failed', result_detail = ?2,
+                 settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1 AND status = 'sending' AND NOT EXISTS (
+                 SELECT 1 FROM connector_actions WHERE account_id = ?3 AND action_id = ?4)",
+        )
+        .bind(draft.id)
+        .bind(format!(
+            "The mail connector refused it ({code}). Nothing was sent."
+        ))
+        .bind(account_id)
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    events::turn_changed(&mut tx, draft.bot_id, draft.turn_id).await?;
+    let draft = reload(&mut tx, draft_id).await?;
+    tx.commit().await?;
+    Ok(draft)
 }
 
 /// What a turn must know about drafts: owner decisions on its cards not yet

@@ -49,6 +49,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for request in &turn.secret_requests {
                 turns.insert(RowKey::SecretRequest(request.id), turn.id);
             }
+            for draft in &turn.outgoing_drafts {
+                turns.insert(RowKey::Draft(draft.id), turn.id);
+            }
         }
     }
     let turns: Vec<_> = rows
@@ -58,7 +61,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
-            RowKey::Question(_) | RowKey::SecretRequest(_) => turns.get(key).copied(),
+            RowKey::Question(_) | RowKey::SecretRequest(_) | RowKey::Draft(_) => {
+                turns.get(key).copied()
+            }
             RowKey::Pending(_) => None,
         })
         .collect();

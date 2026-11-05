@@ -1013,6 +1013,7 @@ pub async fn finish_action(
         })
         .to_string();
     }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_actions SET status = ?3, result = ?4, finished_at = {NOW}
          WHERE account_id = ?1 AND action_id = ?2 AND status = 'dispatching'"
@@ -1021,8 +1022,24 @@ pub async fn finish_action(
     .bind(action_id)
     .bind(status.as_str())
     .bind(text)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if done.rows_affected() == 1 {
+        let turns: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT DISTINCT bot_id, turn_id FROM outgoing_drafts
+             WHERE json_extract(delivery, '$.via') = 'mail'
+               AND replace(json_extract(delivery, '$.account_id'), '-', '') = lower(hex(?1))
+               AND replace(json_extract(delivery, '$.action_id'), '-', '') = lower(hex(?2))",
+        )
+        .bind(account_id)
+        .bind(action_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (bot_id, turn_id) in turns {
+            crate::db::events::turn_changed(&mut tx, bot_id, turn_id).await?;
+        }
+    }
+    tx.commit().await?;
     Ok(done.rows_affected() == 1)
 }
 

@@ -46,7 +46,7 @@ use crate::app::providers::{
 
 pub const ID: &str = "codex";
 /// Bump when the developer instructions or packet format change.
-const PROMPT_VERSION: &str = "else-codex-v16";
+const PROMPT_VERSION: &str = "else-codex-v17";
 /// How long a parent may keep going after a pending delegation.
 const PARK_GRACE: Duration = Duration::from_secs(20);
 /// How long an interrupted parked attempt may take to report its end.

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::connectors::types::{Draft, MailCommand, MessageRef};
+
 pub const MAX_ADDRESS: usize = 320;
 pub const MAX_RECIPIENTS: usize = 50;
 pub const MAX_SUBJECT: usize = 998;
@@ -100,6 +102,9 @@ pub enum Delivery {
     Tool { tool: String, args: Value },
     /// The bot's host tools, which the API cannot see.
     Host,
+    /// The email's connected account, as one durable mail action: its
+    /// receipt settles the draft (see the migration's triggers).
+    Mail { account_id: Uuid, action_id: Uuid },
 }
 
 /// A platform a bot can draft a message or post for. The bot sends through
@@ -143,7 +148,10 @@ impl Platform {
     }
 }
 
-/// An email: headers, subject, and plain-text body.
+/// An email: headers, subject, and plain-text body. With `account_id` it
+/// goes from that connected account (`from` is its address) through the
+/// API, optionally in the thread of `reply_to`; without, the bot sends it
+/// with its own tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Email {
     pub from: String,
@@ -154,6 +162,10 @@ pub struct Email {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageRef>,
 }
 
 /// A message or post on a messaging or social platform. It has no subject
@@ -212,12 +224,34 @@ impl Content {
         }
     }
 
-    /// The same channel: both emails, or messages on the same platform. A
+    /// The connected account an email goes from, if any.
+    pub fn account(&self) -> Option<Uuid> {
+        match self {
+            Self::Email(email) => email.account_id,
+            Self::Message(_) => None,
+        }
+    }
+
+    /// What a revision must keep, for its refusal.
+    pub fn channel(&self) -> &'static str {
+        match self {
+            Self::Email(Email {
+                account_id: Some(_),
+                ..
+            }) => "an email from its connected account: pass the same account_id and reply_to",
+            other => other.noun(),
+        }
+    }
+
+    /// The same channel: both emails from the same connected account (or
+    /// none) in the same thread, or messages on the same platform. A
     /// revision may change its recipients (it is approved afresh) but never
-    /// its medium.
+    /// its medium or sending account.
     pub fn same_channel(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Email(_), Self::Email(_)) => true,
+            (Self::Email(a), Self::Email(b)) => {
+                a.account_id == b.account_id && a.reply_to == b.reply_to
+            }
             (Self::Message(a), Self::Message(b)) => a.platform == b.platform,
             _ => false,
         }
@@ -227,14 +261,16 @@ impl Content {
     pub fn edited(&self, edits: Edits<'_>) -> Result<Self, &'static str> {
         let body = edits.body.map(body).transpose()?;
         match self {
-            Self::Email(email) => Ok(Self::Email(Email {
+            Self::Email(email) => Email {
                 subject: match edits.subject {
                     Some(text) => subject(text)?,
                     None => email.subject.clone(),
                 },
                 body: body.unwrap_or_else(|| email.body.clone()),
                 ..email.clone()
-            })),
+            }
+            .connectable()
+            .map(Self::Email),
             Self::Message(_) if edits.subject.is_some() => {
                 Err("this draft is a message with no subject; edit only its body")
             }
@@ -324,22 +360,94 @@ fn only(args: &Value, allowed: &[&str], usage: &'static str) -> Result<(), &'sta
 
 impl Email {
     /// Parse `draft_email` arguments (`replaces` is read by the caller).
-    pub fn parse(args: &Value) -> Result<Self, &'static str> {
+    /// With `account_id`, `from` is the connected account's `address`,
+    /// which the caller looked up for the bot.
+    pub fn parse(args: &Value, account: Option<&str>) -> Result<Self, &'static str> {
         only(
             args,
-            &["from", "to", "cc", "bcc", "subject", "body", "replaces"],
-            "use from, to, subject, body, and optionally cc, bcc, replaces",
+            &[
+                "from",
+                "to",
+                "cc",
+                "bcc",
+                "subject",
+                "body",
+                "replaces",
+                "account_id",
+                "reply_to",
+            ],
+            "use from (or account_id), to, subject, body, and optionally cc, bcc, reply_to, \
+             replaces",
         )?;
-        let from = address(args.get("from").unwrap_or(&Value::Null))
-            .map_err(|_| "from is the sending address, 3 to 320 bytes with an @")?;
-        Ok(Self {
+        let account_id = match args.get("account_id") {
+            None | Some(Value::Null) => None,
+            Some(id) => Some(
+                id.as_str()
+                    .and_then(|id| id.parse().ok())
+                    .ok_or("account_id is a connected account id from mail_accounts")?,
+            ),
+        };
+        let reply_to = match args.get("reply_to") {
+            None | Some(Value::Null) => None,
+            Some(_) if account_id.is_none() => {
+                return Err("reply_to answers a message in a connected account; pass account_id");
+            }
+            Some(message) => Some(
+                serde_json::from_value(message.clone())
+                    .map_err(|_| "reply_to is a message {folder, uid_validity, uid} from mail")?,
+            ),
+        };
+        let from = match (account_id, account, args.get("from")) {
+            (Some(_), Some(own), None | Some(Value::Null)) => own.to_owned(),
+            (Some(_), Some(own), Some(given))
+                if given
+                    .as_str()
+                    .is_some_and(|g| g.trim().eq_ignore_ascii_case(own)) =>
+            {
+                own.to_owned()
+            }
+            (Some(_), _, _) => {
+                return Err("a connected account sends from its own address; omit from");
+            }
+            (None, _, from) => address(from.unwrap_or(&Value::Null))
+                .map_err(|_| "from is the sending address, 3 to 320 bytes with an @")?,
+        };
+        Self {
             from,
             to: addresses(args, "to", true)?,
             cc: addresses(args, "cc", false)?,
             bcc: addresses(args, "bcc", false)?,
             subject: subject(args["subject"].as_str().ok_or("subject is text")?)?,
             body: body(args["body"].as_str().ok_or("body is text")?)?,
-        })
+            account_id,
+            reply_to,
+        }
+        .connectable()
+    }
+
+    /// The mail command that sends exactly this email from its account.
+    pub fn send_command(&self) -> MailCommand {
+        MailCommand::Send {
+            draft: Draft {
+                to: self.to.clone(),
+                cc: self.cc.clone(),
+                bcc: self.bcc.clone(),
+                subject: self.subject.clone(),
+                body: self.body.clone(),
+                attachments: Vec::new(),
+                reply_to: self.reply_to.clone(),
+            },
+        }
+    }
+
+    fn connectable(self) -> Result<Self, &'static str> {
+        if self.account_id.is_some() && self.send_command().validate().is_err() {
+            return Err(
+                "an email from a connected account has 1 to 50 bare addresses \
+                        (name@example.com) and a body of at most 32000 bytes",
+            );
+        }
+        Ok(self)
     }
 }
 
@@ -393,10 +501,13 @@ mod tests {
 
     #[test]
     fn an_email_parses_only_its_fields_and_refuses_header_injection() {
-        let email = Email::parse(&json!({
-            "from": "bot@example.com", "to": [" ada@example.com "], "cc": ["Bob <bob@example.com>"],
-            "subject": " Lunch on Friday ", "body": "Hi Ada,\n\nLunch on Friday?\n",
-        }))
+        let email = Email::parse(
+            &json!({
+                "from": "bot@example.com", "to": [" ada@example.com "], "cc": ["Bob <bob@example.com>"],
+                "subject": " Lunch on Friday ", "body": "Hi Ada,\n\nLunch on Friday?\n",
+            }),
+            None,
+        )
         .unwrap();
         assert_eq!(email.to, ["ada@example.com"]);
         assert_eq!(email.cc, ["Bob <bob@example.com>"]);
@@ -404,7 +515,10 @@ mod tests {
         assert_eq!(email.subject, "Lunch on Friday");
         assert_eq!(email.body, "Hi Ada,\n\nLunch on Friday?\n");
         let ok = json!({ "from": "b@x.io", "to": ["a@x.io"], "subject": "", "body": "x" });
-        assert!(Email::parse(&ok).is_ok(), "an empty subject is allowed");
+        assert!(
+            Email::parse(&ok, None).is_ok(),
+            "an empty subject is allowed"
+        );
         for (key, bad) in [
             ("to", json!([])),
             ("to", json!(["nobody"])),
@@ -416,8 +530,83 @@ mod tests {
         ] {
             let mut args = ok.clone();
             args[key] = bad;
-            assert!(Email::parse(&args).is_err(), "{args}");
+            assert!(Email::parse(&args, None).is_err(), "{args}");
         }
+    }
+
+    #[test]
+    fn a_connected_email_sends_from_its_account_and_keeps_its_binding() {
+        let account = Uuid::new_v4();
+        let thread = json!({ "folder": "INBOX", "uid_validity": 7, "uid": 42 });
+        let args = json!({ "account_id": account, "reply_to": thread, "to": ["ada@example.com"],
+                           "subject": "Re: Lunch", "body": "Friday works." });
+        let email = Email::parse(&args, Some("owner@example.com")).unwrap();
+        assert_eq!(email.from, "owner@example.com");
+        assert_eq!(email.account_id, Some(account));
+        assert_eq!(email.reply_to.as_ref().map(|m| m.uid), Some(42));
+        let MailCommand::Send { draft } = email.send_command() else {
+            panic!("a send");
+        };
+        assert_eq!(
+            (draft.subject.as_str(), draft.body.as_str()),
+            ("Re: Lunch", "Friday works.")
+        );
+        assert_eq!(draft.reply_to, email.reply_to);
+        for (key, bad) in [
+            ("from", json!("someone-else@example.com")),
+            ("to", json!(["Ada <ada@example.com>"])),
+            ("body", json!("x".repeat(32_001))),
+            ("reply_to", json!({ "folder": "INBOX" })),
+        ] {
+            let mut wrong = args.clone();
+            wrong[key] = bad;
+            assert!(
+                Email::parse(&wrong, Some("owner@example.com")).is_err(),
+                "{key}"
+            );
+        }
+        let mut unbound = args.clone();
+        unbound["account_id"] = Value::Null;
+        unbound["from"] = json!("owner@example.com");
+        assert!(
+            Email::parse(&unbound, None).is_err(),
+            "reply_to needs an account"
+        );
+
+        let bound = Content::Email(email.clone());
+        let long = "x".repeat(32_001);
+        assert!(
+            bound
+                .edited(Edits {
+                    subject: None,
+                    body: Some(&long)
+                })
+                .is_err()
+        );
+        let other = Content::Email(Email {
+            account_id: Some(Uuid::new_v4()),
+            ..email.clone()
+        });
+        let unthreaded = Content::Email(Email {
+            reply_to: None,
+            ..email.clone()
+        });
+        let plain = Content::Email(Email {
+            account_id: None,
+            reply_to: None,
+            ..email
+        });
+        for changed in [&other, &unthreaded, &plain] {
+            assert!(
+                !bound.same_channel(changed),
+                "a revision keeps account and thread"
+            );
+        }
+        let wire = serde_json::to_value(&plain).unwrap();
+        assert!(
+            wire.get("account_id").is_none(),
+            "an unbound email keeps its wire shape"
+        );
     }
 
     #[test]

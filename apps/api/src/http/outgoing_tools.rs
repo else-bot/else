@@ -1,8 +1,10 @@
 //! MCP tools for outgoing drafts the owner approves: emails, messages, and
 //! posts (see docs/decisions/0003-outgoing-drafts.md). `draft_email` and
 //! `draft_message` parse their channel's content; every other step is
-//! shared. Sending itself uses the bot's existing delivery: an external
-//! computer tool call naming the approved draft, or its host tools after
+//! shared. An email bound to a connected account is sent by the API
+//! through that account (`send_draft`), as one durable mail action. Other
+//! drafts are sent by the bot's existing delivery: an external computer
+//! tool call naming the approved draft, or its host tools after
 //! `start_draft_send`.
 
 use serde_json::{Value, json};
@@ -11,14 +13,16 @@ use uuid::Uuid;
 use super::AppState;
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::outgoing::{self, Content, Delivery, Email, MAX_DETAIL, Message, Platform, Status};
+use crate::connectors::{store, types::MailError};
 use crate::db::outgoing_drafts::{self, DraftError, OutgoingDraft};
-use crate::grants::Grant;
+use crate::grants::{Grant, Tool};
 
 pub const TOOL_NAMES: &[&str] = &[
     "draft_email",
     "draft_message",
     "confirm_draft_approval",
     "start_draft_send",
+    "send_draft",
     "report_draft_send",
 ];
 
@@ -50,13 +54,29 @@ pub(super) fn schemas() -> Vec<Value> {
             "name": "draft_email",
             "description": format!("Show the owner an email you drafted. Use this whenever the \
                 owner asks to draft, write, revise, or send an email you would send for the \
-                owner, instead of ask_permission or an approval card. They may edit its subject \
-                and body. {REVIEW}"),
+                owner, instead of ask_permission or an approval card. To send from a connected \
+                account (mail_accounts with send permission), pass its account_id instead of \
+                from, and reply_to to answer a message in its thread; else.bot then sends it \
+                with send_draft. They may edit its subject and body. {REVIEW}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string", "minLength": 3, "maxLength": outgoing::MAX_ADDRESS,
-                              "description": "The address you will send from." },
+                              "description": "The address you will send from with your own \
+                                  tools. Omit with account_id." },
+                    "account_id": { "type": "string", "format": "uuid",
+                                    "description": "A connected account from mail_accounts that \
+                                        this email goes from." },
+                    "reply_to": { "type": "object",
+                                  "description": "With account_id: the message this answers, \
+                                      {folder, uid_validity, uid} from mail_action. Only its \
+                                      thread is used; set to, cc, and subject yourself.",
+                                  "properties": {
+                                      "folder": { "type": "string" },
+                                      "uid_validity": { "type": "integer", "minimum": 1 },
+                                      "uid": { "type": "integer", "minimum": 1 } },
+                                  "required": ["folder", "uid_validity", "uid"],
+                                  "additionalProperties": false },
                     "to": { "type": "array", "minItems": 1, "maxItems": outgoing::MAX_RECIPIENTS,
                             "items": address },
                     "cc": list.clone(),
@@ -65,7 +85,7 @@ pub(super) fn schemas() -> Vec<Value> {
                     "body": body.clone(),
                     "replaces": draft_id(),
                 },
-                "required": ["from", "to", "subject", "body"],
+                "required": ["to", "subject", "body"],
                 "additionalProperties": false,
             },
             "annotations": write,
@@ -102,9 +122,9 @@ pub(super) fn schemas() -> Vec<Value> {
                 [else.bot outgoing drafts] context marks the draft in_context=\"true\" and the \
                 owner's own words clearly say to send it as it is (for example \"looks good, send \
                 it\"). Not for a request to change it (revise with draft_email or draft_message \
-                and replaces), a question, or a hesitation. Then send it once (see \
-                start_draft_send and the approved_draft argument of computer tools) and report \
-                with report_draft_send.",
+                and replaces), a question, or a hesitation. With a connected account, send \
+                it with send_draft. Otherwise send it once (see start_draft_send and the \
+                approved_draft argument of computer tools), then report with report_draft_send.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "draft_id": draft_id() },
@@ -128,6 +148,23 @@ pub(super) fn schemas() -> Vec<Value> {
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": false, "openWorldHint": false },
+        }),
+        json!({
+            "name": "send_draft",
+            "description": "Send an approved email that goes from a connected account \
+                (drafted with account_id). else.bot sends exactly the approved revision once \
+                through that account and records the receipt on the card; do not call \
+                report_draft_send for it. Calling it again in this request returns the same \
+                send, never a second one. Status sending means the result is not known yet: \
+                call it again later in this request, never mail_action.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "draft_id": draft_id() },
+                "required": ["draft_id"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": true },
         }),
         json!({
             "name": "report_draft_send",
@@ -191,7 +228,13 @@ fn only(args: &Value, allowed: &[&str]) -> Result<(), Outcome> {
 
 pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let result = match name {
-        "draft_email" => draft(state, grant, args, Email::parse(args).map(Content::Email)).await,
+        "draft_email" => match sender(state, grant, args).await {
+            Ok(account) => {
+                let email = Email::parse(args, account.as_deref()).map(Content::Email);
+                draft(state, grant, args, email).await
+            }
+            Err(outcome) => Err(outcome),
+        },
         "draft_message" => {
             draft(
                 state,
@@ -203,6 +246,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
         }
         "confirm_draft_approval" => confirm(state, grant, args).await,
         "start_draft_send" => start(state, grant, args).await,
+        "send_draft" => send(state, grant, args).await,
         _ => report(state, grant, args).await,
     };
     result.unwrap_or_else(|outcome| outcome)
@@ -252,20 +296,70 @@ async fn draft(
     ))
 }
 
+async fn sender(state: &AppState, grant: &Grant, args: &Value) -> Result<Option<String>, Outcome> {
+    let Some(id) = args.get("account_id").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let Some(id) = id.as_str().and_then(|id| id.parse::<Uuid>().ok()) else {
+        return Ok(None);
+    };
+    let forbidden = || {
+        (
+            tool_error(
+                "MAIL_FORBIDDEN: this task cannot send from that account. Use an account \
+                        mail_accounts lists with send permission, or omit account_id and send \
+                        with your own tools.",
+            ),
+            Some("rejected MAIL_FORBIDDEN".to_owned()),
+        )
+    };
+    if !grant.allows(Tool::Mail) {
+        return Err(forbidden());
+    }
+    let (account, permissions) = tokio::join!(
+        store::account(&state.db, id),
+        store::permissions(&state.db, id, grant.bot_id)
+    );
+    let unavailable = |_| {
+        (
+            tool_error("UNAVAILABLE: mail accounts could not be read."),
+            None,
+        )
+    };
+    match (
+        account.map_err(unavailable)?,
+        permissions.map_err(unavailable)?,
+    ) {
+        (Some(account), Some(p)) if account.state == "active" && p.read && p.write && p.send => {
+            Ok(Some(account.config.address))
+        }
+        _ => Err(forbidden()),
+    }
+}
+
 async fn confirm(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
     only(args, &["draft_id"])?;
     let id = id_arg(args, "draft_id")?;
     let row = outgoing_drafts::confirm(&state.db, grant.turn_id, id)
         .await
         .map_err(refused)?;
+    let next = if row.content.account().is_some() {
+        "Send exactly this email with send_draft and this draft_id. It uses the connected \
+         account and records the result; do not send with other tools or report_draft_send."
+            .to_owned()
+    } else {
+        format!(
+            "Send exactly this {} now, once: with a computer tool declared \
+                 effect external and approved_draft set to this draft_id, or with your host \
+                 tools after start_draft_send. Then call report_draft_send.",
+            row.content.noun()
+        )
+    };
     Ok((
         tool_result(json!({
             "status": "approved",
             "draft": draft_json(&row),
-            "next": format!("Send exactly this {} now, once: with a computer tool declared \
-                     effect external and approved_draft set to this draft_id, or with your host \
-                     tools after start_draft_send. Then call report_draft_send.",
-                     row.content.noun()),
+            "next": next,
         })),
         Some(format!(
             "owner message approved {} {} version {}",
@@ -294,6 +388,86 @@ async fn start(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome,
             "claimed {} {} for a host send",
             row.content.noun(),
             row.id
+        )),
+    ))
+}
+
+async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, Outcome> {
+    only(args, &["draft_id"])?;
+    let id = id_arg(args, "draft_id")?;
+    let manager = match (&state.connectors, grant.allows(Tool::Mail)) {
+        (Some(manager), true) => manager,
+        _ => {
+            return Err((
+                tool_error("MAIL_UNAVAILABLE: this task has no mail tools."),
+                None,
+            ));
+        }
+    };
+    let draft = outgoing_drafts::load_for(&state.db, grant.bot_id, id)
+        .await
+        .map_err(refused)?;
+    let Some(account_id) = draft.content.account() else {
+        return Err(refused(DraftError::NotConnected));
+    };
+    let settled = matches!(
+        draft.status,
+        Status::Sent | Status::Failed | Status::Uncertain
+    ) && draft.send_turn_id == Some(grant.turn_id)
+        && matches!(draft.delivery.as_deref(), Some(Delivery::Mail { .. }));
+    let row = if settled {
+        draft
+    } else {
+        let delivery = Delivery::Mail {
+            account_id,
+            action_id: Uuid::new_v4(),
+        };
+        let row = outgoing_drafts::claim(&state.db, grant.turn_id, id, &delivery)
+            .await
+            .map_err(refused)?;
+        let (Content::Email(email), Some(Delivery::Mail { action_id, .. })) =
+            (&row.content.0, row.delivery.as_deref())
+        else {
+            return Err(refused(DraftError::NotConnected));
+        };
+        let result = manager
+            .execute(
+                account_id,
+                grant.bot_id,
+                grant.turn_id,
+                Some(*action_id),
+                email.send_command(),
+            )
+            .await;
+        let refusal = result.as_ref().err().map(|err: &MailError| err.code);
+        outgoing_drafts::after_mail_send(&state.db, id, refusal)
+            .await
+            .map_err(refused)?
+    };
+    let next = match row.status {
+        Status::Sent => "It was sent. Tell the owner briefly.",
+        Status::Sending => {
+            "The result is not known yet. Call send_draft again later in this \
+                            request to read it; it never sends twice."
+        }
+        Status::Failed => "It was not sent. Tell the owner why; they can approve it again in chat.",
+        _ => {
+            "It may have been sent. Tell the owner to check the Sent folder; never send it \
+              again without their new approval."
+        }
+    };
+    Ok((
+        tool_result(json!({
+            "status": row.status,
+            "draft_id": row.id,
+            "medium": "email",
+            "detail": row.result_detail,
+            "next": next,
+        })),
+        Some(format!(
+            "email {} {} through its connected account",
+            row.id,
+            row.status.as_str()
         )),
     ))
 }

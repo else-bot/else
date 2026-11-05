@@ -66,6 +66,14 @@ CREATE VIEW turn_holds AS
 
 CREATE TRIGGER turns_end_draft_sends AFTER UPDATE OF status ON turns
 WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'interrupted', 'failed', 'uncertain') BEGIN
+    UPDATE outgoing_drafts SET status = 'failed',
+        result_detail = 'The request ended before the mail connector sent it. Nothing was sent.',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+        settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+    WHERE send_turn_id = NEW.id AND status = 'sending' AND json_extract(delivery, '$.via') = 'mail'
+      AND NOT EXISTS (SELECT 1 FROM connector_actions a
+                      WHERE lower(hex(a.account_id)) = replace(json_extract(delivery, '$.account_id'), '-', '')
+                        AND lower(hex(a.action_id)) = replace(json_extract(delivery, '$.action_id'), '-', ''));
     UPDATE outgoing_drafts SET status = 'uncertain',
         result_detail = 'The request ended before the bot reported whether it was sent.',
         updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
@@ -76,4 +84,20 @@ WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'int
         updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
         settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
     WHERE send_turn_id = NEW.id AND status = 'approved';
+END;
+
+CREATE TRIGGER connector_actions_settle_drafts AFTER UPDATE OF status ON connector_actions
+WHEN OLD.status <> NEW.status AND NEW.status <> 'dispatching' BEGIN
+    UPDATE outgoing_drafts SET
+        status = CASE NEW.status WHEN 'succeeded' THEN 'sent' ELSE NEW.status END,
+        result_detail = CASE NEW.status
+            WHEN 'succeeded' THEN 'The mail server accepted it from the connected account.'
+            WHEN 'failed' THEN 'The mail server refused it. Nothing was sent.'
+            ELSE 'The mail connector could not confirm delivery. It may have been sent. Check the Sent folder before sending it again.'
+        END,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+        settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+    WHERE status IN ('sending', 'uncertain') AND json_extract(delivery, '$.via') = 'mail'
+      AND replace(json_extract(delivery, '$.account_id'), '-', '') = lower(hex(NEW.account_id))
+      AND replace(json_extract(delivery, '$.action_id'), '-', '') = lower(hex(NEW.action_id));
 END;

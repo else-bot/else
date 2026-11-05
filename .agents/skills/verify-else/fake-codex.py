@@ -69,6 +69,10 @@ def draft_reply(turn, latest, packet, stopped):
         draft_id = current[0]['id']
         if not approved:
             outgoing_tool('confirm_draft_approval', {'draft_id': draft_id})
+        if current[0].get('account_id'):
+            outgoing_tool('send_draft', {'draft_id': draft_id})
+            finish(turn, stopped, 'completed')
+            return True
         claimed = outgoing_tool('start_draft_send', {'draft_id': draft_id})
         if stopped.wait(3):
             return True
@@ -88,6 +92,10 @@ def draft_reply(turn, latest, packet, stopped):
             for name in ['Cc', 'Bcc']:
                 if name in fields:
                     args[name.lower()] = fields[name].split(', ')
+            if attributes.get('account_id'):
+                args['account_id'] = attributes['account_id']
+            if fields.get('Reply to message'):
+                args['reply_to'] = json.loads(fields['Reply to message'])
             tool = 'draft_email'
         else:
             args = {'platform': attributes['platform']}

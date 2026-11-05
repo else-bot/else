@@ -217,7 +217,9 @@ impl MailCommand {
             | Self::Delete { message } => msg(message),
             Self::Attachment { message, part } => msg(message) && *part < 1000,
             Self::Move { message, folder: f } => msg(message) && folder(f),
-            Self::Draft { draft: d } | Self::Send { draft: d } => draft(d),
+            Self::Draft { draft: d } | Self::Send { draft: d } => {
+                draft(d) && d.reply_to.as_ref().is_none_or(msg)
+            }
             Self::Reply { message, body, .. } => msg(message) && body.len() <= 32_000,
             Self::Forward {
                 message, to, body, ..
@@ -262,6 +264,7 @@ mod tests {
             subject: "hello\r\nBcc: attacker@example.com".into(),
             body: String::new(),
             attachments: vec![],
+            reply_to: None,
         };
         assert!(MailCommand::Send { draft }.validate().is_err());
         assert!(
@@ -272,7 +275,8 @@ mod tests {
                     bcc: vec![],
                     subject: "hello".into(),
                     body: String::new(),
-                    attachments: vec![]
+                    attachments: vec![],
+                    reply_to: None
                 }
             }
             .allowed(&Permissions {

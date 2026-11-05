@@ -102,6 +102,12 @@ impl AppState {
         self
     }
 
+    /// Replace the email connector manager, for a test mail transport.
+    pub fn with_connectors(mut self, connectors: Arc<crate::connectors::ConnectorManager>) -> Self {
+        self.connectors = Some(connectors);
+        self
+    }
+
     pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
         self.computers = Some(computers);
         self
