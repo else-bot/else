@@ -63,8 +63,10 @@ impl EntityInputHandler for ComputerView {
             .map(|text| 0..text.encode_utf16().count())
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_text = None;
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.marked_text.take() {
+            self.replace_text_in_range(None, &text, window, cx);
+        }
     }
 
     fn replace_text_in_range(
