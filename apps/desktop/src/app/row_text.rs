@@ -86,7 +86,7 @@ impl RowText {
                     if current != Some(&state) {
                         return;
                     }
-                    if let Some(ix) = view.rows.iter().position(|r| r.key == key) {
+                    if let Some(ix) = view.row_index(key) {
                         view.list.remeasure_items(ix..ix + 1);
                         app.check_reading(window, cx);
                         cx.notify();

@@ -35,6 +35,7 @@ pub struct TurnRecord {
     pub error_message: Option<String>,
     pub effect_uncertain: bool,
     pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub attempt: i32,
     /// The bot's requests for secrets during this turn (metadata only).
@@ -53,7 +54,7 @@ pub struct TurnRecord {
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
     t.owner_item_id AS source_item_id, t.provider_id, t.profile_revision, t.profile, t.status,
-    t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.finished_at, t.attempt,
+    t.error_code, t.error_message, t.effect_uncertain, t.created_at, t.started_at, t.finished_at, t.attempt,
     (SELECT json_object('routine_id', lower(hex(r.routine_id)), 'name', r.name, 'due_at', r.due_at)
      FROM routine_runs r WHERE r.turn_id = t.id) AS routine";
 

@@ -173,6 +173,10 @@ pub struct Turn {
     pub error: Option<TurnError>,
     pub effect_uncertain: bool,
     #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
     /// Absent from servers without owner questions.
     #[serde(default)]

@@ -1,0 +1,382 @@
+use crate::model::Conversation;
+use chrono::{DateTime, Utc};
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum ReplyState {
+    Queued,
+    Working,
+    Waiting,
+    Stopping,
+    Complete,
+    Stopped,
+    Failed,
+    Uncertain,
+}
+
+impl ReplyState {
+    pub(in crate::app) fn ticking(self) -> bool {
+        matches!(self, Self::Working | Self::Waiting | Self::Stopping)
+    }
+
+    pub(in crate::app) fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Complete | Self::Stopped | Self::Failed | Self::Uncertain
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::app) struct TaskReply {
+    pub turn: Uuid,
+    pub state: ReplyState,
+    pub anchor: Option<Uuid>,
+    pub latest: Option<Uuid>,
+    pub latest_kept: bool,
+    pub summary: Option<String>,
+    pub history: Vec<Uuid>,
+    pub kept: Vec<Uuid>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl TaskReply {
+    pub(in crate::app) fn elapsed(&self, now: DateTime<Utc>) -> Option<String> {
+        let start = self.started_at?;
+        let end = if self.state.terminal() {
+            self.finished_at?
+        } else {
+            now
+        };
+        Some(format_elapsed((end - start).num_seconds().max(0)))
+    }
+}
+
+pub(super) fn format_elapsed(seconds: i64) -> String {
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
+    }
+}
+
+pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid, TaskReply> {
+    let reacted: HashSet<_> = conversation
+        .items()
+        .filter_map(|item| item.reaction.map(|reaction| reaction.item_id))
+        .collect();
+    let greeting = conversation
+        .items()
+        .next()
+        .filter(|item| item.seq == 1 && item.kind == "assistant")
+        .map(|item| item.turn_id);
+    let mut replies: HashMap<_, _> = conversation
+        .turns_in_order()
+        .into_iter()
+        .filter(|turn| {
+            !(Some(turn.id) == greeting
+                && turn.turn_no == 1
+                && turn.started_at.is_none()
+                && turn.status == "completed")
+        })
+        .filter_map(|turn| {
+            let state = match turn.status.as_str() {
+                "queued" => ReplyState::Queued,
+                "preparing" | "sending" | "running" => ReplyState::Working,
+                "waiting" => ReplyState::Waiting,
+                "cancelling" => ReplyState::Stopping,
+                "completed" => ReplyState::Complete,
+                "interrupted" => ReplyState::Stopped,
+                "failed" => ReplyState::Failed,
+                "uncertain" => ReplyState::Uncertain,
+                _ => return None,
+            };
+            Some((
+                turn.id,
+                TaskReply {
+                    turn: turn.id,
+                    state,
+                    anchor: None,
+                    latest: None,
+                    latest_kept: false,
+                    summary: None,
+                    history: Vec::new(),
+                    kept: Vec::new(),
+                    started_at: turn.started_at,
+                    finished_at: turn.finished_at,
+                },
+            ))
+        })
+        .collect();
+    for item in conversation.items() {
+        let Some(reply) = replies.get_mut(&item.turn_id) else {
+            continue;
+        };
+        if item.kind == "assistant" {
+            if let Some(previous) = reply.latest.replace(item.id) {
+                if reply.latest_kept {
+                    reply.kept.push(previous)
+                } else {
+                    reply.history.push(previous)
+                }
+            }
+            reply.latest_kept = reacted.contains(&item.id)
+                || item
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }));
+            reply.anchor = Some(item.id);
+        } else if reply.latest.is_none() {
+            reply.anchor = Some(item.id);
+        }
+    }
+    for reply in replies
+        .values_mut()
+        .filter(|reply| reply.state == ReplyState::Working)
+    {
+        reply.summary = reply
+            .latest
+            .and_then(|id| conversation.item(id))
+            .and_then(|item| {
+                let line: String = item
+                    .text
+                    .lines()
+                    .find(|line| !line.trim().is_empty())?
+                    .chars()
+                    .take(180)
+                    .collect();
+                let plain = markdown::to_mdast(&line, &markdown::ParseOptions::default())
+                    .ok()?
+                    .to_string();
+                (!plain.trim().is_empty()).then_some(plain)
+            });
+    }
+    replies
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Frame, Snapshot};
+    use serde_json::{Value, json};
+
+    fn id(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn turn(number: u128, status: &str) -> Value {
+        json!({
+            "id": id(number), "request_id": id(number + 100), "turn_no": number,
+            "provider_id": "synthetic", "status": status, "error": null,
+            "effect_uncertain": false, "created_at": "2026-11-05T10:00:00Z",
+            "started_at": "2026-11-05T10:01:00Z", "finished_at": "2026-11-05T10:08:50Z"
+        })
+    }
+
+    fn item(number: u128, turn: u128, kind: &str) -> Value {
+        json!({"id": id(number), "seq": number, "turn_id": id(turn), "kind": kind, "text": format!("Message {number}")})
+    }
+
+    fn conversation(items: Vec<Value>, turns: Vec<Value>) -> Conversation {
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "event_cursor": "test:0", "items": items, "turns": turns,
+            "activity": {"phase": "idle", "queued_count": 0}
+        }))
+        .unwrap();
+        Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    #[test]
+    fn routine_updates_fold_into_history_and_the_last_reply_is_the_answer() {
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                item(2, 10, "assistant"),
+                item(3, 10, "assistant"),
+                item(4, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        let replies = task_replies(&c);
+        let reply = &replies[&id(10)];
+        assert_eq!(reply.latest, Some(id(4)));
+        assert_eq!(reply.anchor, Some(id(4)));
+        assert_eq!(reply.history, [id(2), id(3)]);
+        assert_eq!(reply.state, ReplyState::Complete);
+        assert_eq!(c.items().count(), 4);
+    }
+
+    #[test]
+    fn streaming_and_reconnect_choose_the_same_capsule_and_reply() {
+        let mut c = conversation(vec![item(1, 10, "user")], vec![turn(10, "running")]);
+        let empty = task_replies(&c).remove(&id(10)).unwrap();
+        assert_eq!(empty.anchor, Some(id(1)));
+        assert_eq!(empty.latest, None);
+        for (seq, event, data) in [
+            (1, "item.upsert", json!({"item": item(2, 10, "assistant")})),
+            (2, "item.upsert", json!({"item": item(3, 10, "assistant")})),
+            (3, "turn.updated", json!({"turn": turn(10, "completed")})),
+        ] {
+            c.apply(&Frame {
+                id: Some(format!("test:{seq}")),
+                event: event.into(),
+                data: data.to_string(),
+            })
+            .unwrap();
+        }
+        let reloaded = conversation(
+            vec![
+                item(1, 10, "user"),
+                item(2, 10, "assistant"),
+                item(3, 10, "assistant"),
+            ],
+            vec![turn(10, "completed")],
+        );
+        assert_eq!(task_replies(&c), task_replies(&reloaded));
+    }
+
+    #[test]
+    fn interleaved_tasks_and_handoffs_keep_their_own_replies() {
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                item(2, 10, "assistant"),
+                item(3, 11, "assistant"),
+                item(4, 10, "status"),
+                item(5, 10, "assistant"),
+            ],
+            vec![turn(10, "completed"), turn(11, "waiting")],
+        );
+        let replies = task_replies(&c);
+        assert_eq!(replies[&id(10)].history, [id(2)]);
+        assert_eq!(replies[&id(10)].latest, Some(id(5)));
+        assert_eq!(replies[&id(11)].latest, Some(id(3)));
+        assert_eq!(replies[&id(11)].state, ReplyState::Waiting);
+        assert_eq!(c.item(id(4)).unwrap().kind, "status");
+    }
+
+    #[test]
+    fn feedback_keeps_an_earlier_update_visible() {
+        let mut feedback = item(4, 11, "user");
+        feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
+        let c = conversation(
+            vec![
+                item(1, 10, "user"),
+                item(2, 10, "assistant"),
+                item(3, 10, "assistant"),
+                feedback,
+            ],
+            vec![turn(10, "completed"), turn(11, "queued")],
+        );
+        let replies = task_replies(&c);
+        assert_eq!(replies[&id(10)].kept, [id(2)]);
+        assert!(replies[&id(10)].history.is_empty());
+    }
+
+    #[test]
+    fn duration_uses_execution_start_and_freezes_at_the_server_finish() {
+        let c = conversation(vec![], vec![turn(10, "completed")]);
+        let reply = task_replies(&c).remove(&id(10)).unwrap();
+        assert_eq!(
+            reply
+                .elapsed("2027-01-01T00:00:00Z".parse().unwrap())
+                .as_deref(),
+            Some("7m 50s")
+        );
+        let mut legacy = reply.clone();
+        legacy.started_at = None;
+        assert_eq!(legacy.elapsed(Utc::now()), None);
+        legacy.started_at = reply.started_at;
+        legacy.finished_at = None;
+        assert_eq!(legacy.elapsed(Utc::now()), None);
+    }
+
+    #[test]
+    fn stopped_and_failed_tasks_never_claim_completion() {
+        for (status, state) in [
+            ("interrupted", ReplyState::Stopped),
+            ("failed", ReplyState::Failed),
+            ("uncertain", ReplyState::Uncertain),
+            ("waiting", ReplyState::Waiting),
+            ("cancelling", ReplyState::Stopping),
+        ] {
+            let c = conversation(vec![item(1, 10, "assistant")], vec![turn(10, status)]);
+            let reply = task_replies(&c).remove(&id(10)).unwrap();
+            assert_eq!(reply.state, state);
+            assert_eq!(reply.latest, Some(id(1)));
+            assert_ne!(reply.state, ReplyState::Complete);
+        }
+        let unknown = conversation(
+            vec![item(1, 10, "assistant")],
+            vec![turn(10, "future_status")],
+        );
+        assert!(task_replies(&unknown).is_empty());
+    }
+
+    #[test]
+    fn elapsed_labels_handle_short_tasks_and_hours() {
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(59), "59s");
+        assert_eq!(format_elapsed(60), "1m 00s");
+        assert_eq!(format_elapsed(3600), "1h 00m");
+    }
+
+    #[test]
+    fn the_static_welcome_is_not_reported_as_completed_work() {
+        let mut greeting = turn(1, "completed");
+        greeting["started_at"] = Value::Null;
+        let c = conversation(vec![item(1, 1, "assistant")], vec![greeting]);
+        assert!(task_replies(&c).is_empty());
+        assert_eq!(c.latest_reply().unwrap().text, "Message 1");
+    }
+
+    #[test]
+    fn an_earlier_file_remains_visible_beside_the_final_answer() {
+        let mut file = item(2, 10, "assistant");
+        file["parts"] = json!([{"type":"file", "file": {
+            "id":id(1000), "name":"report.json", "media_type":"application/json", "size":42
+        }}]);
+        let c = conversation(
+            vec![item(1, 10, "user"), file, item(3, 10, "assistant")],
+            vec![turn(10, "completed")],
+        );
+        let reply = task_replies(&c).remove(&id(10)).unwrap();
+        assert_eq!(reply.kept, [id(2)]);
+        assert_eq!(reply.latest, Some(id(3)));
+        assert!(reply.history.is_empty());
+    }
+
+    #[test]
+    fn queued_cancellation_and_legacy_turns_do_not_invent_work_time() {
+        for status in ["queued", "interrupted", "completed"] {
+            let mut record = turn(10, status);
+            record["started_at"] = Value::Null;
+            let c = conversation(vec![item(1, 10, "user")], vec![record]);
+            assert_eq!(task_replies(&c)[&id(10)].elapsed(Utc::now()), None);
+        }
+    }
+
+    #[test]
+    fn progress_title_uses_plain_markdown_text() {
+        let mut update = item(2, 10, "assistant");
+        update["text"] =
+            json!("\n## **Checking** [backup](https://example.invalid) ✓\nMore detail.");
+        let c = conversation(vec![item(1, 10, "user"), update], vec![turn(10, "running")]);
+        assert_eq!(
+            task_replies(&c)[&id(10)].summary.as_deref(),
+            Some("Checking backup ✓")
+        );
+    }
+
+    #[test]
+    fn a_file_in_the_current_live_update_is_kept_visible() {
+        let mut file = item(2, 10, "assistant");
+        file["parts"] = json!([{"type":"file", "file": {
+            "id":id(1000), "name":"report.json", "media_type":"application/json", "size":42
+        }}]);
+        let c = conversation(vec![item(1, 10, "user"), file], vec![turn(10, "running")]);
+        assert!(task_replies(&c)[&id(10)].latest_kept);
+    }
+}
