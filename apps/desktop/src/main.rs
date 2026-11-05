@@ -5,6 +5,7 @@ mod attachments;
 mod avatar;
 mod config;
 mod connection;
+mod email;
 mod inbox;
 mod launch;
 mod model;

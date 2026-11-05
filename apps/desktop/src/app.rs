@@ -466,10 +466,14 @@ impl ElseApp {
         }
     }
 
-    fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_bot(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.inbox.open(id);
         self.select(Some(id), window, cx);
         self.check_reading(window, cx);
+    }
+
+    pub(crate) fn selected_bot_id(&self) -> Option<Uuid> {
+        self.selected
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {

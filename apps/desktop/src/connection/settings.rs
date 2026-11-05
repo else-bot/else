@@ -26,6 +26,37 @@ pub(super) enum Presentation {
 }
 
 impl Shell {
+    pub(super) fn open_email_from_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bot = self
+            .active
+            .as_ref()
+            .and_then(|active| active.app.read(cx).selected_bot_id());
+        self.open_email(bot, window, cx);
+        self.select_settings(SettingsSection::Email, window, cx);
+    }
+
+    fn open_email(&mut self, bot: Option<uuid::Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = &self.active else {
+            return;
+        };
+        let client = active.client.clone();
+        let view = cx.new(|cx| crate::email::EmailSettings::new(client, bot, window, cx));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            |shell, _, event: &crate::email::OpenBot, window, cx| {
+                let app = shell.active.as_ref().map(|active| active.app.clone());
+                window.close_dialog(cx);
+                shell.cancel(window, cx);
+                if let Some(app) = app {
+                    app.update(cx, |app, cx| app.open_bot(event.0, window, cx));
+                }
+            },
+        );
+        self.email = Some((view, subscription));
+        cx.notify();
+    }
+
     pub(super) fn settings_section(&self) -> Option<SettingsSection> {
         match self.setup.as_ref()?.presentation {
             Presentation::Onboarding => None,
@@ -71,7 +102,10 @@ impl Shell {
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
             let height = if shell.upgrade().is_some_and(|shell| {
-                shell.read(cx).settings_section() == Some(SettingsSection::Backups)
+                matches!(
+                    shell.read(cx).settings_section(),
+                    Some(SettingsSection::Backups | SettingsSection::Email)
+                )
             }) {
                 px(760.)
             } else {
@@ -136,6 +170,11 @@ impl Shell {
         }
         if section == SettingsSection::Backups && self.backups.is_none() {
             self.open_backups(window, cx);
+        }
+        if section == SettingsSection::Email && self.email.is_none() {
+            self.open_email(None, window, cx);
+        } else if section != SettingsSection::Email {
+            self.email = None;
         }
         if section == SettingsSection::Updates {
             self.update_action(super::updates::Action::RefreshWork, cx);
@@ -232,7 +271,9 @@ impl Shell {
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
-            SettingsSection::Email => email_settings(cx),
+            SettingsSection::Email => div()
+                .children(self.email.as_ref().map(|(view, _)| view.clone()))
+                .into_any_element(),
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
@@ -654,54 +695,4 @@ pub(super) fn section_heading(title: &'static str, description: &'static str, cx
                 .text_color(cx.theme().muted_foreground)
                 .child(description),
         )
-}
-
-fn email_settings(cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    v_flex()
-        .gap_6()
-        .child(section_heading(
-            "Email",
-            "Manage the inboxes your bots can work with.",
-            cx,
-        ))
-        .child(
-            v_flex()
-                .items_center()
-                .gap_3()
-                .px_5()
-                .py_10()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size_12()
-                        .mb_1()
-                        .rounded(theme.radius_lg)
-                        .bg(theme.secondary)
-                        .child(
-                            Icon::new(IconName::Mail)
-                                .size_6()
-                                .text_color(theme.muted_foreground),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("No email accounts connected"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme.muted_foreground)
-                        .child("Your connected inboxes and their bot access will appear here."),
-                ),
-        )
-        .into_any_element()
 }

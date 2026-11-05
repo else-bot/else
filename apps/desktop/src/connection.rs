@@ -28,7 +28,7 @@ const STORY_MIN_WIDTH: f32 = 760.;
 
 pub(crate) const SHELL_CONTEXT: &str = "AppShell";
 
-actions!(else_desktop, [OpenAppSettings]);
+actions!(else_desktop, [OpenAppSettings, OpenEmailSettings]);
 
 struct Verified {
     profile: Profile,
@@ -152,6 +152,7 @@ pub struct Shell {
     updates: updates::View,
     backups: Option<backups::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
+    email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
 }
 
 impl Shell {
@@ -194,6 +195,7 @@ impl Shell {
             updates,
             backups: None,
             socials: None,
+            email: None,
         };
         match loaded {
             Ok(Some(profile))
@@ -267,6 +269,7 @@ impl Shell {
             .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
             .unwrap_or_default();
         self.backups = None;
+        self.email = None;
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
         let observer = cx.observe_in(&app, window, |shell, app, window, cx| {
             if let Some(socials) = &shell.socials {
@@ -527,6 +530,7 @@ impl Shell {
         if let Some(active) = &self.active {
             self.updates.dismiss();
             self.backups = None;
+            self.email = None;
             self.setup = None;
             active
                 .app
@@ -569,6 +573,10 @@ impl Render for Shell {
                 .key_context(SHELL_CONTEXT)
                 .on_action(cx.listener(|shell, _: &OpenAppSettings, window, cx| {
                     shell.open_settings(window, cx)
+                }))
+                .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
+                    shell.open_settings(window, cx);
+                    shell.open_email_from_chat(window, cx);
                 }))
                 .size_full()
                 .bg(theme.background)
