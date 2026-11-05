@@ -1,17 +1,26 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
+use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
 use gpui_kit::base::text::{MarkdownExtensions, TextView};
+use gpui_kit::component::input::InputContent;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RowFormat {
     Plain,
     Markdown,
+}
+
+pub(super) struct RowSource {
+    pub text: String,
+    pub parts: Vec<MessagePart>,
 }
 
 pub(super) struct RowText {
@@ -20,6 +29,10 @@ pub(super) struct RowText {
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
     widget: Widget,
+    parts: Vec<MessagePart>,
+    files: HashMap<Uuid, Attachment>,
+    owner: WeakEntity<ElseApp>,
+    bot: Uuid,
 }
 
 enum Widget {
@@ -33,23 +46,29 @@ enum Widget {
 impl RowText {
     pub(super) fn new(
         key: RowKey,
-        source: String,
+        source: RowSource,
         format: RowFormat,
         bots: &Arc<MentionRegistry>,
+        bot: Uuid,
         window: &mut Window,
         cx: &mut Context<ElseApp>,
     ) -> Self {
-        let mentions = match format {
+        let RowSource {
+            text: source,
+            parts,
+        } = source;
+        let mut mentions = match format {
             RowFormat::Plain => BotMention::find(&source, bots),
             RowFormat::Markdown => BotMention::in_markdown(&source, bots),
         };
+        let content = plain_content(&source, &parts, &mut mentions);
         let display = MentionDisplay::new(&source, &mentions);
         let widget = match format {
             RowFormat::Plain => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
                     .context_menu(!matches!(key, RowKey::Item(_)));
-                state.set_value(BotMention::content(&source, &mentions), window, cx);
+                state.set_value(content, window, cx);
                 state
             })),
             RowFormat::Markdown => {
@@ -82,6 +101,10 @@ impl RowText {
             bots: bots.clone(),
             display,
             widget,
+            files: file_map(&parts),
+            parts,
+            owner: cx.entity().downgrade(),
+            bot,
         }
     }
 
@@ -119,33 +142,40 @@ impl RowText {
 
     pub(super) fn sync(
         &mut self,
-        source: String,
+        source: RowSource,
         bots: &Arc<MentionRegistry>,
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        if self.source == source && Arc::ptr_eq(&self.bots, bots) {
+        let RowSource {
+            text: source,
+            parts,
+        } = source;
+        if self.source == source && self.parts == parts && Arc::ptr_eq(&self.bots, bots) {
             return false;
         }
-        let mentions = match self.format() {
+        let mut mentions = match self.format() {
             RowFormat::Plain => BotMention::find(&source, bots),
             RowFormat::Markdown => BotMention::in_markdown(&source, bots),
         };
         self.bots = bots.clone();
-        if self.source == source && self.mentions == mentions {
+        let content = plain_content(&source, &parts, &mut mentions);
+        if self.source == source && self.parts == parts && self.mentions == mentions {
             return false;
         }
         let display = MentionDisplay::new(&source, &mentions);
         match &self.widget {
-            Widget::Plain(state) => state.update(cx, |state, cx| {
-                state.set_value(BotMention::content(&source, &mentions), window, cx)
-            }),
+            Widget::Plain(state) => {
+                state.update(cx, |state, cx| state.set_value(content, window, cx))
+            }
             Widget::Markdown { state, .. } => state.update(cx, |state, cx| {
                 state.set_text(&display.text, cx);
                 state.invalidate_inline_layout(cx);
             }),
         }
         self.source = source;
+        self.files = file_map(&parts);
+        self.parts = parts;
         self.mentions = mentions;
         self.display = display;
         true
@@ -153,17 +183,40 @@ impl RowText {
 
     pub(super) fn render(&self) -> AnyElement {
         let mentions = self.mentions.clone();
+        let files = self.files.clone();
+        let preview_files = files.clone();
+        let owner = self.owner.clone();
+        let bot = self.bot;
         match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
                 .readonly(true)
                 .appearance(false)
                 .bordered(false)
                 .token(move |token, _, cx| {
+                    if let Some(file) = file_id(token.token().id()).and_then(|id| files.get(&id)) {
+                        return super::attachments::chip(
+                            token,
+                            file,
+                            None,
+                            file_size(file.size),
+                            None,
+                            cx,
+                        );
+                    }
                     mentions
                         .iter()
                         .find(|mention| mention.token_id() == token.token().id().as_ref())
                         .expect("row token belongs to its matched bot")
                         .token_element(token.line_height(), token.is_selected(), cx)
+                })
+                .on_token_click(move |event, window, cx| {
+                    if let Some(file) =
+                        file_id(event.token().id()).and_then(|id| preview_files.get(&id))
+                    {
+                        let _ = owner.update(cx, |app, cx| {
+                            app.preview_attachment(bot, file.clone(), window, cx)
+                        });
+                    }
                 })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
@@ -192,6 +245,36 @@ impl RowText {
     }
 }
 
+fn file_map(parts: &[MessagePart]) -> HashMap<Uuid, Attachment> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::File { file } => Some((file.id, file.clone())),
+            MessagePart::Text { .. } => None,
+        })
+        .collect()
+}
+
+fn plain_content(
+    source: &str,
+    parts: &[MessagePart],
+    mentions: &mut Vec<BotMention>,
+) -> InputContent {
+    let mut content = input_content(source, parts);
+    mentions.retain(|mention| {
+        content.tokens().iter().all(|file| {
+            let range = file.range();
+            mention.range.end <= range.start || mention.range.start >= range.end
+        })
+    });
+    for span in BotMention::content(source, mentions).tokens() {
+        content = content
+            .with_token(span.range(), span.token().clone())
+            .expect("mention and file spans are disjoint");
+    }
+    content
+}
+
 /// The toolkit's default link gestures.
 fn activates_link(event: &ClickEvent) -> bool {
     match event {
@@ -200,5 +283,51 @@ fn activates_link(event: &ClickEvent) -> bool {
         }
         ClickEvent::Keyboard(_) => true,
         ClickEvent::Touch(click) => !click.long_press,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_content;
+    use crate::api::Bot;
+    use crate::app::bot_mention::{BotMention, MentionRegistry};
+    use crate::attachments::{Attachment, MessagePart, file_id};
+    use uuid::Uuid;
+
+    #[test]
+    fn mentions_and_files_share_a_row_without_overlap_or_id_collisions() {
+        let id = Uuid::new_v4();
+        let bot: Bot =
+            serde_json::from_value(serde_json::json!({"id": id, "name": "Helper"})).unwrap();
+        let registry = MentionRegistry::new(&[bot]);
+        let file = Attachment {
+            id,
+            name: "@Helper".into(),
+            media_type: "text/plain".into(),
+            size: 3,
+        };
+        let text = format!("@Helper see {} after @Helper", file.fallback());
+        let parts = vec![
+            MessagePart::Text {
+                text: "@Helper see ".into(),
+            },
+            MessagePart::File { file },
+            MessagePart::Text {
+                text: " after @Helper".into(),
+            },
+        ];
+        let mut mentions = BotMention::find(&text, &registry);
+        assert_eq!(mentions.len(), 3);
+        let content = plain_content(&text, &parts, &mut mentions);
+        assert_eq!(content.text().as_ref(), text);
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(content.tokens().len(), 3);
+        assert_eq!(file_id(content.tokens()[0].token().id()), None);
+        assert_eq!(file_id(content.tokens()[1].token().id()), Some(id));
+        assert_eq!(
+            content.tokens()[1].token().text().as_ref(),
+            "[File: @Helper]"
+        );
+        assert_eq!(file_id(content.tokens()[2].token().id()), None);
     }
 }

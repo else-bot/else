@@ -2,7 +2,7 @@
 
 use super::ElseApp;
 use super::reply::Author;
-use super::row_text::{RowFormat, RowText};
+use super::row_text::{RowFormat, RowSource, RowText};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
@@ -302,6 +302,7 @@ impl ElseApp {
                     .as_ref()
                     .map_or_else(|| item.text.clone(), |task| task.prompt.clone()),
                 format,
+                item.parts.clone(),
             ));
             requests.retain(|(key, anchor)| {
                 let here = *anchor == Some(item.id);
@@ -318,6 +319,7 @@ impl ElseApp {
                 RowKey::Pending(pending.request_id),
                 pending.text.clone(),
                 RowFormat::Plain,
+                pending.parts.clone(),
             ));
         }
         let pending = self.pending.get(&bot);
@@ -393,17 +395,25 @@ impl ElseApp {
         // Create or update the selectable text of each row.
         let mut changed = Vec::new();
         let mut created = false;
-        for (key, text, format) in texts {
+        for (key, text, format, parts) in texts {
             match view.texts.get_mut(&key) {
                 Some(row) if row.format() == format => {
-                    if row.sync(text, &self.mention_bots, window, cx) {
+                    if row.sync(RowSource { text, parts }, &self.mention_bots, window, cx) {
                         changed.push(key);
                     }
                 }
                 _ => {
                     view.texts.insert(
                         key,
-                        RowText::new(key, text, format, &self.mention_bots, window, cx),
+                        RowText::new(
+                            key,
+                            RowSource { text, parts },
+                            format,
+                            &self.mention_bots,
+                            bot,
+                            window,
+                            cx,
+                        ),
                     );
                     created = true;
                 }

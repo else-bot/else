@@ -1,6 +1,7 @@
 //! SQLite adapter: connection, versioned migrations, and the
 //! transactional operations that persist application state.
 
+pub mod attachments;
 pub mod bot_profiles;
 pub mod bots;
 pub mod categories;

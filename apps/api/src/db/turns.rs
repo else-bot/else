@@ -11,7 +11,7 @@ use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use crate::app::messages::Reaction;
+use crate::app::messages::{MessagePart, Reaction};
 use crate::app::providers::{HistoryEntry, Profile, SessionState, TurnInput};
 
 /// Turn statuses past the queue that hold the bot's single active slot.
@@ -82,6 +82,8 @@ pub struct ItemRecord {
     pub reaction: Option<Json<Reaction>>,
     pub bot_task: Option<Json<BotTask>>,
     pub bot_reply: Option<Json<BotReply>>,
+    /// An owner message's ordered text and file parts; `None` for plain text.
+    pub parts: Option<Json<Vec<MessagePart>>>,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
@@ -94,7 +96,7 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
     CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
-    END AS bot_reply";
+    END AS bot_reply, i.parts";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -106,6 +108,8 @@ pub enum AcceptError {
     RequestConflict,
     #[error("reaction target is not an assistant message of this conversation")]
     InvalidReaction,
+    #[error("a file part is not one of this bot's attachments as stored")]
+    InvalidAttachment,
     #[error("work is still stopping")]
     CancellationPending,
     #[error("no saved profile for provider {0}")]
@@ -128,6 +132,9 @@ pub struct SendRequest<'a> {
     pub bot_id: Uuid,
     pub request_id: Uuid,
     pub text: &'a str,
+    /// Canonical parts (see [`crate::app::messages::canonical_parts`]);
+    /// empty for plain text.
+    pub parts: &'a [MessagePart],
     pub reaction: Option<Reaction>,
     /// The provider named by the request, as sent (part of the request hash).
     pub requested_provider: Option<&'a str>,
@@ -138,8 +145,15 @@ pub struct SendRequest<'a> {
 
 /// Text holds no NUL, so it is always the tail after the last separator.
 /// A reaction gets its own prefix, so text-only hashes are unchanged.
+/// Parts come first under their own prefix (their JSON holds no raw NUL),
+/// so messages without files keep the hashes saved before parts existed.
 pub fn request_hash(req: &SendRequest<'_>) -> Vec<u8> {
     let mut hasher = Sha256::new();
+    if !req.parts.is_empty() {
+        hasher.update(b"parts\0");
+        hasher.update(serde_json::to_vec(req.parts).expect("parts serialize"));
+        hasher.update(b"\0");
+    }
     match req.reaction {
         None => hasher.update(b"turn\0"),
         Some(reaction) => {
@@ -204,6 +218,17 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
             return Err(AcceptError::InvalidReaction);
         }
     }
+    let files: Vec<_> = req
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::File { file } => Some(file),
+            MessagePart::Text { .. } => None,
+        })
+        .collect();
+    if !crate::db::attachments::all_match(&mut tx, req.bot_id, &files).await? {
+        return Err(AcceptError::InvalidAttachment);
+    }
     if cancel_pending {
         return Err(AcceptError::CancellationPending);
     }
@@ -240,8 +265,8 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, reaction)
-         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6)",
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, reaction, parts)
+         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6, ?7)",
     )
     .bind(item_id)
     .bind(conversation_id)
@@ -249,6 +274,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     .bind(turn_id)
     .bind(req.text)
     .bind(req.reaction.map(Json))
+    .bind((!req.parts.is_empty()).then_some(Json(req.parts)))
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
@@ -575,31 +601,35 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         .bind(turn.bot_id)
         .fetch_one(&mut *conn)
         .await?;
-    let text: String =
-        sqlx::query_scalar("SELECT text FROM items WHERE id = ?1 AND kind IN ('user', 'routine')")
-            .bind(turn.source_item_id)
-            .fetch_one(&mut *conn)
-            .await?;
-    let history = sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT t.turn_no, i.kind, i.text, t.status FROM items i JOIN turns t ON t.id = i.turn_id
+    let (text, Json(parts)): (String, Json<Vec<MessagePart>>) = sqlx::query_as(
+        "SELECT text, coalesce(parts, '[]') FROM items WHERE id = ?1 AND kind IN ('user', 'routine')",
+    )
+    .bind(turn.source_item_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let history: Vec<HistoryEntry> =
+        sqlx::query_as::<_, (i64, String, String, String, Json<Vec<MessagePart>>)>(
+            "SELECT t.turn_no, i.kind, i.text, t.status, coalesce(i.parts, '[]')
+         FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'status', 'assistant')
            -- A child's reply reached this bot as its delegation outcome.
            AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
          ORDER BY t.turn_no, i.seq",
-    )
-    .bind(turn.conversation_id)
-    .bind(turn.turn_no)
-    .fetch_all(&mut *conn)
-    .await?
-    .into_iter()
-    .map(|(turn_no, kind, text, status)| HistoryEntry {
-        turn_no,
-        kind,
-        text,
-        status,
-    })
-    .collect();
+        )
+        .bind(turn.conversation_id)
+        .bind(turn.turn_no)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|(turn_no, kind, text, status, Json(parts))| HistoryEntry {
+            turn_no,
+            kind,
+            text,
+            status,
+            parts,
+        })
+        .collect();
     let session = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
         "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision
          FROM provider_sessions s
@@ -620,6 +650,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             memory_revision,
         },
     );
+    let considered = session.as_ref().map_or(0, |s| s.considered_through_turn);
+    let files = input_files(&mut conn, turn.bot_id, &parts, &history, considered).await?;
     let mut input = TurnInput {
         bot_id: turn.bot_id,
         conversation_id: turn.conversation_id,
@@ -627,6 +659,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         turn_no: turn.turn_no,
         bot_name,
         text,
+        parts,
+        files,
         profile: turn.profile.map(|Json(profile)| profile),
         history,
         session,
@@ -644,6 +678,41 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     drop(conn);
     input.memory = crate::db::memory_tree::session_context(pool, input.bot_id).await?;
     Ok(input)
+}
+
+/// Bytes of history files loaded per turn, beyond the message's own.
+const HISTORY_FILE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// The files a turn's packet may name: all of the message's own, then those
+/// of history the session has not seen, newest first within a budget.
+async fn input_files(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    parts: &[MessagePart],
+    history: &[HistoryEntry],
+    considered: i64,
+) -> Result<Vec<crate::app::providers::InputFile>, sqlx::Error> {
+    let file_ids = |parts: &[MessagePart]| -> Vec<(Uuid, u64)> {
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::File { file } => Some((file.id, file.size)),
+                MessagePart::Text { .. } => None,
+            })
+            .collect()
+    };
+    let mut ids: Vec<Uuid> = file_ids(parts).into_iter().map(|(id, _)| id).collect();
+    let mut used = 0;
+    for entry in history.iter().rev().filter(|e| e.turn_no > considered) {
+        for (id, size) in file_ids(&entry.parts).into_iter().rev() {
+            if ids.contains(&id) || used + size as usize > HISTORY_FILE_BUDGET {
+                continue;
+            }
+            used += size as usize;
+            ids.push(id);
+        }
+    }
+    crate::db::attachments::load(conn, bot_id, &ids).await
 }
 
 /// Startup reconciliation, run before the scheduler admits work. A turn
@@ -762,6 +831,7 @@ mod tests {
             bot_id: Uuid::nil(),
             request_id: Uuid::nil(),
             text: "Hello there",
+            parts: &[],
             reaction,
             requested_provider: Some("synthetic"),
             provider_id: "synthetic",
@@ -775,6 +845,33 @@ mod tests {
             hex::encode(request_hash(&request(None))),
             "15fac7d6c0ee166df9bf70a936445c1584de89d06083cbc846c1a9162c0e8352"
         );
+    }
+
+    #[test]
+    fn file_parts_are_part_of_the_request_hash() {
+        use crate::app::messages::Attachment;
+        let file = |id| MessagePart::File {
+            file: Attachment {
+                id,
+                name: "a.png".into(),
+                media_type: "image/png".into(),
+                size: 3,
+            },
+        };
+        let text = |t: &str| MessagePart::Text { text: t.into() };
+        let hash = |parts: &[MessagePart]| {
+            request_hash(&SendRequest {
+                text: "Hello [File: a.png]",
+                parts,
+                ..request(None)
+            })
+        };
+        let one = [text("Hello "), file(Uuid::nil())];
+        let plain = hash(&[]);
+        assert_ne!(hash(&one), plain);
+        assert_eq!(hash(&one), hash(&one.clone()));
+        assert_ne!(hash(&one), hash(&[text("Hello "), file(Uuid::max())]));
+        assert_ne!(hash(&one), hash(&[text("Hello  "), file(Uuid::nil())]));
     }
 
     #[test]

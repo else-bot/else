@@ -4,6 +4,7 @@
 //! results and apply them to this view. The conversation model accepts only
 //! contiguous committed events, and any inconsistency reloads a snapshot.
 
+mod attachments;
 mod bot_mention;
 mod bot_menu;
 mod categories;
@@ -165,6 +166,7 @@ pub enum Connection {
 struct PendingSend {
     request_id: Uuid,
     text: String,
+    parts: Vec<crate::attachments::MessagePart>,
     sent_at: DateTime<Utc>,
     provider_id: Option<String>,
     reaction: Option<Reaction>,
@@ -186,6 +188,7 @@ pub struct ElseApp {
     selected: Option<Uuid>,
     view: Option<ConversationView>,
     composer: Entity<TextareaState>,
+    clipboard_read: Option<Task<()>>,
     mentions: mentions::MentionMenu,
     drafts: HashMap<Uuid, Draft>,
     pending: HashMap<Uuid, Vec<PendingSend>>,
@@ -239,6 +242,7 @@ impl ElseApp {
             &composer,
             window,
             |app, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => app.composer_changed(cx),
                 InputEvent::PressEnter { shift: false, .. } => app.send(window, cx),
                 InputEvent::Focus | InputEvent::Blur => app.sync_mentions(window, cx),
                 _ => {}
@@ -264,6 +268,7 @@ impl ElseApp {
             selected: None,
             view: None,
             composer,
+            clipboard_read: None,
             mentions: Default::default(),
             drafts: HashMap::new(),
             pending: HashMap::new(),
@@ -462,15 +467,14 @@ impl ElseApp {
         }
         // Keep the draft of the bot being left.
         if let Some(previous) = self.selected {
-            self.drafts.entry(previous).or_default().text =
-                self.composer.read(cx).value().to_string();
+            self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
         }
         self.selected = id;
         self.mentions = Default::default();
         let draft = id
             .and_then(|id| self.drafts.get(&id))
-            .map(|draft| draft.text.clone())
-            .unwrap_or_default();
+            .map(|draft| draft.content.clone())
+            .unwrap_or_else(|| gpui_kit::component::input::InputContent::new(""));
         let placeholder = match self.selected_bot() {
             Some(bot) => format!("Message {}…", bot.name),
             None => "Message…".to_owned(),
@@ -527,14 +531,31 @@ impl ElseApp {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bot) = self.selected else { return };
-        let draft = Draft {
-            text: self.composer.read(cx).value().to_string(),
-            reply_to: self.drafts.get(&bot).and_then(|d| d.reply_to.clone()),
-        };
+        let draft = self.drafts.entry(bot).or_default();
+        draft.content = self.composer.read(cx).content();
         let Some(message) = draft.message() else {
             return;
         };
-        if !self.enqueue(bot, message, None, window, cx) {
+        let mut parts = match attachments::parts(&draft.content, &draft.files) {
+            Ok(parts) => parts,
+            Err(error) => {
+                self.notice = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        if !parts.is_empty() {
+            let prefix = message.len() - draft.content.text().len();
+            if prefix > 0 {
+                parts.insert(
+                    0,
+                    crate::attachments::MessagePart::Text {
+                        text: message[..prefix].to_owned(),
+                    },
+                );
+            }
+        }
+        if !self.enqueue(bot, message, parts, None, window, cx) {
             return;
         }
         self.composer
@@ -546,6 +567,7 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         text: String,
+        parts: Vec<crate::attachments::MessagePart>,
         reaction: Option<Reaction>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -565,6 +587,7 @@ impl ElseApp {
         let pending = PendingSend {
             request_id: Uuid::new_v4(),
             text,
+            parts,
             sent_at: Utc::now(),
             // The bot's own provider and model, chosen by the API.
             provider_id: None,
@@ -597,6 +620,7 @@ impl ElseApp {
                     pending.text.clone(),
                     pending.provider_id.clone(),
                     pending.reaction,
+                    pending.parts.clone(),
                 )
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
@@ -727,14 +751,20 @@ impl ElseApp {
         };
         let pending = list.remove(ix);
         if restore {
-            let current = self.composer.read(cx).value().to_string();
-            let text = if current.trim().is_empty() {
-                pending.text
-            } else {
-                format!("{current}\n\n{}", pending.text)
-            };
+            let current = self.composer.read(cx).content();
+            let restored = crate::attachments::input_content(&pending.text, &pending.parts);
+            for part in &pending.parts {
+                if let crate::attachments::MessagePart::File { file } = part {
+                    self.drafts
+                        .entry(bot)
+                        .or_default()
+                        .files
+                        .insert(file.id, attachments::DraftFile::ready(file.clone()));
+                }
+            }
+            let content = attachments::append(current, restored);
             self.composer
-                .update(cx, |state, cx| state.set_value(text, window, cx));
+                .update(cx, |state, cx| state.set_value(content, window, cx));
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
         }
         self.sync_rows(window, cx);

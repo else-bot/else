@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::app::messages::{InvalidMessage, Reaction, validate_text};
+use crate::app::messages::{InvalidMessage, MessagePart, Reaction, canonical_parts, validate_text};
 use crate::app::providers::Availability;
 use crate::db::turns::{self, AcceptError, SendRequest};
 use crate::views::*;
@@ -62,6 +62,10 @@ impl From<AcceptError> for ApiError {
                 "invalid_reaction",
                 "A reaction must target an assistant message in this conversation.",
             ),
+            AcceptError::InvalidAttachment => ApiError::bad_request(
+                "invalid_attachment",
+                "Each file must be one of this bot's uploaded attachments, as returned by its upload.",
+            ),
             AcceptError::CancellationPending => ApiError::new(
                 StatusCode::CONFLICT,
                 "cancellation_pending",
@@ -82,6 +86,9 @@ impl From<AcceptError> for ApiError {
 struct SendBody {
     request_id: Uuid,
     text: String,
+    /// Ordered text and file parts; `text` must be their flattening.
+    #[serde(default)]
+    parts: Vec<MessagePart>,
     #[serde(default)]
     provider_id: Option<String>,
     #[serde(default)]
@@ -95,14 +102,16 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let request_id = body.request_id;
     let with_id = |err: ApiError| err.with_request_id(request_id);
-    validate_text(&body.text).map_err(|err| {
-        with_id(match err {
-            InvalidMessage::TooLarge => {
-                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
-            }
-            _ => ApiError::bad_request("invalid_input", err.to_string()),
-        })
-    })?;
+    let parts = validate_text(&body.text)
+        .and_then(|()| canonical_parts(&body.text, body.parts))
+        .map_err(|err| {
+            with_id(match err {
+                InvalidMessage::TooLarge => {
+                    ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", err.to_string())
+                }
+                _ => ApiError::bad_request("invalid_input", err.to_string()),
+            })
+        })?;
     let registry = state.scheduler.registry();
     let requested = body.provider_id.as_deref();
     // Without a named provider: the bot's own, else the installation's
@@ -118,6 +127,7 @@ async fn send(
         bot_id,
         request_id,
         text: &body.text,
+        parts: &parts,
         reaction: body.reaction,
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),

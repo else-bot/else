@@ -1,5 +1,6 @@
 //! HTTP transport. Handlers translate requests into application operations.
 
+pub mod attachments;
 pub mod auth;
 pub mod bots;
 pub mod categories;
@@ -96,6 +97,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(bots::routes())
         .merge(categories::routes())
         .merge(turns::routes())
+        .merge(attachments::routes())
         .merge(conversation::routes())
         .merge(ws::routes())
         .merge(memory::routes())
@@ -213,6 +215,11 @@ async fn reject_large_body(max: usize, request: Request, next: Next) -> Response
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
+    let max = if attachments::is_upload(request.method(), request.uri().path()) {
+        max.max(attachments::MAX_UPLOAD_BODY_BYTES)
+    } else {
+        max
+    };
     if declared.is_some_and(|len| len > max as u64) {
         return ApiError::new(
             axum::http::StatusCode::PAYLOAD_TOO_LARGE,

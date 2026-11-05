@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod appearance;
+mod attachments;
 mod avatar;
 mod config;
 mod connection;
@@ -45,6 +46,7 @@ gpui_kit::assets::icon_assets!(
         Circle,
         Search,
         ChevronUp,
+        FileText,
         Pause,
         MessageSquareOff,
         Folder,

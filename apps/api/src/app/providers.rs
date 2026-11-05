@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::messages::{Attachment, MessagePart};
+
 /// The models, reasoning efforts, and service tiers an adapter applies
 /// exactly. `priority` is the Fast tier.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
@@ -50,6 +52,23 @@ pub struct HistoryEntry {
     pub text: String,
     /// The owner turn's recorded status (`completed`, `interrupted`, ...).
     pub status: String,
+    /// An owner message's ordered parts; empty for plain text.
+    pub parts: Vec<MessagePart>,
+}
+
+/// An attached file with its bytes, for an adapter to hand to its provider.
+#[derive(Clone)]
+pub struct InputFile {
+    pub attachment: Attachment,
+    pub data: std::sync::Arc<[u8]>,
+}
+
+impl std::fmt::Debug for InputFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputFile")
+            .field("attachment", &self.attachment)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A guest job of the bot, recorded by the API (not by any provider), so a
@@ -104,6 +123,12 @@ pub struct TurnInput {
     pub turn_no: i64,
     pub bot_name: String,
     pub text: String,
+    /// The owner message's ordered parts; empty for plain text. `text` is
+    /// their flattening.
+    pub parts: Vec<MessagePart>,
+    /// Bytes of the files this turn's packet may name: the message's own,
+    /// then those of missed history within a budget, newest first.
+    pub files: Vec<InputFile>,
     /// The profile snapshot taken when the message was accepted.
     pub profile: Option<Profile>,
     /// Settled conversation history before this turn, oldest first.

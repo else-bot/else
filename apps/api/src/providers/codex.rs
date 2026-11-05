@@ -209,6 +209,31 @@ impl Codex {
     }
 }
 
+/// `turn/start` input in the owner's order: text items, with each image
+/// also given as a local image right after its reference. Every file is
+/// named by its staged copy in the project directory.
+fn turn_input(segments: &[prompt::Segment<'_>], project: &std::path::Path) -> Value {
+    let mut items = Vec::new();
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            prompt::Segment::Text(t) => text.push_str(t),
+            prompt::Segment::File(file) => {
+                text.push_str(&prompt::file_reference(&file.attachment));
+                if super::attachments::is_image(&file.attachment) {
+                    items.push(json!({ "type": "text", "text": std::mem::take(&mut text) }));
+                    let path = project.join(super::attachments::relative_path(&file.attachment));
+                    items.push(json!({ "type": "localImage", "path": path }));
+                }
+            }
+        }
+    }
+    if items.is_empty() || !text.is_empty() {
+        items.push(json!({ "type": "text", "text": text }));
+    }
+    Value::Array(items)
+}
+
 /// Ask Codex to stop a turn; the terminal event still decides the outcome.
 async fn interrupt(server: &AppServer, thread_id: &str, native_turn: &str) {
     let params = json!({ "threadId": thread_id, "turnId": native_turn });
@@ -332,6 +357,13 @@ impl Provider for Codex {
         if let Err(err) = codex_home::prepare(&dirs, auth, self.tool_url.as_deref(), true) {
             return failed("provider_unavailable", err.to_string());
         }
+        if let Err(err) = super::attachments::stage(&dirs.project, &input.files).await {
+            return failed(
+                "attachment_unavailable",
+                format!("The attached files could not be prepared: {err}"),
+            );
+        }
+        let project = dirs.project.clone();
         let spec = LaunchSpec {
             turn_id: input.turn_id,
             program: program.clone(),
@@ -353,7 +385,7 @@ impl Provider for Codex {
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
         let outcome = self
-            .converse(&mut server, &input, &profile, sink, cancel)
+            .converse(&mut server, &input, &project, &profile, sink, cancel)
             .await;
         server.shutdown(SHUTDOWN_GRACE).await;
         outcome
@@ -497,6 +529,7 @@ impl Codex {
         &self,
         server: &mut AppServer,
         input: &TurnInput,
+        project: &std::path::Path,
         profile: &Profile,
         sink: &dyn TurnSink,
         cancel: CancellationToken,
@@ -533,7 +566,8 @@ impl Codex {
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (packet, selection) = prompt::turn_packet(input, considered, inject);
+        let (segments, selection) = prompt::turn_content(input, considered, inject);
+        let packet = prompt::segments_text(&segments);
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
         }
@@ -549,7 +583,7 @@ impl Codex {
                     "model": profile.model,
                     "effort": profile.reasoning_effort,
                     "serviceTier": profile.service_tier,
-                    "input": [{ "type": "text", "text": packet }],
+                    "input": turn_input(&segments, project),
                 }),
                 RPC_TIMEOUT,
             )
@@ -766,6 +800,8 @@ mod tests {
             turn_no: 9,
             bot_name: "Work".into(),
             text: "latest".into(),
+            parts: Vec::new(),
+            files: Vec::new(),
             profile: None,
             history: history
                 .into_iter()
@@ -774,6 +810,7 @@ mod tests {
                     kind: kind.into(),
                     text: text.into(),
                     status: "completed".into(),
+                    parts: Vec::new(),
                 })
                 .collect(),
             session: None,
@@ -802,6 +839,36 @@ mod tests {
         assert!(packet.ends_with("Owner's latest message:\nlatest"));
         let full = prompt::packet(&input, 0);
         assert!(full.contains("[turn 1] Owner: a\n[turn 1] Assistant: b\n[turn 2] Owner: c"));
+    }
+
+    #[test]
+    fn history_names_earlier_files_by_their_staged_copies() {
+        use crate::app::messages::{Attachment, MessagePart};
+        let file = Attachment {
+            id: Uuid::nil(),
+            name: "plan.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: 9,
+        };
+        let mut input = input(vec![
+            (1, "user", "Read [File: plan.pdf]"),
+            (1, "assistant", "Done."),
+        ]);
+        input.history[0].parts = vec![
+            MessagePart::Text {
+                text: "Read ".into(),
+            },
+            MessagePart::File { file: file.clone() },
+        ];
+        let packet = prompt::packet(&input, 0);
+        assert!(
+            packet.contains(&format!(
+                "[turn 1] Owner: Read [File: plan.pdf (application/pdf, 9 bytes), saved at .attachments/{}/plan.pdf]\n",
+                Uuid::nil()
+            )),
+            "{packet}"
+        );
+        assert!(packet.ends_with("latest"));
     }
 
     #[test]
@@ -1008,6 +1075,7 @@ mod tests {
 
     fn fake_codex(dir: &std::path::Path) -> (Codex, std::path::PathBuf) {
         let received = dir.join("received.jsonl");
+        let inputs = dir.join("inputs.jsonl");
         let script = format!(
             r#"exec python3 -c '
 import json, sys
@@ -1023,6 +1091,7 @@ for line in sys.stdin:
     elif method == "thread/start": r = {{"thread": {{"id": "fresh-thread"}}}}
     elif method == "turn/start":
         with open({received:?}, "a") as f: f.write(json.dumps(p["input"][0]["text"]) + "\n")
+        with open({inputs:?}, "a") as f: f.write(json.dumps(p["input"]) + "\n")
         r = {{"turn": {{"id": "native-turn"}}}}
     else: r = {{}}
     out({{"id": m["id"], "result": r}})
@@ -1093,6 +1162,81 @@ for line in sys.stdin:
             assert_eq!(state.native_id, native);
             assert_eq!(state.memory_revision, Some(7));
         }
+    }
+
+    #[tokio::test]
+    async fn files_reach_codex_in_order_with_images_as_local_images() {
+        use crate::app::messages::{Attachment, MessagePart};
+        use crate::app::providers::InputFile;
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, _) = fake_codex(dir.path());
+        let file = |name: &str, media_type: &str, data: &[u8]| InputFile {
+            attachment: Attachment {
+                id: Uuid::new_v4(),
+                name: name.into(),
+                media_type: media_type.into(),
+                size: data.len() as u64,
+            },
+            data: data.into(),
+        };
+        let image = file("shot.png", "image/png", b"\x89PNG fake");
+        let notes = file("notes.txt", "text/plain", b"line one\n");
+        let text = |t: &str| MessagePart::Text { text: t.into() };
+        let parts = vec![
+            text("Compare "),
+            MessagePart::File {
+                file: image.attachment.clone(),
+            },
+            text(" with\n  "),
+            MessagePart::File {
+                file: notes.attachment.clone(),
+            },
+        ];
+        let input = TurnInput {
+            text: crate::app::messages::flatten(&parts),
+            parts,
+            files: vec![image.clone(), notes.clone()],
+            profile: Some(Profile {
+                model: MODELS[0].into(),
+                reasoning_effort: "medium".into(),
+                service_tier: "default".into(),
+            }),
+            ..input(Vec::new())
+        };
+        let bot_id = input.bot_id;
+        let sink = super::super::recording::Recorded::default();
+        let outcome = codex.run(input, &sink, CancellationToken::new()).await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+
+        let project = dir.path().join(bot_id.to_string());
+        let staged =
+            |f: &InputFile| project.join(super::super::attachments::relative_path(&f.attachment));
+        assert_eq!(std::fs::read(staged(&image)).unwrap(), b"\x89PNG fake");
+        assert_eq!(std::fs::read(staged(&notes)).unwrap(), b"line one\n");
+        let sent: Value = serde_json::from_str(
+            std::fs::read_to_string(dir.path().join("inputs.jsonl"))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        let canonical = |p: std::path::PathBuf| std::fs::canonicalize(p).unwrap();
+        assert_eq!(sent[0]["type"], "text");
+        assert_eq!(
+            sent[0]["text"],
+            format!("Compare {}", prompt::file_reference(&image.attachment))
+        );
+        assert_eq!(sent[1]["type"], "localImage");
+        assert_eq!(
+            canonical(sent[1]["path"].as_str().unwrap().into()),
+            canonical(staged(&image))
+        );
+        assert_eq!(
+            sent[2],
+            json!({ "type": "text", "text": format!(" with\n  {}", prompt::file_reference(&notes.attachment)) })
+        );
+        assert_eq!(sent.as_array().unwrap().len(), 3);
     }
 
     #[test]
