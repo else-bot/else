@@ -30,7 +30,8 @@ buildx=(docker buildx)
 [ -z "$builder" ] || buildx+=(--builder "$builder")
 
 described="$(helper build-args)"
-mapfile -t args <<<"$described"
+args=()
+while IFS= read -r arg; do args+=("$arg"); done <<<"$described"
 hash="$(helper hash)"
 commit="$(git rev-parse HEAD)"
 context="$(mktemp -d)"
@@ -44,7 +45,8 @@ unpushed() {
 }
 
 if [ "$build" = 1 ]; then
-	mapfile -t todo < <(unpushed "${platforms[@]}")
+	todo=()
+	while IFS= read -r platform; do todo+=("$platform"); done < <(unpushed "${platforms[@]}")
 	if [ ${#todo[@]} -gt 0 ]; then
 		supported="$("${buildx[@]}" inspect --bootstrap | sed -n 's/^Platforms:[[:space:]]*//p' | tr -d '*' | tr ',' '\n' | tr -d ' ')" ||
 			die "cannot inspect the Buildx builder${builder:+ $builder}"
@@ -63,7 +65,8 @@ or pass --builder with a builder that supports it. Registering QEMU emulation is
 	fi
 fi
 
-mapfile -t missing < <(unpushed "${required[@]}")
+missing=()
+while IFS= read -r platform; do missing+=("$platform"); done < <(unpushed "${required[@]}")
 if [ ${#missing[@]} -gt 0 ]; then
 	echo "The guest base for commit $commit still needs: ${missing[*]}."
 	for platform in "${missing[@]}"; do
