@@ -5,6 +5,7 @@ use super::{Connection, ElseApp};
 use crate::api::{Bot, Category};
 use crate::sidebar::known_category;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -177,7 +178,9 @@ impl ElseApp {
                 name.read(cx).focus_handle(cx).focus(window, cx);
             }
             let form = &holder.read(cx).form;
-            let mut body = v_flex().gap_3().child(Input::new(&form.name));
+            let mut body = v_flex()
+                .gap_3()
+                .child(Input::new(&form.name).focus_ring(false));
             if let Some(error) = &form.error {
                 body = body.child(
                     div()
@@ -213,6 +216,7 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("category-cancel")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
@@ -220,6 +224,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("category-submit")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label(action)
                                 .primary()
@@ -422,6 +427,7 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("move-cancel")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
                                 .ghost()
@@ -429,6 +435,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("move-apply")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Move")
                                 .primary()

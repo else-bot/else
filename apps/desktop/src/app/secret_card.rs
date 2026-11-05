@@ -4,6 +4,7 @@
 //! to the owner API; they are cleared on success, decline, navigation, and
 //! disconnect, and never enter a draft, a pending message, or the chat.
 
+use gpui_kit::component::FocusableExt as _;
 use std::collections::BTreeMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -304,6 +305,7 @@ impl ElseApp {
                     )))
                     .child(
                         Button::new(SharedString::from(format!("secret-replace-{id}-{ix}")))
+                            .focus_ring(false)
                             .cursor_pointer()
                             .label("Replace")
                             .xsmall()
@@ -317,6 +319,7 @@ impl ElseApp {
                 None => {
                     let app = app.clone();
                     Input::new(&field.input)
+                        .focus_ring(false)
                         .disabled(busy)
                         .on_paste(move |item, window, cx| {
                             let Some(text) = item.text().filter(|t| is_multiline(t)) else {
@@ -366,6 +369,7 @@ impl ElseApp {
                 .gap_2()
                 .child(
                     Button::new(SharedString::from(format!("secret-decline-{id}")))
+                        .focus_ring(false)
                         .cursor_pointer()
                         .label("Decline")
                         .small()
@@ -377,6 +381,7 @@ impl ElseApp {
                 )
                 .child(
                     Button::new(SharedString::from(format!("secret-save-{id}")))
+                        .focus_ring(false)
                         .cursor_pointer()
                         .label(if form.submitting {
                             "Saving…"

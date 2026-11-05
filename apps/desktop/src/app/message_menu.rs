@@ -3,13 +3,80 @@ use super::{Connection, ElseApp, RowKey};
 use crate::model::{Reaction, ReactionKind};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::actions::Cancel;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, h_flex};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{Disableable as _, Sizable as _, h_flex};
 use gpui_kit::*;
 use uuid::Uuid;
 
 impl ElseApp {
+    pub(super) fn message_actions(
+        &self,
+        bot: Uuid,
+        item: Uuid,
+        author: Author,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let connected = self.connection == Connection::Connected;
+        h_flex()
+            .gap_1()
+            .children((author == Author::Bot).then(|| {
+                let owner = cx.entity().downgrade();
+                Popover::new(SharedString::from(format!("react-{item}")))
+                    .anchor(Anchor::TopRight)
+                    .p_1()
+                    .trigger(
+                        Button::new(SharedString::from(format!("add-reaction-{item}")))
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .ghost()
+                            .small()
+                            .icon(IconName::FaceSlightlySmilingPlus)
+                            .tooltip("Add reaction")
+                            .accessibility_label("Add reaction")
+                            .disabled(!connected),
+                    )
+                    .content(move |_, _, _| {
+                        h_flex().gap_1().children(
+                            [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown].map(|kind| {
+                                let owner = owner.clone();
+                                Button::new(kind.mark())
+                                    .focus_ring(false)
+                                    .cursor_pointer()
+                                    .ghost()
+                                    .label(kind.mark())
+                                    .accessibility_label(match kind {
+                                        ReactionKind::ThumbsUp => "Thumbs up",
+                                        ReactionKind::ThumbsDown => "Thumbs down",
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        let _ = owner.update(cx, |app, cx| {
+                                            app.react(bot, item, kind, window, cx)
+                                        });
+                                        window.dispatch_action(Box::new(Cancel), cx);
+                                    })
+                            }),
+                        )
+                    })
+            }))
+            .child(
+                Button::new(SharedString::from(format!("reply-{item}")))
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .ghost()
+                    .small()
+                    .icon(IconName::Reply)
+                    .tooltip("Reply")
+                    .accessibility_label("Reply to message")
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.start_reply(bot, item, window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn message_menu(
         owner: WeakEntity<Self>,
         bot: Uuid,
@@ -32,6 +99,7 @@ impl ElseApp {
                             [ReactionKind::ThumbsUp, ReactionKind::ThumbsDown].map(|reaction| {
                                 let owner = owner.clone();
                                 Button::new(reaction.mark())
+                                    .focus_ring(false)
                                     .cursor_pointer()
                                     .ghost()
                                     .label(reaction.mark())
@@ -109,6 +177,9 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.connection != Connection::Connected {
+            return;
+        }
         let Some(reference) = self
             .reference(bot, item)
             .filter(|r| r.author == Author::Bot)

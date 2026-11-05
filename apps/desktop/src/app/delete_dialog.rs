@@ -1,5 +1,6 @@
 use super::ElseApp;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
@@ -225,6 +226,7 @@ impl ElseApp {
                         )
                         .child(
                             Button::new("delete-close")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .small()
                                 .ghost()
@@ -251,14 +253,16 @@ impl ElseApp {
                         .gap_2()
                         .child(
                             Button::new("delete-cancel")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Cancel")
-                                .outline()
+                                .ghost()
                                 .track_focus(&cancel)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("delete-confirm")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label(format!("Delete {kind}"))
                                 .custom(

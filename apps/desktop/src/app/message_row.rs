@@ -6,9 +6,11 @@ use crate::model::ReactionKind;
 use chrono::{DateTime, Datelike as _, Local, TimeZone, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 
@@ -53,7 +55,7 @@ impl ElseApp {
             let side = if user {
                 side.pl(relative(0.15))
             } else {
-                side.pr(relative(0.06))
+                side.pr(px(60.))
             };
             side.child(card)
         };
@@ -68,7 +70,7 @@ impl ElseApp {
                     h_flex()
                         .absolute()
                         .top_0()
-                        .right(px(-6.))
+                        .right_0()
                         .h(px(HEIGHT))
                         .min_w(px(HEIGHT + 4.))
                         .px_1p5()
@@ -275,8 +277,27 @@ impl ElseApp {
                     Some(kind) => reacted(card, kind),
                     None => card,
                 };
+                let card = match Author::of(&item.kind) {
+                    Some(author) => div()
+                        .relative()
+                        .group("message-bubble")
+                        .w_full()
+                        .child(side(user, card))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_1()
+                                .when(user, |this| this.left(relative(0.15)).ml(px(-28.)))
+                                .when(!user, |this| this.right(px(4.)))
+                                .invisible()
+                                .group_hover("message-bubble", |this| this.visible())
+                                .child(self.message_actions(view.bot_id, id, author, cx)),
+                        )
+                        .into_any_element(),
+                    None => side(user, card).into_any_element(),
+                };
                 column = column
-                    .child(side(user, card))
+                    .child(card)
                     .children(footer.map(|at| beside(user, note(at, false))));
                 column = column.children(status);
                 column.into_any_element()
@@ -317,6 +338,7 @@ impl ElseApp {
                                 .gap_2()
                                 .children(mark.is_none().then(|| {
                                     Button::new(SharedString::from(format!("restore-{request_id}")))
+                                        .focus_ring(false)
                                         .cursor_pointer()
                                         .label("Restore to composer")
                                         .xsmall()
@@ -328,6 +350,7 @@ impl ElseApp {
                                     Button::new(SharedString::from(format!(
                                         "dismiss-{request_id}"
                                     )))
+                                    .focus_ring(false)
                                     .cursor_pointer()
                                     .label("Dismiss")
                                     .xsmall()
@@ -351,6 +374,7 @@ impl ElseApp {
                         .child(
                             h_flex().w_full().justify_end().gap_2().child(
                                 Button::new(SharedString::from(format!("retry-{request_id}")))
+                                    .focus_ring(false)
                                     .cursor_pointer()
                                     .label("Retry")
                                     .xsmall()

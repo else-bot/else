@@ -1,4 +1,5 @@
 mod view;
+use gpui_kit::component::FocusableExt as _;
 use view::{Preview, show_preview};
 pub(super) use view::{chip, draft_chip};
 
@@ -473,6 +474,7 @@ impl ElseApp {
                     dialog.title(name.clone()).child(error.clone()).footer(
                         h_flex().child(
                             Button::new("retry-file-upload")
+                                .focus_ring(false)
                                 .cursor_pointer()
                                 .label("Retry upload")
                                 .on_click(move |_, window, cx| {

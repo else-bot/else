@@ -30,6 +30,7 @@ gpui_kit::assets::icon_assets!(
         ChevronRight,
         ChevronDown,
         Reply,
+        FaceSlightlySmilingPlus,
         Copy,
         Close,
         ArrowUp,
