@@ -1,6 +1,7 @@
-//! Email drafts: a bot proposes an email, the owner edits and approves or
-//! discards it, and the bot sends it once and reports the result (see
-//! docs/decisions/0003-email-drafts.md).
+//! Outgoing drafts: a bot proposes an email, message, or post, the owner
+//! edits and approves or discards it, and the bot sends it once and reports
+//! the result (see docs/decisions/0003-outgoing-drafts.md). Every channel
+//! shares this lifecycle; only `Content` differs.
 //!
 //! A pending draft parks the attempt that proposed it, like an owner
 //! question. The Approve button approves the exact version the owner saw
@@ -9,7 +10,7 @@
 //! request; the bot there may revise it (a new revision supersedes the old
 //! one) or, when the message approves it, confirm that exact version. An
 //! approval lets one call of the send request send it: an external computer
-//! tool call naming the draft, or `start_email_send` before a host send. No
+//! tool call naming the draft, or `start_draft_send` before a host send. No
 //! second approval card is shown for that call. Only the bot's report for
 //! that claim marks it sent; an unreported claim becomes uncertain when the
 //! request ends (a trigger).
@@ -24,26 +25,22 @@ use uuid::Uuid;
 
 use super::events;
 use super::turns;
-use crate::app::email::{self, ApprovalSource, Delivery, Draft, Outcome, Recipients, Status};
+use crate::app::outgoing::{self, ApprovalSource, Content, Delivery, Edits, Outcome, Status};
 
 /// Drafts per owner request (turn).
 pub const MAX_PER_TURN: i64 = 8;
 
 /// A draft revision as shown to the owner and recorded in events.
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
-pub struct EmailDraft {
+pub struct OutgoingDraft {
     pub id: Uuid,
-    pub email_id: Uuid,
+    /// Shared by every revision of the same email, message, or post.
+    pub lineage_id: Uuid,
     pub revision: i64,
     pub bot_id: Uuid,
     /// The turn the card is shown under.
     pub turn_id: Uuid,
-    #[serde(rename = "from")]
-    pub sender: String,
-    #[serde(flatten)]
-    pub recipients: Json<Recipients>,
-    pub subject: String,
-    pub body: String,
+    pub content: Json<Content>,
     /// Bumped by each owner edit; approvals and messages name it.
     pub version: i64,
     pub status: Status,
@@ -68,25 +65,14 @@ pub struct EmailDraft {
     pub context_version: Option<i64>,
 }
 
-impl EmailDraft {
-    pub fn draft(&self) -> Draft {
-        Draft {
-            from: self.sender.clone(),
-            recipients: self.recipients.0.clone(),
-            subject: self.subject.clone(),
-            body: self.body.clone(),
-        }
-    }
-}
-
-const SELECT: &str = "SELECT d.id, d.email_id, d.revision, d.bot_id, d.turn_id, d.sender,
-        d.recipients, d.subject, d.body, d.version, d.status,
+const SELECT: &str = "SELECT d.id, d.lineage_id, d.revision, d.bot_id, d.turn_id, d.content,
+        d.version, d.status,
         d.status = 'pending' AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
             AS can_approve,
         d.approval_source, d.approved_version, d.approved_item_id, d.approved_at, d.delivery,
         d.result_detail, d.superseded_by, d.created_at, d.updated_at, d.settled_at,
         d.send_turn_id, d.context_turn_id, d.context_version
-    FROM email_drafts d JOIN turns t ON t.id = d.turn_id";
+    FROM outgoing_drafts d JOIN turns t ON t.id = d.turn_id";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DraftError {
@@ -100,11 +86,13 @@ pub enum DraftError {
     Inactive,
     #[error("{0}")]
     Invalid(&'static str),
-    #[error("only the owner's own conversation can draft email for approval")]
+    #[error("only the owner's own conversation can draft for approval")]
     NotAllowed,
+    #[error("a revision keeps its draft's channel ({0})")]
+    ChannelChanged(&'static str),
     #[error("this attempt already asked or delegated; end it and wait for the answer")]
     AttemptParked,
-    #[error("this request already drafted {MAX_PER_TURN} emails")]
+    #[error("this request already made {MAX_PER_TURN} drafts")]
     BudgetExhausted,
     #[error("the request is no longer running")]
     NotRunning,
@@ -128,6 +116,7 @@ impl DraftError {
             Self::Inactive => "DRAFT_INACTIVE",
             Self::Invalid(_) => "INVALID_DRAFT",
             Self::NotAllowed => "NOT_ALLOWED",
+            Self::ChannelChanged(_) => "CHANNEL_CHANGED",
             Self::AttemptParked => "ATTEMPT_PARKED",
             Self::BudgetExhausted => "BUDGET_EXHAUSTED",
             Self::NotRunning => "NOT_RUNNING",
@@ -142,7 +131,7 @@ async fn load(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
     draft_id: Uuid,
-) -> Result<EmailDraft, DraftError> {
+) -> Result<OutgoingDraft, DraftError> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} JOIN bots b ON b.id = d.bot_id
          WHERE d.id = ?1 AND d.bot_id = ?2 AND b.status = 'active'"
@@ -154,7 +143,7 @@ async fn load(
     .ok_or(DraftError::NotFound)
 }
 
-async fn reload(conn: &mut SqliteConnection, draft_id: Uuid) -> Result<EmailDraft, sqlx::Error> {
+async fn reload(conn: &mut SqliteConnection, draft_id: Uuid) -> Result<OutgoingDraft, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE d.id = ?1")))
         .bind(draft_id)
         .fetch_one(&mut *conn)
@@ -165,15 +154,15 @@ async fn reload(conn: &mut SqliteConnection, draft_id: Uuid) -> Result<EmailDraf
 pub async fn for_turns(
     conn: &mut SqliteConnection,
     turn_ids: &[Uuid],
-) -> Result<HashMap<Uuid, Vec<EmailDraft>>, sqlx::Error> {
-    let rows: Vec<EmailDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+) -> Result<HashMap<Uuid, Vec<OutgoingDraft>>, sqlx::Error> {
+    let rows: Vec<OutgoingDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE lower(hex(d.turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
          ORDER BY d.created_at, d.id"
     )))
     .bind(Json(turn_ids))
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_turn: HashMap<Uuid, Vec<EmailDraft>> = HashMap::new();
+    let mut by_turn: HashMap<Uuid, Vec<OutgoingDraft>> = HashMap::new();
     for row in rows {
         by_turn.entry(row.turn_id).or_default().push(row);
     }
@@ -195,27 +184,24 @@ async fn caller(
 
 /// Record a draft from the provider attempt of `turn_id`, parking it, or
 /// a revision of the bot's pending or failed draft `replaces`, which it
-/// supersedes. Proposing the same email again in this turn returns the
-/// earlier revision, so a retried tool call never makes a second card.
+/// supersedes. A revision keeps the channel (email, or the same platform).
+/// Proposing the same content again in this turn returns the earlier
+/// revision, so a retried tool call never makes a second card.
 pub async fn propose(
     pool: &SqlitePool,
     turn_id: Uuid,
-    draft: &Draft,
+    content: &Content,
     replaces: Option<Uuid>,
-) -> Result<EmailDraft, DraftError> {
+) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let same: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM email_drafts
-         WHERE turn_id = ?1 AND status <> 'superseded' AND sender = ?2 AND recipients = ?3
-           AND subject = ?4 AND body = ?5 AND version = 1
+        "SELECT id FROM outgoing_drafts
+         WHERE turn_id = ?1 AND status <> 'superseded' AND content = ?2 AND version = 1
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(turn_id)
-    .bind(&draft.from)
-    .bind(Json(&draft.recipients))
-    .bind(&draft.subject)
-    .bind(&draft.body)
+    .bind(Json(content))
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(id) = same {
@@ -224,7 +210,7 @@ pub async fn propose(
     if turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
         return Err(DraftError::AttemptParked);
     }
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM email_drafts WHERE turn_id = ?1")
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM outgoing_drafts WHERE turn_id = ?1")
         .bind(turn_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -232,15 +218,18 @@ pub async fn propose(
         return Err(DraftError::BudgetExhausted);
     }
     let id = Uuid::new_v4();
-    let (email_id, revision, old_turn) = match replaces {
+    let (lineage_id, revision, old_turn) = match replaces {
         None => (Uuid::new_v4(), 1, None),
         Some(old) => {
             let old = load(&mut tx, caller.bot_id, old).await?;
+            if !old.content.same_channel(content) {
+                return Err(DraftError::ChannelChanged(old.content.noun()));
+            }
             if !matches!(old.status, Status::Pending | Status::Failed) {
                 return Err(DraftError::Settled(old.status));
             }
             sqlx::query(
-                "UPDATE email_drafts SET status = 'superseded', superseded_by = ?2,
+                "UPDATE outgoing_drafts SET status = 'superseded', superseded_by = ?2,
                      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                  WHERE id = ?1",
             )
@@ -248,24 +237,20 @@ pub async fn propose(
             .bind(id)
             .execute(&mut *tx)
             .await?;
-            (old.email_id, old.revision + 1, Some(old.turn_id))
+            (old.lineage_id, old.revision + 1, Some(old.turn_id))
         }
     };
     sqlx::query(
-        "INSERT INTO email_drafts (id, email_id, revision, bot_id, turn_id, attempt, sender,
-             recipients, subject, body)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO outgoing_drafts (id, lineage_id, revision, bot_id, turn_id, attempt, content)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(id)
-    .bind(email_id)
+    .bind(lineage_id)
     .bind(revision)
     .bind(caller.bot_id)
     .bind(turn_id)
     .bind(caller.attempt)
-    .bind(&draft.from)
-    .bind(Json(&draft.recipients))
-    .bind(&draft.subject)
-    .bind(&draft.body)
+    .bind(Json(content))
     .execute(&mut *tx)
     .await?;
     if let Some(old_turn) = old_turn.filter(|t| *t != turn_id) {
@@ -277,58 +262,42 @@ pub async fn propose(
     Ok(row)
 }
 
-/// The owner's subject and body for a draft, as last shown to them; an
-/// omitted field keeps the saved text.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Edits<'a> {
-    pub subject: Option<&'a str>,
-    pub body: Option<&'a str>,
-}
-
-fn is_button_approval_replay(draft: &EmailDraft, version: i64, edits: Edits<'_>) -> bool {
+fn is_button_approval_replay(draft: &OutgoingDraft, version: i64, edits: Edits<'_>) -> bool {
     let same_approval = draft.approval_source == Some(ApprovalSource::Button)
         && !matches!(draft.status, Status::Superseded | Status::Discarded);
     let original_or_approved_version = draft
         .approved_version
         .is_some_and(|approved| version == approved || version.checked_add(1) == Some(approved));
-    let same_subject = edits
-        .subject
-        .is_none_or(|text| email::subject(text).is_ok_and(|subject| subject == draft.subject));
-    let same_body = edits.body.is_none_or(|text| text == draft.body);
-    same_approval && original_or_approved_version && same_subject && same_body
+    let same_content = draft
+        .content
+        .edited(edits)
+        .is_ok_and(|content| content == draft.content.0);
+    same_approval && original_or_approved_version && same_content
 }
 
 async fn apply_edits(
     conn: &mut SqliteConnection,
-    draft: &EmailDraft,
+    draft: &OutgoingDraft,
     version: i64,
     edits: Edits<'_>,
 ) -> Result<bool, DraftError> {
     if draft.version != version {
         return Err(DraftError::Changed(version));
     }
-    let subject = match edits.subject {
-        Some(text) => email::subject(text).map_err(DraftError::Invalid)?,
-        None => draft.subject.clone(),
-    };
-    let body = match edits.body {
-        Some(text) => email::body(text).map_err(DraftError::Invalid)?,
-        None => draft.body.clone(),
-    };
-    if subject == draft.subject && body == draft.body {
+    let content = draft.content.edited(edits).map_err(DraftError::Invalid)?;
+    if content == draft.content.0 {
         return Ok(false);
     }
     if draft.status != Status::Pending {
         return Err(DraftError::Settled(draft.status));
     }
     sqlx::query(
-        "UPDATE email_drafts SET subject = ?2, body = ?3, version = version + 1,
+        "UPDATE outgoing_drafts SET content = ?2, version = version + 1,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
     )
     .bind(draft.id)
-    .bind(&subject)
-    .bind(&body)
+    .bind(Json(&content))
     .execute(&mut *conn)
     .await?;
     Ok(true)
@@ -338,7 +307,7 @@ async fn apply_edits(
 /// retry of an action already recorded.
 #[derive(Debug, Clone)]
 pub struct Settled {
-    pub draft: EmailDraft,
+    pub draft: OutgoingDraft,
     pub changed: bool,
     /// The waiting turn was queued again as a continuation.
     pub requeued: bool,
@@ -397,7 +366,7 @@ pub async fn approve(
     }
     apply_edits(&mut tx, &draft, version, edits).await?;
     sqlx::query(
-        "UPDATE email_drafts SET status = 'approved', approval_source = 'button',
+        "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'button',
              approved_version = version, approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              send_turn_id = turn_id, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
@@ -437,7 +406,7 @@ pub async fn discard(
         other => return Err(DraftError::Settled(other)),
     }
     sqlx::query(
-        "UPDATE email_drafts SET status = 'discarded',
+        "UPDATE outgoing_drafts SET status = 'discarded',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
@@ -457,7 +426,8 @@ pub async fn discard(
 }
 
 /// The draft open in the app when the owner sent a message: its id, the
-/// version shown, and the owner's unsaved edits.
+/// version shown, and the owner's unsaved edits. `subject` is refused for
+/// a draft that is not an email.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachment {
@@ -494,7 +464,7 @@ pub async fn attach_to_message(
     }
     apply_edits(conn, &draft, attachment.version, attachment.edits()).await?;
     sqlx::query(
-        "UPDATE email_drafts SET context_turn_id = ?2, context_version = version,
+        "UPDATE outgoing_drafts SET context_turn_id = ?2, context_version = version,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
     )
@@ -514,7 +484,7 @@ pub async fn confirm(
     pool: &SqlitePool,
     turn_id: Uuid,
     draft_id: Uuid,
-) -> Result<EmailDraft, DraftError> {
+) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
@@ -541,7 +511,7 @@ pub async fn confirm(
         return Err(DraftError::NotInContext);
     }
     sqlx::query(
-        "UPDATE email_drafts SET status = 'approved', approval_source = 'message',
+        "UPDATE outgoing_drafts SET status = 'approved', approval_source = 'message',
              approved_version = version, approved_item_id = ?3,
              approved_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), send_turn_id = ?2,
              turn_id = ?2, attempt = ?4, delivery = NULL, result_detail = NULL, settled_at = NULL,
@@ -571,7 +541,7 @@ pub async fn claim(
     turn_id: Uuid,
     draft_id: Uuid,
     delivery: &Delivery,
-) -> Result<EmailDraft, DraftError> {
+) -> Result<OutgoingDraft, DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
@@ -582,7 +552,7 @@ pub async fn claim(
         return Err(DraftError::OtherRequest);
     }
     sqlx::query(
-        "UPDATE email_drafts SET status = 'sending', delivery = ?2,
+        "UPDATE outgoing_drafts SET status = 'sending', delivery = ?2,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND status = 'approved'",
     )
@@ -605,7 +575,7 @@ pub async fn report(
     draft_id: Uuid,
     outcome: Outcome,
     detail: Option<&str>,
-) -> Result<(EmailDraft, bool), DraftError> {
+) -> Result<(OutgoingDraft, bool), DraftError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = caller(&mut tx, turn_id).await?;
     let draft = load(&mut tx, caller.bot_id, draft_id).await?;
@@ -618,7 +588,7 @@ pub async fn report(
         (status, _) => return Err(DraftError::Settled(status)),
     }
     sqlx::query(
-        "UPDATE email_drafts SET status = ?2, result_detail = ?3,
+        "UPDATE outgoing_drafts SET status = ?2, result_detail = ?3,
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1",
@@ -639,8 +609,8 @@ pub async fn report(
 pub async fn notes(
     conn: &mut SqliteConnection,
     turn_id: Uuid,
-) -> Result<Vec<email::Note>, sqlx::Error> {
-    let rows: Vec<EmailDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+) -> Result<Vec<outgoing::Note>, sqlx::Error> {
+    let rows: Vec<OutgoingDraft> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{SELECT} WHERE (d.turn_id = ?1 AND d.delivered_attempt IS NULL
                           AND d.status IN ('approved', 'discarded')
                           AND d.approval_source IS NOT 'message')
@@ -652,11 +622,11 @@ pub async fn notes(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| email::Note {
+        .map(|row| outgoing::Note {
             id: row.id,
-            email_id: row.email_id,
+            lineage_id: row.lineage_id,
             revision: row.revision,
-            draft: row.draft(),
+            content: row.content.0.clone(),
             status: row.status,
             version: row.version,
             in_context: row.context_turn_id == Some(turn_id)
@@ -676,7 +646,7 @@ pub async fn mark_delivered(
     ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE email_drafts SET delivered_attempt = ?3
+        "UPDATE outgoing_drafts SET delivered_attempt = ?3
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
            AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
     )

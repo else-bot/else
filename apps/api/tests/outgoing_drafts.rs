@@ -1,8 +1,3 @@
-//! Email drafts: a bot drafts an email over MCP, the owner edits and
-//! approves or discards it on its card or answers in chat, and the bot sends
-//! the exact approved version once through its existing tools and reports
-//! the result. Stale versions, replays, and other requests approve nothing.
-
 mod common;
 
 use std::sync::Arc;
@@ -56,7 +51,7 @@ async fn send(app: &TestApp, bot: &str, text: &str, draft: Option<Value>) -> com
     let mut body =
         json!({ "request_id": Uuid::new_v4(), "text": text, "provider_id": "synthetic" });
     if let Some(draft) = draft {
-        body["email_draft"] = draft;
+        body["open_draft"] = draft;
     }
     app.owner("POST", &format!("/v1/bots/{bot}/turns"), Some(body))
         .await
@@ -98,8 +93,22 @@ fn lunch() -> Value {
             "subject": "Lunch on Friday?", "body": "Hi Ada,\n\nLunch on Friday at noon?\n\nMain" })
 }
 
+fn ship_post() -> Value {
+    json!({ "platform": "x", "body": "We shipped native drafts today." })
+}
+
+fn family_message() -> Value {
+    json!({ "platform": "telegram", "account": "@main_bot", "destination": "Family group",
+            "body": "Dinner at 8 on Friday?" })
+}
+
 async fn draft(app: &TestApp, token: &str, args: Value) -> Uuid {
-    let drafted = tool(app, token, "draft_email", args).await;
+    let name = if args.get("platform").is_some() {
+        "draft_message"
+    } else {
+        "draft_email"
+    };
+    let drafted = tool(app, token, name, args).await;
     let result = tool_text(&drafted);
     assert_eq!(result["status"], "pending", "{}", drafted.body);
     assert_eq!(result["parked"], true);
@@ -118,10 +127,10 @@ async fn owner_action(
     body: Value,
 ) -> common::Reply {
     let (method, path) = match action {
-        "edit" => ("PUT", format!("/v1/bots/{bot}/email-drafts/{draft}")),
+        "edit" => ("PUT", format!("/v1/bots/{bot}/outgoing-drafts/{draft}")),
         _ => (
             "POST",
-            format!("/v1/bots/{bot}/email-drafts/{draft}/{action}"),
+            format!("/v1/bots/{bot}/outgoing-drafts/{draft}/{action}"),
         ),
     };
     app.owner(method, &path, Some(body)).await
@@ -149,7 +158,7 @@ async fn shown(app: &TestApp, bot: &str, turn: Uuid) -> Vec<Value> {
         .unwrap()
         .iter()
         .find(|t| t["id"] == turn.to_string())
-        .expect("the turn is in the snapshot")["email_drafts"]
+        .expect("the turn is in the snapshot")["outgoing_drafts"]
         .as_array()
         .unwrap()
         .clone()
@@ -167,7 +176,7 @@ async fn journaled(app: &TestApp, bot: &str, draft: Uuid) -> Value {
         .filter(|(kind, _)| kind == "turn.updated")
         .filter_map(|(_, data)| serde_json::from_str::<Value>(data).ok())
         .filter_map(|data| {
-            data["turn"]["email_drafts"]
+            data["turn"]["outgoing_drafts"]
                 .as_array()?
                 .iter()
                 .find(|d| d["id"] == draft.to_string())
@@ -185,7 +194,7 @@ async fn questions(app: &TestApp) -> i64 {
 }
 
 fn send_args(draft: Uuid) -> Value {
-    json!({ "command": "python3 send_mail.py", "effect": "external", "email_draft": draft })
+    json!({ "command": "python3 send_mail.py", "effect": "external", "approved_draft": draft })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -204,11 +213,12 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     let card = shown(&app, &main, turn).await[0].clone();
     assert_eq!(card["id"], id.to_string());
     assert_eq!(card["revision"], 1);
-    assert_eq!(card["from"], "main@bots.example");
-    assert_eq!(card["to"], json!(["ada@example.com"]));
-    assert_eq!(card["cc"], json!(["bob@example.com"]));
-    assert_eq!(card["bcc"], json!([]));
-    assert_eq!(card["subject"], "Lunch on Friday?");
+    assert_eq!(card["content"]["channel"], "email");
+    assert_eq!(card["content"]["from"], "main@bots.example");
+    assert_eq!(card["content"]["to"], json!(["ada@example.com"]));
+    assert_eq!(card["content"]["cc"], json!(["bob@example.com"]));
+    assert_eq!(card["content"]["bcc"], json!([]));
+    assert_eq!(card["content"]["subject"], "Lunch on Friday?");
     assert_eq!(card["status"], "pending");
     assert_eq!(card["version"], 1);
     assert_eq!(card["can_approve"], true);
@@ -296,7 +306,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
 
     wait(&app, turn, "running").await;
     let packet = synthetic.packets().await.last().unwrap().clone();
-    assert!(packet.contains("[else.bot email drafts]"), "{packet}");
+    assert!(packet.contains("[else.bot outgoing drafts]"), "{packet}");
     assert!(
         packet.contains("Subject: Lunch Friday\n\nHi Ada, lunch Friday?"),
         "{packet}"
@@ -311,7 +321,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
         &app,
         &token,
         "computer_run",
-        json!({ "command": "true", "effect": "local", "email_draft": id }),
+        json!({ "command": "true", "effect": "local", "approved_draft": id }),
     )
     .await;
     assert!(refusal(&local).contains("only with effect external"));
@@ -345,7 +355,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     let sent = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "sent", "detail": "250 OK id=abc" }),
     )
     .await;
@@ -353,7 +363,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     let replayed = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "sent" }),
     )
     .await;
@@ -361,7 +371,7 @@ async fn the_approve_button_sends_the_owners_edited_version_once() {
     let contradicted = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "failed" }),
     )
     .await;
@@ -387,7 +397,7 @@ async fn discarding_continues_the_turn_and_nothing_can_send_it() {
     let early = tool(
         &app,
         &grant(&app, turn).await,
-        "start_email_send",
+        "start_draft_send",
         json!({ "draft_id": id }),
     )
     .await;
@@ -418,7 +428,7 @@ async fn discarding_continues_the_turn_and_nothing_can_send_it() {
     let report = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "sent" }),
     )
     .await;
@@ -479,7 +489,7 @@ async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card()
         old["version"], 2,
         "the owner's edits were saved with the message"
     );
-    assert_eq!(old["body"], "Hi Ada, lunch Friday? My treat.");
+    assert_eq!(old["content"]["body"], "Hi Ada, lunch Friday? My treat.");
     assert_eq!(old["can_approve"], false);
     let button = owner_action(&app, &main, id, "approve", json!({ "version": 2 })).await;
     assert_eq!(
@@ -506,7 +516,7 @@ async fn a_follow_up_carries_the_owners_edits_and_a_revision_replaces_the_card()
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(drafted["draft"]["email_id"], old["email_id"]);
+    assert_eq!(drafted["draft"]["lineage_id"], old["lineage_id"]);
 
     let old = shown(&app, &main, first).await[0].clone();
     assert_eq!(old["status"], "superseded");
@@ -561,7 +571,7 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
     let confirmed = tool(
         &app,
         &token,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
@@ -574,7 +584,7 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
     let replay = tool(
         &app,
         &token,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
@@ -599,16 +609,16 @@ async fn a_clear_chat_approval_confirms_exactly_the_open_version() {
         item
     );
 
-    let started = tool(&app, &token, "start_email_send", json!({ "draft_id": id })).await;
+    let started = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
     let started = tool_text(&started);
     assert_eq!(started["status"], "sending", "{started}");
-    assert_eq!(started["draft"]["subject"], "Lunch on Friday?");
-    let twice = tool(&app, &token, "start_email_send", json!({ "draft_id": id })).await;
+    assert_eq!(started["draft"]["content"]["subject"], "Lunch on Friday?");
+    let twice = tool(&app, &token, "start_draft_send", json!({ "draft_id": id })).await;
     assert!(refusal(&twice).starts_with("DRAFT_SETTLED"));
     let uncertain = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "uncertain", "detail": "SMTP timeout after DATA" }),
     )
     .await;
@@ -636,7 +646,7 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     let unbound = tool(
         &app,
         &plain,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
@@ -664,7 +674,7 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     let changed = tool(
         &app,
         &token,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
@@ -675,7 +685,7 @@ async fn only_the_message_sent_with_the_unchanged_draft_can_approve_it() {
     let unknown = tool(
         &app,
         &token,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": Uuid::new_v4() }),
     )
     .await;
@@ -730,7 +740,7 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
     let confirmed = tool(
         &app,
         &token,
-        "confirm_email_approval",
+        "confirm_draft_approval",
         json!({ "draft_id": id }),
     )
     .await;
@@ -743,7 +753,7 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
     let failed = tool(
         &app,
         &token,
-        "report_email_send",
+        "report_draft_send",
         json!({ "draft_id": id, "status": "failed", "detail": "No SMTP credentials stored." }),
     )
     .await;
@@ -757,4 +767,340 @@ async fn an_unreported_send_is_uncertain_and_an_unused_approval_fails() {
         "{}",
         discarded.body
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_x_post_needs_no_destination_and_its_card_approval_sends_it_once() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main, SLOW, None).await;
+    let emailish = json!({ "platform": "x", "body": "Hi", "subject": "Launch" });
+    assert!(
+        refusal(&tool(&app, &token, "draft_message", emailish).await).starts_with("INVALID_DRAFT"),
+        "a post has no subject"
+    );
+    let id = draft(&app, &token, ship_post()).await;
+    wait(&app, turn, "waiting").await;
+    let card = shown(&app, &main, turn).await[0].clone();
+    assert_eq!(
+        card["content"],
+        json!({ "channel": "message", "platform": "x", "account": null, "destination": null,
+                "body": "We shipped native drafts today." }),
+        "no addresses, Cc/Bcc, or subject"
+    );
+    assert_eq!(card["can_approve"], true);
+
+    let subject = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 1, "subject": "Launch" }),
+    )
+    .await;
+    assert_eq!(subject.status, StatusCode::BAD_REQUEST, "{}", subject.body);
+    assert_eq!(subject.body["error"]["code"], "invalid_draft");
+    assert_eq!(
+        shown(&app, &main, turn).await[0]["status"],
+        "pending",
+        "a refused approval approves nothing"
+    );
+    let edited = owner_action(
+        &app,
+        &main,
+        id,
+        "edit",
+        json!({ "version": 1, "body": "Native drafts shipped today." }),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    let stale = owner_action(&app, &main, id, "approve", json!({ "version": 1 })).await;
+    assert_eq!(stale.body["error"]["code"], "draft_changed");
+    let approved = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 2, "body": "Native drafts shipped today!" }),
+    )
+    .await;
+    assert_eq!(approved.status, StatusCode::OK, "{}", approved.body);
+    assert_eq!(approved.body["draft"]["approved_version"], 3);
+    assert_eq!(
+        approved.body["draft"]["content"]["body"],
+        "Native drafts shipped today!"
+    );
+    let replay = owner_action(
+        &app,
+        &main,
+        id,
+        "approve",
+        json!({ "version": 2, "body": "Native drafts shipped today!" }),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
+    assert_eq!(replay.body["requeued"], false);
+
+    wait(&app, turn, "running").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("channel=\"message\" platform=\"x\""),
+        "{packet}"
+    );
+    assert!(packet.contains("\nNative drafts shipped today!\n</outgoing_draft>"));
+    assert!(!packet.contains("Subject:"), "{packet}");
+    assert!(packet.contains("send exactly this X post now"), "{packet}");
+
+    let token = grant(&app, turn).await;
+    let claimed = tool(&app, &token, "computer_run", send_args(id)).await;
+    assert!(
+        refusal(&claimed).starts_with("COMPUTER_UNAVAILABLE"),
+        "{}",
+        claimed.body
+    );
+    let again = tool(&app, &token, "computer_run", send_args(id)).await;
+    assert!(refusal(&again).starts_with("DRAFT_SETTLED"));
+    assert_eq!(questions(&app).await, 0, "no second approval card");
+    let token = grant(&app, turn).await;
+    let sent = tool_text(
+        &tool(
+            &app,
+            &token,
+            "report_draft_send",
+            json!({ "draft_id": id, "status": "sent", "detail": "post id 1890" }),
+        )
+        .await,
+    );
+    assert_eq!(sent["status"], "sent");
+    assert_eq!(sent["medium"], "X post");
+    let receipt = journaled(&app, &main, id).await;
+    assert_eq!(receipt["status"], "sent");
+    assert_eq!(receipt["result_detail"], "post id 1890");
+    assert_eq!(receipt["delivery"]["via"], "tool");
+    assert_eq!(receipt["content"]["platform"], "x");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_telegram_message_keeps_its_channel_and_owner_edits_across_revisions() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let mut nowhere = family_message();
+    nowhere["destination"] = Value::Null;
+    assert!(
+        refusal(&tool(&app, &token, "draft_message", nowhere).await).starts_with("INVALID_DRAFT"),
+        "a telegram message names its chat"
+    );
+    let id = draft(&app, &token, family_message()).await;
+    wait(&app, first, "waiting").await;
+    let card = shown(&app, &main, first).await[0].clone();
+    assert_eq!(card["content"]["channel"], "message");
+    assert_eq!(card["content"]["platform"], "telegram");
+    assert_eq!(card["content"]["destination"], "Family group");
+    assert_eq!(card["content"]["account"], "@main_bot");
+    for key in ["from", "to", "cc", "bcc", "subject"] {
+        assert!(card["content"].get(key).is_none(), "{key} in {card}");
+    }
+
+    let with_subject = send(
+        &app,
+        &main,
+        "Make it 9.",
+        Some(json!({ "id": id, "version": 1, "subject": "Dinner" })),
+    )
+    .await;
+    assert_eq!(
+        with_subject.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        with_subject.body
+    );
+    assert_eq!(with_subject.body["error"]["code"], "invalid_draft");
+    assert_eq!(
+        status(&app, first).await,
+        "waiting",
+        "the message was refused"
+    );
+
+    let (second, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Make it 9 and ask who brings dessert.",
+        Some(json!({ "id": id, "version": 1, "body": "Dinner at 9 on Friday?" })),
+    )
+    .await;
+    let old = shown(&app, &main, first).await[0].clone();
+    assert_eq!(old["version"], 2, "the owner's edits were saved");
+    assert_eq!(old["content"]["body"], "Dinner at 9 on Friday?");
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("channel=\"message\" platform=\"telegram\""),
+        "{packet}"
+    );
+    assert!(
+        packet.contains("Destination: Family group\n\nDinner at 9 on Friday?"),
+        "{packet}"
+    );
+    assert!(
+        packet.contains("call draft_message with replaces"),
+        "{packet}"
+    );
+
+    let mut as_email = lunch();
+    as_email["replaces"] = json!(id);
+    let switched = tool(&app, &token, "draft_email", as_email).await;
+    assert!(
+        refusal(&switched).starts_with("CHANNEL_CHANGED"),
+        "a message cannot become an email"
+    );
+    let mut as_post = ship_post();
+    as_post["replaces"] = json!(id);
+    let switched = tool(&app, &token, "draft_message", as_post).await;
+    assert!(
+        refusal(&switched).starts_with("CHANNEL_CHANGED"),
+        "a Telegram message cannot become an X post"
+    );
+    assert_eq!(shown(&app, &main, first).await[0]["status"], "pending");
+
+    let mut revised = family_message();
+    revised["body"] = json!("Dinner at 9 on Friday? Who brings dessert?");
+    revised["replaces"] = json!(id);
+    let revised = tool_text(&tool(&app, &token, "draft_message", revised).await);
+    assert_eq!(revised["status"], "pending", "{revised}");
+    assert_eq!(revised["draft"]["revision"], 2);
+    assert_eq!(revised["draft"]["lineage_id"], old["lineage_id"]);
+    assert_eq!(revised["draft"]["content"]["platform"], "telegram");
+    let new_id: Uuid = revised["draft"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(shown(&app, &main, first).await[0]["status"], "superseded");
+    assert_eq!(
+        shown(&app, &main, second).await[0]["id"],
+        new_id.to_string()
+    );
+    let obsolete = send(
+        &app,
+        &main,
+        "Send it.",
+        Some(json!({ "id": id, "version": 2 })),
+    )
+    .await;
+    assert_eq!(obsolete.body["error"]["code"], "draft_settled");
+
+    let moved = sqlx::query(
+        "UPDATE outgoing_drafts SET content = json_set(content, '$.destination', 'Work group')
+         WHERE id = ?1",
+    )
+    .bind(new_id)
+    .execute(&app.db.pool)
+    .await;
+    assert!(moved.is_err(), "a revision's destination is fixed");
+    let to_email = sqlx::query(
+        "UPDATE outgoing_drafts SET content = json_set(content, '$.channel', 'email')
+         WHERE id = ?1",
+    )
+    .bind(new_id)
+    .execute(&app.db.pool)
+    .await;
+    assert!(to_email.is_err(), "a revision's channel is fixed");
+
+    wait(&app, second, "waiting").await;
+    let (third, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Perfect, send it.",
+        Some(json!({ "id": new_id, "version": 1 })),
+    )
+    .await;
+    let confirmed = tool_text(
+        &tool(
+            &app,
+            &token,
+            "confirm_draft_approval",
+            json!({ "draft_id": new_id }),
+        )
+        .await,
+    );
+    assert_eq!(confirmed["status"], "approved", "{confirmed}");
+    assert!(
+        confirmed["next"]
+            .as_str()
+            .unwrap()
+            .contains("Telegram message")
+    );
+    let card = shown(&app, &main, third).await[0].clone();
+    assert_eq!(card["approval_source"], "message");
+    assert_eq!(card["approved_version"], 1);
+    let started = tool_text(
+        &tool(
+            &app,
+            &token,
+            "start_draft_send",
+            json!({ "draft_id": new_id }),
+        )
+        .await,
+    );
+    assert_eq!(started["status"], "sending", "{started}");
+    assert_eq!(
+        started["draft"]["content"]["body"],
+        "Dinner at 9 on Friday? Who brings dessert?"
+    );
+    let uncertain = tool_text(
+        &tool(
+            &app,
+            &token,
+            "report_draft_send",
+            json!({ "draft_id": new_id, "status": "uncertain", "detail": "Bot API timed out" }),
+        )
+        .await,
+    );
+    assert_eq!(uncertain["status"], "uncertain");
+    assert_eq!(uncertain["medium"], "Telegram message");
+    let receipt = journaled(&app, &main, new_id).await;
+    assert_eq!(receipt["status"], "uncertain");
+    assert_eq!(receipt["delivery"]["via"], "host");
+    assert_eq!(receipt["content"]["destination"], "Family group");
+    assert_eq!(questions(&app).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_approval_binds_the_open_message_version_only() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let id = draft(&app, &token, family_message()).await;
+    wait(&app, first, "waiting").await;
+
+    let (_, token) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Send it.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let edited = owner_action(
+        &app,
+        &main,
+        id,
+        "edit",
+        json!({ "version": 1, "body": "Dinner at 7?" }),
+    )
+    .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    let changed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert!(
+        refusal(&changed).starts_with("NOT_IN_CONTEXT"),
+        "the owner changed it after sending"
+    );
+    let send = tool(&app, &token, "computer_run", send_args(id)).await;
+    assert!(refusal(&send).starts_with("DRAFT_SETTLED"));
+    assert_eq!(journaled(&app, &main, id).await["status"], "pending");
 }

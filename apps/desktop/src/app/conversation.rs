@@ -19,7 +19,7 @@ pub(super) enum RowKey {
     SecretRequest(Uuid),
     /// A bot's question or approval request, by question ID.
     Question(Uuid),
-    Email(Uuid),
+    Draft(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,8 +126,8 @@ pub(super) struct ConversationView {
     pub(super) answered: HashSet<Uuid>,
     /// An answer in flight, or its failure, per pending question.
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
-    pub(super) email_forms: HashMap<Uuid, super::email_card::EmailForm>,
-    pub(super) expanded_emails: HashSet<Uuid>,
+    pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
+    pub(super) expanded_drafts: HashSet<Uuid>,
     /// The end of the latest loaded reply was on screen at the last check.
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
@@ -150,8 +150,8 @@ impl ConversationView {
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
-            email_forms: HashMap::new(),
-            expanded_emails: HashSet::new(),
+            draft_forms: HashMap::new(),
+            expanded_drafts: HashSet::new(),
             latest_seen: false,
             reply_layout: None,
             _load: None,
@@ -343,12 +343,12 @@ impl ElseApp {
                             )
                         }))
                         .chain(
-                            turn.email_drafts
+                            turn.outgoing_drafts
                                 .iter()
-                                .filter(|d| d.status != crate::model::EmailStatus::Superseded)
+                                .filter(|d| d.status != crate::model::DraftStatus::Superseded)
                                 .map(move |draft| {
                                     (
-                                        RowKey::Email(draft.id),
+                                        RowKey::Draft(draft.id),
                                         c.question_anchor(turn.id, draft.settled_at),
                                     )
                                 }),
@@ -414,7 +414,7 @@ impl ElseApp {
                             (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_) | RowKey::Question(_) | RowKey::Email(_) => (None, None),
+                RowKey::SecretRequest(_) | RowKey::Question(_) | RowKey::Draft(_) => (None, None),
             })
             .collect();
         let routines = routine_rows(&rows, conversation);
@@ -435,7 +435,7 @@ impl ElseApp {
                 };
                 let state = conversation.and_then(|c| match key {
                     RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
-                    RowKey::Email(id) => c.email_draft(id).map(|d| {
+                    RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
                         format!(
                             "{}:{}:{:?}:{}",
                             d.version, d.updated_at, d.status, d.can_approve
@@ -531,7 +531,7 @@ impl ElseApp {
         view.rows = rows;
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
-        self.sync_email_forms(window, cx);
+        self.sync_draft_forms(window, cx);
         self.check_reading(window, cx);
         cx.notify();
     }

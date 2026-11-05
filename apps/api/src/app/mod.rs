@@ -2,9 +2,9 @@
 //! depend on HTTP or storage.
 
 pub mod bots;
-pub mod email;
 pub mod memory_tree;
 pub mod messages;
+pub mod outgoing;
 pub mod providers;
 pub mod questions;
 pub mod routines;

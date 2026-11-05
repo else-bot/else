@@ -70,10 +70,11 @@ pub fn tool_list() -> Vec<Value> {
     let context = json!({ "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
         "description": "Approval details shown to the owner, including recipient, destination, \
             and complete drafted message or proposed change. Never include credentials." });
-    let email_draft = json!({ "type": "string", "format": "uuid",
-        "description": "Only with effect external: the id of the email draft the owner approved \
-            for this request, which this one call sends. It replaces the approval card for this \
-            call; send exactly that email, once, then call report_email_send." });
+    let approved_draft = json!({ "type": "string", "format": "uuid",
+        "description": "Only with effect external: the id of the draft (email, message, or post) \
+            the owner approved for this request, which this one call sends. It replaces the \
+            approval card for this call; send exactly that content, once, then call \
+            report_draft_send." });
     vec![
         json!({
             "name": "computer_run",
@@ -92,7 +93,7 @@ pub fn tool_list() -> Vec<Value> {
                 "secrets": secrets.clone(),
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "email_draft": email_draft.clone() },
+                "approved_draft": approved_draft.clone() },
                 "required": ["command", "effect"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -108,7 +109,7 @@ pub fn tool_list() -> Vec<Value> {
                 "secrets": secrets,
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "email_draft": email_draft.clone() },
+                "approved_draft": approved_draft.clone() },
                 "required": ["command", "effect"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -176,7 +177,7 @@ pub fn tool_list() -> Vec<Value> {
                 "text": { "type": "string", "maxLength": 4000 },
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "email_draft": email_draft.clone() },
+                "approved_draft": approved_draft.clone() },
                 "required": ["action"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -216,7 +217,7 @@ pub fn tool_list() -> Vec<Value> {
                 "actions": { "type": "array", "minItems": 1, "maxItems": 20,
                              "items": { "type": "object" } },
                 "effect": effect,
-                "purpose": purpose, "context": context, "email_draft": email_draft },
+                "purpose": purpose, "context": context, "approved_draft": approved_draft },
                 "required": ["frame", "actions", "effect"], "additionalProperties": false },
             "annotations": guest.clone(),
         }),

@@ -1,15 +1,17 @@
--- See docs/decisions/0003-email-drafts.md.
-CREATE TABLE email_drafts (
+-- See docs/decisions/0003-outgoing-drafts.md.
+CREATE TABLE outgoing_drafts (
     id BLOB NOT NULL PRIMARY KEY,
-    email_id BLOB NOT NULL,
+    lineage_id BLOB NOT NULL,
     revision INTEGER NOT NULL CHECK (revision >= 1),
     bot_id BLOB NOT NULL REFERENCES bots (id),
     turn_id BLOB NOT NULL REFERENCES turns (id),
     attempt INTEGER NOT NULL,
-    sender text NOT NULL CHECK (length(CAST(sender AS BLOB)) BETWEEN 3 AND 320),
-    recipients TEXT NOT NULL CHECK (json_valid(recipients) AND json_type(recipients) = 'object'),
-    subject text NOT NULL CHECK (length(CAST(subject AS BLOB)) <= 998),
-    body text NOT NULL CHECK (trim(body) <> '' AND length(CAST(body AS BLOB)) <= 100000),
+    -- The typed content (app::outgoing::Content), tagged by channel.
+    content TEXT NOT NULL CHECK (json_valid(content) AND json_type(content) = 'object'
+        AND json_extract(content, '$.channel') IN ('email', 'message')
+        AND json_type(content, '$.body') = 'text'
+        AND trim(json_extract(content, '$.body')) <> ''
+        AND length(CAST(content AS BLOB)) <= 200000),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
     status text NOT NULL DEFAULT 'pending' CHECK (status IN
         ('pending', 'approved', 'sending', 'sent', 'failed', 'uncertain', 'discarded', 'superseded')),
@@ -27,7 +29,7 @@ CREATE TABLE email_drafts (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
     settled_at TEXT,
-    UNIQUE (email_id, revision),
+    UNIQUE (lineage_id, revision),
     CHECK ((approval_source IS NULL) = (approved_version IS NULL)),
     CHECK ((approval_source = 'message') = (approved_item_id IS NOT NULL)),
     CHECK (status NOT IN ('approved', 'sending', 'sent') OR (approval_source IS NOT NULL AND send_turn_id IS NOT NULL)),
@@ -35,9 +37,15 @@ CREATE TABLE email_drafts (
     CHECK ((status = 'superseded') = (superseded_by IS NOT NULL))
 ) STRICT;
 
-CREATE INDEX email_drafts_turn ON email_drafts (turn_id);
-CREATE INDEX email_drafts_send_turn ON email_drafts (send_turn_id) WHERE send_turn_id IS NOT NULL;
-CREATE UNIQUE INDEX email_drafts_live ON email_drafts (email_id) WHERE status <> 'superseded';
+CREATE INDEX outgoing_drafts_turn ON outgoing_drafts (turn_id);
+CREATE INDEX outgoing_drafts_send_turn ON outgoing_drafts (send_turn_id) WHERE send_turn_id IS NOT NULL;
+CREATE UNIQUE INDEX outgoing_drafts_live ON outgoing_drafts (lineage_id) WHERE status <> 'superseded';
+
+CREATE TRIGGER outgoing_drafts_fixed_content BEFORE UPDATE OF content ON outgoing_drafts
+WHEN json_remove(OLD.content, '$.subject', '$.body') IS NOT json_remove(NEW.content, '$.subject', '$.body')
+BEGIN
+    SELECT RAISE(ABORT, 'only the body and an email subject of a draft can change');
+END;
 
 DROP VIEW turn_holds;
 CREATE VIEW turn_holds AS
@@ -54,17 +62,17 @@ CREATE VIEW turn_holds AS
     UNION ALL
     SELECT turn_id, attempt, status = 'pending',
            delivered_attempt IS NULL AND status IN ('approved', 'discarded')
-    FROM email_drafts WHERE approval_source IS NOT 'message';
+    FROM outgoing_drafts WHERE approval_source IS NOT 'message';
 
-CREATE TRIGGER turns_end_email_sends AFTER UPDATE OF status ON turns
+CREATE TRIGGER turns_end_draft_sends AFTER UPDATE OF status ON turns
 WHEN OLD.status <> NEW.status AND NEW.status IN ('cancelling', 'completed', 'interrupted', 'failed', 'uncertain') BEGIN
-    UPDATE email_drafts SET status = 'uncertain',
-        result_detail = 'The request ended before the bot reported whether the email was sent.',
+    UPDATE outgoing_drafts SET status = 'uncertain',
+        result_detail = 'The request ended before the bot reported whether it was sent.',
         updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
         settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
     WHERE send_turn_id = NEW.id AND status = 'sending';
-    UPDATE email_drafts SET status = 'failed',
-        result_detail = 'The request ended before the bot sent the email. Nothing was sent.',
+    UPDATE outgoing_drafts SET status = 'failed',
+        result_detail = 'The request ended before the bot sent it. Nothing was sent.',
         updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
         settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
     WHERE send_turn_id = NEW.id AND status = 'approved';

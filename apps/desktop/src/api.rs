@@ -467,7 +467,7 @@ impl Client {
         provider_id: Option<String>,
         reaction: Option<Reaction>,
         parts: Vec<crate::attachments::MessagePart>,
-        email_draft: Option<crate::model::EmailAttachment>,
+        open_draft: Option<crate::model::DraftAttachment>,
     ) -> Result<Sent, ClientError> {
         let mut body =
             json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
@@ -477,46 +477,46 @@ impl Client {
         if !parts.is_empty() {
             body["parts"] = json!(parts);
         }
-        if let Some(draft) = email_draft {
-            body["email_draft"] = json!(draft);
+        if let Some(draft) = open_draft {
+            body["open_draft"] = json!(draft);
         }
         self.call(Method::POST, format!("/v1/bots/{bot}/turns"), Some(body))
             .await
             .map(|(_, sent)| sent)
     }
 
-    pub async fn approve_email(
+    pub async fn approve_draft(
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-        edit: crate::model::EmailEdit,
-    ) -> Result<crate::model::EmailDraft, ClientError> {
-        self.email_action(bot, draft, "approve", Some(json!(edit)))
+        edit: crate::model::DraftEdit,
+    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+        self.draft_action(bot, draft, "approve", Some(json!(edit)))
             .await
     }
 
-    pub async fn discard_email(
+    pub async fn discard_draft(
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
-    ) -> Result<crate::model::EmailDraft, ClientError> {
-        self.email_action(bot, draft, "discard", None).await
+    ) -> Result<crate::model::OutgoingDraft, ClientError> {
+        self.draft_action(bot, draft, "discard", None).await
     }
 
-    async fn email_action(
+    async fn draft_action(
         self: Arc<Self>,
         bot: Uuid,
         draft: Uuid,
         action: &str,
         body: Option<serde_json::Value>,
-    ) -> Result<crate::model::EmailDraft, ClientError> {
+    ) -> Result<crate::model::OutgoingDraft, ClientError> {
         #[derive(Deserialize)]
         struct Envelope {
-            draft: crate::model::EmailDraft,
+            draft: crate::model::OutgoingDraft,
         }
         self.call::<Envelope>(
             Method::POST,
-            format!("/v1/bots/{bot}/email-drafts/{draft}/{action}"),
+            format!("/v1/bots/{bot}/outgoing-drafts/{draft}/{action}"),
             body,
         )
         .await

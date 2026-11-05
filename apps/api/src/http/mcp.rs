@@ -77,7 +77,7 @@ pub async fn endpoint(
         "ping" => Ok(json!({})),
         "tools/list" => {
             let mut tools = tool_list().as_array().cloned().unwrap_or_default();
-            tools.extend(super::email_tools::schemas());
+            tools.extend(super::outgoing_tools::schemas());
             tools.extend(super::guest_tools::tool_list());
             tools.extend(super::connectors::tool_list());
             Ok(json!({ "tools": tools }))
@@ -88,7 +88,7 @@ pub async fn endpoint(
                 Some("create_bot") => Tool::CreateBot,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_owner") | Some("ask_permission") => Tool::AskOwner,
-                Some(name) if super::email_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
+                Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name) if name.starts_with("routine_") => Tool::Routines,
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 Some("mail_accounts" | "mail_action" | "mail_action_status") => Tool::Mail,
@@ -410,8 +410,8 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
         "ask_owner" => super::owner_tools::ask_owner(state, grant, args).await,
         "ask_permission" => super::owner_tools::ask_permission(state, grant, args).await,
-        name if super::email_tools::TOOL_NAMES.contains(&name) => {
-            super::email_tools::call(state, grant, name, args).await
+        name if super::outgoing_tools::TOOL_NAMES.contains(&name) => {
+            super::outgoing_tools::call(state, grant, name, args).await
         }
         "routine_create" => super::routines::create(state, grant, args).await,
         "routine_list" => super::routines::list(state, grant).await,

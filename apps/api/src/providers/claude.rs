@@ -197,9 +197,9 @@ impl Claude {
             &self.version,
             &runtime,
             match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                (true, true) => "tools:host+elsebot-v4",
+                (true, true) => "tools:host+elsebot-v5",
                 (true, false) => "tools:host",
-                (false, true) => "tools:elsebot-v1",
+                (false, true) => "tools:elsebot-v2",
                 (false, false) => "tools:none",
             },
             "agents:disabled",

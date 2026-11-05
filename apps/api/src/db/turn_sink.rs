@@ -71,7 +71,7 @@ impl SqliteSink {
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
                 delivered_drafts: input
-                    .email_drafts
+                    .outgoing_drafts
                     .iter()
                     .filter(|n| n.decided)
                     .map(|n| n.id)
@@ -462,7 +462,7 @@ impl SinkState {
                             &self.delivered_questions,
                         )
                         .await?;
-                        crate::db::email_drafts::mark_delivered(
+                        crate::db::outgoing_drafts::mark_delivered(
                             &mut tx,
                             self.turn_id,
                             self.attempt,

@@ -1,5 +1,6 @@
-//! Owner routes for a bot's email drafts. Only the owner token reaches
-//! them; a task grant never approves, edits, or discards a draft.
+//! Owner routes for a bot's outgoing drafts (emails, messages, posts).
+//! Only the owner token reaches them; a task grant never approves, edits,
+//! or discards a draft.
 
 use std::sync::Arc;
 
@@ -13,17 +14,18 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
-use crate::db::email_drafts::{self, DraftError, Edits, Settled};
+use crate::app::outgoing::Edits;
+use crate::db::outgoing_drafts::{self, DraftError, Settled};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/bots/{bot_id}/email-drafts/{draft_id}", put(edit))
+        .route("/bots/{bot_id}/outgoing-drafts/{draft_id}", put(edit))
         .route(
-            "/bots/{bot_id}/email-drafts/{draft_id}/approve",
+            "/bots/{bot_id}/outgoing-drafts/{draft_id}/approve",
             post(approve),
         )
         .route(
-            "/bots/{bot_id}/email-drafts/{draft_id}/discard",
+            "/bots/{bot_id}/outgoing-drafts/{draft_id}/discard",
             post(discard),
         )
 }
@@ -61,12 +63,12 @@ pub(super) fn draft_error(err: DraftError) -> ApiError {
         ),
         DraftError::Inactive => conflict(
             "draft_inactive",
-            "The request that drafted this email has ended. Reply in chat to send it.".into(),
+            "The request that drafted this has ended. Reply in chat to send it.".into(),
         ),
         DraftError::Invalid(message) => ApiError::bad_request("invalid_draft", message),
         DraftError::Db(err) => err.into(),
         other => {
-            tracing::warn!(error = %other, "unexpected email draft error on an owner route");
+            tracing::warn!(error = %other, "unexpected outgoing draft error on an owner route");
             ApiError::internal()
         }
     }
@@ -85,7 +87,7 @@ async fn edit(
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
 ) -> Result<Json<Value>, ApiError> {
-    let done = email_drafts::edit(&state.db, bot_id, draft_id, body.version, body.edits())
+    let done = outgoing_drafts::edit(&state.db, bot_id, draft_id, body.version, body.edits())
         .await
         .map_err(draft_error)?;
     Ok(settled(&state, done))
@@ -98,7 +100,7 @@ async fn approve(
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<VersionedEdits>,
 ) -> Result<Json<Value>, ApiError> {
-    let done = email_drafts::approve(&state.db, bot_id, draft_id, body.version, body.edits())
+    let done = outgoing_drafts::approve(&state.db, bot_id, draft_id, body.version, body.edits())
         .await
         .map_err(draft_error)?;
     Ok(settled(&state, done))
@@ -108,7 +110,7 @@ async fn discard(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, draft_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    let done = email_drafts::discard(&state.db, bot_id, draft_id)
+    let done = outgoing_drafts::discard(&state.db, bot_id, draft_id)
         .await
         .map_err(draft_error)?;
     Ok(settled(&state, done))

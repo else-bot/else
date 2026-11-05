@@ -8,14 +8,14 @@ pub mod computers;
 pub mod connectors;
 pub mod conversation;
 mod desktop_stream;
-pub mod email_drafts;
-pub(crate) mod email_tools;
 pub mod error;
 pub mod guest_tools;
 pub mod maintenance;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;
+pub mod outgoing_drafts;
+pub(crate) mod outgoing_tools;
 mod owner_tools;
 pub mod questions;
 pub mod routines;
@@ -126,7 +126,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(settings::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
-        .merge(email_drafts::routes())
+        .merge(outgoing_drafts::routes())
         .merge(routines::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())

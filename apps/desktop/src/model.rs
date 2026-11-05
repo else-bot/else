@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::api::{Activity, Bot};
 
-mod email;
-pub use email::{EmailAttachment, EmailDraft, EmailEdit, EmailStatus};
+mod outgoing;
+pub use outgoing::{DraftAttachment, DraftEdit, DraftStatus, OutgoingDraft};
 
 /// One event of a `bot:<id>` channel: its cursor, kind, and JSON data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ pub struct Turn {
     #[serde(default)]
     pub routine: Option<RoutineRun>,
     #[serde(default)]
-    pub email_drafts: Vec<EmailDraft>,
+    pub outgoing_drafts: Vec<OutgoingDraft>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -462,25 +462,25 @@ impl Conversation {
             .find(|q| q.id == id)
     }
 
-    pub fn email_draft(&self, id: Uuid) -> Option<&EmailDraft> {
+    pub fn outgoing_draft(&self, id: Uuid) -> Option<&OutgoingDraft> {
         self.turns
             .values()
-            .flat_map(|t| &t.email_drafts)
+            .flat_map(|t| &t.outgoing_drafts)
             .find(|d| d.id == id)
     }
 
-    pub fn open_email(&self) -> Option<&EmailDraft> {
+    pub fn open_draft(&self) -> Option<&OutgoingDraft> {
         self.turns_in_order()
             .into_iter()
-            .flat_map(|t| &t.email_drafts)
+            .flat_map(|t| &t.outgoing_drafts)
             .filter(|d| d.status.can_follow_up())
             .last()
     }
 
-    pub fn update_email(&mut self, draft: EmailDraft) {
+    pub fn update_draft(&mut self, draft: OutgoingDraft) {
         for turn in self.turns.values_mut() {
-            if let Some(current) = turn.email_drafts.iter_mut().find(|d| d.id == draft.id) {
-                if current.status == EmailStatus::Pending && current.updated_at <= draft.updated_at
+            if let Some(current) = turn.outgoing_drafts.iter_mut().find(|d| d.id == draft.id) {
+                if current.status == DraftStatus::Pending && current.updated_at <= draft.updated_at
                 {
                     *current = draft;
                 }
@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn email_revisions_and_receipts_survive_events_and_snapshot_reload() {
+    fn outgoing_revisions_and_receipts_survive_events_and_snapshot_reload() {
         let id = Uuid::from_u128(700);
         let next = Uuid::from_u128(701);
         let make_turn = |turn: u128, number, draft_id, status: &str, version| {
@@ -939,9 +939,9 @@ mod tests {
                 "id": Uuid::from_u128(turn), "request_id": Uuid::from_u128(turn + 10),
                 "turn_no": number, "provider_id": "synthetic", "status": "waiting", "error": null,
                 "effect_uncertain": false,
-                "email_drafts": [{"id": draft_id, "email_id": id, "revision": number,
-                    "from": "main@example.invalid", "to": ["ji@example.invalid"], "cc": [], "bcc": [],
-                    "subject": "Edited subject", "body": "Edited message", "version": version,
+                "outgoing_drafts": [{"id": draft_id, "lineage_id": id, "revision": number,
+                    "content": {"channel":"email", "from": "main@example.invalid", "to": ["ji@example.invalid"], "cc": [], "bcc": [],
+                    "subject": "Edited subject", "body": "Edited message"}, "version": version,
                     "status": status, "can_approve": status == "pending", "result_detail": null,
                     "updated_at": "2026-11-05T00:00:02Z", "settled_at": null}]
             })
@@ -953,39 +953,45 @@ mod tests {
             json!({"turn": make_turn(900, 1, id, "pending", 2)}),
         ))
         .unwrap();
-        assert_eq!(c.open_email().unwrap().edit().subject, "Edited subject");
+        assert_eq!(
+            c.open_draft().unwrap().edit().subject.as_deref(),
+            Some("Edited subject")
+        );
         let old = make_turn(900, 1, id, "superseded", 2);
         let revision = make_turn(901, 2, next, "pending", 1);
         c.apply(&frame(3, "turn.updated", json!({"turn": old})))
             .unwrap();
         c.apply(&frame(4, "turn.updated", json!({"turn": revision})))
             .unwrap();
-        assert_eq!(c.open_email().unwrap().id, next);
+        assert_eq!(c.open_draft().unwrap().id, next);
         let mut snap = snapshot(4, vec![], None);
         snap.turns = serde_json::from_value(json!([old, revision])).unwrap();
         let reloaded = Conversation::from_snapshot(snap).unwrap();
-        assert_eq!(reloaded.open_email(), c.open_email());
+        assert_eq!(reloaded.open_draft(), c.open_draft());
         let approval: Turn =
             serde_json::from_value(make_turn(901, 2, next, "approved", 1)).unwrap();
-        let response = approval.email_drafts[0].clone();
+        let response = approval.outgoing_drafts[0].clone();
         c.apply(&frame(
             5,
             "turn.updated",
             json!({"turn": make_turn(901, 2, next, "approved", 1)}),
         ))
         .unwrap();
-        assert!(c.open_email().is_none());
-        assert_eq!(c.email_draft(next).unwrap().status, EmailStatus::Approved);
+        assert!(c.open_draft().is_none());
+        assert_eq!(
+            c.outgoing_draft(next).unwrap().status,
+            DraftStatus::Approved
+        );
         c.apply(&frame(
             6,
             "turn.updated",
             json!({"turn": make_turn(901, 2, next, "sent", 1)}),
         ))
         .unwrap();
-        c.update_email(response);
+        c.update_draft(response);
         assert_eq!(
-            c.email_draft(next).unwrap().status,
-            EmailStatus::Sent,
+            c.outgoing_draft(next).unwrap().status,
+            DraftStatus::Sent,
             "a delayed approval response cannot undo a sent event"
         );
     }

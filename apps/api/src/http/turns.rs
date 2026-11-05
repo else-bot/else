@@ -76,7 +76,7 @@ impl From<AcceptError> for ApiError {
                 "provider_unavailable",
                 format!("Provider {provider} has no saved execution profile; run else-api setup."),
             ),
-            AcceptError::EmailDraft(err) => super::email_drafts::draft_error(err),
+            AcceptError::OpenDraft(err) => super::outgoing_drafts::draft_error(err),
             AcceptError::Db(err) => err.into(),
         }
     }
@@ -94,9 +94,9 @@ struct SendBody {
     provider_id: Option<String>,
     #[serde(default)]
     reaction: Option<Reaction>,
-    /// The email draft open in the app, with the owner's unsaved edits.
+    /// The outgoing draft open in the app, with the owner's unsaved edits.
     #[serde(default)]
-    email_draft: Option<crate::db::email_drafts::Attachment>,
+    open_draft: Option<crate::db::outgoing_drafts::Attachment>,
 }
 
 async fn send(
@@ -136,7 +136,7 @@ async fn send(
         requested_provider: requested,
         provider_id: requested.or(chosen).or(registry.default_id()).unwrap_or(""),
         uses_profile: false,
-        email_draft: body.email_draft.as_ref(),
+        open_draft: body.open_draft.as_ref(),
     };
     // A matching retry returns its saved result even if the provider has
     // since become unavailable; provider checks apply to new messages only.

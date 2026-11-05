@@ -202,9 +202,9 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         Ok(effect) => effect,
         Err(message) => return (tool_error(&message), None),
     };
-    let note = match (effect, args.get("email_draft").filter(|v| !v.is_null())) {
+    let note = match (effect, args.get("approved_draft").filter(|v| !v.is_null())) {
         (Some(Effect::External), Some(_)) => {
-            match crate::http::email_tools::claim_for_tool(state, grant, name, args).await {
+            match crate::http::outgoing_tools::claim_for_tool(state, grant, name, args).await {
                 Ok(note) => Some(note),
                 Err(outcome) => return outcome,
             }
@@ -212,8 +212,8 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
         (_, Some(_)) => {
             return (
                 tool_error(
-                    "email_draft goes only with effect external: it names the approved email \
-                     this call sends. Nothing was done.",
+                    "approved_draft goes only with effect external: it names the approved \
+                     draft this call sends. Nothing was done.",
                 ),
                 None,
             );
