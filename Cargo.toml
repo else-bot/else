@@ -6,7 +6,7 @@ resolver = "3"
 # The one else.bot version: both binaries report it, release tags are
 # v<version>, and scripts/release.sh bumps it.
 [workspace.package]
-version = "0.0.16"
+version = "0.0.17"
 edition = "2024"
 
 # Prefer fast checkout builds over generating debug information for GPUI's
