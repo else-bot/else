@@ -60,6 +60,8 @@ pub struct Catalog {
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
+    pub featured_models: Vec<String>,
+    #[serde(default)]
     pub efforts: Vec<String>,
     #[serde(default)]
     pub tiers: Vec<String>,
