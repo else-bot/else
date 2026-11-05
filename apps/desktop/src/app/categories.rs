@@ -7,7 +7,6 @@ use crate::sidebar::known_category;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::{
@@ -16,21 +15,10 @@ use gpui_kit::component::{
 use gpui_kit::*;
 use uuid::Uuid;
 
-/// Creating or renaming a category.
-struct CategoryForm {
-    /// `None` creates; `Some` renames that category.
-    renaming: Option<Uuid>,
-    request_id: Uuid,
-    /// A create whose outcome is unknown is retried unchanged.
-    in_doubt: Option<String>,
-    name: Entity<InputState>,
-    error: Option<String>,
-    busy: bool,
-}
+mod creation;
+mod form;
 
-pub(super) struct CategoryFormHolder {
-    form: CategoryForm,
-}
+pub(super) use form::CategoryFormHolder;
 
 /// The Move dialog's pending choice for one bot.
 struct MoveHolder {
@@ -124,182 +112,6 @@ impl ElseApp {
                     });
                 }),
         )
-    }
-
-    /// The dialog for a new category, or (with `renaming`) a new name.
-    pub(super) fn open_category_dialog(
-        &mut self,
-        renaming: Option<Category>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let current = renaming
-            .as_ref()
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
-        let name = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("Category name, e.g. Family");
-            state.set_value(current, window, cx);
-            state
-        });
-        let holder = cx.new(|_| CategoryFormHolder {
-            form: CategoryForm {
-                renaming: renaming.as_ref().map(|c| c.id),
-                request_id: Uuid::new_v4(),
-                in_doubt: None,
-                name: name.clone(),
-                error: None,
-                busy: false,
-            },
-        });
-        self.category_form = Some(holder.clone());
-        self._category_enter =
-            Some(
-                cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        app.submit_category(window, cx);
-                    }
-                }),
-            );
-        let app = cx.entity().downgrade();
-        let title = if renaming.is_some() {
-            "Rename category"
-        } else {
-            "New category"
-        };
-        let action = if renaming.is_some() {
-            "Rename"
-        } else {
-            "Create"
-        };
-        let focus_once = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if focus_once.replace(false) {
-                name.read(cx).focus_handle(cx).focus(window, cx);
-            }
-            let form = &holder.read(cx).form;
-            let mut body = v_flex()
-                .gap_3()
-                .child(Input::new(&form.name).focus_ring(false));
-            if let Some(error) = &form.error {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(error.clone()),
-                );
-            }
-            let busy = form.busy;
-            let app_ok = app.clone();
-            let app_submit = app.clone();
-            let app_close = app.clone();
-            let mine = holder.clone();
-            dialog
-                .title(title)
-                .w(px(420.))
-                .on_ok(move |_, window, cx| {
-                    let _ = app_ok.update(cx, |app, cx| app.submit_category(window, cx));
-                    false
-                })
-                // Dismissed: a late result must not close another dialog.
-                .on_close(move |_, _, cx| {
-                    let _ = app_close.update(cx, |app, _| {
-                        if app.category_form.as_ref() == Some(&mine) {
-                            app.category_form = None;
-                        }
-                    });
-                })
-                .child(body)
-                .footer(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("category-cancel")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .label("Cancel")
-                                .ghost()
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("category-submit")
-                                .focus_ring(false)
-                                .cursor_pointer()
-                                .label(action)
-                                .primary()
-                                .loading(busy)
-                                .disabled(busy)
-                                .on_click(move |_, window, cx| {
-                                    let _ = app_submit
-                                        .update(cx, |app, cx| app.submit_category(window, cx));
-                                }),
-                        ),
-                )
-        });
-    }
-
-    fn submit_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (client, Some(holder)) = (self.client.clone(), self.category_form.clone()) else {
-            return;
-        };
-        if holder.read(cx).form.busy {
-            return;
-        }
-        let (renaming, request_id, name) = {
-            let form = &holder.read(cx).form;
-            let name = form
-                .in_doubt
-                .clone()
-                .unwrap_or_else(|| form.name.read(cx).value().to_string());
-            (form.renaming, form.request_id, name)
-        };
-        holder.update(cx, |h, cx| {
-            h.form.busy = true;
-            h.form.error = None;
-            cx.notify();
-        });
-        window.refresh();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = match renaming {
-                Some(id) => client.rename_category(id, name.clone()).await,
-                None => client.create_category(request_id, name.clone()).await,
-            };
-            let _ = this.update_in(cx, |app, window, cx| match result {
-                Ok(category) => {
-                    if app.category_form.as_ref() == Some(&holder) {
-                        app.category_form = None;
-                        window.close_dialog(cx);
-                    }
-                    // The `bots` snapshot shows it.
-                    let _ = category;
-                    app.category_notice = None;
-                    cx.notify();
-                }
-                Err(err) => {
-                    holder.update(cx, |h, cx| {
-                        h.form.busy = false;
-                        // An unknown create outcome keeps the same request and
-                        // name, so a retry cannot make a second category.
-                        if renaming.is_none()
-                            && (err.outcome_unknown() || err.is_request_conflict())
-                        {
-                            h.form.in_doubt = Some(name.clone());
-                            h.form.error = Some(format!(
-                                "{err} Create will retry the original request unchanged."
-                            ));
-                        } else {
-                            h.form.request_id = Uuid::new_v4();
-                            h.form.in_doubt = None;
-                            h.form.error = Some(err.to_string());
-                        }
-                        cx.notify();
-                    });
-                    window.refresh();
-                }
-            });
-        })
-        .detach();
     }
 
     pub(super) fn open_delete_category_dialog(
