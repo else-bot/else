@@ -17,7 +17,7 @@ done
 [ -n "$bump" ] || usage
 
 remote=origin
-git fetch -q --tags "$remote" "+refs/heads/main:refs/remotes/$remote/main" ||
+git fetch --no-tags "$remote" "+refs/heads/main:refs/remotes/$remote/main" ||
 	die "cannot fetch main from $remote"
 
 workspace_version() {
@@ -33,7 +33,9 @@ major) version="$((major + 1)).0.0" ;;
 esac
 tag="v$version"
 branch="release/$tag"
-git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "tag $tag already exists"
+remote_tag="$(git ls-remote --tags "$remote" "refs/tags/$tag")" ||
+	die "cannot check tag $tag on $remote"
+[ -z "$remote_tag" ] || die "tag $tag already exists on $remote"
 
 ensure_pr() {
 	local url body
