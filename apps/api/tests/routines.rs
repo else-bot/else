@@ -578,6 +578,15 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     assert_eq!(report.len(), 1);
     assert_eq!(report[0]["kind"], "assistant");
     assert!(report[0]["text"].as_str().unwrap().contains(TASK));
+    let visible_turn = snapshot["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.to_string())
+        .unwrap();
+    assert_eq!(visible_turn["routine"]["routine_id"], routine["id"]);
+    assert_eq!(visible_turn["routine"]["name"], "Morning digest");
+    assert_eq!(at(&visible_turn["routine"]["due_at"]), due);
     assert_eq!(snapshot["routines"][0]["last_run"]["status"], "completed");
     assert_eq!(
         snapshot["routines"][0]["last_run"]["turn_id"],
@@ -587,6 +596,16 @@ async fn a_run_is_hidden_and_its_report_is_visible() {
     assert!(next > due, "advanced past the run");
 
     let journal = events(&h.app, &main).await;
+    let run_events: Vec<_> = journal
+        .iter()
+        .filter(|(kind, data)| kind == "turn.updated" && data["turn"]["id"] == turn.to_string())
+        .collect();
+    assert!(!run_events.is_empty());
+    assert!(
+        run_events
+            .iter()
+            .all(|(_, data)| data["turn"]["routine"] == visible_turn["routine"])
+    );
     for (kind, data) in &journal {
         if kind == "item.upsert" {
             assert_ne!(data["item"]["kind"], "routine");
@@ -854,6 +873,18 @@ async fn pausing_stops_future_runs_and_resuming_counts_from_now() {
     )
     .await;
     assert_eq!(runs(&h.app, &id).await[0].2, "Morning digest");
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    let admitted = snapshot["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == run.to_string())
+        .unwrap();
+    assert_eq!(admitted["routine"]["name"], "Morning digest");
     let bad = set_enabled(&h.app, &main, &Uuid::new_v4().to_string(), true).await;
     assert_eq!(bad.status, StatusCode::NOT_FOUND);
 }
