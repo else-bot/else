@@ -124,11 +124,13 @@ pub enum BotError {
     Db(#[from] sqlx::Error),
 }
 
-/// Why a turn may not create a bot.
+/// Why a turn may not create or rename a bot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     #[error("only the main bot, in the owner's conversation, can create bots")]
     NotMain,
+    #[error("bots can be renamed only for work rooted in an owner request")]
+    NotOwnerRequest,
     #[error("the request is no longer running")]
     NotRunning,
     #[error("this attempt already delegated; end it and wait for the result")]
@@ -348,14 +350,54 @@ pub async fn update(
     patch: Patch<'_>,
 ) -> Result<BotRecord, BotError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let current = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
+    let bot = update_in(&mut tx, bot_id, patch).await?;
+    tx.commit().await?;
+    Ok(bot)
+}
+
+pub async fn rename_for_turn(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    bot_id: Uuid,
+    name: &BotName,
+) -> Result<BotRecord, BotError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let caller = super::turns::asking_caller(&mut tx, turn_id)
+        .await?
+        .ok_or(Refusal::NotRunning)?;
+    if super::delegations::origin(&mut tx, turn_id).await?
+        != crate::app::providers::Origin::OwnerRequest
+    {
+        return Err(Refusal::NotOwnerRequest.into());
+    }
+    if super::turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
+        return Err(Refusal::AttemptDelegated.into());
+    }
+    let bot = update_in(
+        &mut tx,
+        bot_id,
+        Patch {
+            name: Some(name),
+            avatar: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(bot)
+}
+
+async fn update_in(
+    conn: &mut sqlx::SqliteConnection,
+    bot_id: Uuid,
+    patch: Patch<'_>,
+) -> Result<BotRecord, BotError> {
+    let current = find_in(conn, bot_id).await?.ok_or(BotError::NotFound)?;
     if current.status != BotStatus::Active {
         return Err(BotError::Deleted);
     }
     let name = patch.name.map_or(current.name.as_str(), BotName::as_str);
     let avatar = patch.avatar.unwrap_or(current.avatar());
     if name == current.name && avatar == current.avatar() {
-        tx.commit().await?;
         return Ok(current);
     }
     sqlx::query(
@@ -367,12 +409,10 @@ pub async fn update(
     .bind(name)
     .bind(patch.avatar.map(|a| a.shape))
     .bind(patch.avatar.map(|a| a.color))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    super::events::bot_updated(&mut tx, bot_id).await?;
-    let bot = find_in(&mut tx, bot_id).await?.ok_or(BotError::NotFound)?;
-    tx.commit().await?;
-    Ok(bot)
+    super::events::bot_updated(conn, bot_id).await?;
+    find_in(conn, bot_id).await?.ok_or(BotError::NotFound)
 }
 
 /// Result of a delete request.

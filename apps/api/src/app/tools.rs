@@ -15,6 +15,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_date",
     "delegate",
     "create_bot",
+    "rename_bot",
     "request_secret",
     "ask_owner",
     "ask_permission",
