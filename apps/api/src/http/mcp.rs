@@ -88,7 +88,7 @@ pub async fn endpoint(
                 Some("mcp_list" | "mcp_request") => Tool::Mcp,
                 Some("create_bot") => Tool::CreateBot,
                 Some("request_secret") => Tool::RequestSecret,
-                Some("ask_owner") | Some("ask_permission") | Some("social_connect") => {
+                Some("ask_owner" | "ask_permission" | "confirm_permission" | "social_connect") => {
                     Tool::AskOwner
                 }
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
@@ -248,6 +248,7 @@ fn tool_list() -> Value {
         super::owner_tools::secret_schema(),
         super::owner_tools::choice_schema(),
         super::owner_tools::permission_schema(),
+        super::owner_tools::confirm_permission_schema(),
         super::routines::create_schema(),
         super::routines::list_schema(),
         super::routines::update_schema(),
@@ -405,6 +406,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         }
         "ask_owner" => super::owner_tools::ask_owner(state, grant, args).await,
         "ask_permission" => super::owner_tools::ask_permission(state, grant, args).await,
+        "confirm_permission" => super::owner_tools::confirm_permission(state, grant, args).await,
         name if super::outgoing_tools::TOOL_NAMES.contains(&name) => {
             super::outgoing_tools::call(state, grant, name, args).await
         }

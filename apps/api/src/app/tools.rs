@@ -18,6 +18,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "request_secret",
     "ask_owner",
     "ask_permission",
+    "confirm_permission",
     "draft_email",
     "draft_message",
     "confirm_draft_approval",

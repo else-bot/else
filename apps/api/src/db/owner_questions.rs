@@ -12,7 +12,8 @@
 //! marks it `cancelled` (a trigger).
 //!
 //! Destructive actions may be allowed in advance in two separate scopes,
-//! each chosen on a destructive card. "Always allow destructive actions"
+//! chosen on a destructive card or explicitly authorized in owner chat.
+//! "Always allow destructive actions"
 //! covers the bot's own requests but never a routine run. "Always allow for
 //! this routine" covers runs of that one routine admitted with its current
 //! prompt revision; editing the prompt ends it. Which scope a card offers
@@ -30,6 +31,8 @@ use uuid::Uuid;
 
 use super::events;
 use super::turns::{self, AskingCaller as Caller};
+
+pub mod standing;
 
 use crate::app::providers::Origin;
 use crate::app::questions::{
@@ -238,7 +241,6 @@ async fn insert(
     .bind(spec.multiple)
     .fetch_one(&mut *conn)
     .await?;
-    events::turn_changed(conn, caller.bot_id, turn_id).await?;
     Ok(info(row)?)
 }
 
@@ -265,6 +267,7 @@ pub async fn create(
         return Ok(found);
     }
     let question = insert(&mut tx, turn_id, &caller, spec).await?;
+    events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
     tx.commit().await?;
     Ok(question)
 }
@@ -385,6 +388,7 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
         ..spec.clone()
     };
     let question = insert(&mut tx, turn_id, &caller, &spec).await?;
+    events::turn_changed(&mut tx, caller.bot_id, turn_id).await?;
     tx.commit().await?;
     Ok(Gate::Pending(question))
 }

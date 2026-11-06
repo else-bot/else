@@ -120,6 +120,7 @@ pub fn routine_json(routine: &Routine) -> Value {
         "bot_id": routine.bot_id,
         "name": routine.name,
         "prompt": routine.prompt,
+        "prompt_revision": routine.prompt_revision,
         "cron": routine.cron,
         "timezone": routine.timezone,
         "enabled": routine.enabled,
