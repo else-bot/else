@@ -896,3 +896,33 @@ async fn launch_secrets_stay_off_host_command_lines() {
         "the value reached the provider"
     );
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn turn_cleanup_kills_stubborn_descendants_without_touching_another_turn() {
+    let fx = fixture();
+    let ready = fx.data.join("child-ready");
+    let mut spec = shell(
+        &fx,
+        Uuid::new_v4(),
+        "sh -c 'trap \"\" TERM; touch \"$READY\"; while :; do sleep 1; done' & wait",
+    );
+    spec.env
+        .push(("READY".into(), ready.to_string_lossy().into_owned()));
+    let other = shell(&fx, Uuid::new_v4(), "sleep 300");
+    let mut other_process = Supervised::spawn(fx.host.command(&other)).unwrap();
+    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    process.terminate(Duration::from_millis(100)).await;
+    assert!(!fx.host.live_processes(spec.turn_id).is_empty());
+    assert!(fx.host.sweep_turn(spec.turn_id).unwrap() > 0);
+    assert!(fx.host.live_processes(spec.turn_id).is_empty());
+    assert!(!fx.host.live_processes(other.turn_id).is_empty());
+    other_process.terminate(Duration::ZERO).await;
+}

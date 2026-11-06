@@ -240,9 +240,20 @@ impl Host {
     /// signalled, so a reused PID can never be hit. Returns how many were
     /// terminated, or an error if any survived.
     pub fn sweep_orphans(&self) -> Result<usize, HostError> {
-        let wanted = format!("{MARKER_VAR}={}:", self.marker_prefix);
+        self.sweep(None)
+    }
+
+    pub fn sweep_turn(&self, turn_id: Uuid) -> Result<usize, HostError> {
+        self.sweep(Some(turn_id))
+    }
+
+    fn sweep(&self, turn_id: Option<Uuid>) -> Result<usize, HostError> {
+        let wanted = match turn_id {
+            Some(id) => format!("{MARKER_VAR}={}", self.marker(id)),
+            None => format!("{MARKER_VAR}={}:", self.marker_prefix),
+        };
         let mut killed = Vec::new();
-        for pid in find_marked(&self.marker_prefix, None) {
+        for pid in find_marked(&self.marker_prefix, turn_id) {
             let Some(process) = procs::pin(pid, &wanted) else {
                 continue;
             };
