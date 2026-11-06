@@ -161,9 +161,22 @@ pub(crate) async fn approve(
     args: &Value,
     kind: Kind,
 ) -> Result<Option<&'static str>, Outcome> {
+    let (title, context) = approval_card(name, args);
+    approve_card(state, grant, name, args, kind, title, context).await
+}
+
+/// Like [`approve`], with a card the caller describes.
+pub(crate) async fn approve_card(
+    state: &AppState,
+    grant: &Grant,
+    name: &str,
+    args: &Value,
+    kind: Kind,
+    title: String,
+    context: String,
+) -> Result<Option<&'static str>, Outcome> {
     use crate::app::questions::{Spec, Standing};
     use crate::db::owner_questions::{self, Gate};
-    let (title, context) = approval_card(name, args);
     let spec = Spec::tool_approval(kind, name, args, title, context);
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Run {

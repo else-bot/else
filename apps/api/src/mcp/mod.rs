@@ -26,7 +26,7 @@ pub enum Error {
     #[error("That MCP is not installed.")]
     NotFound,
     #[error(
-        "An MCP with that id is already installed with different files. Remove it in Settings before replacing it."
+        "An MCP with that id is already installed with different files. Call mcp_install again with replace true to ask the owner to approve replacing it, or use a new id to add another account."
     )]
     Conflict,
     #[error("The shared MCP library could not be read or saved.")]
@@ -98,6 +98,47 @@ impl Transport {
         match self {
             Self::Http { .. } => "http",
             Self::Stdio { .. } => "stdio",
+        }
+    }
+
+    /// What the owner approves when a replacement changes the connection.
+    /// Header and environment values, URL queries and arguments can hold
+    /// credentials, so only their names or counts appear.
+    fn describe(&self) -> String {
+        let names = |keys: Vec<&String>| {
+            keys.into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Self::Http { url, headers } => {
+                let mut text = match reqwest::Url::parse(url) {
+                    Ok(mut parsed) => {
+                        let query = parsed.query().is_some();
+                        parsed.set_query(None);
+                        format!("HTTP {parsed}{}", if query { "?…" } else { "" })
+                    }
+                    Err(_) => "HTTP".to_owned(),
+                };
+                if !headers.is_empty() {
+                    text.push_str(&format!(
+                        " with headers {}",
+                        names(headers.keys().collect())
+                    ));
+                }
+                text
+            }
+            Self::Stdio { command, args, env } => {
+                let mut text = format!("stdio {command}");
+                if !args.is_empty() {
+                    text.push_str(&format!(" with {} arguments", args.len()));
+                }
+                if !env.is_empty() {
+                    text.push_str(&format!(" and environment {}", names(env.keys().collect())));
+                }
+                text
+            }
         }
     }
 
@@ -201,7 +242,7 @@ pub struct Installation {
 }
 
 impl Installation {
-    fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.name.trim().is_empty()
             || self.name.len() > 120
             || self.name.chars().any(char::is_control)
@@ -240,6 +281,64 @@ pub struct Package {
     pub documentation: String,
     #[serde(skip)]
     config: Transport,
+}
+
+impl Package {
+    pub fn matches(&self, input: &Installation) -> bool {
+        self.manifest.name == input.name
+            && self.manifest.description == input.description
+            && self.skill == input.skill
+            && self.documentation == input.documentation
+            && self.same_connection(input)
+    }
+
+    /// Saved sign-ins and tool permissions belong to this connection.
+    pub fn same_connection(&self, input: &Installation) -> bool {
+        self.config == input.config
+    }
+
+    /// The approval card text for replacing this package with `input`.
+    pub fn replacement(&self, input: &Installation) -> String {
+        let mut changed = Vec::new();
+        if self.manifest.name != input.name || self.manifest.description != input.description {
+            changed.push("name or description");
+        }
+        if self.skill != input.skill {
+            changed.push("skill");
+        }
+        if self.documentation != input.documentation {
+            changed.push("documentation");
+        }
+        if !self.same_connection(input) {
+            changed.push("connection");
+        }
+        let mut text = format!(
+            "MCP: {}\nCurrent: {}, {}\nNew: {}, {}\nChanges: {}",
+            self.manifest.id.0,
+            self.manifest.name,
+            self.config.describe(),
+            input.name,
+            input.config.describe(),
+            changed.join(", "),
+        );
+        if self.same_connection(input) {
+            text.push_str("\nSaved sign-ins and MCP tool permissions are kept.");
+        } else {
+            text.push_str(
+                "\nEvery bot's saved sign-in and MCP tool permissions for it are removed. \
+                 Bots sign in again on their next use.",
+            );
+        }
+        text
+    }
+}
+
+/// The package a replacement published, and whether its connection changed,
+/// which removed every bot's saved sign-in.
+#[derive(Debug)]
+pub struct Replaced {
+    pub manifest: Summary,
+    pub reconnect: bool,
 }
 
 struct Slot {
@@ -423,11 +522,35 @@ impl Library {
             .map_err(missing)
     }
 
+    /// Publish a package, or return the identical one already under its id.
+    /// Different files under the id are a conflict.
     pub async fn install(
         &self,
         input: Installation,
         installed_by: String,
     ) -> Result<Summary, Error> {
+        self.publish(input, installed_by, false)
+            .await
+            .map(|published| published.manifest)
+    }
+
+    /// Publish a package in place of whatever is under its id. The caller
+    /// has the owner's approval. A changed connection closes every session
+    /// and drops their saved sign-ins.
+    pub async fn replace(
+        &self,
+        input: Installation,
+        installed_by: String,
+    ) -> Result<Replaced, Error> {
+        self.publish(input, installed_by, true).await
+    }
+
+    async fn publish(
+        &self,
+        input: Installation,
+        installed_by: String,
+        replace: bool,
+    ) -> Result<Replaced, Error> {
         input.validate()?;
         let slot = self.slot(&input.id).await?;
         slot.actor
@@ -438,9 +561,22 @@ impl Library {
                         return Err(Error::NotFound);
                     }
                     let path = slot.path.clone();
-                    tokio::task::spawn_blocking(move || install(&path, &input, installed_by))
-                        .await
-                        .map_err(|_| Error::Connection)?
+                    let published = tokio::task::spawn_blocking(move || {
+                        install(&path, &input, installed_by, replace)
+                    })
+                    .await
+                    .map_err(|_| Error::Connection)
+                    .flatten();
+                    // A failed replacement may still have published the new config,
+                    // so no session that holds the old sign-in survives it.
+                    if published.as_ref().map_or(replace, |p| p.reconnect) {
+                        futures_util::future::join_all(
+                            slot.sessions.values_mut().map(oauth::Session::close),
+                        )
+                        .await;
+                        slot.sessions.clear();
+                    }
+                    published
                 })
             })
             .await
@@ -748,32 +884,35 @@ fn read_package(path: &Path) -> Result<Package, Error> {
     })
 }
 
-fn install(path: &Path, input: &Installation, installed_by: String) -> Result<Summary, Error> {
+fn install(
+    path: &Path,
+    input: &Installation,
+    installed_by: String,
+    replace: bool,
+) -> Result<Replaced, Error> {
     let parent = path.parent().expect("package parent");
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(parent)?;
     require_dir(parent)?;
-    match read_package(path) {
-        Ok(existing) => {
-            if existing.manifest.name == input.name
-                && existing.manifest.description == input.description
-                && existing.skill == input.skill
-                && existing.documentation == input.documentation
-                && existing.config == input.config
-            {
-                return Ok(existing.manifest);
-            }
-            return Err(Error::Conflict);
+    let existing = match read_package(path) {
+        Ok(existing) if existing.matches(input) => {
+            return Ok(Replaced {
+                manifest: existing.manifest,
+                reconnect: false,
+            });
         }
+        Ok(_) if !replace => return Err(Error::Conflict),
+        Ok(existing) => Some(existing),
         Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => {
             if std::fs::symlink_metadata(path).is_ok() {
                 return Err(Error::Invalid("The existing MCP package is incomplete."));
             }
+            None
         }
         Err(err) => return Err(err),
-    }
+    };
     let manifest = Summary {
         id: input.id.clone(),
         name: input.name.clone(),
@@ -806,15 +945,68 @@ fn install(path: &Path, input: &Installation, installed_by: String) -> Result<Su
             file.write_all(&bytes)?;
             file.sync_all()?;
         }
+        let keep_sign_ins = existing
+            .as_ref()
+            .is_some_and(|existing| existing.same_connection(input));
+        if keep_sign_ins {
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("oauth-")
+                    && name.ends_with(".json")
+                    && entry.file_type()?.is_file()
+                {
+                    std::fs::hard_link(entry.path(), staging.join(entry.file_name()))?;
+                }
+            }
+        }
         std::fs::File::open(&staging)?.sync_all()?;
-        std::fs::rename(&staging, path)?;
+        if existing.is_some() {
+            exchange(&staging, path)?;
+        } else {
+            std::fs::rename(&staging, path)?;
+        }
         std::fs::File::open(parent)?.sync_all()?;
-        Ok::<_, Error>(manifest)
+        Ok::<_, Error>(Replaced {
+            manifest,
+            reconnect: existing.is_some() && !keep_sign_ins,
+        })
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(staging);
+    let _ = std::fs::remove_dir_all(&staging);
+    if result.is_ok() {
+        std::fs::File::open(parent)?.sync_all()?;
     }
     result
+}
+
+/// Atomically swap two directories, so a crash leaves either package whole.
+/// The old one is left at `a`, under a staging name that startup cleanup removes.
+fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(ErrorKind::InvalidInput))
+    };
+    let (a, b) = (c(a)?, c(b)?);
+    // SAFETY: two valid NUL-terminated paths relative to the cwd.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    // SAFETY: as above; macOS spells the exchange RENAME_SWAP.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

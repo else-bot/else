@@ -56,6 +56,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
     "mcp_request",
+    "mcp_install",
     "mcp_connect",
     "social_connect",
     "social_action",
