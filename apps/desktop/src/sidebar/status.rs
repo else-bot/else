@@ -87,8 +87,18 @@ impl Subtitle {
             _ => {
                 let text = match &bot.read_state {
                     Some(state) => match &state.latest {
-                        Some(latest) if !latest.preview.trim().is_empty() => latest.preview.clone(),
-                        Some(_) => "No text in last reply".to_owned(),
+                        Some(latest) => {
+                            let text =
+                                markdown::to_mdast(&latest.preview, &markdown::ParseOptions::gfm())
+                                    .map(|root| root.to_string())
+                                    .unwrap_or_else(|_| latest.preview.clone());
+                            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if text.is_empty() {
+                                "No text in last reply".to_owned()
+                            } else {
+                                text
+                            }
+                        }
                         None => "No replies yet".to_owned(),
                     },
                     None => "No message preview".to_owned(),
