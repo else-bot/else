@@ -345,9 +345,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn input_selection_is_distinct_and_keeps_text_readable() {
-        let cursor = Palette {
+    fn cursor_dark() -> Palette {
+        Palette {
             background: Rgb(0x141414),
             surface: Rgb(0x0f0f0f),
             raised: Rgb(0x242424),
@@ -355,11 +354,15 @@ mod tests {
             accent: Rgb(0x81a1c1),
             selection: Rgb(0x2c2c2c),
             ..QUIET_DARK
-        };
+        }
+    }
+
+    #[test]
+    fn input_selection_is_distinct_and_keeps_text_readable() {
         for (name, palette) in [
             ("Quiet Light", QUIET_LIGHT),
             ("Quiet Dark", QUIET_DARK),
-            ("Cursor Dark", cursor),
+            ("Cursor Dark", cursor_dark()),
         ] {
             let mut theme = Theme::default();
             theme.apply_config(&Rc::new(palette.config(name, Style::SYSTEM)));
@@ -391,5 +394,115 @@ mod tests {
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#35445a"));
         assert_eq!(colors.danger.as_deref(), Some("#ff9b9b"));
+    }
+
+    #[test]
+    fn hover_states_are_visible_and_keep_control_text_readable() {
+        let rgb = |color: gpui_kit::Rgba| Rgb(u32::from(color) >> 8);
+        let mut failures = Vec::new();
+        for (name, palette) in [
+            ("Quiet Light", QUIET_LIGHT),
+            ("Quiet Dark", QUIET_DARK),
+            ("Cursor Dark", cursor_dark()),
+        ] {
+            let mut theme = Theme::default();
+            theme.apply_config(&Rc::new(palette.config(name, Style::SYSTEM)));
+            let paint = |color: gpui_kit::Hsla| {
+                rgb(gpui_kit::rgb(palette.background.0).blend(color.into()))
+            };
+            let mut check = |role, contrast: f32, minimum| {
+                if contrast < minimum {
+                    failures.push(format!("{name}: {role} contrast {contrast:.2} < {minimum}"));
+                }
+            };
+            for (role, surface, fill, foreground) in [
+                (
+                    "menu hover",
+                    theme.popover,
+                    theme.accent,
+                    theme.accent_foreground,
+                ),
+                (
+                    "list hover",
+                    theme.colors.list,
+                    theme.list_hover,
+                    theme.foreground,
+                ),
+                (
+                    "sidebar hover",
+                    theme.sidebar,
+                    theme.sidebar_accent,
+                    theme.sidebar_foreground,
+                ),
+                (
+                    "button hover",
+                    theme.button,
+                    theme.button_hover,
+                    theme.button_foreground,
+                ),
+                (
+                    "secondary hover",
+                    theme.secondary,
+                    theme.secondary_hover,
+                    theme.secondary_foreground,
+                ),
+            ] {
+                check(role, paint(surface).contrast(paint(fill)), 1.2);
+                check(role, paint(foreground).contrast(paint(fill)), 4.5);
+            }
+            check(
+                "destructive menu text",
+                paint(theme.danger).contrast(paint(theme.accent)),
+                4.5,
+            );
+            for background in [palette.background, palette.surface, palette.raised] {
+                let hover = theme
+                    .accent
+                    .opacity(if palette.mode.is_dark() { 0.5 } else { 1. });
+                let fill = rgb(gpui_kit::rgb(background.0).blend(hover.into()));
+                check("ghost hover", background.contrast(fill), 1.15);
+                check("ghost text", palette.foreground.contrast(fill), 4.5);
+            }
+            for (role, foreground, fill) in [
+                (
+                    "primary",
+                    theme.button_primary_foreground,
+                    theme.button_primary,
+                ),
+                (
+                    "primary hover",
+                    theme.button_primary_foreground,
+                    theme.button_primary_hover,
+                ),
+                (
+                    "primary pressed",
+                    theme.button_primary_foreground,
+                    theme.button_primary_active,
+                ),
+                (
+                    "danger",
+                    theme.button_danger_foreground,
+                    theme.button_danger,
+                ),
+                (
+                    "danger hover",
+                    theme.button_danger_foreground,
+                    theme.button_danger_hover,
+                ),
+                (
+                    "danger pressed",
+                    theme.button_danger_foreground,
+                    theme.button_danger_active,
+                ),
+                (
+                    "secondary pressed",
+                    theme.secondary_foreground,
+                    theme.secondary_active,
+                ),
+            ] {
+                check(role, paint(foreground).contrast(paint(fill)), 4.5);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
