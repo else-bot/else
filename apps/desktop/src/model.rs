@@ -127,6 +127,7 @@ pub const APPROVE: &str = "approve";
 pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
+pub const APPROVE_TOOL: &str = "approve_tool";
 
 /// One option of a bot's question, by its stable id and shown label.
 #[derive(Debug, Clone, PartialEq, Deserialize)]

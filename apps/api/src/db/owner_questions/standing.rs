@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::{QuestionInfo, RequestError, find_same, info, insert, turns};
 use crate::app::questions::{
-    APPROVE_FOREVER, APPROVE_ROUTINE, DESTRUCTIVE_SCOPE, MAX_CONTEXT, PermissionTarget, Spec,
+    APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, MAX_CONTEXT, PermissionTarget, Spec,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +38,7 @@ pub async fn confirm(
     authorization: &str,
 ) -> Result<Confirmed, ConfirmError> {
     let authorization = authorization.trim();
-    if authorization.is_empty() || authorization.len() > MAX_CONTEXT {
+    if authorization.is_empty() || authorization.len() > MAX_CONTEXT || !target.valid() {
         return Err(ConfirmError::NotAuthorized);
     }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -57,6 +57,11 @@ pub async fn confirm(
     .await?;
     if !source.is_some_and(|text| text.contains(authorization)) {
         return Err(ConfirmError::NotAuthorized);
+    }
+    if matches!(target, PermissionTarget::McpTool { .. })
+        && !matches!(super::scope(&mut tx, turn_id).await?, super::Scope::Bot)
+    {
+        return Err(RequestError::NotAllowed.into());
     }
     if turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
         return Err(RequestError::AttemptParked.into());
@@ -85,7 +90,7 @@ pub async fn confirm(
             return Err(ConfirmError::AuthorizationUsed);
         }
         let active: bool = match &target {
-            PermissionTarget::Bot => sqlx::query_scalar(
+            PermissionTarget::Bot | PermissionTarget::McpTool { .. } => sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM bot_permissions WHERE bot_id = ?1 AND question_id = ?2)",
             )
             .bind(caller.bot_id)
@@ -106,6 +111,7 @@ pub async fn confirm(
     let answer = match &target {
         PermissionTarget::Bot => APPROVE_FOREVER,
         PermissionTarget::Routine { .. } => APPROVE_ROUTINE,
+        PermissionTarget::McpTool { .. } => APPROVE_TOOL,
     };
     let row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE owner_questions SET status = 'answered', answer = ?2,
@@ -119,15 +125,15 @@ pub async fn confirm(
     .bind(caller.attempt)
     .fetch_one(&mut *tx)
     .await?;
-    match target {
-        PermissionTarget::Bot => {
+    match &target {
+        PermissionTarget::Bot | PermissionTarget::McpTool { .. } => {
             sqlx::query(
                 "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
                  ON CONFLICT (bot_id, scope) DO UPDATE SET question_id = excluded.question_id,
                      granted_at = excluded.granted_at",
             )
             .bind(caller.bot_id)
-            .bind(DESTRUCTIVE_SCOPE)
+            .bind(target.bot_scope().unwrap())
             .bind(question.id)
             .execute(&mut *tx)
             .await?;

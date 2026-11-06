@@ -6,12 +6,13 @@ use crate::app::questions::Kind;
 pub(super) const MAX_PURPOSE: usize = 300;
 const MAX_PREVIEW: usize = 2000;
 
-pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads, or changes only inside your \
-    computer or project directory that are easy to undo); destructive (deletes, overwrites, \
+pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads and routine reversible work, \
+    including creating or updating tickets, notes, and documents locally or in connected services); destructive (deletes, overwrites, \
     or changes something hard to undo, here or on a remote service: deleting a remote git \
     branch, repository, file, or record is destructive, not external); external (sends a \
-    message or email, posts, edits, or publishes anything others can see, pays, or otherwise \
-    reaches people or services outside). Required; a missing effect is refused, never assumed local.";
+    message or email, publishes publicly, pays, changes access or security, or makes another \
+    sensitive commitment). Routine work requested by the owner needs no approval merely because \
+    it uses a remote service. Required; a missing effect is refused, never assumed local.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Effect {
@@ -93,16 +94,25 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
     } else {
         purpose.to_owned()
     };
+    if name == "mcp_request" {
+        let header = format!(
+            "MCP: {} / {} ({})\n",
+            text("id"),
+            args["params"]["name"].as_str().unwrap_or_default(),
+            text("effect")
+        );
+        let body = if text("context").trim().is_empty() {
+            args["params"].to_string()
+        } else {
+            text("context").to_owned()
+        };
+        let available = crate::app::questions::MAX_CONTEXT.saturating_sub(header.len());
+        return (title, format!("{header}{}", slice(&body, 0, available).1));
+    }
     if !text("context").trim().is_empty() {
         return (title, text("context").to_owned());
     }
     let context = match name {
-        "mcp_request" => format!(
-            "MCP {}: {}\n{}",
-            text("id"),
-            text("method"),
-            slice(&args["params"].to_string(), 0, MAX_PREVIEW).1
-        ),
         "computer_run" | "computer_job_start" => {
             let mut preview = slice(text("command"), 0, MAX_PREVIEW).1.to_owned();
             if preview.len() < text("command").len() {
@@ -162,6 +172,9 @@ pub(crate) async fn approve(
         Ok(Gate::Run {
             standing: Some(Standing::Routine),
         }) => Ok(Some("standing destructive permission for this routine")),
+        Ok(Gate::Run {
+            standing: Some(Standing::Tool),
+        }) => Ok(Some("standing permission for this MCP tool and effect")),
         Ok(Gate::Run { standing: None }) => Ok(Some("approved by the owner")),
         Ok(Gate::Pending(question)) => Err(crate::http::owner_tools::pending_approval(
             state,
