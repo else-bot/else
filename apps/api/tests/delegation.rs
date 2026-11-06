@@ -1275,7 +1275,7 @@ async fn the_main_bot_creates_specialists_it_can_delegate_to_at_once() {
     let parked = create_bot(&app, &token, json!({ "name": "Late" })).await;
     assert_eq!(parked.status, StatusCode::CONFLICT);
     let name = else_api::app::bots::BotName::parse("Late").unwrap();
-    let direct = else_api::db::bots::create_for_turn(&app.db.pool, root, &name).await;
+    let direct = else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None).await;
     assert!(
         matches!(
             direct,
@@ -1312,7 +1312,7 @@ async fn a_deleted_creation_replays_as_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_a_running_main_owner_turn_creates_bots() {
+async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
     let app = app_with(3).await;
     let work = leaf(&app, "Work").await;
     let (main, root, token) = running_main(&app).await;
@@ -1352,7 +1352,11 @@ async fn only_a_running_main_owner_turn_creates_bots() {
     let leaf_turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     app.wait_turn(&leaf_turn.to_string(), &["running"]).await;
     let reply = create_bot(&app, &forged(&app, leaf_turn).await, args.clone()).await;
-    assert!(text(&reply).starts_with("NOT_ALLOWED"), "{}", reply.body);
+    assert!(
+        text(&reply).starts_with("PURPOSE_REQUIRED"),
+        "{}",
+        reply.body
+    );
 
     let pending = tool_text(&delegate(&app, &token, &work, "[synthetic:hang] research").await);
     let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
@@ -1372,9 +1376,9 @@ async fn only_a_running_main_owner_turn_creates_bots() {
     assert!(text(&reply).starts_with("NOT_ALLOWED"), "{}", reply.body);
     let name = else_api::app::bots::BotName::parse("GitHub").unwrap();
     assert!(matches!(
-        else_api::db::bots::create_for_turn(&app.db.pool, child, &name).await,
+        else_api::db::bots::create_for_turn(&app.db.pool, child, &name, None, None).await,
         Err(else_api::db::bots::BotError::Refused(
-            else_api::db::bots::Refusal::NotMain
+            else_api::db::bots::Refusal::NotOwnerConversation
         ))
     ));
 
@@ -1392,7 +1396,7 @@ async fn only_a_running_main_owner_turn_creates_bots() {
         StatusCode::UNAUTHORIZED
     );
     assert!(matches!(
-        else_api::db::bots::create_for_turn(&app.db.pool, root, &name).await,
+        else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None).await,
         Err(else_api::db::bots::BotError::Refused(
             else_api::db::bots::Refusal::NotRunning
         ))
@@ -1426,12 +1430,6 @@ async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
         (&main, "Note the dentist appointment on Friday."),
     ] {
         let (root, token) = h.running(&work, GATE).await;
-        let not_main = tool(&h.app, &token, "create_bot", json!({ "name": "X" })).await;
-        assert_eq!(
-            not_main.status,
-            StatusCode::FORBIDDEN,
-            "creation stays main-only"
-        );
         let pending = tool(
             &h.app,
             &token,
@@ -1453,10 +1451,7 @@ async fn any_bot_hands_work_to_a_peer_or_the_main_bot_and_gets_the_reply() {
         let results = else_api::providers::prompt::outcomes_block(&attempts[1]);
         assert!(results.contains(task), "{results}");
         let rules = else_api::providers::prompt::instructions(&attempts[0], "/p");
-        assert!(
-            rules.contains("Only the main bot can create bots"),
-            "{rules}"
-        );
+        assert!(rules.contains("register it with create_bot"), "{rules}");
     }
 }
 

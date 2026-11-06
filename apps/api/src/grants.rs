@@ -30,7 +30,7 @@ pub enum Tool {
     /// Hand a task to another registered bot (a bot's own owner
     /// conversation, never a delegated task).
     Delegate,
-    /// Register a new bot for the owner (main bot only).
+    /// Register a new bot in its own conversation for an owner request.
     CreateBot,
     /// Rename a bot for work rooted in an owner request.
     RenameBot,

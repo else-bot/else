@@ -53,6 +53,28 @@ impl BotName {
     }
 }
 
+pub const MAX_PURPOSE_CHARS: usize = 2000;
+
+#[derive(Debug, Clone)]
+pub struct BotPurpose(String);
+
+impl BotPurpose {
+    pub fn parse(raw: &str) -> Result<Self, &'static str> {
+        let purpose = raw.trim();
+        if purpose.is_empty()
+            || purpose.chars().count() > MAX_PURPOSE_CHARS
+            || purpose.contains('\0')
+        {
+            return Err("purpose must be 1 to 2000 characters without NUL characters");
+        }
+        Ok(Self(purpose.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A preset avatar: one of the shapes the desktop draws, in one of its
 /// named colors. The API stores and validates the names; it draws nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

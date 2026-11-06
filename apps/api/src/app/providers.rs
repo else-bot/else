@@ -233,7 +233,8 @@ pub struct DelegationContext {
     pub delegated_task: bool,
     /// For a delegated task: the bot that delegated it, ID and name.
     pub delegated_by: Option<(Uuid, String)>,
-    /// The installation's main bot in its owner conversation.
+    pub main_bot: bool,
+    /// An owner request in this bot's own conversation.
     pub can_create_bot: bool,
     /// Other active bots: ID and name.
     pub registry: Vec<(Uuid, String)>,

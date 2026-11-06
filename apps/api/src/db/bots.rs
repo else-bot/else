@@ -2,7 +2,7 @@
 //!
 //! Creation is idempotent under a stable request ID: a matching retry returns
 //! the same bot and a changed payload conflicts. The owner supplies that ID;
-//! the main bot's creations derive it from the owner turn and the name.
+//! bots' creations derive it from the owner turn and the name.
 //! Deletion commits a tombstone and clears the saved default in one
 //! transaction before returning; history and conversations are retained.
 
@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::installation::insert_bot;
-use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName};
+use crate::app::bots::{Avatar, AvatarColor, AvatarShape, BotName, BotPurpose};
 use crate::app::providers::Profile;
 
 mod sidebar;
@@ -127,10 +127,12 @@ pub enum BotError {
 /// Why a turn may not create or rename a bot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    #[error("only the main bot, in the owner's conversation, can create bots")]
-    NotMain,
-    #[error("bots can be renamed only for work rooted in an owner request")]
+    #[error("bots can be created only in an owner conversation for an owner request")]
+    NotOwnerConversation,
+    #[error("bots can be created or renamed only for work rooted in an owner request")]
     NotOwnerRequest,
+    #[error("a purpose is required when another bot creates a bot")]
+    PurposeRequired,
     #[error("the request is no longer running")]
     NotRunning,
     #[error("this attempt already delegated; end it and wait for the result")]
@@ -169,13 +171,15 @@ pub async fn create(
     create_as(pool, request_id, bot, None).await
 }
 
-/// Create a bot while the main bot's owner turn is running. Retries of the
+/// Create a bot while an owner-request turn is running. Retries of the
 /// same name, including continuation attempts, return the same bot even if
 /// it was deleted. The bot uses installation defaults.
 pub async fn create_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
     name: &BotName,
+    purpose: Option<&BotPurpose>,
+    category_id: Option<Uuid>,
 ) -> Result<Created, BotError> {
     let mut hasher = Sha256::new();
     hasher.update(b"else.bot turn create_bot\0");
@@ -187,35 +191,49 @@ pub async fn create_for_turn(
     let bot = NewBot {
         name,
         profile: None,
-        category_id: None,
+        category_id,
         avatar: None,
     };
-    create_as(pool, request_id, bot, Some(turn_id)).await
+    create_as(pool, request_id, bot, Some((turn_id, purpose))).await
 }
 
-async fn authorize(conn: &mut sqlx::SqliteConnection, turn_id: Uuid) -> Result<(), BotError> {
+async fn authorize(
+    conn: &mut sqlx::SqliteConnection,
+    turn_id: Uuid,
+) -> Result<super::turns::AskingCaller, BotError> {
     let caller = super::turns::asking_caller(conn, turn_id)
         .await?
         .ok_or(Refusal::NotRunning)?;
-    if !caller.owner_conversation || !caller.main_bot {
-        return Err(Refusal::NotMain.into());
+    if !caller.owner_conversation {
+        return Err(Refusal::NotOwnerConversation.into());
+    }
+    if super::delegations::origin(conn, turn_id).await?
+        != crate::app::providers::Origin::OwnerRequest
+    {
+        return Err(Refusal::NotOwnerRequest.into());
     }
     if super::turns::attempt_parked(conn, turn_id, caller.attempt).await? {
         return Err(Refusal::AttemptDelegated.into());
     }
-    Ok(())
+    Ok(caller)
 }
 
 async fn create_as(
     pool: &SqlitePool,
     request_id: Uuid,
     bot: NewBot<'_>,
-    turn_id: Option<Uuid>,
+    creation: Option<(Uuid, Option<&BotPurpose>)>,
 ) -> Result<Created, BotError> {
-    let hash = create_hash(&bot);
+    let mut hash = create_hash(&bot);
+    if let Some((_, Some(purpose))) = creation {
+        hash = Sha256::digest([hash.as_slice(), purpose.as_str().as_bytes()].concat()).to_vec();
+    }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some(turn_id) = turn_id {
-        authorize(&mut tx, turn_id).await?;
+    if let Some((turn_id, purpose)) = creation {
+        let caller = authorize(&mut tx, turn_id).await?;
+        if !caller.main_bot && purpose.is_none() {
+            return Err(Refusal::PurposeRequired.into());
+        }
     }
     let receipt: Option<(String, Vec<u8>, Uuid)> = sqlx::query_as(
         "SELECT operation, payload_hash, bot_id FROM request_receipts WHERE request_id = ?1",
@@ -278,11 +296,88 @@ async fn create_as(
     .bind(&hash)
     .execute(&mut *tx)
     .await?;
+    if let Some((turn_id, Some(purpose))) = creation {
+        creation_receipt(&mut tx, turn_id, bot_id, bot.name, purpose, &hash).await?;
+    }
     super::events::notify(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Created::New(
         find(pool, bot_id).await?.ok_or(BotError::NotFound)?,
     ))
+}
+
+async fn creation_receipt(
+    conn: &mut sqlx::SqliteConnection,
+    source_turn: Uuid,
+    bot_id: Uuid,
+    name: &BotName,
+    purpose: &BotPurpose,
+    hash: &[u8],
+) -> Result<(), BotError> {
+    let (creator, creator_name): (Uuid, String) = sqlx::query_as(
+        "SELECT b.id, b.name FROM turns t JOIN bots b ON b.id = t.bot_id WHERE t.id = ?1",
+    )
+    .bind(source_turn)
+    .fetch_one(&mut *conn)
+    .await?;
+    let (main, conversation): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT b.id, c.id FROM installation i JOIN bots b ON b.id = i.default_bot_id
+         JOIN conversations c ON c.bot_id = b.id AND c.kind = 'owner' WHERE b.status = 'active'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let text = format!(
+        "{creator_name} (bot_id {creator}) created {} (bot_id {bot_id}).\nPurpose: {}",
+        name.as_str(),
+        purpose.as_str()
+    );
+    for target in [main, bot_id] {
+        super::memory::append(
+            conn,
+            target,
+            &super::memory::NewEntry {
+                request_key: &format!("bot-created:{bot_id}"),
+                kind: super::memory::Kind::ToolActivity,
+                body: &text,
+                source: serde_json::json!({"tool": "create_bot", "creator_bot_id": creator,
+                "source_turn_id": source_turn, "bot_id": bot_id}),
+                supersedes_seq: None,
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            super::memory::AppendError::Db(err) => err,
+            err => sqlx::Error::Protocol(err.to_string()),
+        })?;
+    }
+    if creator == main {
+        return Ok(());
+    }
+    let (turn_no, seq): (i64, i64) = sqlx::query_as(
+        "UPDATE conversations SET last_turn_no = last_turn_no + 1, last_item_seq = last_item_seq + 1
+         WHERE id = ?1 RETURNING last_turn_no, last_item_seq",
+    ).bind(conversation).fetch_one(&mut *conn).await?;
+    let receipt_turn = Uuid::new_v4();
+    let item = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+         owner_item_id, provider_id, status, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'system', 'completed', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))",
+    ).bind(receipt_turn).bind(main).bind(conversation).bind(bot_id).bind(hash)
+        .bind(turn_no).bind(item).execute(&mut *conn).await?;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+        VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+    )
+    .bind(item)
+    .bind(conversation)
+    .bind(seq)
+    .bind(receipt_turn)
+    .bind(text)
+    .execute(&mut *conn)
+    .await?;
+    super::events::item_upsert(conn, main, item).await?;
+    Ok(())
 }
 
 pub async fn find(pool: &SqlitePool, bot_id: Uuid) -> Result<Option<BotRecord>, sqlx::Error> {

@@ -83,7 +83,7 @@ pub async fn endpoint(
         }
         "tools/call" => {
             let needs = match params["name"].as_str() {
-                Some("delegate") => Tool::Delegate,
+                Some("delegate" | "council" | "list_bots") => Tool::Delegate,
                 Some("mcp_install") => Tool::ManageMcp,
                 Some("mcp_list" | "mcp_request" | "mcp_connect" | "mcp_connection_status") => {
                     Tool::Mcp
@@ -207,6 +207,21 @@ fn tool_list() -> Value {
             "annotations": read_only,
         },
         {
+            "name": "list_bots",
+            "description": "Discover all other active bots and categories, including the main bot ID. Filter by category_id to find council members. This does not grant access to their private memory.",
+            "inputSchema": {"type": "object", "properties": {"category_id": {"type": "string", "format": "uuid"}}, "additionalProperties": false},
+            "annotations": read_only,
+        },
+        {
+            "name": "council",
+            "description": "Ask 1 to 32 distinct bots for reports on the same self-contained task. Use list_bots with category_id to find every member of a category. Accepted atomically; runs asynchronously and returns all outcomes in a continuation. After pending, end this attempt immediately. Delegated tasks cannot create councils. No memory or permissions are shared.",
+            "inputSchema": {"type": "object", "properties": {
+                "target_bot_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 1, "maxItems": crate::db::delegations::MAX_COUNCIL_BOTS, "uniqueItems": true},
+                "task": {"type": "string", "minLength": 1, "maxLength": 4000}
+            }, "required": ["target_bot_ids", "task"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
             "name": "delegate",
             "description": "Hand one subtask to another registered bot (the main bot included) \
                 from your registry or a create_bot result, by its exact bot_id. Not available in a \
@@ -229,18 +244,22 @@ fn tool_list() -> Value {
         },
         {
             "name": "create_bot",
-            "description": "Main bot only: register a new else.bot specialist for the owner, with \
+            "description": "Register a new else.bot specialist in your owner conversation for an owner request, with \
                 the installation's default provider and no credentials, shared memory, or \
                 other access. Returns its bot_id at once; you may delegate to it in this \
                 attempt. Repeating the same name in this owner request returns the same bot. \
                 The bot learns its responsibilities from the tasks it receives, so give its \
-                first task with delegate.",
+                first task with delegate. Supply its purpose, required for non-main bots. The server \
+                saves the purpose in the new bot's memory and acknowledges creation to the main bot. \
+                Optional category_id comes from list_bots.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "minLength": 1,
                               "maxLength": crate::app::bots::MAX_NAME_CHARS,
                               "description": "Short display name, for example GitHub." },
+                    "purpose": { "type": "string", "minLength": 1, "maxLength": crate::app::bots::MAX_PURPOSE_CHARS },
+                    "category_id": { "type": "string", "format": "uuid" },
                 },
                 "required": ["name"],
                 "additionalProperties": false,
@@ -421,6 +440,8 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
         "delegate" => delegate(state, grant, args).await,
+        "council" => council(state, grant, args).await,
+        "list_bots" => list_bots(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
         "rename_bot" => rename_bot(state, grant, args).await,
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
@@ -874,9 +895,12 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 DelegateError::NotAllowed => "NOT_ALLOWED",
                 DelegateError::SelfTarget => "SELF_DELEGATION",
                 DelegateError::BotUnavailable => "BOT_UNAVAILABLE",
-                DelegateError::BudgetExhausted => "BUDGET_EXHAUSTED",
+                DelegateError::BudgetExhausted | DelegateError::CouncilBudgetExhausted => {
+                    "BUDGET_EXHAUSTED"
+                }
                 DelegateError::AttemptParked => "ATTEMPT_PARKED",
                 DelegateError::InvalidTask => "INVALID_TASK",
+                DelegateError::InvalidCouncil => "INVALID_COUNCIL",
                 DelegateError::NotRunning => "NOT_RUNNING",
                 DelegateError::Db => "UNAVAILABLE",
             };
@@ -886,14 +910,124 @@ async fn delegate(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ListBotsArgs {
+    category_id: Option<Uuid>,
+}
+
+async fn list_bots(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let parsed = if args.is_null() {
+        Ok(ListBotsArgs::default())
+    } else {
+        serde_json::from_value(args.clone())
+    };
+    let Ok(parsed) = parsed else {
+        return (
+            tool_error("Pass an optional category_id from list_bots."),
+            None,
+        );
+    };
+    match crate::db::bots::list(&state.db, false).await {
+        Ok(listing) => {
+            if parsed
+                .category_id
+                .is_some_and(|id| !listing.categories.iter().any(|c| c.id == id))
+            {
+                return (
+                    tool_error("CATEGORY_NOT_FOUND: Use a category_id from list_bots."),
+                    None,
+                );
+            }
+            let bots: Vec<_> = listing
+                .bots
+                .iter()
+                .filter(|b| {
+                    b.id != grant.bot_id
+                        && parsed
+                            .category_id
+                            .is_none_or(|id| b.category_id == Some(id))
+                })
+                .map(|b| json!({"bot_id": b.id, "name": b.name, "category_id": b.category_id}))
+                .collect();
+            (
+                tool_result(
+                    json!({"main_bot_id": listing.default_bot_id, "categories": listing.categories,
+                "bots": bots}),
+                ),
+                None,
+            )
+        }
+        Err(_) => (
+            tool_error("UNAVAILABLE: Bot discovery is unavailable."),
+            None,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CouncilArgs {
+    target_bot_ids: Vec<Uuid>,
+    task: String,
+}
+
+async fn council(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let Ok(parsed) = serde_json::from_value::<CouncilArgs>(args.clone()) else {
+        return (
+            tool_error("Pass target_bot_ids from list_bots and a shared task."),
+            None,
+        );
+    };
+    match crate::db::delegations::council(
+        &state.db,
+        grant.turn_id,
+        &parsed.target_bot_ids,
+        &parsed.task,
+    )
+    .await
+    {
+        Ok(accepted) => {
+            let pending = accepted
+                .iter()
+                .any(|a| matches!(a.status.as_str(), "queued" | "running"));
+            if pending {
+                state.scheduler.grants().park(grant.turn_id).await;
+                state.scheduler.wake();
+            }
+            let tasks: Vec<_> = accepted
+                .iter()
+                .map(|a| {
+                    json!({"task_id": a.delegation_id,
+                "target": {"bot_id": a.target_bot_id, "name": a.target_name},
+                "status": a.status, "outcome": a.outcome})
+                })
+                .collect();
+            (
+                tool_result(json!({"status": if pending {"pending"} else {"settled"},
+                "parked": pending, "tasks": tasks,
+                "next": if pending {"End this attempt. All reports arrive in a continuation; combine them and preserve failures and disagreements."}
+                    else {"Use the recorded reports. Do not resubmit completed work."}})),
+                Some(format!("council reports from {} bots", tasks.len())),
+            )
+        }
+        Err(err) => (
+            tool_error(&format!("COUNCIL_REFUSED: {err}")),
+            Some("council refused".into()),
+        ),
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateBotArgs {
     name: String,
+    purpose: Option<String>,
+    category_id: Option<Uuid>,
 }
 
 async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    use crate::app::bots::BotName;
+    use crate::app::bots::{BotName, BotPurpose};
     use crate::db::bots::{self, BotError, Created, Refusal};
     let reject = |code: &str, message: &str| {
         (
@@ -902,13 +1036,28 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         )
     };
     let Ok(parsed) = serde_json::from_value::<CreateBotArgs>(args.clone()) else {
-        return reject("INVALID_ARGUMENTS", "pass exactly a name, as a string.");
+        return reject(
+            "INVALID_ARGUMENTS",
+            "pass a name, optional purpose, and optional category_id.",
+        );
     };
     let name = match BotName::parse(&parsed.name) {
         Ok(name) => name,
         Err(err) => return reject("INVALID_BOT", &err.to_string()),
     };
-    match bots::create_for_turn(&state.db, grant.turn_id, &name).await {
+    let purpose = match parsed.purpose.as_deref().map(BotPurpose::parse).transpose() {
+        Ok(purpose) => purpose,
+        Err(err) => return reject("INVALID_BOT", err),
+    };
+    match bots::create_for_turn(
+        &state.db,
+        grant.turn_id,
+        &name,
+        purpose.as_ref(),
+        parsed.category_id,
+    )
+    .await
+    {
         Ok(created) => {
             let (bot, new) = match created {
                 Created::New(bot) => (bot, true),
@@ -939,11 +1088,19 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Err(BotError::Refused(refusal)) => {
             let code = match refusal {
-                Refusal::NotMain | Refusal::NotOwnerRequest => "NOT_ALLOWED",
+                Refusal::NotOwnerConversation | Refusal::NotOwnerRequest => "NOT_ALLOWED",
+                Refusal::PurposeRequired => "PURPOSE_REQUIRED",
                 Refusal::NotRunning => "NOT_RUNNING",
                 Refusal::AttemptDelegated => "ATTEMPT_PARKED",
             };
             reject(code, &refusal.to_string())
+        }
+        Err(BotError::RequestConflict) => reject(
+            "REQUEST_CONFLICT",
+            "This name was already used with another purpose or category in this request.",
+        ),
+        Err(BotError::CategoryNotFound) => {
+            reject("CATEGORY_NOT_FOUND", "Use a category_id from list_bots.")
         }
         Err(err) => {
             tracing::warn!(error = %err, "creating a bot from a turn failed");
@@ -993,7 +1150,11 @@ async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             let code = match &err {
                 BotError::NotFound => "BOT_NOT_FOUND",
                 BotError::Deleted => "BOT_UNAVAILABLE",
-                BotError::Refused(Refusal::NotMain | Refusal::NotOwnerRequest) => "NOT_ALLOWED",
+                BotError::Refused(
+                    Refusal::NotOwnerConversation
+                    | Refusal::NotOwnerRequest
+                    | Refusal::PurposeRequired,
+                ) => "NOT_ALLOWED",
                 BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
                 BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
                 _ => {

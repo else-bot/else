@@ -618,6 +618,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
             || matches!(
                 name,
                 "mcp_list"
+                    | "list_bots"
                     | "mcp_connection_status"
                     | "computer_job"
                     | "computer_read_file"
