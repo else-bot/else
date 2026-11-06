@@ -358,6 +358,11 @@ impl ElseApp {
             .items_center()
             .text_xs()
             .text_color(color)
+            .when(!pending, |line| {
+                line.group_hover("sidebar-bot-row", |style| {
+                    style.text_color(theme.foreground)
+                })
+            })
             .when_some(icon, |line, icon| {
                 line.child(div().flex_none().child(
                     if subtitle.kind == Kind::Working && connected {
@@ -367,13 +372,17 @@ impl ElseApp {
                             .color(color)
                             .into_any_element()
                     } else {
-                        Icon::new(icon).xsmall().into_any_element()
+                        Icon::new(icon)
+                            .xsmall()
+                            .text_color(color)
+                            .into_any_element()
                     },
                 ))
             })
             .child(div().flex_1().min_w_0().truncate().child(subtitle.text));
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
+            .group("sidebar-bot-row")
             .min_h(px(46.))
             .gap_2p5()
             .items_center()

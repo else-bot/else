@@ -430,11 +430,7 @@ impl ElseApp {
             {
                 rows.push(RowKey::Item(item.id));
             }
-            let format = if item.kind == "assistant" || item.bot_reply.is_some() {
-                RowFormat::Markdown
-            } else {
-                RowFormat::Plain
-            };
+            let format = RowFormat::for_item(item);
             texts.push((
                 RowKey::Item(item.id),
                 item.bot_task
@@ -471,7 +467,7 @@ impl ElseApp {
             texts.push((
                 RowKey::Pending(pending.request_id),
                 pending.text.clone(),
-                RowFormat::Plain,
+                RowFormat::for_owner(&pending.text),
                 pending.parts.clone(),
             ));
         }

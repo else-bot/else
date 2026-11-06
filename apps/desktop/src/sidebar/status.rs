@@ -87,8 +87,18 @@ impl Subtitle {
             _ => {
                 let text = match &bot.read_state {
                     Some(state) => match &state.latest {
-                        Some(latest) if !latest.preview.trim().is_empty() => latest.preview.clone(),
-                        Some(_) => "No text in last reply".to_owned(),
+                        Some(latest) => {
+                            let text =
+                                markdown::to_mdast(&latest.preview, &markdown::ParseOptions::gfm())
+                                    .map(|root| root.to_string())
+                                    .unwrap_or_else(|_| latest.preview.clone());
+                            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if text.is_empty() {
+                                "No text in last reply".to_owned()
+                            } else {
+                                text
+                            }
+                        }
                         None => "No replies yet".to_owned(),
                     },
                     None => "No message preview".to_owned(),
@@ -148,6 +158,41 @@ mod tests {
         );
         bot.read_state = None;
         assert_eq!(Subtitle::new(&bot, true, false).text, "No message preview");
+    }
+
+    #[test]
+    fn reply_previews_show_plain_text_without_changing_the_reply() {
+        for (source, expected) in [
+            (
+                "Created **Github**, your specialist.",
+                "Created Github, your specialist.",
+            ),
+            (
+                "**Ready** _now_ with `cargo test`",
+                "Ready now with cargo test",
+            ),
+            ("## [Report](https://example.com) ~~old~~", "Report old"),
+            ("  **Résumé**\nwith   details  ", "Résumé with details"),
+            ("`a_b * c` + **bold**", "a_b * c + bold"),
+            ("2 * 3 = 6 and foo_bar", "2 * 3 = 6 and foo_bar"),
+            ("\\*literal\\* &amp; café", "*literal* & café"),
+            ("---", "No text in last reply"),
+        ] {
+            let bot = bot(json!({"read_state": {
+                "latest": {
+                    "turn_id": uuid::Uuid::nil(),
+                    "item_id": uuid::Uuid::nil(),
+                    "position": {"item_seq": 1, "text_bytes": source.len()},
+                    "preview": source
+                },
+                "read_through": {"item_seq": 0, "text_bytes": 0},
+                "marked_unread": false
+            }}));
+            let subtitle = Subtitle::new(&bot, true, false);
+            assert_eq!(subtitle.kind, Kind::Message);
+            assert_eq!(subtitle.text, expected, "{source}");
+            assert_eq!(bot.read_state.unwrap().latest.unwrap().preview, source);
+        }
     }
 
     #[test]

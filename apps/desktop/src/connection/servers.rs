@@ -11,7 +11,6 @@ use tokio::sync::{mpsc, watch};
 pub(super) enum Editor {
     Add,
     Edit(Uuid),
-    Local,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,7 +311,6 @@ impl Shell {
                 .find(id)
                 .map(|s| s.name.clone())
                 .unwrap_or_default(),
-            Editor::Local => "This computer".into(),
             Editor::Add => String::new(),
         };
         self.setup
@@ -320,10 +318,7 @@ impl Shell {
             .unwrap()
             .name
             .update(cx, |field, cx| field.set_value(name, window, cx));
-        match editor {
-            Editor::Local => self.back_to_welcome(window, cx),
-            _ => self.open_remote(profile.as_ref(), window, cx),
-        }
+        self.open_remote(profile.as_ref(), window, cx);
         cx.notify();
     }
 

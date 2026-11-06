@@ -359,7 +359,7 @@ color8 = "#555753"
             );
             assert_eq!(
                 colors.selection.as_deref(),
-                Some(palette.selection.hex().as_str())
+                Some(palette.accent.hex().as_str())
             );
             assert_eq!(
                 colors.switch.as_deref(),

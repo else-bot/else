@@ -15,18 +15,6 @@ impl Shell {
             .gap_2()
             .items_center()
             .child(self.render_server_switcher("topbar-server-switcher", cx))
-            .child(
-                Button::new("topbar-add-server")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .xsmall()
-                    .label("+")
-                    .accessibility_label("Add server")
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.open_server_editor(servers::Editor::Add, window, cx)
-                    })),
-            )
             .child(div().flex_1())
             .child(
                 Button::new("app-settings-open")
@@ -34,11 +22,7 @@ impl Shell {
                     .track_focus(&self.settings_focus)
                     .cursor_pointer()
                     .icon(IconName::Settings)
-                    .label(if cfg!(target_os = "macos") {
-                        "Settings ⌘,"
-                    } else {
-                        "Settings Ctrl+,"
-                    })
+                    .label("Settings")
                     .xsmall()
                     .ghost()
                     .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),
