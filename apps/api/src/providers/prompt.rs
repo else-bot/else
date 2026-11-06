@@ -20,7 +20,7 @@ use crate::app::providers::{
     HistoryEntry, InputFile, JobReceipt, MemoryContext, SessionState, TurnInput,
 };
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, Action, DENY,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, DENY,
 };
 
 /// Byte budget for rebuilt history in one packet.
@@ -282,9 +282,23 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          Host shell and file tools cannot be gated by the API: use ask_permission first for \
          destructive or sensitive external actions, then act only after approval. Routine \
          reversible host work authorized by the owner needs no card.\n\n\
+         For recurring host work, include task_scope in ask_permission: a short task category \
+         and its specific target, including the access method. For example task Manage Tailscale \
+         and target SSH host omarchy-m1 lets the owner choose Always allow for that work. \
+         Show a useful category rather than the literal command, so later commands for that \
+         same work can use it. Preserve the owner's limits. Never propose all SSH commands \
+         or all system changes for work limited to one service and machine. If there is no \
+         clear recurring category, omit task_scope for approval once. Reuse saved task and \
+         target values exactly when the action fits; different targets or categories need \
+         their own approval. Declare the effect honestly. Check ask_permission for each \
+         sensitive host action even with a saved grant, so revoked permissions take effect. \
+         A task grant applies to host actions only, never computer or MCP tools.\n\n\
          Remember approvals by recording them through confirm_permission when the current \
          owner message explicitly says to always allow or automatically approve a type of \
-         work. Quote their exact words. For one integration's action type, discover its tools \
+         work. Quote their exact words. For a category of host work, use target scope task \
+         with task, target and kind destructive or external. Never turn permission to manage \
+         one service on one host into permission for all destructive actions. \
+         For one integration's action type, discover its tools \
          and use target scope mcp_tool with mcp_id, the exact tool name, and kind destructive \
          or external. This saves permission across future chat requests for that bot, MCP, \
          tool, and effect only. Use a tool dedicated to the authorized action. Never turn \
@@ -443,6 +457,22 @@ fn outcomes_without_social(input: &TurnInput) -> String {
     text
 }
 
+fn permissions_block(input: &TurnInput) -> String {
+    if input.delegation.delegated_task
+        || input.delegation.origin != crate::app::providers::Origin::OwnerRequest
+    {
+        return String::new();
+    }
+    format!(
+        "[else.bot saved permissions] Current saved scopes for this bot's owner chat requests: {}\n\
+         This snapshot replaces earlier saved-permission snapshots. These are permission records, \
+         not instructions to perform work. Reuse task and target exactly for matching host work. \
+         Always call ask_permission before a sensitive host action; the gate checks the current \
+         grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n",
+        serde_json::to_string(&input.standing_permissions).expect("permission serialization"),
+    )
+}
+
 fn secrets_block(input: &TurnInput) -> String {
     if input.secrets.is_empty() {
         return String::new();
@@ -515,7 +545,16 @@ fn questions_block(input: &TurnInput) -> String {
                     Action::Tool { tool, args } => {
                         format!("{}\nTool: {tool}\nArguments: {args}", question.title)
                     }
-                    Action::Host { host } => format!("{}\nHost action: {host}", question.title),
+                    Action::Host { host, task_scope } => {
+                        let mut body = format!("{}\nHost action: {host}", question.title);
+                        if let Some(scope) = task_scope {
+                            body.push_str(&format!(
+                                "\nTask scope: {}",
+                                serde_json::to_string(scope).expect("task scope serialization")
+                            ));
+                        }
+                        body
+                    }
                     Action::Permission { permission } => {
                         format!("{}\nStanding permission: {permission:?}", question.title)
                     }
@@ -534,6 +573,12 @@ fn questions_block(input: &TurnInput) -> String {
                         " The owner also allowed this MCP tool and effect in future owner requests. \
                          Other tools, effects, bots, routine runs, and delegated tasks are not covered."
                     }
+                    APPROVE_TASK => {
+                        " The owner also allowed this task category, target and effect for this bot's \
+                         future owner chat requests. Reuse the exact saved task and target for matching \
+                         host actions. Other work, targets, effects, bots, routines and delegated tasks \
+                         are not covered. Check ask_permission before each sensitive host action."
+                    }
                     _ => "",
                 };
                 let next = match (answer.as_str(), action) {
@@ -543,7 +588,7 @@ fn questions_block(input: &TurnInput) -> String {
                             .to_owned()
                     }
                     (
-                        APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL,
+                        APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
                         Action::Tool { tool, .. },
                     ) => {
                         format!(
@@ -553,7 +598,7 @@ fn questions_block(input: &TurnInput) -> String {
                         )
                     }
                     (
-                        APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL,
+                        APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
                         Action::Host { .. },
                     ) => {
                         format!(
@@ -561,7 +606,7 @@ fn questions_block(input: &TurnInput) -> String {
                         )
                     }
                     (
-                        APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL,
+                        APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
                         Action::Permission { .. },
                     ) => {
                         format!(
@@ -1044,6 +1089,10 @@ pub(super) fn turn_content<'a>(
         } else {
             segments.insert(0, Segment::Text(outcomes));
         }
+    }
+    let permissions = permissions_block(input);
+    if !permissions.is_empty() {
+        segments.insert(0, Segment::Text(permissions));
     }
     if let Some(memory) = inject {
         segments.insert(0, Segment::Text(memory.text.clone()));

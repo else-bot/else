@@ -62,6 +62,9 @@ pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
+pub const APPROVE_TASK: &str = "approve_task";
+/// Bytes of a task scope's task or target, after normalization.
+pub const MAX_TASK_SCOPE: usize = 200;
 /// The broad destructive grant, separate from permissions for individual tools.
 pub const DESTRUCTIVE_SCOPE: &str = "destructive";
 
@@ -75,6 +78,8 @@ pub enum Standing {
     Routine,
     /// One MCP tool and effect in the bot's owner requests.
     Tool,
+    /// One declared task on one target, with one effect, in the bot's owner requests.
+    Task,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -141,7 +146,7 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
     match (kind, offer) {
         (Kind::Destructive, Some(Standing::Bot)) => choices.push(Choice {
             id: APPROVE_FOREVER.into(),
-            label: "Always allow destructive actions".into(),
+            label: "Always allow for this bot".into(),
         }),
         (Kind::Destructive, Some(Standing::Routine)) => choices.push(Choice {
             id: APPROVE_ROUTINE.into(),
@@ -151,6 +156,10 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
             id: APPROVE_TOOL.into(),
             label: "Always allow this tool".into(),
         }),
+        (Kind::Destructive | Kind::External, Some(Standing::Task)) => choices.push(Choice {
+            id: APPROVE_TASK.into(),
+            label: "Always allow".into(),
+        }),
         _ => {}
     }
     choices
@@ -159,10 +168,70 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Action {
-    McpConnection { mcp_connection: McpConnection },
-    Tool { tool: String, args: Value },
-    Host { host: String },
-    Permission { permission: PermissionTarget },
+    McpConnection {
+        mcp_connection: McpConnection,
+    },
+    Tool {
+        tool: String,
+        args: Value,
+    },
+    Host {
+        host: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_scope: Option<TaskScope>,
+    },
+    Permission {
+        permission: PermissionTarget,
+    },
+}
+
+/// The recurring work a host action belongs to, as the bot declared it:
+/// what kind of task, on which target. A standing grant matches it exactly,
+/// after normalization; it never parses the action itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskScope {
+    pub task: String,
+    pub target: String,
+}
+
+fn scope_text(text: &str) -> Option<String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty() && text.len() <= MAX_TASK_SCOPE && !text.chars().any(char::is_control))
+        .then_some(text)
+}
+
+impl TaskScope {
+    /// The normalized scope, or `None` when either part is empty, too long,
+    /// or contains control characters.
+    pub fn new(task: &str, target: &str) -> Option<Self> {
+        Some(Self {
+            task: scope_text(task)?,
+            target: {
+                let target = target.trim();
+                if target.is_empty()
+                    || target.len() > MAX_TASK_SCOPE
+                    || target.chars().any(char::is_control)
+                {
+                    return None;
+                }
+                target.to_owned()
+            },
+        })
+    }
+
+    fn canonical(&self) -> bool {
+        Self::new(&self.task, &self.target).as_ref() == Some(self)
+    }
+
+    fn key(&self, kind: Kind) -> String {
+        format!(
+            "task:{}:{}:{}",
+            kind.as_str(),
+            hex::encode(self.task.to_lowercase()),
+            hex::encode(&self.target),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +256,11 @@ pub enum PermissionTarget {
         tool: String,
         kind: Kind,
     },
+    Task {
+        task: String,
+        target: String,
+        kind: Kind,
+    },
 }
 
 impl PermissionTarget {
@@ -195,12 +269,13 @@ impl PermissionTarget {
             Self::Bot => Standing::Bot,
             Self::Routine { .. } => Standing::Routine,
             Self::McpTool { .. } => Standing::Tool,
+            Self::Task { .. } => Standing::Task,
         }
     }
 
     pub fn kind(&self) -> Kind {
         match self {
-            Self::McpTool { kind, .. } => *kind,
+            Self::McpTool { kind, .. } | Self::Task { kind, .. } => *kind,
             _ => Kind::Destructive,
         }
     }
@@ -213,8 +288,36 @@ impl PermissionTarget {
                     && tool.len() <= 128
                     && !tool.contains('\0')
             }
+            Self::Task { kind, .. } => *kind != Kind::Choice && self.task_scope().is_some(),
             _ => true,
         }
+    }
+
+    /// The target with a task scope normalized, or `None` when it is invalid.
+    pub fn canonical(self) -> Option<Self> {
+        let target = match self {
+            Self::Task { task, target, kind } => {
+                let scope = TaskScope::new(&task, &target)?;
+                Self::Task {
+                    task: scope.task,
+                    target: scope.target,
+                    kind,
+                }
+            }
+            other => other,
+        };
+        target.valid().then_some(target)
+    }
+
+    fn task_scope(&self) -> Option<TaskScope> {
+        let Self::Task { task, target, .. } = self else {
+            return None;
+        };
+        let scope = TaskScope {
+            task: task.clone(),
+            target: target.clone(),
+        };
+        scope.canonical().then_some(scope)
     }
 
     pub fn bot_scope(&self) -> Option<String> {
@@ -227,10 +330,25 @@ impl PermissionTarget {
                 kind.as_str(),
                 hex::encode(tool),
             )),
+            Self::Task { kind, .. } => Some(self.task_scope()?.key(*kind)),
         }
     }
 
+    /// The standing grant that would cover this approved action: an MCP tool
+    /// call, or a host action declared with a task scope.
     pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
+        if let Action::Host {
+            task_scope: Some(scope),
+            ..
+        } = action
+        {
+            let target = Self::Task {
+                task: scope.task.clone(),
+                target: scope.target.clone(),
+                kind,
+            };
+            return target.valid().then_some(target);
+        }
         let Action::Tool { tool, args } = action else {
             return None;
         };
@@ -324,7 +442,7 @@ impl Spec {
             PermissionTarget::Routine { routine_id, .. } => {
                 hash(&[b"standing_permission", b"routine", routine_id.as_bytes()])
             }
-            PermissionTarget::McpTool { .. } => hash(&[
+            PermissionTarget::McpTool { .. } | PermissionTarget::Task { .. } => hash(&[
                 b"standing_permission",
                 target.bot_scope().unwrap().as_bytes(),
             ]),
@@ -332,7 +450,7 @@ impl Spec {
         Self {
             kind,
             title: match standing {
-                Standing::Bot => "Allow destructive actions for this bot".into(),
+                Standing::Bot => "Always allow destructive actions for this bot".into(),
                 Standing::Routine => "Allow destructive actions for this routine".into(),
                 Standing::Tool => match &target {
                     PermissionTarget::McpTool { mcp_id, tool, kind } => format!(
@@ -340,6 +458,12 @@ impl Spec {
                         kind.as_str(),
                         String::from(mcp_id.clone()),
                     ),
+                    _ => unreachable!(),
+                },
+                Standing::Task => match &target {
+                    PermissionTarget::Task { task, target, kind } => {
+                        format!("Always allow {} actions: {task} on {target}", kind.as_str())
+                    }
                     _ => unreachable!(),
                 },
             },
@@ -406,10 +530,11 @@ impl Spec {
     }
 
     /// Parse `ask_permission` arguments: the kind, the exact action the bot
-    /// will take on the host, and why.
+    /// will take on the host, why, and optionally the recurring task and
+    /// target it belongs to, which a card may offer to always allow.
     pub fn permission(args: &Value) -> Result<Self, &'static str> {
-        only_keys(args, &["kind", "action", "reason"])
-            .map_err(|_| "use kind, action, and optionally reason")?;
+        only_keys(args, &["kind", "action", "reason", "task_scope"])
+            .map_err(|_| "use kind, action, and optionally reason and task_scope")?;
         let kind = args["kind"]
             .as_str()
             .and_then(Kind::approval)
@@ -420,6 +545,28 @@ impl Spec {
             .ok_or("action is 1 to 4000 bytes: exactly what will be done")?;
         let reason = text_arg(args, "reason", MAX_TITLE)
             .map_err(|_| "reason is at most 500 bytes of text")?;
+        const SCOPE_ERROR: &str =
+            "task_scope is {task, target}: each 1 to 200 bytes of text without control characters";
+        let task_scope = match args.get("task_scope") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let scope =
+                    serde_json::from_value::<TaskScope>(value.clone()).map_err(|_| SCOPE_ERROR)?;
+                Some(TaskScope::new(&scope.task, &scope.target).ok_or(SCOPE_ERROR)?)
+            }
+        };
+        let action_hash = match &task_scope {
+            None => hash(&[b"host", kind.as_str().as_bytes(), action.as_bytes()]),
+            Some(scope) => hash(&[
+                b"host",
+                kind.as_str().as_bytes(),
+                action.as_bytes(),
+                b"task",
+                scope.task.as_bytes(),
+                scope.target.as_bytes(),
+            ]),
+        };
+        let offer = task_scope.as_ref().map(|_| Standing::Task);
         let title = reason.map(str::to_owned).unwrap_or_else(|| {
             match kind {
                 Kind::External => "Allow this action that reaches outside your machine?",
@@ -431,13 +578,14 @@ impl Spec {
             kind,
             title,
             context: Some(action.to_owned()),
-            choices: approval_choices(kind, Some(Standing::Bot)),
+            choices: approval_choices(kind, offer),
             multiple: false,
             approval: Some(Approval {
                 action: Action::Host {
                     host: action.to_owned(),
+                    task_scope,
                 },
-                hash: hash(&[b"host", kind.as_str().as_bytes(), action.as_bytes()]),
+                hash: action_hash,
             }),
         })
     }
@@ -513,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_binds_the_described_action_and_offers_forever_only_for_destructive() {
+    fn a_permission_binds_the_described_action_and_offers_no_blanket_grant() {
         let delete = Spec::permission(&json!({
             "kind": "destructive", "action": "rm -rf ~/old-site", "reason": "Remove the old site",
         }))
@@ -522,7 +670,7 @@ mod tests {
         assert_eq!(delete.title, "Remove the old site");
         assert_eq!(delete.context.as_deref(), Some("rm -rf ~/old-site"));
         let ids: Vec<&str> = delete.choices.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, [APPROVE, DENY, APPROVE_FOREVER]);
+        assert_eq!(ids, [APPROVE, DENY]);
 
         let send =
             Spec::permission(&json!({ "kind": "external", "action": "mail -s hi bob@x" })).unwrap();
@@ -534,6 +682,184 @@ mod tests {
         );
         assert!(Spec::permission(&json!({ "kind": "local", "action": "ls" })).is_err());
         assert!(Spec::permission(&json!({ "kind": "external" })).is_err());
+    }
+
+    fn tailscale(task: &str, target: &str) -> Spec {
+        Spec::permission(&json!({
+            "kind": "destructive", "action": "ssh omarchy-m1 sudo tailscale up --ssh",
+            "task_scope": { "task": task, "target": target },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_task_scoped_permission_offers_always_allow_and_binds_its_scope() {
+        let spec = tailscale("  Manage   Tailscale via SSH ", "omarchy-m1");
+        let ids: Vec<&str> = spec.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, [APPROVE, DENY, APPROVE_TASK]);
+        assert_eq!(spec.choices[2].label, "Always allow");
+        let approval = spec.approval.as_ref().unwrap();
+        let scope = TaskScope {
+            task: "Manage Tailscale via SSH".into(),
+            target: "omarchy-m1".into(),
+        };
+        assert_eq!(
+            approval.action,
+            Action::Host {
+                host: "ssh omarchy-m1 sudo tailscale up --ssh".into(),
+                task_scope: Some(scope),
+            }
+        );
+        let target = PermissionTarget::for_action(spec.kind, &approval.action).unwrap();
+        assert_eq!(target.standing(), Standing::Task);
+        let serialized = serde_json::to_value(&target).unwrap();
+        assert_eq!(
+            serialized,
+            json!({ "scope": "task", "task": "Manage Tailscale via SSH",
+                    "target": "omarchy-m1", "kind": "destructive" })
+        );
+        assert_eq!(
+            serde_json::from_value::<PermissionTarget>(serialized).unwrap(),
+            target
+        );
+
+        let unscoped = Spec::permission(&json!({
+            "kind": "destructive", "action": "ssh omarchy-m1 sudo tailscale up --ssh",
+        }))
+        .unwrap();
+        let other_target = tailscale("Manage Tailscale via SSH", "omarchy-m2");
+        let hashes = [
+            unscoped.approval.as_ref().unwrap().hash,
+            approval.hash,
+            other_target.approval.as_ref().unwrap().hash,
+        ];
+        assert_ne!(
+            hashes[0], hashes[1],
+            "the scope is part of the bound action"
+        );
+        assert_ne!(hashes[1], hashes[2]);
+        assert_eq!(
+            serde_json::to_value(&unscoped.approval.unwrap().action).unwrap(),
+            json!({ "host": "ssh omarchy-m1 sudo tailscale up --ssh" }),
+            "unscoped host actions keep their stored shape"
+        );
+    }
+
+    #[test]
+    fn task_grants_preserve_target_identity_and_match_task_names_case_insensitively() {
+        let key = |task: &str, target: &str, kind: Kind| {
+            PermissionTarget::Task {
+                task: task.into(),
+                target: target.into(),
+                kind,
+            }
+            .bot_scope()
+            .unwrap()
+        };
+        let base = key("Manage Tailscale via SSH", "omarchy-m1", Kind::Destructive);
+        assert_eq!(
+            base,
+            key("manage tailscale via ssh", "omarchy-m1", Kind::Destructive)
+        );
+        assert_ne!(
+            key("Manage files", "/srv/Prod", Kind::Destructive),
+            key("Manage files", "/srv/prod", Kind::Destructive)
+        );
+        assert_ne!(
+            key("Manage files", "/srv/a  b", Kind::Destructive),
+            key("Manage files", "/srv/a b", Kind::Destructive)
+        );
+        assert_eq!(
+            TaskScope::new("Manage files", " /srv/a  b ")
+                .unwrap()
+                .target,
+            "/srv/a  b"
+        );
+        assert_ne!(
+            base,
+            key("Manage Tailscale via SSH", "omarchy-m2", Kind::Destructive)
+        );
+        assert_ne!(
+            base,
+            key("Manage Docker via SSH", "omarchy-m1", Kind::Destructive)
+        );
+        assert_ne!(
+            base,
+            key("Manage Tailscale via SSH", "omarchy-m1", Kind::External)
+        );
+        assert_ne!(
+            key("a:b", "c", Kind::Destructive),
+            key("a", "b:c", Kind::Destructive),
+            "separators inside the text cannot collide"
+        );
+        assert!(base.starts_with("task:destructive:"));
+        assert_ne!(base, DESTRUCTIVE_SCOPE);
+    }
+
+    #[test]
+    fn malformed_task_scopes_are_refused() {
+        let long = "x".repeat(MAX_TASK_SCOPE + 1);
+        for bad in [
+            json!("Manage Tailscale"),
+            json!({ "task": "Manage Tailscale" }),
+            json!({ "task": "  ", "target": "omarchy-m1" }),
+            json!({ "task": "Manage Tailscale", "target": "" }),
+            json!({ "task": long, "target": "omarchy-m1" }),
+            json!({ "task": "Manage\u{7}Tailscale", "target": "omarchy-m1" }),
+            json!({ "task": "Manage\u{0}Tailscale", "target": "omarchy-m1" }),
+            json!({ "task": 1, "target": "omarchy-m1" }),
+            json!({ "task": "Manage Tailscale", "target": "omarchy-m1", "kind": "external" }),
+        ] {
+            assert!(
+                Spec::permission(&json!({
+                    "kind": "destructive", "action": "tailscale up", "task_scope": bad,
+                }))
+                .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            Spec::permission(&json!({
+                "kind": "destructive", "action": "tailscale up", "task_scope": null,
+            }))
+            .unwrap()
+            .approval
+            .is_some_and(|a| matches!(
+                a.action,
+                Action::Host {
+                    task_scope: None,
+                    ..
+                }
+            ))
+        );
+        let raw = PermissionTarget::Task {
+            task: " Manage  Tailscale ".into(),
+            target: "omarchy-m1".into(),
+            kind: Kind::External,
+        };
+        assert!(!raw.valid(), "only normalized targets are valid");
+        assert_eq!(
+            raw.canonical(),
+            Some(PermissionTarget::Task {
+                task: "Manage Tailscale".into(),
+                target: "omarchy-m1".into(),
+                kind: Kind::External,
+            })
+        );
+        for bad in [
+            PermissionTarget::Task {
+                task: "".into(),
+                target: "omarchy-m1".into(),
+                kind: Kind::External,
+            },
+            PermissionTarget::Task {
+                task: "Manage".into(),
+                target: "omarchy-m1".into(),
+                kind: Kind::Choice,
+            },
+        ] {
+            assert_eq!(bad.canonical(), None);
+        }
     }
 
     #[test]

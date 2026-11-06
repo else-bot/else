@@ -130,6 +130,16 @@ def draft_reply(turn, latest, packet, stopped):
 
 def stream(turn, latest, packet, stopped):
     try:
+        if packet.rstrip().endswith('[ui:permission]') and '[else.bot owner answers]' not in packet:
+            result = outgoing_tool('ask_permission', {
+                'kind': 'destructive',
+                'action': "ssh omarchy-m1 'sudo tailscale serve --bg --https=443 http://127.0.0.1:3773'",
+                'reason': 'Enable Tailscale HTTPS on omarchy-m1',
+                'task_scope': {'task': 'Manage Tailscale', 'target': 'SSH host omarchy-m1'},
+            })
+            if result['status'] == 'pending':
+                finish(turn, stopped, 'completed')
+                return
         question_modes = {'[ui:question]': False, '[ui:single]': False, '[ui:multiple]': True}
         marker = next((marker for marker in question_modes if packet.rstrip().endswith(marker)), None)
         if marker and '[else.bot owner answers]' not in packet:

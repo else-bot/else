@@ -16,7 +16,8 @@ use uuid::Uuid;
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
 use crate::model::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, DENY, Question, QuestionAnswer,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, DENY, Question,
+    QuestionAnswer,
 };
 
 mod choice;
@@ -64,6 +65,10 @@ fn outcome(question: &Question, bot_name: &str) -> String {
             (true, Some(APPROVE_TOOL)) => {
                 "Approved. This tool and action type are allowed in future chat requests.".into()
             }
+            (true, Some(APPROVE_TASK)) => question.task_scope().map_or_else(
+                || "Approved. This task and action type are allowed in future chats with this bot.".into(),
+                |scope| format!("Always allowed for this bot: {} on {}.", scope.task, scope.target),
+            ),
             (true, Some(DENY)) => "Denied.".into(),
             _ => format!(
                 "You chose {}.",
@@ -222,6 +227,10 @@ impl ElseApp {
             );
         }
         card = card.child(note(match question.kind.as_str() {
+            _ if question.choices.iter().any(|c| c.id == APPROVE_TASK) => question.task_scope().map_or_else(
+                || "Always allow remembers this task and action type for future chats with this bot.".to_owned(),
+                |scope| format!("Always allow remembers \"{}\" on \"{}\" for this action type in future chats with this bot. Other tasks and targets still need approval.", scope.task, scope.target),
+            ),
             _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Approve once covers this action. Always allow remembers this integration tool and action type for this bot's chat requests. Other tools and action types still need approval.".to_owned(),
             "external" => "Approve once covers exactly this sensitive action.".to_owned(),
             _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task on future runs. Other routines and chat requests still need approval. Changing the task clears this permission.".to_owned(),
@@ -236,7 +245,7 @@ impl ElseApp {
             {
                 Some(SubmitState::Sending) => "Sending…".to_owned(),
                 Some(SubmitState::Recorded) => "Recorded".to_owned(),
-
+                _ if choice.id == APPROVE_FOREVER => "Always allow for this bot".to_owned(),
                 _ => choice.label.clone(),
             };
             let choice_id = choice.id.clone();
@@ -336,5 +345,24 @@ mod tests {
             heading(&question("external", "pending", None), "Mail").contains("sensitive action")
         );
         assert_eq!(letter("c"), "C");
+    }
+
+    #[test]
+    fn task_approval_names_the_saved_category_and_target() {
+        let mut card = question("destructive", "answered", Some(crate::model::APPROVE_TASK));
+        for action in [
+            serde_json::json!({ "host": "ssh omarchy-m1 tailscale status", "task_scope": {
+                "task": "Manage Tailscale", "target": "SSH host omarchy-m1"
+            }}),
+            serde_json::json!({ "permission": { "scope": "task", "kind": "destructive",
+                "task": "Manage Tailscale", "target": "SSH host omarchy-m1"
+            }}),
+        ] {
+            card.action = Some(serde_json::from_value(action).unwrap());
+            assert_eq!(
+                outcome(&card, "Tech Manager"),
+                "Always allowed for this bot: Manage Tailscale on SSH host omarchy-m1."
+            );
+        }
     }
 }

@@ -83,10 +83,15 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         handoff(&app, t2).await.is_none(),
         "same provider, no handoff"
     );
-    assert_eq!(
-        last(&a.packets().await),
-        "Second message on A.",
+    let resumed = last(&a.packets().await);
+    assert!(resumed.ends_with("Second message on A."), "{resumed}");
+    assert!(
+        !resumed.contains("PURPLE-7"),
         "a resumed session gets no history"
+    );
+    assert!(
+        resumed.contains("[else.bot saved permissions]"),
+        "{resumed}"
     );
 
     let (t3, status) = say(&app, &bot, B, "Third, on B: what is the code word?").await;
@@ -118,7 +123,13 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
 
     let (t4, _) = say(&app, &bot, B, "Fourth, still B.").await;
     assert!(handoff(&app, t4).await.is_none());
-    assert_eq!(last(&b.packets().await), "Fourth, still B.");
+    let resumed = last(&b.packets().await);
+    assert!(resumed.ends_with("Fourth, still B."), "{resumed}");
+    assert!(!resumed.contains("Third, on B:"), "{resumed}");
+    assert!(
+        resumed.contains("[else.bot saved permissions]"),
+        "{resumed}"
+    );
 
     let a_before = a.packets().await.len();
     let (t5, _) = say(&app, &bot, A, "Fifth, back on A.").await;

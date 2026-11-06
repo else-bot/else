@@ -11,15 +11,16 @@
 //! question `skipped` (it was not permission); any other end of the turn
 //! marks it `cancelled` (a trigger).
 //!
-//! Destructive actions may be allowed in advance in two separate scopes,
-//! chosen on a destructive card or explicitly authorized in owner chat.
-//! "Always allow destructive actions"
-//! covers the bot's own requests but never a routine run. "Always allow for
-//! this routine" covers runs of that one routine admitted with its current
-//! prompt revision; editing the prompt ends it. Which scope a card offers
-//! and which grant applies come from the turn's source in the database,
-//! never from what a model wrote. A tool grant covers one MCP tool and
-//! effect in the bot's owner requests.
+//! Actions may be allowed in advance, chosen on a card or explicitly
+//! authorized in owner chat. The broad bot grant covers destructive actions
+//! in the bot's own requests but never a routine run; host action cards no
+//! longer offer it. "Always allow for this routine" covers runs of that one
+//! routine admitted with its current prompt revision; editing the prompt
+//! ends it. A tool grant covers one MCP tool and effect, and a task grant
+//! one declared task, target, and effect of host actions, both only in the
+//! bot's owner requests. Which scope a card offers and which grant applies
+//! come from the turn's source in the database; a task grant matches the
+//! declared task and target exactly and never interprets the action.
 
 use std::collections::HashMap;
 
@@ -36,8 +37,9 @@ pub mod standing;
 
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, Answer, Choice, DESTRUCTIVE_SCOPE,
-    Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status, approval_choices,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, Answer, Choice,
+    DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status,
+    approval_choices,
 };
 
 /// A question as shown to the owner and recorded in events.
@@ -67,7 +69,11 @@ impl QuestionInfo {
         self.status == Status::Answered
             && matches!(
                 self.answer.as_ref().and_then(Answer::single),
-                Some(APPROVE) | Some(APPROVE_FOREVER) | Some(APPROVE_ROUTINE) | Some(APPROVE_TOOL)
+                Some(APPROVE)
+                    | Some(APPROVE_FOREVER)
+                    | Some(APPROVE_ROUTINE)
+                    | Some(APPROVE_TOOL)
+                    | Some(APPROVE_TASK)
             )
     }
 
@@ -335,17 +341,20 @@ pub enum Gate {
     Denied(QuestionInfo),
 }
 
-/// Decide a destructive or external action, atomically: a standing grant
-/// of the turn's scope runs a destructive call; an approval for exactly
-/// these arguments is consumed by this one call; otherwise the owner is
-/// asked, on a card offering only the grant this turn's scope can receive.
+/// Decide a destructive or external action, atomically: a broad or routine
+/// grant of the turn's scope runs a destructive call; a denial of exactly
+/// this action in this request stands; an approval for exactly these
+/// arguments is consumed by this one call; a tool or task grant matching the
+/// action runs it in an owner request; otherwise the owner is asked, on a
+/// card offering only the grant this turn's scope can receive. A host action
+/// without a task scope is offered no standing grant.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
-    let tool_target = if caller.owner_conversation
+    let target = if caller.owner_conversation
         && super::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest
     {
         spec.approval
@@ -354,11 +363,15 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
     } else {
         None
     };
-    let tool_granted = match (scope, &tool_target) {
+    let granted = match (scope, &target) {
         (Scope::Bot, Some(target)) => {
-            has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await?
+            if has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await? {
+                Some(target.standing())
+            } else {
+                None
+            }
         }
-        _ => false,
+        _ => None,
     };
     if spec.kind == Kind::Destructive {
         let standing = match scope {
@@ -391,29 +404,27 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
                     == 1;
                 if consumed {
                     tx.commit().await?;
-                    return Ok(Gate::Run {
-                        standing: tool_granted.then_some(Standing::Tool),
-                    });
+                    return Ok(Gate::Run { standing: granted });
                 }
             }
             Status::Answered => return Ok(Gate::Denied(found)),
             Status::Skipped | Status::Cancelled => {}
         }
     }
-    if tool_granted {
-        return Ok(Gate::Run {
-            standing: Some(Standing::Tool),
-        });
+    if granted.is_some() {
+        return Ok(Gate::Run { standing: granted });
     }
+    let host = matches!(
+        spec.approval.as_ref().map(|a| &a.action),
+        Some(Action::Host { .. })
+    );
+    let offer = match (scope, &target) {
+        (Scope::Bot, Some(target)) => Some(target.standing()),
+        (Scope::Bot, None) if host => None,
+        _ => scope.offer(),
+    };
     let spec = Spec {
-        choices: approval_choices(
-            spec.kind,
-            if matches!(scope, Scope::Bot) && tool_target.is_some() {
-                Some(Standing::Tool)
-            } else {
-                scope.offer()
-            },
-        ),
+        choices: approval_choices(spec.kind, offer),
         ..spec.clone()
     };
     let question = insert(&mut tx, turn_id, &caller, &spec).await?;
@@ -531,22 +542,30 @@ pub async fn answer(
         return Err(SettleError::Settled(question.status));
     }
     let choice = answer.single();
-    let tool_scope = if choice == Some(APPROVE_TOOL) {
-        if !matches!(scope(&mut tx, question.turn_id).await?, Scope::Bot)
-            || super::delegations::origin(&mut tx, question.turn_id).await? != Origin::OwnerRequest
-        {
-            return Err(SettleError::InvalidChoice);
+    let standing = match choice {
+        Some(APPROVE_TOOL) => Some(Standing::Tool),
+        Some(APPROVE_TASK) => Some(Standing::Task),
+        _ => None,
+    };
+    let granted_scope = match standing {
+        Some(standing) => {
+            if !matches!(scope(&mut tx, question.turn_id).await?, Scope::Bot)
+                || super::delegations::origin(&mut tx, question.turn_id).await?
+                    != Origin::OwnerRequest
+            {
+                return Err(SettleError::InvalidChoice);
+            }
+            Some(
+                question
+                    .action
+                    .as_ref()
+                    .and_then(|a| PermissionTarget::for_action(question.kind, a))
+                    .filter(|target| target.standing() == standing)
+                    .and_then(|target| target.bot_scope())
+                    .ok_or(SettleError::InvalidChoice)?,
+            )
         }
-        Some(
-            question
-                .action
-                .as_ref()
-                .and_then(|a| PermissionTarget::for_action(question.kind, a))
-                .and_then(|target| target.bot_scope())
-                .ok_or(SettleError::InvalidChoice)?,
-        )
-    } else {
-        None
+        None => None,
     };
     if question.kind == Kind::Destructive {
         match (choice, scope(&mut tx, question.turn_id).await?) {
@@ -582,7 +601,7 @@ pub async fn answer(
         .execute(&mut *tx)
         .await?;
     }
-    if let Some(scope) = tool_scope {
+    if let Some(scope) = granted_scope {
         sqlx::query(
             "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
              ON CONFLICT (bot_id, scope) DO NOTHING",
@@ -657,7 +676,8 @@ pub async fn mark_delivered(
     sqlx::query(
         "UPDATE owner_questions SET delivered_attempt = ?3,
              consumed_attempt = CASE WHEN json_type(action, '$.host') = 'text'
-                 AND answer IN ('approve', 'approve_forever', 'approve_routine') THEN ?3 ELSE consumed_attempt END
+                 AND answer IN ('approve', 'approve_forever', 'approve_routine', 'approve_task')
+                 THEN ?3 ELSE consumed_attempt END
          WHERE turn_id = ?1 AND delivered_attempt IS NULL
            AND lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?2))",
     )

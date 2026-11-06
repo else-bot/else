@@ -395,6 +395,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         delegation: Default::default(),
         secrets: Vec::new(),
         questions: Vec::new(),
+        standing_permissions: Vec::new(),
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         handoff: None,
