@@ -53,6 +53,41 @@ fn registered_credentials_are_bound_to_trusted_github_endpoints() {
 }
 
 #[tokio::test]
+async fn compiled_registration_starts_signin_without_runtime_credentials() {
+    use crate::config::{Config, tests::MapSource};
+    let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(
+        dir.path().into(),
+        Uuid::new_v4(),
+        Some(Arc::new(fixtures::key())),
+    );
+    let mut session = Session::open(store, config.github_oauth.clone())
+        .await
+        .unwrap();
+    session.state = State::Required(github());
+    let started = session
+        .authorize(
+            &Transport::Http {
+                url: github().resource,
+                headers: Default::default(),
+            },
+            "http://127.0.0.1:49177/mcp/callback".into(),
+        )
+        .await;
+    if let Some(client) = config.github_oauth {
+        let started = started.unwrap();
+        let url = reqwest::Url::parse(&started.authorization_url).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], client.client_id);
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert!(!started.authorization_url.contains(client.secret.as_str()));
+    } else {
+        assert!(matches!(started, Err(Error::Invalid(_))));
+    }
+}
+
+#[tokio::test]
 async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registration() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

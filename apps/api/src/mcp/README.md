@@ -59,16 +59,18 @@ Coordinated backups include the shared library in one encrypted `mcp.tar.age` ar
 
 ## Set up GitHub sign-in
 
-GitHub's remote MCP server does not support dynamic client registration. It requires a registered OAuth App or GitHub App and a client secret for token exchange. See [GitHub's host integration guide](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).
+Official API releases embed a dedicated GitHub OAuth App registration. The owner clicks **Connect in browser** without configuring credentials. GitHub's remote MCP server does not support dynamic client registration and requires a client secret for token exchange. See [GitHub's host integration guide](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).
+
+For source builds or a custom registration:
 
 1. [Register a dedicated OAuth App](https://github.com/settings/applications/new) for else.bot. Set its callback URL to `http://127.0.0.1/mcp/callback`. GitHub allows the desktop to select a different loopback port for each sign-in.
 2. Generate a client secret in the app's settings.
-3. Set `ELSE_GITHUB_CLIENT_ID` and `ELSE_GITHUB_CLIENT_SECRET` in the API server's environment. For direct API runs, you can use a private `.env` file. For an installed service, configure its service environment. Keep the secret outside shared MCP package files and chat.
+3. Set `ELSE_GITHUB_CLIENT_ID` and `ELSE_GITHUB_CLIENT_SECRET` in the API server's environment. Both values replace the embedded registration together. For direct API runs, you can use a private `.env` file. For an installed service, configure its service environment. Keep credentials outside shared MCP package files and chat. To embed your own registration, follow the [build instructions](../../../../CONTRIBUTING.md#run-a-development-session).
 4. Restart the API server. Retry **Connect in browser** in the desktop connection card.
 
 The API accepts these credentials only for `https://api.githubcopilot.com` resources with GitHub's official issuer, authorization endpoint, and token endpoint. The secret accompanies code exchange and refresh requests only. It does not appear in the browser URL, bot metadata, or saved tokens. GitHub Enterprise endpoints need a separate registration integration.
 
-The registration belongs to the API installation. Each bot still needs separate owner consent and has its own encrypted tokens. Restoring tokens to a new API host also requires configuring the same OAuth App credentials there. Changing the client ID requires signing in again. Organization policy may require approval of the OAuth App before repository access succeeds.
+The embedded app credentials are extractable from the API binary. PKCE binds each authorization code to its sign-in attempt. Each bot still needs separate owner consent and has its own encrypted tokens. Restoring tokens requires the same OAuth App registration, either embedded or configured on the new host. Changing the client ID requires signing in again. Organization policy may require approval of the OAuth App before repository access succeeds.
 
 ## Verification
 

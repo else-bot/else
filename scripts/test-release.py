@@ -117,6 +117,49 @@ class RustSetup(unittest.TestCase):
             self.assertEqual(github_path.read_text(), f"{bin_dir}\n")
 
 
+class GitHubOAuthBuild(unittest.TestCase):
+    def script(self, name):
+        workflow = (ROOT / ".github/workflows/release-tag.yml").read_text()
+        step = workflow.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+        return textwrap.dedent(step.split("        run: ", 1)[1].removeprefix("|\n"))
+
+    def prepare(self, root, overrides=None):
+        env = {**os.environ, "RUNNER_TEMP": str(root), "GITHUB_ENV": str(root / "environment"),
+               "ELSE_GITHUB_CLIENT_ID": "fixture-id", "ELSE_GITHUB_CLIENT_SECRET": "private-fixture-secret"}
+        env.update(overrides or {})
+        return subprocess.run(["bash", "-e", "-o", "pipefail", "-c",
+                               self.script("Prepare GitHub MCP sign-in configuration")],
+                              env=env, capture_output=True, text=True, timeout=10)
+
+    def test_release_prepares_private_registration_and_removes_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = self.prepare(root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            registration = root / "else-github-oauth.json"
+            self.assertEqual(json.loads(registration.read_text()), {
+                "client_id": "fixture-id", "client_secret": "private-fixture-secret"})
+            self.assertEqual(registration.stat().st_mode & 0o777, 0o600)
+            environment = (root / "environment").read_text()
+            self.assertEqual(environment, f"ELSE_GITHUB_OAUTH_CONFIG={registration}\n")
+            self.assertNotIn("private-fixture-secret", result.stdout + result.stderr + environment)
+            cleanup = subprocess.run(["bash", "-e", "-c", self.script("Remove OAuth registrations")],
+                                     env={**os.environ, "RUNNER_TEMP": str(root)},
+                                     capture_output=True, text=True, timeout=10)
+            self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+            self.assertFalse(registration.exists())
+
+    def test_release_rejects_missing_or_invalid_credentials_without_echoing_them(self):
+        for override in [{"ELSE_GITHUB_CLIENT_ID": ""}, {"ELSE_GITHUB_CLIENT_SECRET": ""},
+                         {"ELSE_GITHUB_CLIENT_SECRET": "private\ninvalid"}]:
+            with self.subTest(override=list(override)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.prepare(root, override)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "else-github-oauth.json").exists())
+                self.assertNotIn("private", result.stdout + result.stderr)
+
+
 class ReleasePreflight(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

@@ -15,6 +15,7 @@ use crate::credentials::SecretKeySource;
 pub const DEFAULT_BIND: &str = "127.0.0.1:7879";
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
+const GITHUB_OAUTH: Option<(&str, &str)> = include!(concat!(env!("OUT_DIR"), "/github_oauth.rs"));
 
 /// SQLite connection URL. It is never
 /// printed through `Debug` or error messages.
@@ -147,22 +148,7 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
             None => None,
         };
-        let github_oauth = match (
-            source.get("ELSE_GITHUB_CLIENT_ID"),
-            source.get("ELSE_GITHUB_CLIENT_SECRET"),
-        ) {
-            (None, None) => None,
-            (Some(id), Some(secret)) => Some(std::sync::Arc::new(
-                crate::mcp::oauth::RegisteredClient::github(id, secret)
-                    .map_err(|reason| invalid("ELSE_GITHUB_CLIENT_ID", reason))?,
-            )),
-            _ => {
-                return Err(invalid(
-                    "ELSE_GITHUB_CLIENT_ID",
-                    "set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET together",
-                ));
-            }
-        };
+        let github_oauth = github_oauth(source, GITHUB_OAUTH)?;
         let backup = crate::backup::capture::BackupConfig {
             dir: match source.get("ELSE_BACKUP_DIR") {
                 Some(path) => absolute_path("ELSE_BACKUP_DIR", path)?,
@@ -295,6 +281,32 @@ impl Config {
             shutdown_grace,
         })
     }
+}
+
+fn github_oauth(
+    source: &dyn Source,
+    embedded: Option<(&str, &str)>,
+) -> Result<Option<std::sync::Arc<crate::mcp::oauth::RegisteredClient>>, ConfigError> {
+    let registration = match (
+        source.get("ELSE_GITHUB_CLIENT_ID"),
+        source.get("ELSE_GITHUB_CLIENT_SECRET"),
+    ) {
+        (None, None) => embedded.map(|(id, secret)| (id.to_owned(), secret.to_owned())),
+        (Some(id), Some(secret)) => Some((id, secret)),
+        _ => {
+            return Err(invalid(
+                "ELSE_GITHUB_CLIENT_ID",
+                "set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET together",
+            ));
+        }
+    };
+    registration
+        .map(|(id, secret)| {
+            crate::mcp::oauth::RegisteredClient::github(id, secret)
+                .map(std::sync::Arc::new)
+                .map_err(|reason| invalid("ELSE_GITHUB_CLIENT_ID", reason))
+        })
+        .transpose()
 }
 
 fn database_url(
@@ -431,7 +443,36 @@ pub mod tests {
         assert!(!debug.contains("private-secret"));
         assert!(!debug.contains("registered-id"));
         let default = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
-        assert!(default.github_oauth.is_none());
+        assert_eq!(default.github_oauth.is_some(), GITHUB_OAUTH.is_some());
+    }
+
+    #[test]
+    fn github_runtime_credentials_replace_the_complete_embedded_registration() {
+        let embedded = Some(("embedded-id", "embedded-secret"));
+        let none = MapSource::new(&[]);
+        let default = github_oauth(&none, embedded).unwrap();
+        assert!(default.is_some());
+        assert!(github_oauth(&none, None).unwrap().is_none());
+        let partial = MapSource::new(&[("ELSE_GITHUB_CLIENT_ID", "override-id")]);
+        assert!(github_oauth(&partial, embedded).is_err());
+        let partial = MapSource::new(&[("ELSE_GITHUB_CLIENT_SECRET", "override-secret")]);
+        assert!(github_oauth(&partial, embedded).is_err());
+        let override_source = MapSource::new(&[
+            ("ELSE_GITHUB_CLIENT_ID", "override-id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "override-secret"),
+        ]);
+        let invalid_embedded = Some(("invalid embedded id", "invalid embedded secret"));
+        assert!(github_oauth(&none, invalid_embedded).is_err());
+        assert!(
+            github_oauth(&override_source, invalid_embedded)
+                .unwrap()
+                .is_some()
+        );
+        let invalid_override = MapSource::new(&[
+            ("ELSE_GITHUB_CLIENT_ID", "invalid override id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "invalid override secret"),
+        ]);
+        assert!(github_oauth(&invalid_override, embedded).is_err());
     }
 
     #[test]
