@@ -6,7 +6,15 @@ use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, Theme, h_flex};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    App,
+    LocalServer,
+    RemoteServer(Uuid),
+}
+
 pub(super) struct View {
+    pub(super) remote_profile: Option<Profile>,
     pub(super) commands: Commands,
     pub(super) snapshot: Snapshot,
     logs: Entity<TextareaState>,
@@ -63,14 +71,54 @@ impl View {
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) -> Self {
-        let (commands, mut states) = if server {
+        let (commands, states) = if server {
             crate::updates::start_server(launch, runtime)
         } else {
             crate::updates::start(launch, runtime)
         };
 
+        let target = if server {
+            Target::LocalServer
+        } else {
+            Target::App
+        };
+        Self::from_states(commands, states, target, None, window, cx)
+    }
+
+    pub(super) fn new_remote(
+        id: Uuid,
+        profile: Profile,
+        runtime: &tokio::runtime::Handle,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Result<Self, String> {
+        let client = Arc::new(Client::new(
+            profile.origin.clone(),
+            &profile.token,
+            runtime.clone(),
+        )?);
+        let (commands, states) = crate::updates::start_remote(client, runtime);
+        Ok(Self::from_states(
+            commands,
+            states,
+            Target::RemoteServer(id),
+            Some(profile),
+            window,
+            cx,
+        ))
+    }
+
+    fn from_states(
+        commands: Commands,
+        mut states: tokio::sync::watch::Receiver<Snapshot>,
+        target: Target,
+        remote_profile: Option<Profile>,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Self {
         let snapshot = states.borrow().clone();
         Self {
+            remote_profile,
             commands,
             snapshot,
             logs: cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 100_000)),
@@ -84,7 +132,7 @@ impl View {
                     let snapshot = states.borrow_and_update().clone();
                     if this
                         .update_in(cx, |shell, window, cx| {
-                            shell.update_snapshot(snapshot, server, window, cx)
+                            shell.update_snapshot(snapshot, target, window, cx)
                         })
                         .is_err()
                     {
@@ -104,6 +152,12 @@ impl View {
             self.snapshot.operation,
             Operation::Preparing | Operation::Installing | Operation::Restarting
         )
+    }
+
+    pub(super) fn has_activity(&self) -> bool {
+        self.busy()
+            || !self.snapshot.output.is_empty()
+            || !matches!(self.snapshot.operation, Operation::Idle)
     }
 
     fn latest(&self) -> Option<&str> {
@@ -128,14 +182,20 @@ impl Shell {
     fn update_snapshot(
         &mut self,
         snapshot: Snapshot,
-        server: bool,
+        target: Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = if server {
-            &mut self.server_updates
-        } else {
-            &mut self.updates
+        let server = target != Target::App;
+        let view = match target {
+            Target::App => &mut self.updates,
+            Target::LocalServer => &mut self.server_updates,
+            Target::RemoteServer(id) => {
+                let Some(view) = self.remote_updates.get_mut(&id) else {
+                    return;
+                };
+                view
+            }
         };
         if snapshot.output != view.snapshot.output {
             if view.snapshot.output.is_empty() {
@@ -160,7 +220,7 @@ impl Shell {
         let changed = server
             && matches!(
                 view.snapshot.operation,
-                Operation::Installing | Operation::Preparing
+                Operation::Installing | Operation::Preparing | Operation::Restarting
             )
             && matches!(
                 snapshot.operation,
@@ -175,14 +235,19 @@ impl Shell {
     }
 
     pub(super) fn update_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        if matches!(action, Action::Install) && (self.updates.busy() || self.server_updates.busy())
+        if matches!(action, Action::Install)
+            && !self
+                .server_update_target
+                .is_some_and(|id| self.remote_updates.contains_key(&id))
+            && (self.updates.busy() || self.server_updates.busy())
         {
             return;
         }
-        let view = if self.server_update_target.is_some() {
-            &mut self.server_updates
-        } else {
-            &mut self.updates
+        let target = self.server_update_target;
+        let view = match target.and_then(|id| self.remote_updates.get_mut(&id)) {
+            Some(view) => view,
+            None if target.is_some() => &mut self.server_updates,
+            None => &mut self.updates,
         };
         if matches!(action, Action::Install) && !view.can_install()
             || matches!(action, Action::RefreshWork) && view.snapshot.unavailable.is_some()
@@ -226,10 +291,13 @@ impl Shell {
     }
 
     fn update_view(&self) -> &View {
-        if self.server_update_target.is_some() {
-            &self.server_updates
-        } else {
-            &self.updates
+        match self
+            .server_update_target
+            .and_then(|id| self.remote_updates.get(&id))
+        {
+            Some(view) => view,
+            None if self.server_update_target.is_some() => &self.server_updates,
+            None => &self.updates,
         }
     }
 
@@ -274,7 +342,11 @@ impl Shell {
             ),
             Operation::Restarting | Operation::RestartScheduled => (
                 "Restarting else.bot",
-                "Reopening the installed app.".to_owned(),
+                if server {
+                    "Waiting for the server to reconnect after its update.".to_owned()
+                } else {
+                    "Reopening the installed app.".to_owned()
+                },
                 IconName::RotateCw,
                 theme.foreground,
             ),
@@ -333,7 +405,7 @@ impl Shell {
                             "App updates"
                         },
                         if server {
-                            "Updates for this managed local server."
+                            "Update this server and reconnect when it restarts."
                         } else {
                             "The desktop app on this computer. Your servers keep running."
                         },
