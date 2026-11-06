@@ -105,6 +105,7 @@ Updates require bots to finish their current work first. If an update reports th
 | `elsebot start` | Start the server |
 | `elsebot stop` | Stop the server and running turns |
 | `elsebot restart` | Restart the server |
+| `elsebot reset` | Erase local saved state and return to first-run setup |
 | `elsebot logs` | Follow server logs |
 | `elsebot paths` | Show installation paths |
 | `elsebot db` | Open the database for read-only SQL |
@@ -112,6 +113,10 @@ Updates require bots to finish their current work first. If an update reports th
 ## Data and backups
 
 Conversations, memory, credentials, and bot computer state live under `~/.else/data`. Bot project files live under `~/.else/bots`. Server settings are in `~/.else/config/.env`; the app saves its connection in `~/.else/config/desktop.json`.
+
+To start over after testing, quit the desktop app and run `elsebot reset`. Type `reset` at the confirmation prompt, or use `elsebot reset --yes` to skip the prompt. This permanently deletes local conversations, memory, credentials, bot projects, computers, backups, logs, and desktop preferences. It stops the local server and bot computers, creates fresh credentials and onboarding state, and leaves the server stopped. Open the app and choose **Start local** to begin again.
+
+Reset keeps the installed software, service registration, host settings in `config/.env`, and your Codex and Claude CLI logins. It also removes Claude session transcripts for this installation's bot projects from the host Claude configuration. Unrelated provider projects and provider-wide logs stay in place. It refuses custom storage paths outside the installer layout. Remote servers, remote backups, and backup copies you made elsewhere are unchanged. Deleting all of `~/.else` also removes the installed software and leaves service registrations behind, so use `elsebot reset` for a fresh start.
 
 The server makes encrypted backups daily and keeps seven completed sets by default in `~/.else/data/backups`. To make one manually, stop the server first:
 

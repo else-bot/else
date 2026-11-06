@@ -8,6 +8,7 @@ Usage: elsebot <command>
   status            the installed and running versions, and whether the API is up
   version           the installed version
   update [options]  install the latest release (options: install.sh --help)
+  reset [--yes]     erase local history, memory, credentials, projects and computers
   desktop           open the desktop app
   start | stop | restart
                     the API service (stop is graceful: running turns end as Stopped)
@@ -271,6 +272,42 @@ is_active() {
 	esac
 }
 
+reset_installation() {
+	case "${1:-}" in
+	-h | --help)
+		echo "Usage: elsebot reset [--yes]"
+		echo "Quit the desktop app first. Reset permanently deletes this installation's local"
+		echo "history, memory, credentials, projects, bot computers, backups, logs and app connection."
+		echo "Installed software, host settings and provider CLI logins are kept. Remote servers"
+		echo "and remote backups are not changed. The local server stays stopped after reset."
+		return ;;
+	esac
+	[ $# -eq 0 ] || { [ $# -eq 1 ] && [ "$1" = --yes ]; } || die "usage: elsebot reset [--yes]"
+	need_api
+	echo "Reset $ELSE_HOME?"
+	echo "This permanently deletes local history, memory, credentials, projects, bot computers,"
+	echo "backups, logs and the saved app connection. Quit the desktop app before continuing."
+	if [ "${1:-}" != --yes ]; then
+		[ -t 0 ] || die "reset needs confirmation in a terminal; use --yes for non-interactive reset"
+		local answer
+		read -r -p "Type reset to continue: " answer || return 1
+		[ "$answer" = reset ] || { echo "Reset cancelled."; return 0; }
+	fi
+	local command processes
+	processes="$(ps -axww -o command=)" || die "could not check whether the desktop app is running"
+	while IFS= read -r command; do
+		case "$command" in
+		*"$CURRENT/bin/else-desktop"* | *"$ELSE_HOME/versions/"*"/bin/else-desktop"*)
+			die "quit this installation's desktop app before resetting" ;;
+		esac
+		if [ -n "$ELSEBOT_APP" ] && [[ "$command" == *"$ELSEBOT_APP/Contents/MacOS/else-desktop"* ]]; then
+			die "quit this installation's desktop app before resetting"
+		fi
+	done <<<"$processes"
+	stop || die "could not stop the API; nothing was deleted"
+	(cd "$CONFIG" && ELSE_HOME="$ELSE_HOME" "$CURRENT/bin/else-api" reset --yes)
+}
+
 
 cmd="${1:-status}"
 [ $# -gt 0 ] && shift
@@ -315,6 +352,7 @@ desktop)
 start) start ;;
 stop) stop ;;
 restart) stop && start ;;
+reset) reset_installation "$@" ;;
 service-install) service_install ;;
 logs)
 	if [ "$ELSEBOT_MANAGER" = systemd ]; then
