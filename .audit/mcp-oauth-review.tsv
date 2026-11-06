@@ -1,9 +1,0 @@
-ts	phase	decision	why	evidence	result
-2026-11-06T13:30:07Z	start	Review PR132 for structural quality and fix findings as separate commits	User explicitly requested the thermo-nuclear review and fixes; this run follows the original OAuth implementation	.audit/mcp-oauth-review.md	open
-2026-11-06T13:48:58Z	structure	Share one typed loopback callback parser and listener between email and MCP	One owner prevents security checks and cancellation behavior diverging	929b047	VERIFIED
-2026-11-06T13:48:58Z	ownership	Bind session identity and async credential storage once; split protocol and persistence	Fix shared stdio disconnect and remove blocking encryption and repeated identity plumbing	a9450ec	VERIFIED
-2026-11-06T13:48:58Z	contract	Use a typed connection action and dedicated native card	Durable consent must not depend on activity-log redaction or raw JSON tool-name checks	c369ce9	VERIFIED
-2026-11-06T13:48:58Z	lifecycle	Retain the prior account if a reauthorization exchange or save fails	The previous credential should stay usable until its replacement persists	565eb41	VERIFIED
-2026-11-06T13:48:58Z	recovery	Recover saved credentials before settling or cancelling a connection card	A failed confirmation must never enable a false denial or repeat OAuth; known package absence remains cancellable	apps/desktop/src/app/question_card/mcp/flow.rs	VERIFIED
-2026-11-06T13:48:58Z	native	A real native card recovers and confirms credentials from the fake Python OAuth server	Exercise the saved-token/pending-card boundary that caused the partial-success bug	.audit/verify-mcp-recovery.py;.audit/mcp-oauth-recovered-card.png	VERIFIED
-2026-11-06T13:54:51Z	verify	Full workspace and focused checks pass; native saved-credential recovery verified	Verify fixes against real HTTP and the native app, including the final removed-package edge case	.audit/mcp-oauth-review-verification.txt	VERIFIED

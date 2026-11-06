@@ -4,5 +4,6 @@
 !/.env.example
 __pycache__/
 /.else-dev/
+/.audit/
 /.cargo/config.toml
 client_secret_*.json
