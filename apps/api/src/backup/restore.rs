@@ -466,6 +466,7 @@ async fn load_and_check(
         let checked = match provider.as_str() {
             crate::providers::codex::ID => crate::providers::codex::validate(&profile),
             crate::providers::claude::ID => crate::providers::claude::validate(&profile),
+            crate::providers::grok::ID => crate::providers::grok::validate(&profile),
             _ => Ok(()),
         };
         if let Err(reason) = checked {

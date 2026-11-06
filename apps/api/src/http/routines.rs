@@ -198,7 +198,7 @@ fn fields() -> Value {
                        so." },
         "provider_id": { "type": "string",
                          "description": "With model, only when the owner named the provider \
-                             (codex or claude)." },
+                             (codex, claude, or grok)." },
         "reasoning_effort": { "type": "string",
                               "description": "With model, only when the owner asked for one \
                                   (low, medium, high, xhigh, max). Defaults to your usual \

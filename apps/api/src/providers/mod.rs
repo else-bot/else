@@ -5,6 +5,8 @@ pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
 mod default_skills;
+pub mod grok;
+pub mod grok_home;
 pub mod host;
 pub(crate) mod output_images;
 pub mod prompt;
@@ -15,9 +17,8 @@ use std::sync::Arc;
 use crate::app::providers::{Availability, Provider};
 use crate::config::Config;
 
-/// Providers enabled by configuration, in default-selection order. Codex and
-/// Claude are always listed; each reports unavailable (with a reason) when its
-/// CLI or host login is missing.
+/// Providers in default-selection order. Codex, Claude, and Grok report
+/// unavailable with a reason when their CLI or host login is missing.
 pub fn registry(config: &Config) -> Registry {
     build(config).0
 }
@@ -43,13 +44,21 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn crate::memory_worker:
     let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let home = std::env::var("HOME").ok();
     let claude = claude::Claude::detect(
-        Some(host),
+        Some(host.clone()),
         executable(config.claude_bin.as_deref(), "claude"),
         claude_home::host_config(config_dir.as_deref(), home.as_deref()),
         claude_home::host_account(config_dir.as_deref(), home.as_deref()),
     )
-    .with_tools(tool_url);
+    .with_tools(tool_url.clone());
     providers.push(Arc::new(claude));
+    providers.push(Arc::new(
+        grok::Grok::detect(
+            Some(host),
+            executable(config.grok_bin.as_deref(), "grok"),
+            grok_home::host_home(),
+        )
+        .with_tools(tool_url),
+    ));
     if config.synthetic_provider {
         providers.push(Arc::new(synthetic::Synthetic::new(
             std::time::Duration::from_millis(40),

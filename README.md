@@ -26,7 +26,7 @@ The installer selects the newest stable release tag, downloads its binaries into
 
 The installer asks before installing missing system packages and whether to start the server automatically. It also installs Microsandbox and downloads the bot computer image for server installations. App-only installations do not need the VM runtime or provider CLIs.
 
-Install the Codex CLI or Claude Code on the server and sign in as the user who runs else.bot. For Codex, run `codex login`. For Claude Code, run `claude` and finish sign-in. The installer checks for these CLIs but does not install them.
+Install the Codex CLI, Claude Code, or Grok Build on the server and sign in as the user who runs else.bot. For Codex, run `codex login`. For Claude Code, run `claude` and finish sign-in. For Grok, run `grok login`. The installer checks for these CLIs but does not install them.
 
 On Linux, log out and back in if the installer adds you to the `kvm` group. On macOS, bot computers use Apple's Hypervisor framework.
 
