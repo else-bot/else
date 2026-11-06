@@ -144,6 +144,7 @@ pub(super) struct ReplyLayout {
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
     pub(super) unread_since: Option<ReplyPosition>,
+    pub(super) _unread_dismissal: Option<Task<()>>,
     pub(super) conversation: Option<Conversation>,
     pub(super) stream_problem: Option<String>,
     pub(super) loading_older: bool,
@@ -187,6 +188,7 @@ impl ConversationView {
         Self {
             bot_id,
             unread_since: None,
+            _unread_dismissal: None,
             conversation: None,
             stream_problem: None,
             loading_older: false,

@@ -193,7 +193,7 @@ impl MessageImages {
             let owner = cx.entity().downgrade();
             app.image_viewer =
                 Some(cx.new(|cx| ImageViewer::new(gallery, index, owner, window, cx)));
-            cx.notify();
+            app.check_reading(window, cx);
         });
     }
 

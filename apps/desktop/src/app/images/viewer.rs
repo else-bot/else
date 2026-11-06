@@ -46,7 +46,7 @@ impl ImageViewer {
         }
         let _ = self.owner.update(cx, |app, cx| {
             app.image_viewer = None;
-            cx.notify();
+            app.check_reading(window, cx);
         });
     }
 
