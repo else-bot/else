@@ -25,8 +25,12 @@ The Linux desktop needs a working Vulkan driver. On macOS, install Xcode with th
 ```sh
 git clone https://github.com/else-bot/else.git
 cd else
+git config --local extensions.worktreeConfig true
+git config --worktree core.hooksPath .githooks
 cargo build --workspace --locked
 ```
+
+The pre-commit hook runs `cargo test --workspace --locked` and blocks commits when tests fail. Git does not enable repository hooks on clone, so run the hook configuration commands once per checkout. For an existing linked worktree, run `git config --worktree core.hooksPath .githooks` there.
 
 For real provider replies, install Codex or Claude Code and sign in as your development user. Set `ELSE_CODEX_BIN` or `ELSE_CLAUDE_BIN` if a CLI is outside `PATH`.
 
@@ -85,7 +89,7 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
-Run `cargo test --workspace --locked` on your development machine and fix failures before committing or pushing. Ordinary pull requests skip the `cargo-test` job. Release pull requests from `release/v*` branches and manual workflow runs execute the full suite on Ubuntu with stable Rust. The required `cargo-test` check accepts the skipped job on ordinary pull requests and requires passing tests on release pull requests.
+The pre-commit hook runs the full Cargo suite locally. Fix test failures before committing. Ordinary pull requests skip the `cargo-test` job. Release pull requests from `release/v*` branches and manual workflow runs execute the full suite on Ubuntu with stable Rust. The required `cargo-test` check accepts the skipped job on ordinary pull requests and requires passing tests on release pull requests.
 
 The `release-ready` check must also pass before merging. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
 
