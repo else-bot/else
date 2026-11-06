@@ -297,6 +297,31 @@ mod tests {
     }
 
     #[test]
+    fn reaction_feedback_uses_chat_bubbles_instead_of_task_capsules() {
+        for status in ["queued", "running", "completed", "failed"] {
+            for kind in ["thumbs_up", "thumbs_down"] {
+                let mut feedback = item(3, 11, "user");
+                feedback["reaction"] = json!({"item_id": id(2), "kind": kind});
+                let c = conversation(
+                    vec![
+                        item(1, 10, "user"),
+                        item(2, 10, "assistant"),
+                        feedback,
+                        item(4, 11, "assistant"),
+                    ],
+                    vec![turn(10, "completed"), turn(11, status)],
+                );
+                let replies = task_replies(&c);
+                assert!(replies.contains_key(&id(10)), "the original task stays rich");
+                assert!(
+                    !replies.contains_key(&id(11)),
+                    "{kind} feedback in {status} must not become a task capsule"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn duration_uses_execution_start_and_freezes_at_the_server_finish() {
         let c = conversation(vec![], vec![turn(10, "completed")]);
         let reply = task_replies(&c).remove(&id(10)).unwrap();
