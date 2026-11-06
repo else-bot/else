@@ -57,7 +57,7 @@ async fn compiled_registration_starts_signin_without_runtime_credentials() {
     use crate::config::{Config, tests::MapSource};
     let config = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(
+    let store = Store::for_bot(
         dir.path().into(),
         Uuid::new_v4(),
         Some(Arc::new(fixtures::key())),
@@ -124,7 +124,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let dir = tempfile::tempdir().unwrap();
     let bot = Uuid::new_v4();
-    let store = Store::new(dir.path().into(), bot, Some(Arc::new(fixtures::key())));
+    let store = Store::for_bot(dir.path().into(), bot, Some(Arc::new(fixtures::key())));
     let mut session = Session::open(store.clone(), Some(registration.clone()))
         .await
         .unwrap();

@@ -28,7 +28,7 @@ fn callback(id: Uuid, state: &str) -> Complete {
 async fn github_signin_identifies_the_missing_server_registration() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session::open(
-        Store::new(
+        Store::for_bot(
             dir.path().into(),
             Uuid::new_v4(),
             Some(std::sync::Arc::new(key())),
@@ -74,7 +74,7 @@ async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_
     let bot = Uuid::new_v4();
     let key = key();
     let mut session = Session {
-        store: Store::new(dir.path().into(), bot, Some(std::sync::Arc::new(key))),
+        store: Store::for_bot(dir.path().into(), bot, Some(std::sync::Arc::new(key))),
         state: State::Authorizing(pending),
         connection: None,
         client: None,
@@ -106,7 +106,7 @@ fn cancellation_and_expiration_restore_an_existing_account_without_exposing_cred
     let id = flow.id;
     let dir = tempfile::tempdir().unwrap();
     let mut session = Session {
-        store: Store::new(
+        store: Store::for_bot(
             dir.path().into(),
             Uuid::new_v4(),
             Some(std::sync::Arc::new(key())),
@@ -151,7 +151,7 @@ async fn a_failed_credential_write_does_not_publish_refreshed_tokens() {
     previous.discovery.token_endpoint = endpoint;
     previous.expires_at = Some(now() - 1);
     let mut session = Session {
-        store: Store::new(
+        store: Store::for_bot(
             blocked_path,
             Uuid::new_v4(),
             Some(std::sync::Arc::new(key())),
@@ -202,7 +202,7 @@ async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
             axum::serve(listener, router).await.unwrap();
         });
         let mut session = Session {
-            store: Store::new(path, Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
+            store: Store::for_bot(path, Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
             state: State::Authorizing(flow),
             connection: None,
             client: None,

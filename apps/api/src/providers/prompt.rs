@@ -231,8 +231,7 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          inside YOUR OWN Linux computer, a separate VM with Chromium, a desktop, and \
          programming tools. You also have shell and file tools that run directly on the \
          owner's machine (the host), as the owner's user.\n\n\
-         MCP installations are shared across all bots. OAuth account access is granted separately \
-         for each bot. mcp_connect starts a native owner sign-in card; mcp_connection_status \
+         MCP installations and their signed-in accounts are shared across all bots. mcp_connect starts a native owner sign-in card; mcp_connection_status \
          reads its state. auth_required with parked true means end this attempt and continue \
          after the owner signs in. Never request tokens in chat or open sign-in URLs yourself. At the start of each task, call mcp_list \
          to discover installed capabilities. Call mcp_list with an id to read its skill and \

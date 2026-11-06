@@ -317,9 +317,10 @@ impl ElseApp {
         }
         card = card
             .child(
-                div().text_xs().text_color(theme.muted_foreground).child(
-                    "Sign in using your browser. Only this bot may use the connected account.",
-                ),
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Sign in using your browser. Every bot may use the connected account."),
             )
             .child(
                 h_flex()
@@ -371,7 +372,7 @@ impl ElseApp {
             let result = if question.status == "answered"
                 && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE)
             {
-                "Account connected for this bot."
+                "Account connected for every bot."
             } else {
                 "Connection cancelled."
             };

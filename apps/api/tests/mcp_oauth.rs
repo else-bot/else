@@ -219,7 +219,7 @@ fn assert_private_files(dir: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per_bot() {
+async fn owner_consent_resumes_a_parked_read_and_one_sign_in_serves_every_bot() {
     let fixture = Fixture::start().await;
     let db = std::sync::Arc::new(common::TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
@@ -313,10 +313,7 @@ async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per
         .unwrap();
     assert!(attempt >= 2);
     assert_eq!(owner_connection(&app, &bot).await["status"], "connected");
-    assert_eq!(
-        owner_connection(&app, &other).await["status"],
-        "disconnected"
-    );
+    assert_eq!(owner_connection(&app, &other).await["status"], "connected");
     let events = fixture.events().await;
     assert!(
         events
@@ -337,7 +334,9 @@ async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per
         .unwrap()
         .join("mcp/oauth-fixture");
     assert_private_files(&root);
-    assert!(root.join(format!("oauth-{bot}.json")).is_file());
+    let shared = root.join(format!("oauth-{}.json", Uuid::nil()));
+    assert!(shared.is_file());
+    assert!(!root.join(format!("oauth-{bot}.json")).exists());
     let app = app.restart().await;
     assert_eq!(owner_connection(&app, &bot).await["status"], "connected");
     let (_, token) = grant(&app, &bot, false).await;
@@ -346,7 +345,7 @@ async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per
         "fixture_read"
     );
     let (_, other_token) = grant(&app, &other, true).await;
-    let other_required = result(
+    let other_connected = result(
         &tool(
             &app,
             &other_token,
@@ -355,11 +354,13 @@ async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per
         )
         .await,
     );
-    assert_eq!(other_required["status"], "pending_owner_auth");
-    let disconnected = app.owner("DELETE", &connection_path(&bot), None).await;
+    assert_eq!(other_connected["status"], "connected", "{other_connected}");
+    let disconnected = app.owner("DELETE", &connection_path(&other), None).await;
     assert_eq!(disconnected.status, StatusCode::NO_CONTENT);
-    assert!(!root.join(format!("oauth-{bot}.json")).exists());
-    assert_eq!(owner_connection(&app, &bot).await["status"], "disconnected");
+    assert!(!shared.exists());
+    for bot in [&bot, &other] {
+        assert_eq!(owner_connection(&app, bot).await["status"], "disconnected");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
