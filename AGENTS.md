@@ -9,3 +9,4 @@
 - Add hover popovers, tooltips, or image descriptions only when they provide information beyond visible labels, familiar icons, or surrounding context.
 - Show keyboard shortcuts directly in labeled buttons.
 - Preserve accessibility labels when removing hover descriptions.
+- Bundle each new desktop icon in `AppIcons` in `apps/desktop/src/main.rs` unless GPUI Kit includes it by default, and verify it renders in the app.
