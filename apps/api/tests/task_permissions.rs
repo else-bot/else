@@ -27,6 +27,140 @@ fn task_target(task: &str) -> Value {
     json!({ "scope": "task", "task": task, "target": HOST, "kind": "destructive" })
 }
 
+const UP_TO_DATE_REQUEST: &str =
+    "Can you enable require PR to be up to date with branch before merging";
+
+fn requested_host_action() -> Value {
+    json!({
+        "kind": "external",
+        "action": "gh api --method PUT repos/else-bot/else/rulesets/26617470 --input merge-rules/require-up-to-date.json",
+        "reason": "Require PR branches to be up to date",
+        "authorization": UP_TO_DATE_REQUEST,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_owner_request_runs_its_host_action_without_another_card() {
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE} {UP_TO_DATE_REQUEST}"))
+        .await;
+    let called = tool(app, &token, "ask_permission", requested_host_action()).await;
+    assert_eq!(called.result["status"], "approved", "{}", called.body);
+    assert_eq!(called.result["standing"], false);
+    assert_eq!(called.result["scope"], Value::Null);
+    assert!(permissions(app, &bot).await.is_empty());
+    let questions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM owner_questions WHERE turn_id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(questions, 0, "the request never creates an approval card");
+    h.release(turn).await;
+    wait(app, turn, "completed").await;
+
+    let (next, token) = h.running(&bot, GATE).await;
+    let called = tool(app, &token, "ask_permission", requested_host_action()).await;
+    assert_eq!(called.result["status"], "pending", "{}", called.body);
+    h.release(next).await;
+    wait(app, next, "waiting").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invented_or_malformed_host_authorization_does_not_approve_an_action() {
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (turn, token) = h.running(&bot, GATE).await;
+    for invalid in [json!(""), json!("  "), json!(false), json!(["yes"])] {
+        let mut args = requested_host_action();
+        args["authorization"] = invalid;
+        let called = tool(app, &token, "ask_permission", args).await;
+        assert!(called.error, "{}", called.body);
+        assert_eq!(called.code(), "INVALID_REQUEST", "{}", called.body);
+    }
+    let called = tool(app, &token, "ask_permission", requested_host_action()).await;
+    assert_eq!(called.result["status"], "pending", "{}", called.body);
+    assert!(permissions(app, &bot).await.is_empty());
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_quote_cannot_override_a_pending_or_denied_host_action() {
+    use else_api::app::questions::{Spec, permission_authorization};
+    use else_api::db::owner_questions::{self, Gate};
+
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE_EVERY_ATTEMPT} {UP_TO_DATE_REQUEST}"))
+        .await;
+    let args = requested_host_action();
+    let mut without_quote = args.clone();
+    without_quote
+        .as_object_mut()
+        .unwrap()
+        .remove("authorization");
+    let (question, _) = pending(app, &token, without_quote).await;
+    let spec = Spec::permission(&args).unwrap();
+    let quote = permission_authorization(&args).unwrap();
+    assert!(matches!(
+        owner_questions::gate_host(&app.db.pool, turn, &spec, quote)
+            .await
+            .unwrap(),
+        Gate::Pending(_)
+    ));
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+    assert_eq!(answer(app, &bot, question, "deny").await, StatusCode::OK);
+    let token = next_grant(&h, turn, &token).await;
+    let called = tool(app, &token, "ask_permission", args).await;
+    assert_eq!(called.result["status"], "denied", "{}", called.body);
+    assert!(permissions(app, &bot).await.is_empty());
+    h.release(turn).await;
+    wait(app, turn, "completed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_quote_cannot_approve_a_different_action_after_the_attempt_parks() {
+    use else_api::app::questions::{Spec, permission_authorization};
+    use else_api::db::owner_questions::{self, RequestError};
+
+    let h = recorder::harness(4).await;
+    let app = &h.app;
+    let bot = app.main_bot().await;
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE} {UP_TO_DATE_REQUEST}"))
+        .await;
+    let called = tool(
+        app,
+        &token,
+        "ask_owner",
+        json!({"question": "Which repository?", "choices": ["else", "other"]}),
+    )
+    .await;
+    assert_eq!(called.result["status"], "pending", "{}", called.body);
+    let args = requested_host_action();
+    let result = owner_questions::gate_host(
+        &app.db.pool,
+        turn,
+        &Spec::permission(&args).unwrap(),
+        permission_authorization(&args).unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(RequestError::AttemptParked)),
+        "{result:?}"
+    );
+    h.release(turn).await;
+    wait(app, turn, "waiting").await;
+}
+
 async fn wait(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
@@ -377,7 +511,9 @@ async fn delegated_work_cannot_use_or_record_a_task_grant() {
         .await
         .unwrap();
     let (_, child_token) = h.started(child).await;
-    let blocked = tool(app, &child_token, "ask_permission", tailscale("up")).await;
+    let mut action = tailscale("up");
+    action["authorization"] = json!(authorization);
+    let blocked = tool(app, &child_token, "ask_permission", action).await;
     assert_ne!(blocked.result["status"], "approved", "{}", blocked.body);
     let recorded = tool(
         app,
@@ -448,7 +584,9 @@ async fn routine_runs_keep_routine_grants_and_never_receive_task_grants() {
     )
     .await;
     assert!(refused.error, "{}", refused.body);
-    let (question, choices) = pending(app, &token, tailscale("up")).await;
+    let mut action = tailscale("up");
+    action["authorization"] = json!("Refresh Tailscale.");
+    let (question, choices) = pending(app, &token, action).await;
     assert_eq!(choices, ["approve", "deny", "approve_routine"]);
     h.release(run).await;
     wait(app, run, "waiting").await;

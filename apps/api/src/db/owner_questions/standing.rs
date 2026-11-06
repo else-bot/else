@@ -53,14 +53,7 @@ pub async fn confirm(
     if !caller.owner_conversation {
         return Err(RequestError::NotAllowed.into());
     }
-    let source: Option<String> = sqlx::query_scalar(
-        "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id
-         WHERE t.id = ?1 AND i.kind = 'user'",
-    )
-    .bind(turn_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if !source.is_some_and(|text| text.contains(authorization)) {
+    if !super::owner_message_quotes(&mut tx, turn_id, authorization).await? {
         return Err(ConfirmError::NotAuthorized);
     }
     if matches!(target, PermissionTarget::McpTool { .. })
