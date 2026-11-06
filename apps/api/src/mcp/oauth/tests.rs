@@ -25,6 +25,39 @@ fn callback(id: Uuid, state: &str) -> Complete {
 }
 
 #[tokio::test]
+async fn github_signin_identifies_the_missing_server_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::open(Store::new(
+        dir.path().into(),
+        Uuid::new_v4(),
+        Some(std::sync::Arc::new(key())),
+    ))
+    .await
+    .unwrap();
+    let mut github = discovery();
+    github.resource = "https://api.githubcopilot.com/mcp/".into();
+    github.issuer = "https://github.com/login/oauth".into();
+    github.authorization_endpoint = "https://github.com/login/oauth/authorize".into();
+    github.token_endpoint = "https://github.com/login/oauth/access_token".into();
+    github.registration_endpoint = None;
+    session.state = State::Required(github);
+    let error = session
+        .authorize(
+            &Transport::Http {
+                url: "https://api.githubcopilot.com/mcp/".into(),
+                headers: Default::default(),
+            },
+            "http://127.0.0.1:49177/mcp/callback".into(),
+        )
+        .await
+        .err()
+        .expect("GitHub needs a registered app");
+    assert!(error.to_string().contains("ELSE_GITHUB_CLIENT_ID"), "{error}");
+    assert!(error.to_string().contains("ELSE_GITHUB_CLIENT_SECRET"), "{error}");
+    assert_eq!(session.status().status, "disconnected");
+}
+
+#[tokio::test]
 async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_shot() {
     let dir = tempfile::tempdir().unwrap();
     let pending = pending(None);
