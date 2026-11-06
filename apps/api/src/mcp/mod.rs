@@ -242,7 +242,7 @@ pub struct Installation {
 }
 
 impl Installation {
-    fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         if self.name.trim().is_empty()
             || self.name.len() > 120
             || self.name.chars().any(char::is_control)
@@ -565,15 +565,18 @@ impl Library {
                         install(&path, &input, installed_by, replace)
                     })
                     .await
-                    .map_err(|_| Error::Connection)??;
-                    if published.reconnect {
+                    .map_err(|_| Error::Connection)
+                    .flatten();
+                    // A failed replacement may still have published the new config,
+                    // so no session that holds the old sign-in survives it.
+                    if published.as_ref().map_or(replace, |p| p.reconnect) {
                         futures_util::future::join_all(
                             slot.sessions.values_mut().map(oauth::Session::close),
                         )
                         .await;
                         slot.sessions.clear();
                     }
-                    Ok(published)
+                    published
                 })
             })
             .await

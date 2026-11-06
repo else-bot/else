@@ -275,6 +275,9 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
             "Supply a valid MCP id, name, description, skill, documentation and config.",
         ))));
     };
+    if let Err(error) = input.validate() {
+        return Ok(Install::Done(Err(error)));
+    }
     let Ok(by) = sqlx::query_scalar::<_, String>("SELECT name FROM bots WHERE id = ?1")
         .bind(grant.bot_id)
         .fetch_one(&state.db)
@@ -297,29 +300,38 @@ async fn install(state: &AppState, grant: &Grant, args: &Value) -> Result<Instal
     let context = super::mcp::slice(&context, 0, crate::app::questions::MAX_CONTEXT)
         .1
         .to_owned();
+    // Replacing changes where every bot's MCP data and sign-ins go, an access
+    // change: external approval has no standing grant, so the owner approves
+    // each replacement.
     let note = super::guest_tools::approval::approve_card(
         state,
         grant,
         "mcp_install",
         args,
-        crate::app::questions::Kind::Destructive,
+        crate::app::questions::Kind::External,
         title,
         context,
     )
     .await?
     .unwrap_or("approved by the owner");
-    if !existing.same_connection(&input) {
-        let scope = format!("mcp:{}:%", String::from(input.id.clone()));
-        if sqlx::query("DELETE FROM bot_permissions WHERE scope LIKE ?1")
-            .bind(scope)
+    let revoke = || async {
+        sqlx::query("DELETE FROM bot_permissions WHERE scope LIKE ?1")
+            .bind(format!("mcp:{}:%", String::from(input.id.clone())))
             .execute(&state.db)
             .await
-            .is_err()
-        {
-            return Ok(Install::Approved(Err(Error::Connection), note));
-        }
+            .map(drop)
+            .map_err(|_| Error::Connection)
+    };
+    if !existing.same_connection(&input)
+        && let Err(error) = revoke().await
+    {
+        return Ok(Install::Approved(Err(error), note));
     }
-    let result = library(state).replace(input, by).await.map(|replaced| {
+    let result = match library(state).replace(input.clone(), by).await {
+        Ok(replaced) if replaced.reconnect => revoke().await.map(|()| replaced),
+        other => other,
+    }
+    .map(|replaced| {
         let mut value = installed(replaced.manifest);
         value["replaced"] = json!(true);
         value["reconnect_required"] = json!(replaced.reconnect);

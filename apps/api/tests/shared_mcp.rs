@@ -198,18 +198,35 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
     );
 
     moved["replace"] = json!(true);
+    let mut leaky = moved.clone();
+    leaky["config"] = json!({"type":"http","url":"https://alice:card-secret@example.com/mcp"});
+    let refused = tool(&app, &token, "mcp_install", leaky).await;
+    assert_eq!(refused.body["result"]["isError"], true, "{}", refused.body);
+    let asked: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(asked, 0, "invalid input is refused before any card");
     let pending = result(&tool(&app, &token, "mcp_install", moved.clone()).await);
     assert_eq!(pending["parked"], true, "{pending}");
     assert!(app.scheduler.grants().is_parked(turn).await);
-    let (kind, title, context): (String, String, String) =
-        sqlx::query_as("SELECT kind, title, context FROM owner_questions WHERE turn_id = ?1")
-            .bind(turn)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
+    let (question, kind, title, context, choices): (Uuid, String, String, String, String) =
+        sqlx::query_as(
+            "SELECT id, kind, title, context, choices FROM owner_questions WHERE turn_id = ?1",
+        )
+        .bind(turn)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
     assert_eq!(
         (kind.as_str(), title.as_str()),
-        ("destructive", "Replace the T3 Code MCP")
+        ("external", "Replace the T3 Code MCP")
+    );
+    let choices: Vec<Value> = serde_json::from_str(&choices).unwrap();
+    assert_eq!(
+        choices.len(),
+        2,
+        "approve or deny, no standing grant: {choices:?}"
     );
     assert!(context.contains("Changes: connection"), "{context}");
     assert!(context.contains("environment MCP_TEST_SECRET"), "{context}");
@@ -233,11 +250,27 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
             .await
             .unwrap();
     }
-    let (_, token) = grant(&app, &scout, tools).await;
+    let (_, scout_token) = grant(&app, &scout, tools.clone()).await;
+    let standing = result(&tool(&app, &scout_token, "mcp_install", moved.clone()).await);
+    assert_eq!(
+        standing["parked"], true,
+        "standing grants never replace: {standing}"
+    );
+
+    let answered = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{maple}/questions/{question}/answer"),
+            Some(json!({ "choice": "approve" })),
+        )
+        .await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    app.wait_turn(&turn.to_string(), &["running"]).await;
+    let (_, token) = grant_for_running(&app, &maple, tools).await;
     let replaced = result(&tool(&app, &token, "mcp_install", moved).await);
     assert_eq!(replaced["replaced"], true, "{replaced}");
     assert_eq!(replaced["reconnect_required"], true);
-    assert_eq!(replaced["mcp"]["installed_by"], "Scout");
+    assert_eq!(replaced["mcp"]["installed_by"], "Maple");
     let scopes: Vec<String> = sqlx::query_scalar("SELECT scope FROM bot_permissions")
         .fetch_all(&app.db.pool)
         .await
