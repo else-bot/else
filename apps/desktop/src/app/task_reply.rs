@@ -11,7 +11,7 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
@@ -31,24 +31,35 @@ impl ElseApp {
         let expanded = view.expanded_tasks.contains(&task.turn);
         let working = task.state == ReplyState::Working;
         let (status, error) = super::message_row::turn_label(turn);
-        let title = match task.state {
+        let title = bot.map_or_else(|| "Task".to_owned(), |bot| bot.name.clone());
+        let summary = match task.state {
             ReplyState::Complete => "Task complete".to_owned(),
             ReplyState::Working => task
                 .summary
                 .clone()
                 .unwrap_or_else(|| "Working on your task".to_owned()),
-            _ => status.clone(),
+            _ => status,
         };
         let elapsed = task.elapsed(Utc::now());
         let color = if error {
             theme.danger
         } else if working {
             theme.primary
+        } else if task.state == ReplyState::Complete {
+            theme.success
         } else {
             theme.muted_foreground
         };
+        let show_reply =
+            task.latest_kept || !matches!(task.state, ReplyState::Queued | ReplyState::Working);
+        let mut history = task.history.clone();
+        if !show_reply && let Some(id) = task.latest {
+            history.push(id);
+        }
+        let expandable = !history.is_empty();
         let header = h_flex()
             .w_full()
+            .min_w_0()
             .items_center()
             .gap_3()
             .children(bot.map(|bot| {
@@ -63,66 +74,129 @@ impl ElseApp {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
+                    .text_left()
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .truncate()
-                            .child(title),
+                            .child(title.clone()),
                     )
                     .child(
                         h_flex()
+                            .w_full()
+                            .min_w_0()
                             .items_center()
-                            .gap_1p5()
+                            .gap_1()
                             .text_xs()
                             .text_color(color)
-                            .child(if working {
-                                "Working".to_owned()
+                            .children(
+                                (task.state == ReplyState::Complete)
+                                    .then(|| Icon::new(IconName::Check).xsmall().flex_none()),
+                            )
+                            .child(div().truncate().child(if error {
+                                "Needs attention".to_owned()
                             } else {
-                                bot.map_or_else(|| "Bot".to_owned(), |bot| bot.name.clone())
-                            })
-                            .children(elapsed.as_ref().filter(|_| !task.state.terminal()).map(
-                                |elapsed| {
-                                    div()
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!("· {elapsed}"))
-                                },
-                            )),
+                                summary.clone()
+                            })),
                     ),
             )
-            .children((task.state == ReplyState::Complete).then(|| {
-                h_flex()
-                    .items_center()
-                    .gap_1()
+            .children(elapsed.map(|elapsed| {
+                div()
+                    .flex_none()
                     .text_xs()
-                    .text_color(theme.success)
-                    .child(Icon::new(IconName::Check).xsmall())
-                    .child("Done")
+                    .text_color(theme.muted_foreground)
+                    .child(elapsed)
+            }))
+            .children(expandable.then(|| {
+                Icon::new(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .flex_none()
+                .text_color(theme.muted_foreground)
             }));
-        let show_reply =
-            task.latest_kept || !matches!(task.state, ReplyState::Queued | ReplyState::Working);
-        let mut card = v_flex()
-            .relative()
+        let mut bubble = v_flex()
             .w_full()
             .min_w_0()
-            .gap_3()
-            .p_3p5()
             .rounded(theme.radius_lg)
-            .bg(theme.secondary.opacity(0.5))
-            .child(header);
-        if error {
-            card = card.child(div().text_sm().text_color(theme.danger).child(status));
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(theme.sidebar.opacity(0.6))
+            .child(if expandable {
+                let id = task.turn;
+                Button::new(SharedString::from(format!("task-history-{id}")))
+                    .ghost()
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .toggled(expanded)
+                    .with_size(Size::Size(px(16.)))
+                    .w_full()
+                    .px_3p5()
+                    .py_1()
+                    .rounded(theme.radius_lg)
+                    .accessibility_label(format!(
+                        "{} activity for {title}. {summary}",
+                        if expanded { "Collapse" } else { "Expand" }
+                    ))
+                    .child(header)
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(view) = app.view.as_mut()
+                            && !view.expanded_tasks.remove(&id)
+                        {
+                            view.expanded_tasks.insert(id);
+                        }
+                        app.remeasure_row(RowKey::Task(id), cx);
+                    }))
+                    .into_any_element()
+            } else {
+                header.px_3p5().py_1().into_any_element()
+            })
+            .children(error.then(|| {
+                div()
+                    .w_full()
+                    .px_3p5()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(summary)
+            }));
+        if expanded && expandable {
+            let mut activity = v_flex().w_full().min_w_0().gap_3().px_3p5().pb_3();
+            for id in history {
+                activity = activity.child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .children(conversation.item(id).and_then(|item| item.created_at).map(
+                            |at| {
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(super::message_row::stamp(at))
+                            },
+                        ))
+                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
+                );
+            }
+            bubble = bubble.child(activity);
         }
+        let mut card = v_flex().relative().w_full().min_w_0().gap_2().child(bubble);
         if show_reply {
             if let Some(id) = task.latest {
                 card = card.child(
                     div()
                         .w_full()
-                        .pt_3()
-                        .border_t_1()
-                        .border_color(theme.border.opacity(0.5))
-                        .children(self.task_message(id, None, cx)),
+                        .px_3p5()
+                        .py_2()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border.opacity(0.6))
+                        .bg(theme.sidebar.opacity(0.6))
+                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
                 );
             } else if task.state == ReplyState::Complete {
                 card = card.child(
@@ -138,9 +212,12 @@ impl ElseApp {
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .p_3()
-                    .rounded(theme.radius)
-                    .bg(theme.primary.opacity(0.06))
+                    .px_3p5()
+                    .py_2()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .bg(theme.sidebar.opacity(0.6))
                     .child(
                         div()
                             .text_xs()
@@ -149,89 +226,6 @@ impl ElseApp {
                     )
                     .children(self.task_message(id, conversation.reaction_for(id), cx)),
             );
-        }
-        let mut history = task.history.clone();
-        if !show_reply && let Some(id) = task.latest {
-            history.push(id);
-        }
-        if !history.is_empty() || (task.state.terminal() && elapsed.is_some()) {
-            let label = if task.state.terminal() {
-                elapsed.map_or_else(
-                    || "Activity".to_owned(),
-                    |elapsed| format!("Worked for {elapsed}"),
-                )
-            } else {
-                format!(
-                    "Activity · {} {}",
-                    history.len(),
-                    if history.len() == 1 {
-                        "update"
-                    } else {
-                        "updates"
-                    }
-                )
-            };
-            let id = task.turn;
-            card = card.child(
-                h_flex()
-                    .w_full()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .child(if history.is_empty() {
-                        h_flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Clock).xsmall())
-                            .child(label)
-                            .into_any_element()
-                    } else {
-                        Button::new(SharedString::from(format!("task-history-{id}")))
-                            .ghost()
-                            .xsmall()
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .icon(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .label(label)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                if let Some(view) = app.view.as_mut()
-                                    && !view.expanded_tasks.remove(&id)
-                                {
-                                    view.expanded_tasks.insert(id);
-                                }
-                                app.remeasure_row(RowKey::Task(id), cx);
-                            }))
-                            .into_any_element()
-                    }),
-            );
-        }
-        if expanded {
-            for id in history {
-                card = card.child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_2()
-                        .pl_3()
-                        .border_l_1()
-                        .border_color(theme.border)
-                        .children(conversation.item(id).and_then(|item| item.created_at).map(
-                            |at| {
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(super::message_row::stamp(at))
-                            },
-                        ))
-                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
-                );
-            }
         }
         let animate = !cx.reduce_motion()
             && view
@@ -251,16 +245,7 @@ impl ElseApp {
         } else {
             card.into_any_element()
         };
-        Some(
-            match task
-                .latest
-                .filter(|_| show_reply)
-                .and_then(|id| conversation.reaction_for(id))
-            {
-                Some(kind) => super::message_row::with_reaction(card, kind, cx),
-                None => card,
-            },
-        )
+        Some(card)
     }
 
     fn task_message(
