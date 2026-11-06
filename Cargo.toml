@@ -3,7 +3,7 @@ members = ["apps/api", "apps/desktop", "crates/tailnet"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.25"
+version = "0.0.26"
 edition = "2024"
 
 [profile.dev]
