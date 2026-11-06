@@ -730,6 +730,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         delegation: crate::db::delegations::context(&mut conn, turn_id).await?,
         secrets: crate::db::secret_requests::undelivered(&mut conn, turn_id).await?,
         questions: crate::db::owner_questions::undelivered(&mut conn, turn_id).await?,
+        standing_permissions: Vec::new(),
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         handoff: None,
@@ -737,7 +738,17 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         routine: crate::db::routines::run_of(&mut conn, turn_id).await?,
     };
     drop(conn);
-    input.memory = crate::db::memory_tree::session_context(pool, input.bot_id).await?;
+    let (memory, permissions) = tokio::join!(
+        crate::db::memory_tree::session_context(pool, input.bot_id),
+        crate::db::owner_questions::permissions(pool, input.bot_id),
+    );
+    input.memory = memory?;
+    let permissions = permissions?;
+    if input.delegation.origin == crate::app::providers::Origin::OwnerRequest
+        && !input.delegation.delegated_task
+    {
+        input.standing_permissions = permissions.into_iter().filter_map(|p| p.target).collect();
+    }
     Ok(input)
 }
 

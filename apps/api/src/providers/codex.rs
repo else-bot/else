@@ -838,12 +838,43 @@ mod tests {
             delegation: Default::default(),
             secrets: Vec::new(),
             questions: Vec::new(),
+            standing_permissions: Vec::new(),
             outgoing_drafts: Vec::new(),
             social_setups: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
             routine: None,
         }
+    }
+
+    #[test]
+    fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
+        let mut turn = input(Vec::new());
+        turn.delegation.origin = crate::app::providers::Origin::OwnerRequest;
+        turn.standing_permissions
+            .push(crate::app::questions::PermissionTarget::Task {
+                task: "Manage Tailscale".into(),
+                target: "SSH host omarchy-m1".into(),
+                kind: crate::app::questions::Kind::Destructive,
+            });
+        let skills = super::super::default_skills::Update {
+            text: None,
+            applied: Default::default(),
+        };
+        let recorded = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+        assert!(recorded.contains("Manage Tailscale"));
+        assert!(recorded.contains("SSH host omarchy-m1"));
+        assert!(!recorded.contains("Continue the owner's request with these results."));
+        turn.standing_permissions.clear();
+        let revoked = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+        assert!(revoked.contains("Current saved scopes for this bot's owner chat requests: []"));
+        assert!(!revoked.contains("Manage Tailscale"));
+        turn.delegation.delegated_task = true;
+        assert!(
+            !prompt::turn_packet(&turn, turn.turn_no, None, &skills)
+                .0
+                .contains("[else.bot saved permissions]")
+        );
     }
 
     #[test]

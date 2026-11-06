@@ -128,6 +128,7 @@ pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
 pub const APPROVE_TOOL: &str = "approve_tool";
+pub const APPROVE_TASK: &str = "approve_task";
 
 /// One option of a bot's question, by its stable id and shown label.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -187,9 +188,38 @@ pub struct Question {
 pub struct QuestionAction {
     #[serde(default)]
     pub mcp_connection: Option<crate::api::McpConsent>,
+    #[serde(default)]
+    pub task_scope: Option<TaskScope>,
+    #[serde(default)]
+    pub permission: Option<QuestionPermission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TaskScope {
+    pub task: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "scope", rename_all = "lowercase")]
+pub enum QuestionPermission {
+    Task {
+        #[serde(flatten)]
+        task_scope: TaskScope,
+    },
+    #[serde(other)]
+    Other,
 }
 
 impl Question {
+    pub fn task_scope(&self) -> Option<&TaskScope> {
+        let action = self.action.as_ref()?;
+        action.task_scope.as_ref().or(match &action.permission {
+            Some(QuestionPermission::Task { task_scope }) => Some(task_scope),
+            _ => None,
+        })
+    }
+
     pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
         self.action.as_ref()?.mcp_connection.as_ref()
     }

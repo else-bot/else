@@ -175,6 +175,9 @@ pub(crate) async fn approve(
         Ok(Gate::Run {
             standing: Some(Standing::Tool),
         }) => Ok(Some("standing permission for this MCP tool and effect")),
+        Ok(Gate::Run {
+            standing: Some(Standing::Task),
+        }) => Ok(Some("standing permission for this task and target")),
         Ok(Gate::Run { standing: None }) => Ok(Some("approved by the owner")),
         Ok(Gate::Pending(question)) => Err(crate::http::owner_tools::pending_approval(
             state,

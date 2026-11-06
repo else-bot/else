@@ -44,6 +44,9 @@ composer.`. Send `[ui:hang]` for a turn that waits until Stop work. The fixture
 also accepts `[ui:question]` for an A/B card, `[ui:single]` for five choices
 with exactly one answer, and `[ui:multiple]` for five checkbox choices.
 Click one option on the single-answer card to submit it immediately.
+Send `[ui:permission]` to request a scoped Tailscale approval for `SSH host omarchy-m1`.
+Choose **Always allow** and check the saved task through the permissions API.
+The fixture requests approval but never runs SSH or changes Tailscale.
 Select choices and click **Done** to submit the checklist.
 Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
