@@ -703,7 +703,7 @@ impl Shell {
                 content = content
                     .child(settings_row(
                         "Server address",
-                        "HTTPS or a local SSH tunnel",
+                        "HTTPS, Tailscale IP, or a local SSH tunnel",
                         v_flex()
                             .gap_2()
                             .child(

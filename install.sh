@@ -956,13 +956,34 @@ owner_token_file() {
 
 api_running() { curl -gfsS --max-time 3 "$(api_url)/healthz" >/dev/null 2>&1; }
 
+show_api_urls() {
+	ok "running on $(api_url) (local)"
+	local cli=tailscale ip url port
+	if ! have "$cli"; then
+		cli=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+		[ -x "$cli" ] || return 0
+	fi
+	port="$(api_url)"
+	port="${port##*:}"
+	while IFS= read -r ip; do
+		case "$ip" in
+		*:*) url="http://[$ip]:$port" ;;
+		*.*.*.*) url="http://$ip:$port" ;;
+		*) continue ;;
+		esac
+		if curl --noproxy '*' -gfsS --max-time 2 "$url/readyz" >/dev/null 2>&1; then
+			ok "running on $url (Tailscale)"
+		fi
+	done < <(TAILSCALE_BE_CLI=1 "$cli" ip 2>/dev/null || true)
+}
+
 start_api() {
 	step "Start the API"
 	elsebot start >/dev/null 2>&1 || true
 	local _
 	for _ in $(seq 1 60); do
 		if curl -gfsS --max-time 2 "$(api_url)/readyz" >/dev/null 2>&1; then
-			ok "running on $(api_url)"
+			show_api_urls
 			return 0
 		fi
 		sleep 1
@@ -1170,7 +1191,7 @@ install_server() {
 			run_setup || die "else-api setup failed (log: $LOGS/setup.log)"
 		fi
 		if api_running; then
-			ok "the API is running"
+			show_api_urls
 		else
 			if [ "$mode" = current ]; then
 				run_setup || die "else-api setup failed (log: $LOGS/setup.log)"

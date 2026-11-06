@@ -184,12 +184,10 @@ impl Client {
     pub async fn resume_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
         let this = self.clone();
         self.run(async move {
-            let response = this
+            let request = this
                 .request(Method::POST, &format!("/v1/bots/{bot}/computer/resume"))
-                .timeout(Duration::from_secs(15))
-                .send()
-                .await
-                .map_err(|err| ClientError::Protocol(err.without_url().to_string()))?;
+                .timeout(Duration::from_secs(15));
+            let response = this.send_request(request).await?;
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED {
                 return Err(ClientError::Unauthorized);
@@ -261,6 +259,9 @@ impl Client {
         events: &mpsc::Sender<DesktopEvent>,
     ) -> Result<(), String> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        self.verify_transport()
+            .await
+            .map_err(|err| err.to_string())?;
         let mut url = url::Url::parse(&self.origin.ws_url()).expect("validated API origin");
         url.set_path(&format!("/v1/bots/{bot}/desktop/stream"));
         url.set_query(Some(if wake {

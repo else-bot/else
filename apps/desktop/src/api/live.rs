@@ -190,6 +190,15 @@ impl Client {
             };
         }
         loop {
+            let verified = tokio::select! {
+                _ = events.closed() => return,
+                result = self.verify_transport() => result,
+            };
+            if let Err(err) = verified {
+                deliver!(LiveEvent::Disconnected(err.to_string()));
+                pause!();
+                continue;
+            }
             let connected = tokio::select! {
                 _ = events.closed() => return,
                 result = tokio::time::timeout(

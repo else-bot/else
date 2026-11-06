@@ -293,6 +293,8 @@ pub enum ClientError {
     Unauthorized,
     #[error("Cannot reach the API at {origin} ({cause}). Is `else-api serve` running?")]
     Unreachable { origin: String, cause: String },
+    #[error("{0}")]
+    Transport(String),
     #[error("{message}")]
     Api {
         status: u16,
@@ -324,7 +326,7 @@ impl ClientError {
             Self::Unreachable { .. } | Self::Protocol(_) => true,
             Self::Api { code, .. } if code == "provider_unavailable" => false,
             Self::Api { status, .. } => *status >= 500,
-            Self::Unauthorized => false,
+            Self::Unauthorized | Self::Transport(_) => false,
         }
     }
 }
@@ -385,11 +387,26 @@ impl Client {
             .header(AUTHORIZATION, self.auth.clone())
     }
 
-    pub(crate) async fn send_json<T: DeserializeOwned>(
+    async fn verify_transport(&self) -> Result<(), ClientError> {
+        if let Some(ip) = self.origin.tailscale_ip() {
+            let status = else_tailnet::Status::read()
+                .await
+                .map_err(ClientError::Transport)?;
+            if !status.contains(ip) {
+                return Err(ClientError::Transport(
+                    "This IP is not a device on your connected Tailscale network. Check the server's Tailscale IP or use HTTPS.".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_request(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<(StatusCode, T), ClientError> {
-        let response = request.send().await.map_err(|err| {
+    ) -> Result<reqwest::Response, ClientError> {
+        self.verify_transport().await?;
+        request.send().await.map_err(|err| {
             if err.is_connect() || err.is_timeout() || err.is_request() {
                 ClientError::Unreachable {
                     origin: self.origin.as_str().to_owned(),
@@ -398,7 +415,14 @@ impl Client {
             } else {
                 ClientError::Protocol(err.without_url().to_string())
             }
-        })?;
+        })
+    }
+
+    pub(crate) async fn send_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(StatusCode, T), ClientError> {
+        let response = self.send_request(request).await?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientError::Unauthorized);

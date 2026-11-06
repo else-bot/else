@@ -75,7 +75,9 @@ Open **Settings → Socials** to manage connections, edit each bot's instruction
 
 ## Connect to another machine
 
-The server listens on `127.0.0.1:7878`. Use an SSH tunnel to reach it from your app machine:
+The server listens on `127.0.0.1:7878`. When Tailscale is connected, it also listens on that machine's Tailscale IPs. The installer prints the reachable local and Tailscale URLs. Connect Tailscale on your app machine, then paste the server's `http://100.x.y.z:7878` URL and owner key into the app. IPv6 Tailscale addresses work too. The app checks that the IP belongs to a device on its connected tailnet before sending the owner key. The API checks for Tailscale addresses every 15 seconds, including after Tailscale starts or reconnects.
+
+You can also use an SSH tunnel to reach the server from your app machine:
 
 ```sh
 ssh -N -L 7878:127.0.0.1:7878 you@server
@@ -89,7 +91,7 @@ cat ~/.else/data/owner-token
 
 In the app, choose **Edit configuration**, enter `127.0.0.1:7878`, paste the key, and choose **Connect to server**. The app saves a connection after the server accepts it. Use **Change server** to connect elsewhere.
 
-For access through a domain, put an HTTPS reverse proxy in front of the server. It must forward HTTP and WebSocket requests to `127.0.0.1:7878` and rewrite the upstream `Host` header to that address. The app requires HTTPS for non-loopback addresses and verifies the server certificate. Keep the owner key private; it grants access to your installation.
+For access through a domain, put an HTTPS reverse proxy in front of the server. It must forward HTTP and WebSocket requests to `127.0.0.1:7878` and rewrite the upstream `Host` header to that address. The app requires HTTPS except for loopback and verified Tailscale IPs, and verifies the server certificate. Keep the owner key private; it grants access to your installation.
 
 ## Update and manage the server
 

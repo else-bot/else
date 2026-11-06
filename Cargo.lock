@@ -2074,6 +2074,7 @@ dependencies = [
  "croner",
  "des",
  "dotenvy",
+ "else-tailnet",
  "futures-util",
  "getrandom 0.4.3",
  "hex",
@@ -2131,6 +2132,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dotenvy",
+ "else-tailnet",
  "futures-util",
  "gpui-kit",
  "image",
@@ -2152,6 +2154,16 @@ dependencies = [
  "url",
  "uuid",
  "wl-clipboard-rs",
+]
+
+[[package]]
+name = "else-tailnet"
+version = "0.0.25"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

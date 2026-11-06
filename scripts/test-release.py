@@ -136,11 +136,11 @@ class ReleasePreflight(unittest.TestCase):
         scripts.mkdir()
         (scripts / "release.sh").write_text(Path(__file__).with_name("release.sh").read_text())
         (self.repo / "Cargo.toml").write_text(
-            '[workspace]\nmembers = ["apps/api", "apps/desktop"]\n'
+            '[workspace]\nmembers = ["apps/api", "apps/desktop", "crates/tailnet"]\n'
             '[workspace.package]\nversion = "0.0.1"\n')
         self.lock = 'version = 4\n'
-        for name in ("api", "desktop"):
-            member = self.repo / "apps" / name
+        for name in ("api", "desktop", "tailnet"):
+            member = self.repo / ("crates" if name == "tailnet" else "apps") / name
             (member / "src").mkdir(parents=True)
             (member / "Cargo.toml").write_text(
                 f'[package]\nname = "else-{name}"\nversion.workspace = true\n')
@@ -225,10 +225,10 @@ esac
                          ["Cargo.lock", "Cargo.toml"])
         manifest = tomllib.loads(self.git("show", f"{head}:Cargo.toml"))
         self.assertEqual(manifest["workspace"]["package"]["version"], "0.0.2")
-        expected_lock = self.lock.replace('name = "else-api"\nversion = "0.0.1"',
-                                          'name = "else-api"\nversion = "0.0.2"').replace(
-                                              'name = "else-desktop"\nversion = "0.0.1"',
-                                              'name = "else-desktop"\nversion = "0.0.2"')
+        expected_lock = self.lock
+        for name in ("else-api", "else-desktop", "else-tailnet"):
+            expected_lock = expected_lock.replace(f'name = "{name}"\nversion = "0.0.1"',
+                                                  f'name = "{name}"\nversion = "0.0.2"')
         self.assertEqual(self.git("show", f"{head}:Cargo.lock"), expected_lock.strip())
         self.assertEqual({name: (self.repo / name).read_bytes() for name in checkout}, checkout)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)

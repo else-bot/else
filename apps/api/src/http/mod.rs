@@ -521,6 +521,36 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn tailscale_hosts_require_the_matching_listener_and_reject_browsers() {
+        let ip = "100.102.228.67".parse().unwrap();
+        for (host, browser, expected) in [
+            ("100.102.228.67:7878", false, StatusCode::OK),
+            ("100.102.228.68:7878", false, StatusCode::BAD_REQUEST),
+            ("100.102.228.67:7878", true, StatusCode::FORBIDDEN),
+        ] {
+            let mut request = Request::get("/healthz").header(header::HOST, host);
+            if browser {
+                request = request.header(header::ORIGIN, "http://evil.example");
+            }
+            let (status, _) = send(
+                app().layer(axum::Extension(auth::ListenerIp(ip))),
+                request.body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, expected, "{host}");
+        }
+        let (status, _) = send(
+            app(),
+            Request::get("/healthz")
+                .header(header::HOST, "100.102.228.67:7878")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn browser_origin_and_foreign_host_are_rejected() {
         let (status, _) = send(
             app(),

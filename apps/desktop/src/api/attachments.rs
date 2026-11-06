@@ -46,12 +46,10 @@ impl Client {
     ) -> Result<Vec<u8>, ClientError> {
         let this = self.clone();
         self.run(async move {
-            let response = this
+            let request = this
                 .request(Method::GET, &format!("/v1/bots/{bot}/attachments/{id}"))
-                .timeout(Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| ClientError::Protocol(e.without_url().to_string()))?;
+                .timeout(Duration::from_secs(30));
+            let response = this.send_request(request).await?;
             if response.status() == StatusCode::UNAUTHORIZED {
                 return Err(ClientError::Unauthorized);
             }
