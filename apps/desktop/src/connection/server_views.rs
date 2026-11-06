@@ -161,41 +161,7 @@ impl Shell {
                     })),
             );
         }
-        menu.child(div().h(px(1.)).my_1().mx_2().bg(theme.border))
-            .child(
-                Button::new("switcher-add-server")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .label("+ Add server")
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.server_menu = false;
-                        shell.open_server_editor(Editor::Add, window, cx);
-                    })),
-            )
-            .child(
-                Button::new("switcher-manage-servers")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .icon(IconName::Settings)
-                    .label("Manage servers")
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.server_menu = false;
-                        if shell.settings_section().is_some() {
-                            shell.server_editor = None;
-                            shell.server_update_target = None;
-                            shell.select_settings(settings::SettingsSection::Server, window, cx);
-                        } else {
-                            shell.open_settings(window, cx);
-                        }
-                    })),
-            )
-            .into_any_element()
+        menu.into_any_element()
     }
 
     pub(super) fn render_server_list(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -345,7 +311,8 @@ impl Shell {
                         ),
                 );
             }
-            actions = actions
+            let connection_actions = h_flex()
+                .gap_1()
                 .child(
                     Button::new(SharedString::from(format!("edit-server-{id}")))
                         .focus_ring(false)
@@ -434,7 +401,8 @@ impl Shell {
                                             .truncate()
                                             .child(saved.profile.origin.as_str().to_owned()),
                                     ),
-                            ),
+                            )
+                            .child(connection_actions),
                     )
                     .child(
                         h_flex()
@@ -455,26 +423,6 @@ impl Shell {
                             )
                         },
                     ),
-            );
-        }
-        if self.launch.local.is_ok()
-            && !self.registry.servers.iter().any(|s| {
-                self.launch.local.as_ref().is_ok_and(|local| {
-                    local.origin() == &s.profile.origin
-                        && local.key().is_ok_and(|token| token == s.profile.token)
-                })
-            })
-        {
-            content = content.child(
-                Button::new("servers-add-local")
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .small()
-                    .label("Connect this computer")
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.open_server_editor(Editor::Local, window, cx)
-                    })),
             );
         }
         content
