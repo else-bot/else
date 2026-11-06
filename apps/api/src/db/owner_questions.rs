@@ -151,7 +151,9 @@ fn info(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RequestError {
-    #[error("only the owner's own conversation can ask the owner; delegated tasks cannot")]
+    #[error(
+        "only the owner's own conversation can ask the owner; a task delegated from an owner request can only ask for approvals and sign-ins"
+    )]
     NotAllowed,
     #[error("this attempt already asked or delegated; end it and wait for the answer")]
     AttemptParked,
@@ -209,7 +211,13 @@ async fn insert(
     caller: &Caller,
     spec: &Spec,
 ) -> Result<QuestionInfo, RequestError> {
-    if !caller.owner_conversation {
+    // A task delegated from an owner request shows its approval and sign-in
+    // cards in the target bot's chat; only the owner's conversation asks
+    // open questions.
+    if !caller.owner_conversation
+        && (spec.approval.is_none()
+            || super::delegations::origin(conn, turn_id).await? != Origin::OwnerRequest)
+    {
         return Err(RequestError::NotAllowed);
     }
     if turns::attempt_parked(conn, turn_id, caller.attempt).await? {
@@ -406,9 +414,13 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
         });
     }
     let spec = Spec {
+        // Work another bot delegated approves one call at a time: its card
+        // never offers a standing grant.
         choices: approval_choices(
             spec.kind,
-            if matches!(scope, Scope::Bot) && tool_target.is_some() {
+            if !caller.owner_conversation {
+                None
+            } else if matches!(scope, Scope::Bot) && tool_target.is_some() {
                 Some(Standing::Tool)
             } else {
                 scope.offer()

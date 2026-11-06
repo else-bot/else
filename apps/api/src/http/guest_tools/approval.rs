@@ -212,7 +212,7 @@ pub(crate) async fn approve_card(
         )),
         Err(owner_questions::RequestError::NotAllowed) => Err((
             tool_error(&format!(
-                "NOT_ALLOWED: a delegated task cannot ask the owner, so this {} action cannot \
+                "NOT_ALLOWED: this task cannot ask the owner, so this {} action cannot \
                  be approved here. Nothing was done. Report what needs approval in your result.",
                 kind.as_str()
             )),
