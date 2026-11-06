@@ -108,6 +108,7 @@ Updates require bots to finish their current work first. If an update reports th
 | `elsebot stop` | Stop the server and running turns |
 | `elsebot restart` | Restart the server |
 | `elsebot reset` | Erase local saved state and return to first-run setup |
+| `elsebot remove` | Uninstall the app, server, services, and all local data |
 | `elsebot logs` | Follow server logs |
 | `elsebot paths` | Show installation paths |
 | `elsebot db` | Open the database for read-only SQL |
@@ -118,7 +119,7 @@ Conversations, memory, credentials, and bot computer state live under `~/.else/d
 
 To start over after testing, quit the desktop app and run `elsebot reset`. Type `reset` at the confirmation prompt, or use `elsebot reset --yes` to skip the prompt. This permanently deletes local conversations, memory, credentials, bot projects, computers, backups, logs, and desktop preferences. It stops the local server and bot computers, creates fresh credentials and onboarding state, and leaves the server stopped. Open the app and choose **Start local** to begin again.
 
-Reset keeps the installed software, service registration, host settings in `config/.env`, and your Codex and Claude CLI logins. It also removes Claude session transcripts for this installation's bot projects from the host Claude configuration. Unrelated provider projects and provider-wide logs stay in place. It refuses custom storage paths outside the installer layout. Remote servers, remote backups, and backup copies you made elsewhere are unchanged. Deleting all of `~/.else` also removes the installed software and leaves service registrations behind, so use `elsebot reset` for a fresh start.
+Reset keeps the installed software, service registration, host settings in `config/.env`, and your Codex and Claude CLI logins. It also removes Claude session transcripts for this installation's bot projects from the host Claude configuration. Unrelated provider projects and provider-wide logs stay in place. It refuses custom storage paths outside the installer layout. Remote servers, remote backups, and backup copies you made elsewhere are unchanged. To uninstall everything on this machine, run `elsebot remove` and type `remove` at the prompt. Use `elsebot remove --yes` to skip confirmation. Removal closes the app, stops the server and bot computers, and deletes the installation, service registrations, app launcher, and all local data. It keeps shared system packages, provider CLI logins, remote servers, and remote backups. Custom storage outside the installation is refused.
 
 The server makes encrypted backups daily and keeps seven completed sets by default in `~/.else/data/backups`. To make one manually, stop the server first:
 

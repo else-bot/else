@@ -299,8 +299,11 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          the only way chat text approves anything, and only that exact draft; when unsure, \
          revise or ask instead.\n\n\
          Whenever you need an answer from the owner, call ask_owner with the question and \
-         optional context such as a draft. Offer two to five short choices when they fit: \
-         the owner picks one on a native card and you continue with their choice. When \
+         optional context such as a draft. Offer two to five short choices when they fit. \
+         For alternatives where exactly one answer is needed, omit multiple or set it to \
+         false: all choices appear on the native card and clicking one submits that answer \
+         immediately. Single-answer questions can offer more than Yes and No; use distinct, \
+         descriptive choices such as Skip posting, Prepare a draft, or Edit the draft first. When \
          several actions can be selected independently, set multiple to true. The owner \
          selects the actions and clicks Done; do only the selected actions. For an \
          open question omit choices; the owner answers in chat, which skips the old card \

@@ -9,6 +9,7 @@ Usage: elsebot <command>
   version           the installed version
   update [options]  install the latest release (options: install.sh --help)
   reset [--yes]     erase local history, memory, credentials, projects and computers
+  remove [--yes]    uninstall the app, server and all local else.bot data
   desktop           open the desktop app
   start | stop | restart
                     the API service (stop is graceful: running turns end as Stopped)
@@ -19,7 +20,13 @@ Usage: elsebot <command>
 EOF
 }
 
-self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+	directory="$(cd "$(dirname "$self")" && pwd -P)"
+	target="$(readlink "$self")"
+	case "$target" in /*) self="$target" ;; *) self="$directory/$target" ;; esac
+done
+self="$(cd "$(dirname "$self")" && pwd -P)/$(basename "$self")"
 ELSE_HOME="${ELSE_HOME:-$(cd "$(dirname "$self")/.." && pwd -P)}"
 CONFIG="$ELSE_HOME/config"
 CURRENT="$ELSE_HOME/current"
@@ -208,9 +215,15 @@ EOF
 pid_file() { echo "$RUN/$ELSEBOT_SERVICE.pid"; }
 
 process_pid() {
-	local pid
+	local pid executable installation
 	pid="$(cat "$(pid_file)" 2>/dev/null)" || return 1
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+	installation="$(cd "$ELSE_HOME" && pwd -P)" || return 1
+	executable="$(readlink "/proc/$pid/exe" 2>/dev/null || ps -ww -o comm= -p "$pid" 2>/dev/null)" || return 1
+	case "$executable" in
+	"$installation/versions/"*/bin/else-api | "$installation/current/bin/else-api" | "$installation/server-current/bin/else-api") ;;
+	*) return 1 ;;
+	esac
 	case "$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" || ps -o command= -p "$pid" 2>/dev/null)" in
 	*else-api*serve*) echo "$pid" ;;
 	*) return 1 ;;
@@ -309,6 +322,190 @@ reset_installation() {
 }
 
 
+macos_app_bundles() {
+	python3 - "$ELSEBOT_APP" "$ELSE_HOME" "$1" <<'PYTHON'
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+
+app, home = map(Path, sys.argv[1:3])
+home = home.resolve()
+
+def owned(bundle):
+    if bundle.is_symlink():
+        return False
+    try:
+        marker = json.loads((bundle / "Contents/Resources/installation.json").read_text())
+        return Path(marker["home"]).is_absolute() and Path(marker["home"]).resolve() == home
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+if (app.exists() or app.is_symlink()) and not owned(app):
+    sys.exit(f"{app} does not belong to this installation")
+bundles = [app] if app.exists() else []
+for candidate in app.parent.glob(f".{app.name}.*"):
+    if re.fullmatch(rf"\.{re.escape(app.name)}\.[0-9a-f]{{32}}\.(old|new)", candidate.name) and owned(candidate):
+        bundles.append(candidate)
+if sys.argv[3] == "remove":
+    for bundle in bundles:
+        shutil.rmtree(bundle)
+    (app.parent / f".{app.name}.lock").unlink(missing_ok=True)
+else:
+    for bundle in bundles:
+        print(bundle)
+PYTHON
+}
+
+remove_desktop() {
+	local pid executable processes process_home="$1" app_bundles="$2" bundle matched
+	processes="$(ps -axww -o pid= -o comm=)" || die "could not list desktop processes"
+	while read -r pid executable; do
+		[ -n "$pid" ] || continue
+		if [ -d /proc ]; then
+			executable="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+			executable="${executable% (deleted)}"
+		fi
+		case "$executable" in
+		"$ELSE_HOME/"*/bin/else-desktop | "$ELSE_HOME/"*/Contents/MacOS/else-desktop | \
+		"$process_home/"*/bin/else-desktop | "$process_home/"*/Contents/MacOS/else-desktop) ;;
+		*)
+			matched=0
+			while IFS= read -r bundle; do
+				if [ -n "$bundle" ] && [ "$executable" = "$bundle/Contents/MacOS/else-desktop" ]; then matched=1; break; fi
+			done <<<"$app_bundles"
+			[ "$matched" = 1 ] || continue ;;
+		esac
+		kill -TERM "$pid" 2>/dev/null || die "could not stop desktop process $pid; close it and retry removal"
+		local attempt
+		for attempt in $(seq 1 10); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 1
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			die "desktop process $pid did not quit; close it and retry removal"
+		fi
+	done <<<"$processes"
+}
+
+remove_installation() {
+	case "${1:-}" in
+	-h | --help)
+		echo "Usage: elsebot remove [--yes]"
+		echo "Uninstall this machine's app and server, including services, local history, memory,"
+		echo "credentials, bot projects, computers, backups, logs, installed releases and tools."
+		echo "The app and server are stopped first. Remote servers, remote backups, shared system"
+		echo "packages and your provider CLI logins are kept. Custom external storage is refused."
+		return ;;
+	esac
+	[ $# -eq 0 ] || { [ $# -eq 1 ] && [ "$1" = --yes ]; } || die "usage: elsebot remove [--yes]"
+	local removal_root original_home="$ELSE_HOME" user_home
+	case "$ELSE_HOME" in /*) ;; *) die "removal requires an absolute ELSE_HOME" ;; esac
+	[ -d "$ELSE_HOME" ] || { echo "else.bot is already removed from $ELSE_HOME."; return; }
+	removal_root="$(cd "$ELSE_HOME" && pwd -P)"
+	user_home="$(cd "$HOME" && pwd -P)"
+	case "$user_home/" in "$removal_root/"*) die "refusing to remove HOME or one of its parents" ;; esac
+	[ "$removal_root" != / ] || die "refusing to remove /"
+	[ "$self" -ef "$ELSE_HOME/bin/elsebot" ] || die "run this installation's $ELSE_HOME/bin/elsebot remove"
+	[ ! -L "$RUN" ] && [ ! -L "$CONFIG" ] || die "removal refuses symlinked run or config directories"
+	local unit plist desktop icon link app_bundles="" unit_owned=0 plist_owned=0
+	unit="$(unit_file)"
+	plist="$(login_plist)"
+	desktop="$HOME/.local/share/applications/else-bot.desktop"
+	icon="$HOME/.local/share/icons/hicolor/scalable/apps/else-bot.svg"
+	link="$HOME/.local/bin/elsebot"
+	if [ -e "$unit" ]; then
+		if grep -Fxq "WorkingDirectory=$CONFIG" "$unit"; then
+			unit_owned=1
+		elif [ "$ELSEBOT_MANAGER" = systemd ]; then
+			die "$unit belongs to another installation"
+		fi
+	fi
+	if [ -e "$plist" ]; then
+		if grep -Fq "<string>$(xml "$CONFIG")</string>" "$plist"; then
+			plist_owned=1
+		elif [ "$ELSEBOT_MANAGER" = launchd ]; then
+			die "$plist belongs to another installation"
+		fi
+	fi
+	if [ -n "$ELSEBOT_APP" ]; then
+		app_bundles="$(macos_app_bundles list)" || die "could not check app bundle ownership"
+	fi
+	echo "Remove else.bot from $ELSE_HOME?"
+	echo "This permanently deletes the app, server, local history, credentials, bot projects,"
+	echo "computers and backups, along with all installed else.bot software and settings."
+	if [ "${1:-}" != --yes ]; then
+		[ -t 0 ] || die "remove needs confirmation in a terminal; use --yes for non-interactive removal"
+		local answer
+		read -r -p "Type remove to continue: " answer || return 1
+		[ "$answer" = remove ] || { echo "Removal cancelled."; return 0; }
+	fi
+	mkdir -p "$RUN"
+	mkdir "$RUN/install.lock" 2>/dev/null || die "another installer or removal holds $RUN/install.lock"
+	printf '%s\n' "$$" >"$RUN/install.lock/pid"
+	trap 'rm -rf "$RUN/install.lock"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	remove_desktop "$removal_root" "$app_bundles"
+	case "$ELSEBOT_MANAGER" in
+	systemd)
+		local loaded
+		loaded="$(systemctl --user show -p LoadState --value "$ELSEBOT_SERVICE.service")" || die "could not inspect the API service"
+		if [ "$loaded" != not-found ]; then
+			local working_directory
+			working_directory="$(systemctl --user show -p WorkingDirectory --value "$ELSEBOT_SERVICE.service")" ||
+				die "could not inspect the API service directory"
+			[ "$working_directory" = "$CONFIG" ] || die "the loaded API service belongs to another installation"
+			stop || die "could not stop the API service"
+			if [ -e "$unit" ]; then
+				systemctl --user disable "$ELSEBOT_SERVICE.service" || die "could not disable the API service"
+			fi
+		fi ;;
+	launchd)
+		if launchd_loaded; then
+			launchctl print "$(launchd_domain)/$LABEL" | sed 's/^[[:space:]]*//' | grep -Fxq "working directory = $CONFIG" ||
+				die "the loaded API agent belongs to another installation"
+		fi
+		stop || die "could not stop the API agent"
+		if launchd_loaded; then die "could not unload the API agent"; fi ;;
+	process) stop || die "could not stop the API" ;;
+	*) die "unknown service manager: $ELSEBOT_MANAGER" ;;
+	esac
+	if [ -f "$CONFIG/.env" ] || [ -d "$ELSE_HOME/data" ]; then
+		[ -x "$SERVER_CURRENT/bin/else-api" ] || die "restore the server binary before removing its data"
+		local cleanup_command=reset
+		if (cd "$CONFIG" && "$SERVER_CURRENT/bin/else-api" --help) | grep -Fq 'remove-state --yes'; then cleanup_command=remove-state; fi
+		(cd "$CONFIG" && ELSE_HOME="$ELSE_HOME" "$SERVER_CURRENT/bin/else-api" "$cleanup_command" --yes) ||
+			die "could not clean up local state; restore the server with elsebot update and retry removal"
+		if [ "$cleanup_command" = reset ] && [ "$(cat "$RUN/install.lock/pid" 2>/dev/null || true)" != "$$" ]; then
+			trap - EXIT
+			mkdir "$RUN/install.lock" 2>/dev/null || die "another installer started during cleanup; retry removal after it finishes"
+			printf '%s\n' "$$" >"$RUN/install.lock/pid"
+			trap 'rm -rf "$RUN/install.lock"' EXIT
+		fi
+	fi
+	if [ "$unit_owned" = 1 ]; then
+		rm -f "$unit"
+		systemctl --user daemon-reload || die "could not reload user services"
+		systemctl --user reset-failed "$ELSEBOT_SERVICE.service" >/dev/null 2>&1 || true
+	fi
+	if [ "$plist_owned" = 1 ]; then rm -f "$plist"; fi
+	if [ -f "$desktop" ] && grep -Fxq "Exec=$ELSE_HOME/bin/elsebot desktop" "$desktop"; then
+		rm -f "$desktop" "$icon"
+		if command -v update-desktop-database >/dev/null 2>&1; then
+			update-desktop-database "$(dirname "$desktop")" >/dev/null 2>&1 || true
+		fi
+	fi
+	if [ -L "$link" ] && [ "$link" -ef "$ELSE_HOME/bin/elsebot" ]; then rm -f "$link"; fi
+	if [ -n "$ELSEBOT_APP" ]; then macos_app_bundles remove; fi
+	cd /
+	rm -rf "$removal_root"
+	if [ -L "$original_home" ]; then rm -f "$original_home"; fi
+	echo "else.bot removed."
+}
+
+
 cmd="${1:-status}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
@@ -353,6 +550,7 @@ start) start ;;
 stop) stop ;;
 restart) stop && start ;;
 reset) reset_installation "$@" ;;
+remove) remove_installation "$@" ;;
 service-install) service_install ;;
 logs)
 	if [ "$ELSEBOT_MANAGER" = systemd ]; then

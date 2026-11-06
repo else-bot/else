@@ -32,6 +32,7 @@ files, environments, browser profile, and network profile (--network picks\n    
 another); the old computer is kept stopped\n  \
 rollback-computer  switch a bot back to the computer its last upgrade replaced\n  \
 reset --yes  erase this installation's local state; use `elsebot reset`\n  \
+remove-state --yes  erase local state without setup; used by `elsebot remove`\n  \
 version  print this build's version\n";
 
 fn main() -> ExitCode {
@@ -69,7 +70,7 @@ fn main() -> ExitCode {
         "restore" | "restore-remote" => args.len() == 3 || args.len() == 4,
         "upgrade-computer" => args.len() == 3 || (args.len() == 5 && args[3] == "--network"),
         "rollback-computer" => args.len() == 2,
-        "reset" => args.len() == 2 && args[1] == "--yes",
+        "reset" | "remove-state" => args.len() == 2 && args[1] == "--yes",
         _ => args.len() <= 1,
     };
     if !arity_ok {
@@ -86,7 +87,8 @@ fn main() -> ExitCode {
         }
         "rollback-computer" => run_upgrade_computer(&args[1], None, None),
         "setup" => run_setup(),
-        "reset" => run_reset(),
+        "reset" => run_reset(true),
+        "remove-state" => run_reset(false),
         "migrate" => run_migrate(),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -414,7 +416,7 @@ fn run_setup() -> anyhow::Result<()> {
     setup(&config)
 }
 
-fn run_reset() -> anyhow::Result<()> {
+fn run_reset(reinitialize: bool) -> anyhow::Result<()> {
     let config = load_config()?;
     let home =
         std::env::var_os("ELSE_HOME").context("use `elsebot reset` to select an installation")?;
@@ -423,8 +425,10 @@ fn run_reset() -> anyhow::Result<()> {
     else_api::providers::host::Host::new(&config.data_dir, &config.bots_dir).sweep_orphans()?;
     runtime()?.block_on(plan.stop_computers(&config))?;
     plan.erase()?;
-    setup(&config)?;
-    println!("Reset complete. Open else.bot and choose Start local to begin again.");
+    if reinitialize {
+        setup(&config)?;
+        println!("Reset complete. Open else.bot and choose Start local to begin again.");
+    }
     Ok(())
 }
 

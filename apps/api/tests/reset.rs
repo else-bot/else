@@ -14,7 +14,7 @@ impl Installation {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("installation with spaces");
-        for name in ["config", "current/bin", "bots", "logs", "run"] {
+        for name in ["config", "current/bin", "bin", "bots", "logs", "run"] {
             fs::create_dir_all(home.join(name)).unwrap();
         }
         fs::write(home.join("config/elsebot.env"), "ELSEBOT_MANAGER=process\n").unwrap();
@@ -30,6 +30,11 @@ impl Installation {
         symlink(
             env!("CARGO_BIN_EXE_else-api"),
             home.join("current/bin/else-api"),
+        )
+        .unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/elsebot"),
+            home.join("bin/elsebot"),
         )
         .unwrap();
         let installation = Self { _root: root, home };
@@ -66,7 +71,7 @@ impl Installation {
     fn cli(&self, args: &[&str]) -> Output {
         let mut command = Command::new("bash");
         self.environment(&mut command);
-        command.arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/elsebot"));
+        command.arg(self.home.join("bin/elsebot"));
         command.args(args).output().unwrap()
     }
 
@@ -431,4 +436,97 @@ fn reset_terminates_orphaned_provider_processes() {
         status.is_some_and(|status| !status.success()),
         "the provider process survived reset"
     );
+}
+
+#[test]
+fn remove_erases_the_installation_and_its_command_link_without_recreating_state() {
+    let installation = Installation::new();
+    installation.seed();
+    let link = installation._root.path().join(".local/bin/elsebot");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(installation.home.join("bin/elsebot"), &link).unwrap();
+    let unconfirmed = installation.cli(&["remove"]);
+    assert!(!unconfirmed.status.success());
+    assert!(installation.home.join("data/owner-token").exists());
+    let result = installation.cli(&["remove", "--yes"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("else.bot removed."));
+    assert!(!installation.home.exists());
+    assert!(!link.is_symlink());
+    assert!(Path::new(env!("CARGO_BIN_EXE_else-api")).exists());
+}
+
+#[test]
+fn remove_state_preserves_the_installation_lock_and_does_not_provision_new_credentials() {
+    let installation = Installation::new();
+    installation.seed();
+    let lock = installation.home.join("run/install.lock");
+    fs::create_dir(&lock).unwrap();
+    fs::write(lock.join("pid"), "123").unwrap();
+    installation.success(&["remove-state", "--yes"]);
+    assert_eq!(fs::read_to_string(lock.join("pid")).unwrap(), "123");
+    assert!(!installation.home.join("data/owner-token").exists());
+    assert!(!installation.home.join("data/secret-key").exists());
+    assert!(!installation.home.join("data/else.sqlite3").exists());
+    assert!(installation.home.join("current/bin/else-api").exists());
+}
+
+#[test]
+fn remove_refuses_external_storage_and_keeps_the_software_for_retry() {
+    let installation = Installation::new();
+    let external = installation._root.path().join("external-data");
+    fs::create_dir(&external).unwrap();
+    fs::write(external.join("keep"), "external data").unwrap();
+    fs::write(
+        installation.home.join("config/.env"),
+        format!("ELSE_DATA_DIR='{}'\n", external.display()),
+    )
+    .unwrap();
+    let result = installation.cli(&["remove", "--yes"]);
+    assert!(!result.status.success());
+    assert!(installation.home.join("bin/elsebot").exists());
+    assert!(installation.home.join("data/owner-token").exists());
+    assert!(external.join("keep").exists());
+    assert!(!installation.home.join("run/install.lock").exists());
+}
+
+#[test]
+fn remove_stops_its_running_server_before_deleting_the_installation() {
+    let installation = Installation::new();
+    let binary = installation.home.join("current/bin/else-api");
+    fs::remove_file(&binary).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_else-api"), &binary).unwrap();
+    let mut command = Command::new(&binary);
+    installation.environment(&mut command);
+    command.env("ELSE_API_BIND", "127.0.0.1:0").arg("serve");
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().unwrap();
+    let pid = child.id();
+    let reaper = std::thread::spawn(move || child.wait().unwrap());
+    fs::write(installation.home.join("run/else-api.pid"), pid.to_string()).unwrap();
+    for _ in 0..100 {
+        if installation.home.join("data/api.json").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let result = installation.cli(&["remove", "--yes"]);
+    if !result.status.success() {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(reaper.join().unwrap().success());
+    assert!(!installation.home.exists());
 }
