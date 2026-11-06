@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question, QuestionAnswer};
+use crate::model::{
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, DENY, Question, QuestionAnswer,
+};
 
 mod choice;
 pub(super) mod mcp;
@@ -43,7 +45,7 @@ impl QuestionForm {
 fn heading(question: &Question, bot_name: &str) -> String {
     match question.kind.as_str() {
         "destructive" => format!("{bot_name} wants to do something that is hard to undo"),
-        "external" => format!("{bot_name} wants to reach outside: send, post, or pay"),
+        "external" => format!("{bot_name} wants to take a sensitive action"),
         _ => format!("{bot_name} has a question"),
     }
 }
@@ -58,6 +60,9 @@ fn outcome(question: &Question, bot_name: &str) -> String {
             (true, Some(APPROVE_ROUTINE)) => {
                 "Approved. Destructive actions are allowed for this routine's saved task on future runs."
                     .into()
+            }
+            (true, Some(APPROVE_TOOL)) => {
+                "Approved. This tool and action type are allowed in future chat requests.".into()
             }
             (true, Some(DENY)) => "Denied.".into(),
             _ => format!(
@@ -217,7 +222,8 @@ impl ElseApp {
             );
         }
         card = card.child(note(match question.kind.as_str() {
-            "external" => "Approval covers exactly this action, once. Sending, posting, or paying is never allowed in advance.".to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Approve once covers this action. Always allow remembers this integration tool and action type for this bot's chat requests. Other tools and action types still need approval.".to_owned(),
+            "external" => "Approve once covers exactly this sensitive action.".to_owned(),
             _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task on future runs. Other routines and chat requests still need approval. Changing the task clears this permission.".to_owned(),
             _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Approve once covers exactly this action. Always allow lets this bot take destructive actions without asking.".to_owned(),
             _ => "Approval covers exactly this action, once.".to_owned(),
@@ -326,7 +332,9 @@ mod tests {
         );
         assert!(outcome(&question("choice", "cancelled", None), "Mail").starts_with("Withdrawn"));
         assert_eq!(outcome(&question("choice", "pending", None), "Mail"), "");
-        assert!(heading(&question("external", "pending", None), "Mail").contains("reach outside"));
+        assert!(
+            heading(&question("external", "pending", None), "Mail").contains("sensitive action")
+        );
         assert_eq!(letter("c"), "C");
     }
 }

@@ -18,8 +18,8 @@
 //! this routine" covers runs of that one routine admitted with its current
 //! prompt revision; editing the prompt ends it. Which scope a card offers
 //! and which grant applies come from the turn's source in the database,
-//! never from what a model wrote. External actions are approved one at a
-//! time, always.
+//! never from what a model wrote. A tool grant covers one MCP tool and
+//! effect in the bot's owner requests.
 
 use std::collections::HashMap;
 
@@ -36,8 +36,8 @@ pub mod standing;
 
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, Answer, Choice, DESTRUCTIVE_SCOPE, Kind,
-    MAX_PER_TURN, Outcome, Spec, Standing, Status, approval_choices,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TOOL, Answer, Choice, DESTRUCTIVE_SCOPE,
+    Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status, approval_choices,
 };
 
 /// A question as shown to the owner and recorded in events.
@@ -67,7 +67,7 @@ impl QuestionInfo {
         self.status == Status::Answered
             && matches!(
                 self.answer.as_ref().and_then(Answer::single),
-                Some(APPROVE) | Some(APPROVE_FOREVER) | Some(APPROVE_ROUTINE)
+                Some(APPROVE) | Some(APPROVE_FOREVER) | Some(APPROVE_ROUTINE) | Some(APPROVE_TOOL)
             )
     }
 
@@ -327,7 +327,7 @@ async fn scope(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Scope, sqlx
 #[derive(Debug)]
 pub enum Gate {
     /// Run it: the owner approved exactly this call (consumed here), or a
-    /// standing destructive grant of this scope applies.
+    /// standing grant of this scope applies.
     Run { standing: Option<Standing> },
     /// The owner has not answered yet; the attempt must end.
     Pending(QuestionInfo),
@@ -345,6 +345,21 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
         .await?
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
+    let tool_target = if caller.owner_conversation
+        && super::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest
+    {
+        spec.approval
+            .as_ref()
+            .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
+    } else {
+        None
+    };
+    let tool_granted = match (scope, &tool_target) {
+        (Scope::Bot, Some(target)) => {
+            has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await?
+        }
+        _ => false,
+    };
     if spec.kind == Kind::Destructive {
         let standing = match scope {
             Scope::Bot if has_permission(&mut tx, caller.bot_id, DESTRUCTIVE_SCOPE).await? => {
@@ -376,15 +391,29 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
                     == 1;
                 if consumed {
                     tx.commit().await?;
-                    return Ok(Gate::Run { standing: None });
+                    return Ok(Gate::Run {
+                        standing: tool_granted.then_some(Standing::Tool),
+                    });
                 }
             }
             Status::Answered => return Ok(Gate::Denied(found)),
             Status::Skipped | Status::Cancelled => {}
         }
     }
+    if tool_granted {
+        return Ok(Gate::Run {
+            standing: Some(Standing::Tool),
+        });
+    }
     let spec = Spec {
-        choices: approval_choices(spec.kind, scope.offer()),
+        choices: approval_choices(
+            spec.kind,
+            if matches!(scope, Scope::Bot) && tool_target.is_some() {
+                Some(Standing::Tool)
+            } else {
+                scope.offer()
+            },
+        ),
         ..spec.clone()
     };
     let question = insert(&mut tx, turn_id, &caller, &spec).await?;
@@ -502,6 +531,23 @@ pub async fn answer(
         return Err(SettleError::Settled(question.status));
     }
     let choice = answer.single();
+    let tool_scope = if choice == Some(APPROVE_TOOL) {
+        if !matches!(scope(&mut tx, question.turn_id).await?, Scope::Bot)
+            || super::delegations::origin(&mut tx, question.turn_id).await? != Origin::OwnerRequest
+        {
+            return Err(SettleError::InvalidChoice);
+        }
+        Some(
+            question
+                .action
+                .as_ref()
+                .and_then(|a| PermissionTarget::for_action(question.kind, a))
+                .and_then(|target| target.bot_scope())
+                .ok_or(SettleError::InvalidChoice)?,
+        )
+    } else {
+        None
+    };
     if question.kind == Kind::Destructive {
         match (choice, scope(&mut tx, question.turn_id).await?) {
             (Some(APPROVE_ROUTINE), Scope::Routine { current: true, .. }) => {}
@@ -532,6 +578,17 @@ pub async fn answer(
         )
         .bind(bot_id)
         .bind(DESTRUCTIVE_SCOPE)
+        .bind(question.id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(scope) = tool_scope {
+        sqlx::query(
+            "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT (bot_id, scope) DO NOTHING",
+        )
+        .bind(bot_id)
+        .bind(scope)
         .bind(question.id)
         .execute(&mut *tx)
         .await?;
@@ -618,22 +675,38 @@ pub struct Permission {
     pub scope: String,
     pub granted_at: DateTime<Utc>,
     pub question_id: Option<Uuid>,
+    pub target: Option<PermissionTarget>,
 }
 
 pub async fn permissions(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<Permission>, sqlx::Error> {
-    let rows: Vec<(String, DateTime<Utc>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT scope, granted_at, question_id FROM bot_permissions WHERE bot_id = ?1 ORDER BY scope",
+    type PermissionRow = (
+        String,
+        DateTime<Utc>,
+        Option<Uuid>,
+        Option<Json<crate::app::questions::Action>>,
+        Option<Kind>,
+    );
+    let rows: Vec<PermissionRow> = sqlx::query_as(
+        "SELECT p.scope, p.granted_at, p.question_id, q.action, q.kind
+         FROM bot_permissions p LEFT JOIN owner_questions q ON q.id = p.question_id
+         WHERE p.bot_id = ?1 ORDER BY p.scope",
     )
     .bind(bot_id)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(scope, granted_at, question_id)| Permission {
-            scope,
-            granted_at,
-            question_id,
-        })
+        .map(
+            |(scope, granted_at, question_id, action, kind)| Permission {
+                scope,
+                granted_at,
+                question_id,
+                target: action.and_then(|action| match action.0 {
+                    crate::app::questions::Action::Permission { permission } => Some(permission),
+                    action => kind.and_then(|kind| PermissionTarget::for_action(kind, &action)),
+                }),
+            },
+        )
         .collect())
 }
 

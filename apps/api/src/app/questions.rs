@@ -61,11 +61,11 @@ pub const APPROVE: &str = "approve";
 pub const DENY: &str = "deny";
 pub const APPROVE_FOREVER: &str = "approve_forever";
 pub const APPROVE_ROUTINE: &str = "approve_routine";
-/// The one standing grant a bot can hold.
+pub const APPROVE_TOOL: &str = "approve_tool";
+/// The broad destructive grant, separate from permissions for individual tools.
 pub const DESTRUCTIVE_SCOPE: &str = "destructive";
 
-/// Where a standing approval of destructive actions applies. Neither ever
-/// covers external actions.
+/// Where a standing approval applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Standing {
@@ -73,6 +73,8 @@ pub enum Standing {
     Bot,
     /// Runs of one routine admitted with its current prompt.
     Routine,
+    /// One MCP tool and effect in the bot's owner requests.
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -124,8 +126,7 @@ impl Status {
     }
 }
 
-/// The options of an approval card. Only a destructive action offers a
-/// standing grant, and only the one `offer` names.
+/// The options of an approval card, including the standing scope offered by the gate.
 pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
     let mut choices = vec![
         Choice {
@@ -145,6 +146,10 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
         (Kind::Destructive, Some(Standing::Routine)) => choices.push(Choice {
             id: APPROVE_ROUTINE.into(),
             label: "Always allow for this routine".into(),
+        }),
+        (Kind::Destructive | Kind::External, Some(Standing::Tool)) => choices.push(Choice {
+            id: APPROVE_TOOL.into(),
+            label: "Always allow this tool".into(),
         }),
         _ => {}
     }
@@ -176,6 +181,12 @@ pub enum PermissionTarget {
         routine_id: Uuid,
         prompt_revision: i64,
     },
+    #[serde(rename = "mcp_tool")]
+    McpTool {
+        mcp_id: crate::mcp::PackageId,
+        tool: String,
+        kind: Kind,
+    },
 }
 
 impl PermissionTarget {
@@ -183,7 +194,55 @@ impl PermissionTarget {
         match self {
             Self::Bot => Standing::Bot,
             Self::Routine { .. } => Standing::Routine,
+            Self::McpTool { .. } => Standing::Tool,
         }
+    }
+
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::McpTool { kind, .. } => *kind,
+            _ => Kind::Destructive,
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::McpTool { tool, kind, .. } => {
+                *kind != Kind::Choice
+                    && !tool.trim().is_empty()
+                    && tool.len() <= 128
+                    && !tool.contains('\0')
+            }
+            _ => true,
+        }
+    }
+
+    pub fn bot_scope(&self) -> Option<String> {
+        match self {
+            Self::Bot => Some(DESTRUCTIVE_SCOPE.into()),
+            Self::Routine { .. } => None,
+            Self::McpTool { mcp_id, tool, kind } => Some(format!(
+                "mcp:{}:{}:{}",
+                String::from(mcp_id.clone()),
+                kind.as_str(),
+                hex::encode(tool),
+            )),
+        }
+    }
+
+    pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
+        let Action::Tool { tool, args } = action else {
+            return None;
+        };
+        if tool != "mcp_request" || args["method"] != "tools/call" {
+            return None;
+        }
+        let target = Self::McpTool {
+            mcp_id: crate::mcp::PackageId::try_from(args["id"].as_str()?.to_owned()).ok()?,
+            tool: args["tool"].as_str()?.to_owned(),
+            kind,
+        };
+        target.valid().then_some(target)
     }
 }
 
@@ -259,20 +318,33 @@ impl Spec {
 
     pub fn standing_permission(target: PermissionTarget, authorization: &str) -> Self {
         let standing = target.standing();
+        let kind = target.kind();
         let permission_hash = match &target {
             PermissionTarget::Bot => hash(&[b"standing_permission", b"bot"]),
             PermissionTarget::Routine { routine_id, .. } => {
                 hash(&[b"standing_permission", b"routine", routine_id.as_bytes()])
             }
+            PermissionTarget::McpTool { .. } => hash(&[
+                b"standing_permission",
+                target.bot_scope().unwrap().as_bytes(),
+            ]),
         };
         Self {
-            kind: Kind::Destructive,
+            kind,
             title: match standing {
                 Standing::Bot => "Allow destructive actions for this bot".into(),
                 Standing::Routine => "Allow destructive actions for this routine".into(),
+                Standing::Tool => match &target {
+                    PermissionTarget::McpTool { mcp_id, tool, kind } => format!(
+                        "Always allow {} actions with {}/{tool}",
+                        kind.as_str(),
+                        String::from(mcp_id.clone()),
+                    ),
+                    _ => unreachable!(),
+                },
             },
             context: Some(authorization.into()),
-            choices: approval_choices(Kind::Destructive, Some(standing)),
+            choices: approval_choices(kind, Some(standing)),
             multiple: false,
             approval: Some(Approval {
                 action: Action::Permission { permission: target },

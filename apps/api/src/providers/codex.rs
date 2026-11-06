@@ -45,7 +45,7 @@ use crate::app::providers::{
 };
 
 pub const ID: &str = "codex";
-const PROMPT_VERSION: &str = "else-codex-v18";
+const PROMPT_VERSION: &str = "else-codex-v19";
 const PARK_GRACE: Duration = Duration::from_secs(20);
 const PARK_STOP: Duration = Duration::from_secs(15);
 const MODELS: &[&str] = &[
