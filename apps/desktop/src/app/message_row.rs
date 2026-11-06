@@ -65,25 +65,6 @@ impl ElseApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
-        let footer = if group.tail {
-            let at = row.footer_stamp.map(stamp);
-            at.is_some().then(|| {
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .flex_wrap()
-                    .gap_2()
-                    .px_3p5()
-                    .pt_2()
-                    .pb_2p5()
-                    .child(div().flex_1())
-                    .children(
-                        at.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)),
-                    )
-            })
-        } else {
-            None
-        };
         let frame = gpui_kit::component::v_flex()
             .w_full()
             .border_l_1()
@@ -103,7 +84,6 @@ impl ElseApp {
                     .map(|run| routine_banner(run, cx)),
             )
             .child(div().w_full().px_1().pt_1().child(body))
-            .children(footer)
             .when(group.last, |frame| frame.pb_1());
         column
             .when(group.first, |column| column.pt_1p5())
