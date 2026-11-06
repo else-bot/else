@@ -400,7 +400,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         social_setups: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
-        routine: None,
+        run: None,
     }
 }
 

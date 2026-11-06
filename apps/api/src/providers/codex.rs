@@ -843,7 +843,7 @@ mod tests {
             social_setups: Vec::new(),
             handoff: None,
             jobs: Vec::new(),
-            routine: None,
+            run: None,
         }
     }
 

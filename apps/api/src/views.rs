@@ -103,6 +103,28 @@ pub fn item_json(item: &ItemRecord) -> Value {
     })
 }
 
+/// A webhook with its pace, waiting wake and last wake. Never its token.
+pub fn webhook_json(webhook: &crate::db::webhooks::Webhook) -> Value {
+    json!({
+        "id": webhook.id,
+        "bot_id": webhook.bot_id,
+        "name": webhook.name,
+        "prompt": webhook.prompt,
+        "min_interval_minutes": webhook.pace.min_interval_minutes(),
+        "daily_limit": webhook.pace.daily_limit(),
+        "enabled": webhook.enabled,
+        "requested_at": webhook.requested_at,
+        "wake_not_before": webhook.not_before,
+        "created_at": webhook.created_at,
+        "updated_at": webhook.updated_at,
+        "last_wake": webhook.last_wake.as_ref().map(|wake| json!({
+            "woke_at": wake.woke_at,
+            "status": wake.status,
+            "turn_id": wake.turn_id,
+        })),
+    })
+}
+
 /// A routine with its derived last-run state. The prompt is included: the
 /// owner may read what each run will do.
 pub fn routine_json(routine: &Routine) -> Value {

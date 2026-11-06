@@ -95,7 +95,9 @@ pub async fn endpoint(
                     Tool::AskOwner
                 }
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
-                Some(name) if name.starts_with("routine_") => Tool::Routines,
+                Some(name) if name.starts_with("routine_") || name.starts_with("webhook_") => {
+                    Tool::Routines
+                }
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
                 Some("mail_accounts" | "mail_action" | "mail_action_status") => Tool::Mail,
                 Some("social_connections" | "social_action" | "social_action_status") => {
@@ -294,6 +296,10 @@ fn tool_list() -> Value {
         super::routines::list_schema(),
         super::routines::update_schema(),
         super::routines::delete_schema(),
+        super::webhooks::create_schema(),
+        super::webhooks::list_schema(),
+        super::webhooks::update_schema(),
+        super::webhooks::delete_schema(),
         {
             "name": "memory_date",
             "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
@@ -458,6 +464,10 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "routine_list" => super::routines::list(state, grant).await,
         "routine_update" => super::routines::update(state, grant, args).await,
         "routine_delete" => super::routines::delete(state, grant, args).await,
+        "webhook_create" => super::webhooks::create(state, grant, args).await,
+        "webhook_list" => super::webhooks::list(state, grant).await,
+        "webhook_update" => super::webhooks::update(state, grant, args).await,
+        "webhook_delete" => super::webhooks::delete(state, grant, args).await,
         "mail_accounts" | "mail_action" | "mail_action_status" => {
             super::connectors::call(state, grant, name, args).await
         }

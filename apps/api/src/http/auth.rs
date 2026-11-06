@@ -46,7 +46,7 @@ impl FailureLimiter {
         self.started.elapsed().as_secs() / FAILURE_WINDOW.as_secs()
     }
 
-    fn blocked_for(&self) -> Option<u64> {
+    pub(crate) fn blocked_for(&self) -> Option<u64> {
         let window = self.window.load(Ordering::Acquire);
         (window >> 32 == self.epoch() && window as u32 >= MAX_FAILURES_PER_WINDOW).then(|| {
             (FAILURE_WINDOW
@@ -56,7 +56,7 @@ impl FailureLimiter {
         })
     }
 
-    fn record_failure(&self) {
+    pub(crate) fn record_failure(&self) {
         let _ = self
             .window
             .try_update(Ordering::AcqRel, Ordering::Acquire, |window| {
@@ -128,7 +128,7 @@ fn is_port(tail: &str) -> bool {
         .is_some_and(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next()?;
     if values.next().is_some() {
