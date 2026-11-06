@@ -1,10 +1,10 @@
 //! One-hop asynchronous delegation.
 //!
 //! A bot's provider attempt in its own owner conversation may hand one task
-//! to another registered bot (the main bot included), at most two per
-//! request. The child runs as an ordinary queued
-//! turn of the target bot, in a separate task conversation, through the
-//! same scheduler. The target's owner conversation shows a receipt and the
+//! to another registered bot (the main bot included), at most two individual
+//! delegations per request. A council accepts a group of up to 32 reports
+//! atomically. Each child runs as an ordinary queued turn of the target bot,
+//! in a separate task conversation, through the same scheduler. The target's owner conversation shows a receipt and the
 //! child's reply, and the delegating bot's conversation shows the settled
 //! reply; the task conversation keeps its execution (source item, grants,
 //! native session). The parent attempt then ends; its owner turn waits
@@ -20,10 +20,11 @@ use uuid::Uuid;
 use super::events;
 use crate::app::providers::Profile;
 
-/// Children per owner request (root turn).
+/// Child limit when accepting an individual delegation.
 pub const MAX_CHILDREN: i64 = 2;
-/// Children per provider attempt: the attempt parks after one.
+/// Individual delegations per provider attempt; a council parks after its group.
 pub const PER_ATTEMPT: i64 = 1;
+pub const MAX_COUNCIL_BOTS: usize = 32;
 pub const MAX_TASK_BYTES: usize = 8_000;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -36,12 +37,16 @@ pub enum DelegateError {
     BotUnavailable,
     #[error("this request already used its {MAX_CHILDREN} delegations")]
     BudgetExhausted,
+    #[error("this request already used its {MAX_COUNCIL_BOTS} council reports")]
+    CouncilBudgetExhausted,
     #[error("this attempt already delegated; wait for the result")]
     AttemptParked,
     #[error("the task must be 1 to {MAX_TASK_BYTES} bytes")]
     InvalidTask,
     #[error("the request is no longer running")]
     NotRunning,
+    #[error("a council needs 1 to 32 distinct bot IDs")]
+    InvalidCouncil,
     #[error("database error")]
     Db,
 }
@@ -72,21 +77,65 @@ pub async fn create(
     target: Uuid,
     task: &str,
 ) -> Result<Accepted, DelegateError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let accepted = create_in(&mut tx, turn_id, target, task, false).await?;
+    tx.commit().await?;
+    Ok(accepted)
+}
+
+pub async fn council(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    targets: &[Uuid],
+    task: &str,
+) -> Result<Vec<Accepted>, DelegateError> {
+    let mut targets = targets.to_vec();
+    targets.sort_unstable();
+    let count = targets.len();
+    targets.dedup();
+    if count == 0 || count > MAX_COUNCIL_BOTS || targets.len() != count {
+        return Err(DelegateError::InvalidCouncil);
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM turns WHERE id = ?1")
+        .bind(turn_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(DelegateError::NotRunning)?;
+    let parked = super::turns::attempt_parked(&mut tx, turn_id, attempt).await?;
+    let mut accepted = Vec::with_capacity(count);
+    for target in targets {
+        let result = create_in(&mut tx, turn_id, target, task, true).await?;
+        if parked && result.created {
+            return Err(DelegateError::AttemptParked);
+        }
+        accepted.push(result);
+    }
+    tx.commit().await?;
+    Ok(accepted)
+}
+
+async fn create_in(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    target: Uuid,
+    task: &str,
+    council: bool,
+) -> Result<Accepted, DelegateError> {
     let task = task.trim();
     if task.is_empty() || task.len() > MAX_TASK_BYTES || task.contains('\0') {
         return Err(DelegateError::InvalidTask);
     }
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let parent_bot: Option<Uuid> = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
         .bind(turn_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     let Some(parent_bot) = parent_bot else {
         return Err(DelegateError::NotRunning);
     };
     sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
         .bind(parent_bot)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     let caller: Option<(Uuid, String, i32, String, String)> = sqlx::query_as(
         "SELECT t.bot_id, t.status, t.attempt, c.kind, b.status
@@ -95,7 +144,7 @@ pub async fn create(
          WHERE t.id = ?1",
     )
     .bind(turn_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some((parent, status, attempt, kind, bot_status)) = caller else {
         return Err(DelegateError::NotRunning);
@@ -103,7 +152,13 @@ pub async fn create(
     if !matches!(status.as_str(), "sending" | "running") || bot_status != "active" {
         return Err(DelegateError::NotRunning);
     }
-    if kind != "owner" {
+    if kind != "owner"
+        || matches!(
+            origin(conn, turn_id).await?,
+            crate::app::providers::Origin::ConnectorEvent
+                | crate::app::providers::Origin::SocialEvent
+        )
+    {
         return Err(DelegateError::NotAllowed);
     }
     if target == parent {
@@ -121,7 +176,7 @@ pub async fn create(
     )
     .bind(turn_id)
     .bind(&hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     if let Some((id, target_bot_id, target_name, status, outcome)) = existing {
         return Ok(Accepted {
@@ -139,13 +194,18 @@ pub async fn create(
     )
     .bind(turn_id)
     .bind(attempt)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
-    if total >= MAX_CHILDREN {
+    if council {
+        if total >= MAX_COUNCIL_BOTS as i64 {
+            return Err(DelegateError::CouncilBudgetExhausted);
+        }
+    } else if total >= MAX_CHILDREN {
         return Err(DelegateError::BudgetExhausted);
     }
-    if this_attempt >= PER_ATTEMPT
-        || super::turns::attempt_parked(&mut tx, turn_id, attempt).await?
+    if !council
+        && (this_attempt >= PER_ATTEMPT
+            || super::turns::attempt_parked(conn, turn_id, attempt).await?)
     {
         return Err(DelegateError::AttemptParked);
     }
@@ -155,7 +215,7 @@ pub async fn create(
          WHERE b.id = ?1",
     )
     .bind(target)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some((
         target_status,
@@ -174,17 +234,17 @@ pub async fn create(
     let own: Option<String> =
         sqlx::query_scalar("SELECT provider_id FROM bot_profiles WHERE bot_id = ?1")
             .bind(target)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?;
     let provider = match own {
         Some(provider) => provider,
-        None => match crate::db::bot_profiles::default_provider(&mut tx).await? {
+        None => match crate::db::bot_profiles::default_provider(conn).await? {
             Some(provider) => provider,
             None => selected.unwrap_or_else(|| "codex".to_owned()),
         },
     };
     let profile: Option<(i64, sqlx::types::Json<Profile>)> =
-        crate::db::bot_profiles::effective(&mut tx, target, &provider).await?;
+        crate::db::bot_profiles::effective(conn, target, &provider).await?;
     let delegation_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
     let child_turn = Uuid::new_v4();
@@ -197,7 +257,7 @@ pub async fn create(
     )
     .bind(owner_conversation)
     .bind(turn_no)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT INTO conversations (id, bot_id, kind, last_item_seq, last_turn_no)
@@ -206,7 +266,7 @@ pub async fn create(
     .bind(conversation_id)
     .bind(target)
     .bind(turn_no)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
@@ -223,7 +283,7 @@ pub async fn create(
     .bind(&provider)
     .bind(profile.as_ref().map(|(revision, _)| *revision))
     .bind(profile.as_ref().map(|(_, profile)| profile))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
@@ -233,7 +293,7 @@ pub async fn create(
     .bind(conversation_id)
     .bind(child_turn)
     .bind(task)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "INSERT INTO delegations (id, root_turn_id, parent_attempt, parent_bot_id, target_bot_id,
@@ -249,11 +309,11 @@ pub async fn create(
     .bind(&hash)
     .bind(conversation_id)
     .bind(child_turn)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     let sender: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?1")
         .bind(parent)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
     sqlx::query(
         "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
@@ -266,12 +326,11 @@ pub async fn create(
     .bind(format!(
         "Received a task from {sender}. I'll take care of it for you.\n\n{task}"
     ))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    crate::db::memory::log_item(&mut tx, item_id).await?;
-    events::item_upsert(&mut tx, target, receipt_id).await?;
-    events::turn_changed(&mut tx, target, child_turn).await?;
-    tx.commit().await?;
+    crate::db::memory::log_item(conn, item_id).await?;
+    events::item_upsert(conn, target, receipt_id).await?;
+    events::turn_changed(conn, target, child_turn).await?;
     Ok(Accepted {
         delegation_id,
         target_bot_id: target,
@@ -590,8 +649,8 @@ pub async fn context(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Conte
         origin,
         delegated_task: false,
         delegated_by: None,
-        can_create_bot: main == Some(bot)
-            && !matches!(origin, Origin::ConnectorEvent | Origin::SocialEvent),
+        main_bot: main == Some(bot),
+        can_create_bot: origin == Origin::OwnerRequest,
         registry,
         remaining: (MAX_CHILDREN - used).max(0),
         outcomes: undelivered(conn, turn_id).await?,
