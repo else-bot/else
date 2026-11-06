@@ -531,16 +531,20 @@ impl Provider for Claude {
             return TurnOutcome::Interrupted;
         }
         let inject = prompt::memory_for(input.memory.as_ref(), resumed);
+        let skills = super::default_skills::for_session(resumed);
         let mut state = SessionState {
             native_id: session.id().to_owned(),
             fingerprint,
             considered_through_turn: considered,
             memory_revision: resumed.and_then(|s| s.memory_revision),
+            default_skills: resumed
+                .map(|s| s.default_skills.clone())
+                .unwrap_or_default(),
         };
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (segments, selection) = prompt::turn_content(&input, considered, inject);
+        let (segments, selection) = prompt::turn_content(&input, considered, inject, &skills);
         let packet = prompt::segments_text(&segments);
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
@@ -683,6 +687,7 @@ impl Provider for Claude {
                         if sink.running().await.is_err() {
                             cancel.cancel();
                         }
+                        state.default_skills = skills.applied.clone();
                         state.considered_through_turn = input.turn_no;
                         if let Some(memory) = inject {
                             state.memory_revision = Some(memory.revision);

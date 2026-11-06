@@ -574,16 +574,20 @@ impl Codex {
         }
         let resumed_session = input.session.as_ref().filter(|s| s.native_id == thread_id);
         let inject = prompt::memory_for(input.memory.as_ref(), resumed_session);
+        let skills = super::default_skills::for_session(resumed_session);
         let mut state = SessionState {
             native_id: thread_id.clone(),
             fingerprint,
             considered_through_turn: considered,
             memory_revision: resumed_session.and_then(|s| s.memory_revision),
+            default_skills: resumed_session
+                .map(|s| s.default_skills.clone())
+                .unwrap_or_default(),
         };
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (segments, selection) = prompt::turn_content(input, considered, inject);
+        let (segments, selection) = prompt::turn_content(input, considered, inject, &skills);
         let packet = prompt::segments_text(&segments);
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
@@ -623,6 +627,7 @@ impl Codex {
         if sink.running().await.is_err() {
             cancel.cancel();
         }
+        state.default_skills = skills.applied;
         state.considered_through_turn = input.turn_no;
         if let Some(memory) = inject {
             state.memory_revision = Some(memory.revision);
@@ -1428,7 +1433,7 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn a_warm_thread_receives_memory_whenever_its_revision_changed() {
+    async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
         let dir = tempfile::tempdir().unwrap();
         let (codex, received) = fake_codex(dir.path());
         let turn = |session| TurnInput {
@@ -1460,13 +1465,26 @@ for line in sys.stdin:
             fingerprint: fingerprint.clone(),
             considered_through_turn: 2,
             memory_revision,
+            default_skills: Default::default(),
         };
+        let current = super::super::default_skills::for_session(None).applied;
+        let mut up_to_date = warm(Some(7));
+        up_to_date.default_skills = current.clone();
+        let mut stale = up_to_date.clone();
+        stale
+            .default_skills
+            .insert("unslop".into(), "old-content-hash".into());
+        let mut incompatible = up_to_date.clone();
+        incompatible.fingerprint = "old-provider-fingerprint".into();
         let memory = "Owner correction: rebase branches, never merge them.";
 
-        for (session, native, refreshed) in [
-            (None, "fresh-thread", true),
-            (Some(warm(Some(6))), "warm-thread", true),
-            (Some(warm(Some(7))), "warm-thread", false),
+        for (session, native, refreshed, skills_changed) in [
+            (None, "fresh-thread", true, true),
+            (Some(warm(Some(6))), "warm-thread", true, true),
+            (Some(warm(Some(7))), "warm-thread", false, true),
+            (Some(stale), "warm-thread", false, true),
+            (Some(up_to_date), "warm-thread", false, false),
+            (Some(incompatible), "fresh-thread", true, true),
         ] {
             let sink = super::super::recording::Recorded::default();
             let outcome = codex
@@ -1475,8 +1493,14 @@ for line in sys.stdin:
             assert_eq!(outcome, TurnOutcome::Completed);
             let text = super::super::recording::received(&received).pop().unwrap();
             assert_eq!(text.contains(memory), refreshed, "{native}: {text}");
+            assert_eq!(text.contains("Avoid em dashes entirely."), skills_changed);
             assert!(text.ends_with("Clean up the stale branches."));
             let state = sink.last_session();
+            let before_send = sink.sessions.lock().unwrap().first().unwrap().clone();
+            if skills_changed {
+                assert_ne!(before_send.default_skills, current);
+            }
+            assert_eq!(state.default_skills, current);
             assert_eq!(state.native_id, native);
             assert_eq!(state.memory_revision, Some(7));
         }
@@ -1541,8 +1565,14 @@ for line in sys.stdin:
         .unwrap();
         let canonical = |p: std::path::PathBuf| std::fs::canonicalize(p).unwrap();
         assert_eq!(sent[0]["type"], "text");
+        let (skills, message) = sent[0]["text"]
+            .as_str()
+            .unwrap()
+            .split_once("[end else.bot default skills]\n\n")
+            .unwrap();
+        assert!(skills.contains("Default skill `unslop`"));
         assert_eq!(
-            sent[0]["text"],
+            message,
             format!("Compare {}", prompt::file_reference(&image.attachment))
         );
         assert_eq!(sent[1]["type"], "localImage");

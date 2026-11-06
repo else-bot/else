@@ -179,6 +179,8 @@ pub struct SessionState {
     pub considered_through_turn: i64,
     /// The memory view revision given to the session, if any.
     pub memory_revision: Option<i64>,
+    /// Content hashes of the bundled default skills acknowledged by this session.
+    pub default_skills: std::collections::BTreeMap<String, String>,
 }
 
 /// The recorded outcome of a delegated child, given to the parent's
