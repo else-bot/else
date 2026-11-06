@@ -617,7 +617,8 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
         let read_only = name.starts_with("memory_")
             || matches!(
                 name,
-                "computer_job"
+                "mcp_list"
+                    | "computer_job"
                     | "computer_read_file"
                     | "computer_secrets"
                     | "routine_list"

@@ -81,6 +81,7 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
     let text = |key: &str| args[key].as_str().unwrap_or_default();
     let purpose = text("purpose").trim();
     let default = match name {
+        "mcp_request" => "Use a shared MCP",
         "computer_run" => "Run a command in the bot's computer",
         "computer_job_start" => "Start a background job in the bot's computer",
         "computer_input" => "Use the bot's desktop",
@@ -96,6 +97,12 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
         return (title, text("context").to_owned());
     }
     let context = match name {
+        "mcp_request" => format!(
+            "MCP {}: {}\n{}",
+            text("id"),
+            text("method"),
+            slice(&args["params"].to_string(), 0, MAX_PREVIEW).1
+        ),
         "computer_run" | "computer_job_start" => {
             let mut preview = slice(text("command"), 0, MAX_PREVIEW).1.to_owned();
             if preview.len() < text("command").len() {
@@ -137,7 +144,7 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
     (title, context)
 }
 
-async fn approve(
+pub(crate) async fn approve(
     state: &AppState,
     grant: &Grant,
     name: &str,

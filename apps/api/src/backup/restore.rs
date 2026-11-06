@@ -34,7 +34,7 @@ pub struct RestoreRequest<'a> {
     pub staging_parent: &'a Path,
     /// Largest decrypted artifact accepted (bounds staging space).
     pub max_bytes: u64,
-    /// Where bot computers are restored: required when the set has them.
+    /// Where host state is restored: required when the set includes it.
     pub computers: Option<ComputerTarget<'a>>,
 }
 
@@ -44,7 +44,7 @@ pub struct ComputerTarget<'a> {
     /// Needed only for a set with computers.
     pub runtime: Option<std::sync::Arc<dyn crate::computers::ComputerRuntime>>,
     /// The new installation's data directory (desktop passwords, host
-    /// artifacts, and the bots' project directories under `projects/`).
+    /// artifacts, shared MCP packages, and bot project directories).
     pub data_dir: &'a Path,
 }
 
@@ -160,7 +160,15 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     let mut seen = std::collections::HashSet::new();
     let mut files = std::collections::HashSet::new();
     let mut projects = std::collections::HashSet::new();
+    let mut mcp = false;
     for artifact in rest {
+        if artifact.kind == "mcp" {
+            if mcp || artifact.object != super::mcp::OBJECT || artifact.bot_id.is_some() {
+                return invalid("invalid shared MCP archive");
+            }
+            mcp = true;
+            continue;
+        }
         let Some(bot) = artifact.bot_id else {
             return invalid("an archive without its bot");
         };
@@ -214,6 +222,11 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         .count();
     if included != seen.len() || with_project != projects.len() {
         return invalid("a bot entry names a missing archive");
+    }
+    if !matches!(manifest.coverage.mcp.as_str(), "included" | "omitted")
+        || (manifest.coverage.mcp == "included") != mcp
+    {
+        return invalid("shared MCP coverage does not match its archive");
     }
     Ok(())
 }
@@ -309,7 +322,7 @@ pub async fn restore(request: RestoreRequest<'_>) -> Result<RestoreReport, Backu
     let has_host_state = manifest.artifacts.len() > 1;
     if has_host_state && request.computers.is_none() {
         return Err(BackupError::Refused(
-            "this set includes bot computers, project directories, or host artifacts; restore \
+            "this set includes bot computers, project directories, shared MCPs, or host artifacts; restore \
              it into a new installation directory"
                 .into(),
         ));
@@ -517,6 +530,21 @@ async fn restore_runtime(
     attempted: &mut Vec<String>,
 ) -> Result<(), BackupError> {
     if let Some(target) = &request.computers {
+        if let Some(artifact) = manifest.artifacts.iter().find(|a| a.kind == "mcp") {
+            let plain = staging.join("mcp.tar");
+            let set_dir = request.set_dir.to_owned();
+            let artifact = artifact.clone();
+            let identity = identity.clone();
+            let dir = target.data_dir.join("mcp");
+            tokio::task::spawn_blocking(move || {
+                let result = verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
+                    .and_then(|()| super::mcp::unpack(&plain, &dir));
+                let _ = std::fs::remove_file(&plain);
+                result
+            })
+            .await
+            .map_err(|e| BackupError::Io(e.to_string()))??;
+        }
         let projects = projects_dir(target.data_dir);
         for artifact in manifest.artifacts[1..]
             .iter()
@@ -540,7 +568,7 @@ async fn restore_runtime(
         }
         for artifact in manifest.artifacts[1..]
             .iter()
-            .filter(|a| a.kind != "project")
+            .filter(|a| !matches!(a.kind.as_str(), "project" | "mcp"))
         {
             let bot = artifact.bot_id.expect("validated");
             if artifact.kind == "file" {

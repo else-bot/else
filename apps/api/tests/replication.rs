@@ -486,6 +486,7 @@ async fn a_remote_set_restores_into_a_fresh_installation_after_an_emulator_resta
             exclusive: false,
 
             projects_dir: Some(dir.path().join("bots")),
+            mcp_dir: Some(dir.path().join("mcp")),
         })
         .run_once()
         .await
@@ -756,6 +757,7 @@ async fn unverified_or_lower_coverage_sets_never_displace_the_recovery_point() {
             exclusive: false,
 
             projects_dir: Some(dir.path().join("bots")),
+            mcp_dir: Some(dir.path().join("mcp")),
         })
         .run_once()
         .await

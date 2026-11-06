@@ -4,6 +4,9 @@
 pub const SERVER_NAME: &str = "elsebot";
 /// The tools this server offers. Adapters allow exactly these.
 pub const TOOL_NAMES: &[&str] = &[
+    "mcp_list",
+    "mcp_install",
+    "mcp_request",
     "memory_bots",
     "memory_search",
     "memory_read",
@@ -48,6 +51,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// for the outcome and continues in a new attempt. The computer tools park
 /// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
+    "mcp_request",
     "social_connect",
     "social_action",
     "delegate",
@@ -103,6 +107,10 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
     use serde_json::{Value, json};
 
     match name {
+        "mcp_install" => json!({"id":args["id"],"name":args["name"]}),
+        "mcp_request" => {
+            json!({"id":args["id"],"method":args["method"],"tool":args["params"]["name"],"effect":args["effect"]})
+        }
         "mail_accounts" | "social_connections" => json!({}),
         "social_connect" => json!({"provider":args["provider"],"reason":args["reason"]}),
         "social_action" | "social_action_status" => {

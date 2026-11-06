@@ -23,7 +23,7 @@ setup    provision missing credentials, apply migrations, and create the main\n 
 bot and default provider profiles once; never replaces existing state\n  \
 migrate  apply pending versioned migrations only\n  \
 backup   capture one encrypted database backup set now\n  \
-restore  verify a backup set and restore it into a new SQLite file; never changes an existing database or file\n  \
+restore  verify a backup set and restore it into new paths; new-data-dir is required for sets with shared MCPs, projects, computers, or files\n  \
 restore-remote  download a completed set from the configured bucket, then restore it\n  \
 upgrade-computer  move an existing bot computer to a new guest image, keeping its\n           \
 files, environments, browser profile, and network profile (--network picks\n           \
@@ -176,6 +176,7 @@ fn run_backup() -> anyhow::Result<()> {
             drain: std::time::Duration::from_secs(0),
             exclusive: true,
             projects_dir: Some(config.bots_dir.clone()),
+            mcp_dir: Some(config.data_dir.join("mcp")),
         });
         let saved = else_api::backup::settings::load_or_seed(&pool, &key, &config).await?;
         if let Some(destination) = saved.destination {
@@ -469,6 +470,7 @@ fn run_serve() -> anyhow::Result<()> {
                 "terminated provider processes left by an earlier API"
             );
         }
+        else_api::mcp::cleanup(&config.data_dir.join("mcp"))?;
         let (registry, summarizer) = else_api::providers::build(&config);
         let (requeued, uncertain) = db::turns::recover_after_restart(&pool).await?;
         else_api::connectors::store::recover(&pool).await?;
@@ -526,6 +528,7 @@ fn run_serve() -> anyhow::Result<()> {
                 drain: std::time::Duration::from_secs(300),
                 exclusive: false,
                 projects_dir: Some(config.bots_dir.clone()),
+                mcp_dir: Some(config.data_dir.join("mcp")),
             },
             stop_scheduler.clone(),
         )

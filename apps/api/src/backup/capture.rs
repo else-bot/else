@@ -115,7 +115,7 @@ fn publish_completion(set_dir: &Path, completion: &Completion) -> Result<(), Bac
     super::sync_dir(set_dir)
 }
 
-/// Capture, encrypt, and publish one database-only set.
+/// Capture, encrypt, and publish a set with the configured checkpoint sources.
 pub async fn create_set(
     pool: &SqlitePool,
     params: &DatabaseParams,
@@ -181,7 +181,7 @@ pub async fn create_set(
 }
 
 /// What a coordinated capture may use: the scheduler's gate and drain, and
-/// the bot computers. Without them a set is database only, and says so.
+/// filesystem sources. Without a checkpoint, only the database is captured.
 #[derive(Clone, Default)]
 pub struct Coordinator {
     pub scheduler: Option<std::sync::Arc<crate::scheduler::Scheduler>>,
@@ -194,6 +194,8 @@ pub struct Coordinator {
     /// The bots' project directories (`ELSE_BOTS_DIR`), captured at the
     /// checkpoint.
     pub projects_dir: Option<PathBuf>,
+    /// Shared MCP packages under the installation's data directory.
+    pub mcp_dir: Option<PathBuf>,
 }
 
 async fn seal_file(
@@ -429,6 +431,35 @@ async fn capture_projects(
     Ok((artifacts, states))
 }
 
+async fn capture_mcp(
+    dir: PathBuf,
+    staging: &Path,
+    identity: &age::x25519::Identity,
+    limit: u64,
+) -> Result<Artifact, BackupError> {
+    let plain = staging.join("mcp.tar");
+    let archive_target = plain.clone();
+    tokio::task::spawn_blocking(move || super::mcp::archive(&dir, &archive_target, limit))
+        .await
+        .map_err(|e| BackupError::Io(e.to_string()))??;
+    let sealed = seal_file(
+        plain,
+        staging.join(super::mcp::OBJECT),
+        identity.clone(),
+        limit,
+    )
+    .await?;
+    Ok(Artifact {
+        kind: "mcp".into(),
+        object: super::mcp::OBJECT.into(),
+        bot_id: None,
+        ciphertext_bytes: sealed.ciphertext_bytes,
+        ciphertext_sha256: sealed.ciphertext_sha256,
+        plaintext_bytes: sealed.plaintext_bytes,
+        plaintext_sha256: sealed.plaintext_sha256,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn capture_into(
     pool: &SqlitePool,
@@ -508,15 +539,31 @@ async fn capture_into(
         }
         None => Default::default(),
     };
-    let (mut project_artifacts, mut project_states) = match (
-        &coordinator.projects_dir,
-        gate.is_some() || coordinator.exclusive,
-    ) {
-        (Some(dir), true) => {
-            capture_projects(&bot_rows, dir, staging, &identity, config.max_bytes).await?
+    let project_capture = async {
+        match (
+            &coordinator.projects_dir,
+            gate.is_some() || coordinator.exclusive,
+        ) {
+            (Some(dir), true) => {
+                capture_projects(&bot_rows, dir, staging, &identity, config.max_bytes).await
+            }
+            _ => Ok(Default::default()),
         }
-        _ => Default::default(),
     };
+    let mcp_capture = async {
+        match (
+            &coordinator.mcp_dir,
+            gate.is_some() || coordinator.exclusive,
+        ) {
+            (Some(dir), true) => capture_mcp(dir.clone(), staging, &identity, config.max_bytes)
+                .await
+                .map(Some),
+            _ => Ok(None),
+        }
+    };
+    let (projects, mcp) = tokio::join!(project_capture, mcp_capture);
+    let (mut project_artifacts, mut project_states) = projects?;
+    let mcp_artifact = mcp?;
     if cancel.is_cancelled() {
         return Err(BackupError::Interrupted);
     }
@@ -598,7 +645,7 @@ async fn capture_into(
 
     let coordinated = coordinator.computers.is_some()
         && (coordinator.scheduler.is_some() || coordinator.exclusive);
-    let mut complete = coordinated;
+    let mut complete = coordinated && mcp_artifact.is_some();
     let entries: Vec<BotEntry> = bots
         .into_iter()
         .map(|(id, name, status)| {
@@ -658,6 +705,13 @@ async fn capture_into(
         !project_artifacts.is_empty() || entries.iter().any(|b| !b.project.starts_with("omitted"));
     let projects_partial = entries.iter().any(|b| b.project == "partial");
     artifacts.append(&mut project_artifacts);
+    let mcp = if let Some(artifact) = mcp_artifact {
+        artifacts.push(artifact);
+        "included"
+    } else {
+        "omitted"
+    }
+    .to_owned();
     if !missing_files.is_empty() {
         complete = false;
     }
@@ -669,7 +723,7 @@ async fn capture_into(
         "included"
     }
     .to_owned();
-    let coverage = if coordinated {
+    let mut coverage = if coordinated {
         super::Coverage {
             database: "included".into(),
             vm: if complete {
@@ -678,11 +732,13 @@ async fn capture_into(
                 "partial".into()
             },
             projects,
+            mcp: mcp.clone(),
             provider_state: "omitted-reauth-required".into(),
             whole_assistant: complete,
             note: if complete {
                 "Whole assistant: the database, every active bot's computer (standalone disk \
-                 archives with their images), and every bot's project directory. Native provider \
+                 archives with their images), every bot's project directory, and the shared MCP \
+                 skills, documentation and config. Native provider \
                  sessions are not included: conversations are rebuilt from SQLite and \
                  providers may need a fresh login."
                     .into()
@@ -690,7 +746,8 @@ async fn capture_into(
                 format!(
                     "Partial: a bot's computer is missing from the runtime, a desktop browser was \
                      not checkpointed, a project directory was not captured whole, or host \
-                     artifacts are missing ({}), so this set does not recover the whole assistant.",
+                     artifacts are missing ({}), or the shared MCP library was not captured, \
+                     so this set does not recover the whole assistant.",
                     missing_files.len()
                 )
             },
@@ -707,6 +764,19 @@ async fn capture_into(
     } else {
         super::database_only_coverage()
     };
+    coverage.mcp = mcp;
+    if !coordinated && coverage.mcp == "included" {
+        coverage.note = format!(
+            "The database{} and shared MCP skills, documentation and config are included. \
+             Bot computers and native provider sessions are not included. Restoring this set \
+             does not recover the whole assistant.",
+            if coverage.projects == "omitted" {
+                ""
+            } else {
+                ", bot project directories"
+            }
+        );
+    }
 
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,

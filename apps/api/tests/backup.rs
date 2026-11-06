@@ -576,7 +576,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     let (ok, out) = run(&["backup"]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("coverage: The database and the bots' project directories only:"),
+        out.contains("shared MCP skills, documentation and config are included"),
         "{out}"
     );
     let key = std::fs::read_to_string(data.join("secret-key")).unwrap();
@@ -594,10 +594,16 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     let app = TestApp::with_db(db);
     let target = Target::new(&app);
     let db = app.db.clone();
+    let restored_data = dir.path().join("restored-data");
     let mut command = common::api_command(&db, &data, common::free_port());
     let out = command
         .env("RUST_LOG", "info")
-        .args(["restore", &set, &target.name])
+        .args([
+            "restore",
+            &set,
+            &target.name,
+            restored_data.to_str().unwrap(),
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -609,6 +615,7 @@ async fn the_backup_and_restore_commands_work_on_an_installation() {
     );
     assert!(out.status.success(), "{text}");
     assert!(text.contains(&format!("into database {}", target.name)));
+    assert!(restored_data.join("mcp").is_dir());
     assert!(!text.contains(key), "the key is never printed");
     assert_eq!(
         rows(&target.url(), COMPARED[0]).await,

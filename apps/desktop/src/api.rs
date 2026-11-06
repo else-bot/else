@@ -19,6 +19,8 @@ use uuid::Uuid;
 mod attachments;
 mod backups;
 pub use backups::*;
+mod mcp;
+pub use mcp::*;
 mod email;
 pub use email::*;
 mod live;
@@ -419,7 +421,12 @@ impl Client {
                 Err(_) => ClientError::Protocol(format!("HTTP {status}")),
             });
         }
-        serde_json::from_slice(&bytes)
+        let body = if status == StatusCode::NO_CONTENT && bytes.is_empty() {
+            b"null".as_slice()
+        } else {
+            bytes.as_ref()
+        };
+        serde_json::from_slice(body)
             .map(|value| (status, value))
             .map_err(|err| ClientError::Protocol(err.to_string()))
     }
@@ -850,6 +857,15 @@ pub(crate) mod tests {
             !request.lines().next().unwrap().contains(&"T".repeat(43)),
             "token not in URL"
         );
+    }
+
+    #[tokio::test]
+    async fn remove_mcp_accepts_an_empty_no_content_response() {
+        let (origin, server) =
+            serve_once("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+        client(origin).remove_mcp("t3-code".into()).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("DELETE /v1/settings/mcp/t3-code HTTP/1.1\r\n"));
     }
 
     #[tokio::test]

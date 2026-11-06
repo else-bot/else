@@ -622,6 +622,8 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         Tool::RequestSecret,
         Tool::AskOwner,
         Tool::Routines,
+        Tool::Mcp,
+        Tool::ManageMcp,
     ] {
         assert!(!grant.allows(forbidden));
     }
@@ -637,7 +639,13 @@ async fn mail_event_origin_removes_computer_and_delegation_authority() {
         1,
         "a standing send permission still sends"
     );
-    for name in ["draft_email", "send_draft"] {
+    for name in [
+        "draft_email",
+        "send_draft",
+        "mcp_list",
+        "mcp_install",
+        "mcp_request",
+    ] {
         let refused = tool(&h.app, &token, name, json!({})).await;
         assert_eq!(
             refused.status,

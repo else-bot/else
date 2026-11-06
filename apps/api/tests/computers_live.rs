@@ -939,6 +939,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         exclusive: false,
 
         projects_dir: Some(dir.path().join("bots")),
+        mcp_dir: Some(dir.path().join("mcp")),
     });
     let started = std::time::Instant::now();
     let summary = worker.run_once().await.unwrap();
