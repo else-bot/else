@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise prebuilt installation with local Git tags and HTTP release assets."""
+"""Exercise release downloads and source fallback with local Git tags and assets."""
 import contextlib
 from functools import partial
 import http.server
@@ -56,7 +56,7 @@ fi
 '''
 
 HARNESS = SETUP + ACTION
-TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then echo --from-source app-current; exit 0; fi\n' + HARNESS
+TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then bash "$TEST_INSTALLER" --help; exit; fi\n' + HARNESS
 
 
 def executable(path, text):
@@ -93,11 +93,22 @@ class Downloads(unittest.TestCase):
         shutil.copy2(self.root / "releases/download/v0.0.2/SHA256SUMS", latest / "SHA256SUMS")
         self.requests = []
         requests = self.requests
+        self.http_errors = {}
+        http_errors = self.http_errors
 
         class Handler(http.server.SimpleHTTPRequestHandler):
             def do_GET(self):
                 requests.append(self.path)
+                if self.path in http_errors:
+                    self.send_error(http_errors[self.path])
+                    return
                 super().do_GET()
+
+            def do_HEAD(self):
+                if self.path in http_errors:
+                    self.send_error(http_errors[self.path])
+                    return
+                super().do_HEAD()
 
             def log_message(self, *_):
                 pass
@@ -142,11 +153,7 @@ class Downloads(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
-    def test_latest_published_app_install_and_repeat(self):
-        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.3"\n')
-        self.git("add", "Cargo.toml")
-        self.git("commit", "-qm", "unpublished release")
-        self.git("tag", "v0.0.3")
+    def test_latest_tagged_app_install_and_repeat(self):
         self.run_installer("--yes", "--app-only")
         self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.2"))
         self.assertTrue((self.installation / "current/bin/else-desktop").is_file())
@@ -155,12 +162,31 @@ class Downloads(unittest.TestCase):
         packages = (self.root / "packages").read_text().split()
         self.assertNotIn("build-essential", packages)
         self.assertFalse(any(package.endswith("-dev") for package in packages))
-        self.assertEqual(self.requests, ["/releases/latest/download/SHA256SUMS",
-                                       "/releases/download/v0.0.2/SHA256SUMS",
+        self.assertEqual(self.requests, ["/releases/download/v0.0.2/SHA256SUMS",
                                        "/releases/download/v0.0.2/else-desktop-v0.0.2-linux-amd64.tar.gz"])
         self.requests.clear()
         self.run_installer("--yes", "--app-only", "--version", "0.0.2")
         self.assertEqual(self.requests, [])
+
+    def test_latest_tag_ahead_of_published_binaries_builds_from_source(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.source_toolchain()
+        for version in ("0.0.10", "0.0.3", "0.0.11-rc.1"):
+            (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+            self.git("add", "Cargo.toml")
+            self.git("commit", "-qm", version)
+            self.git("tag", f"v{version}")
+        self.requests.clear()
+        self.run_installer("--yes", "--app-only")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.10"))
+        self.assertEqual(self.pointer("app-previous"), Path("versions/0.0.2"))
+        self.assertEqual((self.installation / "build/compiled").read_text().split(), ["else-desktop"])
+        self.assertEqual(subprocess.check_output(
+            [self.installation / "app-current/bin/else-desktop", "--version"], text=True).strip(),
+            "else-desktop 0.0.10")
+        self.assertIn("build-essential", (self.root / "packages").read_text().split())
+        self.assertTrue(self.requests)
+        self.assertTrue(all(path.startswith("/releases/download/v0.0.10/") for path in self.requests))
 
     def test_all_platforms_and_components(self):
         for distro, arch, platform in (("debian", "x86_64", "linux-amd64"),
@@ -399,7 +425,8 @@ printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
         assets = self.root / "releases/download/v0.0.2"
         desktop = assets / release_binaries.archive_name("else-desktop", "0.0.2", "linux-amd64")
         checksums = assets / "SHA256SUMS"
-        for failure in ("checksum", "missing-checksum", "duplicate-checksum", "missing-archive", "wrong-version"):
+        self.source_toolchain()
+        for failure in ("checksum", "missing-checksum", "invalid-checksum", "duplicate-checksum", "wrong-version"):
             with self.subTest(failure=failure):
                 self.assets("0.0.2", "0.0.1" if failure == "wrong-version" else None)
                 if failure == "checksum":
@@ -408,18 +435,123 @@ printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
                     checksums.write_text("".join(line for line in checksums.read_text().splitlines(True) if desktop.name not in line))
                 elif failure == "duplicate-checksum":
                     checksums.write_text(checksums.read_text() + next(line for line in checksums.read_text().splitlines(True) if desktop.name in line))
-                elif failure == "missing-archive":
-                    desktop.unlink()
+                elif failure == "invalid-checksum":
+                    checksums.write_text("".join(
+                        f"invalid  {desktop.name}\n" if desktop.name in line else line
+                        for line in checksums.read_text().splitlines(True)))
                 self.run_installer(success=False, TEST_ACTION="release", ELSE_VERSION="0.0.2")
                 self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.1"))
                 self.assertFalse((self.installation / "versions/0.0.2").exists())
                 self.assertEqual(list((self.installation / "versions").glob(".install-*")), [])
+                self.assertFalse((self.installation / "build/compiled").exists())
 
-    def test_release_without_binaries_does_not_build_locally(self):
-        (self.root / "releases/latest/download/SHA256SUMS").unlink()
-        result = self.run_installer("--yes", "--app-only", success=False)
-        self.assertIn("--from-source", result.stderr)
-        self.assertFalse((self.installation / "toolchain").exists())
+    def test_missing_checksums_or_archive_builds_selected_components(self):
+        self.source_toolchain()
+        for components in ("app", "server", "both"):
+            for missing in ("SHA256SUMS", "else-desktop", "else-api"):
+                selected = {"else-api", "else-desktop"} if components == "both" else {
+                    "else-api" if components == "server" else "else-desktop"}
+                if missing != "SHA256SUMS" and missing not in selected:
+                    continue
+                with self.subTest(components=components, missing=missing):
+                    self.assets("0.0.2")
+                    name = missing if missing == "SHA256SUMS" else release_binaries.archive_name(
+                        missing, "0.0.2", "linux-amd64")
+                    (self.root / "releases/download/v0.0.2" / name).unlink()
+                    shutil.rmtree(self.installation / "versions", ignore_errors=True)
+                    self.run_installer("--yes", f"--{components}-only" if components != "both" else "--both",
+                                       "--version", "0.0.2", TEST_SERVER="1")
+                    self.assertEqual({path.name for path in (self.installation / "versions/0.0.2/bin").iterdir()},
+                                     selected)
+                    self.assertEqual(set((self.installation / "build/compiled").read_text().split()), selected)
+                    packages = (self.root / "packages").read_text().split()
+                    self.assertIn("build-essential", packages)
+                    self.assertEqual("libxkbcommon-dev" in packages, components != "server")
+
+    def test_failed_fallback_build_preserves_current_installation(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.1")
+        self.source_toolchain()
+        executable(self.installation / "toolchain/cargo/bin/cargo", "#!/bin/sh\necho 'build failed' >&2\nexit 1\n")
+        (self.root / "releases/download/v0.0.2/SHA256SUMS").unlink()
+        result = self.run_installer("--yes", "--app-only", "--version", "0.0.2", success=False)
+        self.assertIn("build failed", result.stderr)
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.1"))
+        self.assertFalse((self.installation / "versions/0.0.2").exists())
+        self.assertEqual(list((self.installation / "versions").glob(".install-*")), [])
+
+    def test_download_access_error_does_not_build_from_source(self):
+        self.source_toolchain()
+        for legacy in (False, True):
+            if legacy:
+                self.legacy_download_installer()
+            for name in ("SHA256SUMS", "else-desktop-v0.0.2-linux-amd64.tar.gz"):
+                with self.subTest(legacy=legacy, asset=name):
+                    self.http_errors.clear()
+                    self.http_errors[f"/releases/download/v0.0.2/{name}"] = 403
+                    self.run_installer("--yes", "--app-only", "--version", "0.0.2", success=False)
+                    self.assertFalse((self.installation / "build/compiled").exists())
+                    self.assertFalse((self.installation / "versions/0.0.2").exists())
+
+    def test_macos_fallback_checks_metal_before_building_the_app(self):
+        self.source_toolchain()
+        (self.root / "releases/download/v0.0.2/SHA256SUMS").unlink()
+        tools = self.root / "tools"
+        executable(tools / "xcode-select", "#!/bin/sh\necho /fixture/Xcode\n")
+        executable(tools / "xcrun", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_XCRUN"\n')
+        calls = self.root / "xcrun-calls"
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2", TEST_DISTRO="macos",
+                           TEST_ARCH="aarch64", TEST_XCRUN=str(calls), PATH=f"{tools}:{os.environ['PATH']}")
+        self.assertEqual(calls.read_text().strip(), "-sdk macosx -f metal")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+
+    def legacy_download_installer(self):
+        (self.repo / "install.sh").write_text('''
+if [ "${1:-}" = --help ]; then echo --from-source app-current; exit 0; fi
+case " $* " in
+    *" --from-source "*) echo source > "$ELSE_HOME/tagged-build-mode" ;;
+    *) echo download > "$ELSE_HOME/tagged-build-mode" ;;
+esac
+''' + HARNESS)
+        self.git("add", "install.sh")
+        self.git("commit", "-qm", "installer requiring explicit source builds")
+        self.git("tag", "-f", "v0.0.2")
+
+    def test_missing_assets_forward_source_build_to_older_tagged_installer(self):
+        self.legacy_download_installer()
+        self.source_toolchain()
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.assertEqual((self.installation / "tagged-build-mode").read_text().strip(), "download")
+        self.assertFalse((self.installation / "build/compiled").exists())
+        for missing in ("SHA256SUMS", "else-desktop-v0.0.2-linux-amd64.tar.gz"):
+            with self.subTest(asset=missing):
+                self.assets("0.0.2")
+                (self.root / "releases/download/v0.0.2" / missing).unlink()
+                shutil.rmtree(self.installation / "versions", ignore_errors=True)
+                self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+                self.assertEqual((self.installation / "tagged-build-mode").read_text().strip(), "source")
+                self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+
+    def test_legacy_probe_only_checks_the_chosen_components(self):
+        self.legacy_download_installer()
+        self.source_toolchain()
+        (self.root / "releases/download/v0.0.2/else-api-v0.0.2-linux-amd64.tar.gz").unlink()
+        self.run_installer("--yes", "--version", "0.0.2",
+                           before_action='choose_components() { COMPONENTS=app; }\n')
+        self.assertEqual((self.installation / "tagged-build-mode").read_text().strip(), "download")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertFalse((self.installation / "build/compiled").exists())
+
+    def test_older_tagged_installer_does_not_bypass_bad_checksums_for_missing_assets(self):
+        self.legacy_download_installer()
+        self.source_toolchain()
+        assets = self.root / "releases/download/v0.0.2"
+        (assets / "else-desktop-v0.0.2-linux-amd64.tar.gz").unlink()
+        checksums = assets / "SHA256SUMS"
+        checksums.write_text(checksums.read_text().replace(
+            next(line.split()[0] for line in checksums.read_text().splitlines()
+                 if line.endswith("else-desktop-v0.0.2-linux-amd64.tar.gz")), "invalid"))
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2", success=False)
+        self.assertFalse((self.installation / "build/compiled").exists())
 
     def test_unsupported_macos_architecture_is_rejected(self):
         result = self.run_installer("--yes", "--app-only", success=False, TEST_DISTRO="macos")
@@ -433,11 +565,18 @@ printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
 set -eu
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
 mkdir -p "$CARGO_TARGET_DIR/release"
-printf '#!/bin/sh\necho "else-desktop %s"\n' "$version" > "$CARGO_TARGET_DIR/release/else-desktop"
-echo compiled > "$CARGO_TARGET_DIR/compiled"
+: > "$CARGO_TARGET_DIR/compiled"
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -p ]; then
+        shift
+        printf '#!/bin/sh\necho "%s %s"\n' "$1" "$version" > "$CARGO_TARGET_DIR/release/$1"
+        echo "$1" >> "$CARGO_TARGET_DIR/compiled"
+    fi
+    shift
+done
 ''')
 
-    def test_source_build_is_explicit(self):
+    def test_explicit_source_build_skips_downloads(self):
         self.source_toolchain()
         self.run_installer("--yes", "--app-only", "--from-source", "--version", "0.0.2")
         self.assertTrue((self.installation / "build/compiled").is_file())
@@ -458,7 +597,8 @@ printf 'legacy database and service policy' > "$TEST_LEGACY_POLICY"
         self.git("commit", "-qm", "legacy release policy")
         self.git("tag", "-f", "v0.0.2")
         self.source_toolchain()
-        for arguments in (("--yes", "--app-only", "--from-source", "--version", "0.0.2"), ("--from-source",)):
+        for arguments in (("--yes", "--app-only", "--version", "0.0.2"),
+                          ("--yes", "--app-only", "--from-source", "--version", "0.0.2"), ("--from-source",)):
             with self.subTest(arguments=arguments):
                 marker.unlink(missing_ok=True)
                 self.run_installer(*arguments, ELSE_VERSION="0.0.2", TEST_LEGACY_POLICY=str(marker))
