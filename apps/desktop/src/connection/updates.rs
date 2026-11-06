@@ -7,8 +7,8 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as _, Theme, h_flex};
 
 pub(super) struct View {
-    commands: Commands,
-    snapshot: Snapshot,
+    pub(super) commands: Commands,
+    pub(super) snapshot: Snapshot,
     logs: Entity<TextareaState>,
     scroll: ScrollHandle,
     page_scroll: ScrollHandle,
@@ -44,7 +44,31 @@ impl View {
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) -> Self {
-        let (commands, mut states) = crate::updates::start(launch, runtime);
+        Self::new_for(launch, runtime, false, window, cx)
+    }
+
+    pub(super) fn new_server(
+        launch: &Launch,
+        runtime: &tokio::runtime::Handle,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Self {
+        Self::new_for(launch, runtime, true, window, cx)
+    }
+
+    fn new_for(
+        launch: &Launch,
+        runtime: &tokio::runtime::Handle,
+        server: bool,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) -> Self {
+        let (commands, mut states) = if server {
+            crate::updates::start_server(launch, runtime)
+        } else {
+            crate::updates::start(launch, runtime)
+        };
+
         let snapshot = states.borrow().clone();
         Self {
             commands,
@@ -60,7 +84,7 @@ impl View {
                     let snapshot = states.borrow_and_update().clone();
                     if this
                         .update_in(cx, |shell, window, cx| {
-                            shell.update_snapshot(snapshot, window, cx)
+                            shell.update_snapshot(snapshot, server, window, cx)
                         })
                         .is_err()
                     {
@@ -75,7 +99,7 @@ impl View {
         (self.scroll.offset().y + self.scroll.max_offset().y).abs() < px(8.)
     }
 
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         matches!(
             self.snapshot.operation,
             Operation::Preparing | Operation::Installing | Operation::Restarting
@@ -101,8 +125,18 @@ impl View {
 }
 
 impl Shell {
-    fn update_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
-        let view = &mut self.updates;
+    fn update_snapshot(
+        &mut self,
+        snapshot: Snapshot,
+        server: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = if server {
+            &mut self.server_updates
+        } else {
+            &mut self.updates
+        };
         if snapshot.output != view.snapshot.output {
             if view.snapshot.output.is_empty() {
                 view.page_scroll.scroll_to_bottom();
@@ -120,15 +154,36 @@ impl Shell {
                 view.scroll.scroll_to_bottom();
             }
         }
-        if matches!(snapshot.operation, Operation::Relaunched) {
+        if !server && matches!(snapshot.operation, Operation::Relaunched) {
             cx.quit();
         }
+        let changed = server
+            && matches!(
+                view.snapshot.operation,
+                Operation::Installing | Operation::Preparing
+            )
+            && matches!(
+                snapshot.operation,
+                Operation::Idle | Operation::Ready { .. } | Operation::Failed(_)
+            );
         view.snapshot = snapshot;
+        if changed {
+            self.servers
+                .refresh(&self.registry, &self.runtime, window, cx);
+        }
         cx.notify();
     }
 
     pub(super) fn update_action(&mut self, action: Action, cx: &mut Context<Self>) {
-        let view = &mut self.updates;
+        if matches!(action, Action::Install) && (self.updates.busy() || self.server_updates.busy())
+        {
+            return;
+        }
+        let view = if self.server_update_target.is_some() {
+            &mut self.server_updates
+        } else {
+            &mut self.updates
+        };
         if matches!(action, Action::Install) && !view.can_install()
             || matches!(action, Action::RefreshWork) && view.snapshot.unavailable.is_some()
         {
@@ -170,9 +225,18 @@ impl Shell {
         cx.notify();
     }
 
+    fn update_view(&self) -> &View {
+        if self.server_update_target.is_some() {
+            &self.server_updates
+        } else {
+            &self.updates
+        }
+    }
+
     pub(super) fn render_updates(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let view = &self.updates;
+        let server = self.server_update_target.is_some();
+        let view = self.update_view();
         let snapshot = &view.snapshot;
         let output_visible = view.show_output || !snapshot.output.is_empty();
         let (title, description, icon, tone) = match &snapshot.operation {
@@ -190,7 +254,11 @@ impl Shell {
             ),
             Operation::Ready { version } => (
                 "Update installed",
-                format!("{version} is installed. Restart the app to start using it."),
+                if server {
+                    format!("{version} is installed. The server has restarted.")
+                } else {
+                    format!("{version} is installed. Restart the app to start using it.")
+                },
                 IconName::Check,
                 theme.success,
             ),
@@ -259,8 +327,16 @@ impl Shell {
             .when(!output_visible, |content| {
                 content
                     .child(super::settings::section_heading(
-                        "Updates",
-                        "Keep else.bot on this device up to date.",
+                        if server {
+                            "Server updates"
+                        } else {
+                            "App updates"
+                        },
+                        if server {
+                            "Updates for this managed local server."
+                        } else {
+                            "The desktop app on this computer. Your servers keep running."
+                        },
                         cx,
                     ))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(
@@ -306,7 +382,14 @@ impl Shell {
                     .gap_3()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(format!("Running v{}", env!("CARGO_PKG_VERSION")))
+                    .child(if let Some(id) = self.server_update_target {
+                        self.registry
+                            .find(id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default()
+                    } else {
+                        format!("Running v{}", env!("CARGO_PKG_VERSION"))
+                    })
                     .when_some(view.latest(), |row, version| {
                         row.child(Icon::new(IconName::ArrowRight).size_3())
                             .child(format!("Latest {version}"))
@@ -320,7 +403,8 @@ impl Shell {
                 theme.muted_foreground,
                 theme,
             ));
-        } else if !output_visible
+        } else if server
+            && !output_visible
             && !view.busy()
             && !matches!(
                 snapshot.operation,
@@ -436,7 +520,11 @@ impl Shell {
     }
 
     fn render_update_actions(&self, cx: &Context<Self>) -> AnyElement {
-        let view = &self.updates;
+        let view = self.update_view();
+        let server = self.server_update_target.is_some();
+        if server && matches!(view.snapshot.operation, Operation::Ready { .. }) {
+            return div().into_any_element();
+        }
         let (label, action, disabled) = match &view.snapshot.operation {
             Operation::Preparing => ("Checking work…".to_owned(), Action::Install, true),
             Operation::Installing => ("Updating…".to_owned(), Action::Install, true),
@@ -505,7 +593,7 @@ impl Shell {
     }
 
     fn render_update_output(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
-        let view = &self.updates;
+        let view = self.update_view();
         let status = match view.snapshot.operation {
             Operation::Installing | Operation::Preparing => "LIVE",
             Operation::Ready { .. } => "COMPLETE",

@@ -39,6 +39,22 @@ impl Preferences {
         saved
     }
 
+    pub fn load_for_server(store: &crate::config::ProfileStore, id: Uuid, legacy: bool) -> Self {
+        let path = store.server_preferences_path(id);
+        let missing = matches!(
+            std::fs::symlink_metadata(&path),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound
+        );
+        if legacy && missing {
+            let mut saved = Self::load(store.preferences_path());
+            saved.path = Some(path);
+            let _ = saved.save();
+            saved
+        } else {
+            Self::load(path)
+        }
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let path = self
             .path
@@ -89,6 +105,45 @@ mod tests {
         b.save().unwrap();
         assert_eq!(Preferences::load(first).sidebar_width, 310.);
         assert_eq!(Preferences::load(second).sidebar_width, 390.);
+    }
+
+    #[test]
+    fn legacy_layout_is_copied_only_to_its_original_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ProfileStore::at(dir.path().join("desktop.json"));
+        let mut legacy = Preferences::load(store.preferences_path());
+        let category = Uuid::new_v4();
+        legacy.sidebar_width = 310.;
+        legacy.category_order = vec![category];
+        legacy.collapsed.insert(Some(category));
+        legacy.save().unwrap();
+        let original = std::fs::read(store.preferences_path()).unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let migrated = Preferences::load_for_server(&store, first, true);
+        assert_eq!(migrated.sidebar_width, 310.);
+        assert_eq!(migrated.category_order, [category]);
+        assert!(migrated.collapsed.contains(&Some(category)));
+        assert_eq!(std::fs::read(store.preferences_path()).unwrap(), original);
+        legacy.category_order.clear();
+        legacy.save().unwrap();
+        assert_eq!(
+            Preferences::load_for_server(&store, first, true).category_order,
+            [category]
+        );
+        let mut unrelated = Preferences::load_for_server(&store, second, false);
+        assert!(unrelated.category_order.is_empty());
+        assert!(unrelated.collapsed.is_empty());
+        unrelated.category_order = vec![Uuid::new_v4()];
+        unrelated.save().unwrap();
+        assert_eq!(
+            Preferences::load_for_server(&store, first, true).category_order,
+            [category]
+        );
+        assert_eq!(
+            Preferences::load_for_server(&store, second, false).category_order,
+            unrelated.category_order
+        );
     }
 
     #[test]

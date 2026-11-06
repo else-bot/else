@@ -323,10 +323,20 @@ fn bundle_home(exe: &Path) -> Option<PathBuf> {
     marker.home.is_absolute().then_some(marker.home)
 }
 
+pub(crate) fn component_directory(home: &Path, pointer: &str) -> PathBuf {
+    let component = home.join(pointer);
+    if component.symlink_metadata().is_ok() {
+        component
+    } else {
+        home.join("current")
+    }
+}
+
 fn installed(home: &Path) -> Result<LocalServer, NoLocal> {
-    let current = home.join("current/bin");
-    if !is_executable(&current.join("else-api")) {
-        return Err(if is_executable(&current.join("else-desktop")) {
+    let server = component_directory(home, "server-current").join("bin/else-api");
+    let app = component_directory(home, "app-current").join("bin/else-desktop");
+    if !is_executable(&server) {
+        return Err(if is_executable(&app) {
             NoLocal::AppOnly
         } else {
             NoLocal::NotInstalled
@@ -728,6 +738,28 @@ mod tests {
     }
 
     #[test]
+    fn component_discovery_keeps_the_server_separate_from_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        installation(&home, true, "#!/bin/sh\n");
+        std::fs::rename(home.join("current"), home.join("server-release")).unwrap();
+        symlink("server-release", home.join("server-current")).unwrap();
+        write(
+            &home.join("app-release/bin/else-desktop"),
+            "#!/bin/sh\n",
+            0o755,
+        );
+        symlink("app-release", home.join("app-current")).unwrap();
+        symlink("app-release", home.join("current")).unwrap();
+        let launch = Launch::discover(env(&[("ELSE_HOME", home.to_str().unwrap().into())]), None);
+        assert!(launch.local.unwrap().manages_service());
+        assert!(launch.updates.unwrap().server().is_some());
+        std::fs::remove_file(home.join("server-current")).unwrap();
+        symlink("missing", home.join("server-current")).unwrap();
+        assert!(matches!(installed(&home), Err(NoLocal::AppOnly)));
+    }
+
+    #[test]
     fn updates_need_a_trusted_installation() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -816,10 +848,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".else/data")).unwrap();
         let saved = dir.path().join(".config/else-bot/desktop.json");
         let profile = Profile::parse("https://remote.example.com", TOKEN).unwrap();
-        ProfileStore::at(saved.clone()).save(&profile).unwrap();
+        let mut registry = crate::config::ServerRegistry::default();
+        let id = registry.upsert(profile.clone(), None, None).unwrap();
+        registry.selected = Some(id);
+        ProfileStore::at(saved.clone()).save(&registry).unwrap();
         let launch = Launch::discover(env(&[("HOME", dir.path().to_str().unwrap().into())]), None);
         assert_eq!(store_path(&launch), saved);
-        assert_eq!(launch.store.unwrap().load().unwrap(), Some(profile));
+        assert_eq!(launch.store.unwrap().load().unwrap(), registry);
     }
 
     #[test]

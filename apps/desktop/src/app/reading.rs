@@ -227,6 +227,18 @@ impl ElseApp {
         }
     }
 
+    pub(crate) fn notification_scope(&self) -> Uuid {
+        self.scope
+    }
+
+    pub(crate) fn has_unsaved_work(&self, cx: &App) -> bool {
+        !self.composer.read(cx).value().trim().is_empty()
+            || self.drafts.values().any(|draft| {
+                draft.message().is_some() || !draft.files.is_empty() || draft.reply_to.is_some()
+            })
+            || self.pending.values().any(|list| !list.is_empty())
+    }
+
     /// Take down every notification this connection showed.
     pub fn dismiss_notifications(&mut self, cx: &mut Context<Self>) {
         for bot in self.inbox.shown() {
@@ -238,11 +250,14 @@ impl ElseApp {
     pub fn set_hidden(&mut self, hidden: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.hidden = hidden;
         if hidden {
+            self.computer = None;
+            self._computer_layout = None;
             self.clear_social_forms(window, cx);
         } else {
             self.sync_social_forms(window, cx);
         }
         if !hidden {
+            self.ensure_settings(window, cx);
             self.check_reading(window, cx);
         }
     }

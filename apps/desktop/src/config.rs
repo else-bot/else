@@ -1,9 +1,9 @@
-//! Desktop configuration: the saved server profile (API origin and owner
-//! token) and the private files it is read from.
+//! Saved server identities, credentials, and their private atomic registry.
 //!
 //! The token never appears in URLs, logs, or error messages, and it is only
 //! ever sent to the one configured origin.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::{Read, Write};
@@ -11,6 +11,11 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 
 use url::{Host, Url};
+use uuid::Uuid;
+
+const MAX_SERVERS: usize = 64;
+const MAX_REGISTRY_BYTES: u64 = 256 * 1024;
+const REGISTRY_SCHEMA: u32 = 1;
 
 /// A validated API origin: `https://` for any host, `http://` only for
 /// loopback, without credentials, path, query, or fragment.
@@ -152,10 +157,160 @@ impl Profile {
     }
 }
 
+pub type ServerId = Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedServer {
+    pub id: ServerId,
+    pub name: String,
+    pub profile: Profile,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerRegistry {
+    pub servers: Vec<SavedServer>,
+    pub selected: Option<ServerId>,
+    pub legacy_server: Option<ServerId>,
+}
+
+impl ServerRegistry {
+    pub fn find(&self, id: ServerId) -> Option<&SavedServer> {
+        self.servers.iter().find(|server| server.id == id)
+    }
+
+    pub fn upsert(
+        &mut self,
+        profile: Profile,
+        name: Option<String>,
+        editing: Option<ServerId>,
+    ) -> Result<ServerId, String> {
+        let existing = self
+            .servers
+            .iter()
+            .position(|server| server.profile.origin == profile.origin);
+        let target = match editing {
+            Some(id) => {
+                let index = self
+                    .servers
+                    .iter()
+                    .position(|server| server.id == id)
+                    .ok_or("This saved server no longer exists.")?;
+                if existing.is_some_and(|other| other != index) {
+                    return Err("A connection to this server address is already saved.".into());
+                }
+                Some(index)
+            }
+            None => existing,
+        };
+        let name = name.map(|name| server_name(&name)).transpose()?;
+        if let Some(index) = target {
+            let server = &mut self.servers[index];
+            server.profile = profile;
+            if let Some(name) = name {
+                server.name = name;
+            }
+            return Ok(server.id);
+        }
+        if self.servers.len() >= MAX_SERVERS {
+            return Err(format!(
+                "You can save up to {MAX_SERVERS} servers. Remove a connection before adding another."
+            ));
+        }
+        let id = Uuid::new_v4();
+        let name = name.unwrap_or_else(|| default_server_name(&profile.origin));
+        self.servers.push(SavedServer { id, name, profile });
+        Ok(id)
+    }
+
+    pub fn remove(&mut self, id: ServerId) -> Result<(), String> {
+        if self.selected == Some(id) {
+            return Err("Switch to another server before removing this connection.".into());
+        }
+        let index = self
+            .servers
+            .iter()
+            .position(|server| server.id == id)
+            .ok_or("This saved server no longer exists.")?;
+        self.servers.remove(index);
+        if self.legacy_server == Some(id) {
+            self.legacy_server = None;
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.servers.len() > MAX_SERVERS {
+            return Err(format!(
+                "The registry contains more than {MAX_SERVERS} servers."
+            ));
+        }
+        let mut ids = HashSet::new();
+        let mut origins = HashSet::new();
+        for server in &self.servers {
+            if server.id.is_nil() || !ids.insert(server.id) {
+                return Err("Saved servers must have distinct, nonempty IDs.".into());
+            }
+            if !origins.insert(server.profile.origin.as_str()) {
+                return Err("The same server address is saved more than once.".into());
+            }
+            server_name(&server.name)?;
+        }
+        for id in [self.selected, self.legacy_server].into_iter().flatten() {
+            if !ids.contains(&id) {
+                return Err("The registry refers to a server that is not saved.".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn server_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(
+            "Give the server a name of 1 to 80 characters, without control characters.".into(),
+        );
+    }
+    Ok(name.to_owned())
+}
+
+fn default_server_name(origin: &Origin) -> String {
+    if origin.is_loopback() {
+        return "This computer".into();
+    }
+    Url::parse(origin.as_str())
+        .expect("validated origin")
+        .host_str()
+        .expect("origin has a host")
+        .chars()
+        .take(80)
+        .collect()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredProfile {
     origin: String,
     owner_token: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredServer {
+    id: ServerId,
+    name: String,
+    origin: String,
+    owner_token: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRegistry {
+    schema_version: u32,
+    selected: Option<ServerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_server: Option<ServerId>,
+    servers: Vec<StoredServer>,
 }
 
 /// Where the profile is kept: `ELSE_DESKTOP_CONFIG_FILE` (an installation's
@@ -201,29 +356,121 @@ impl ProfileStore {
         self.path.with_extension("layout.json")
     }
 
-    /// `Ok(None)` when nothing was saved yet.
-    pub fn load(&self) -> Result<Option<Profile>, String> {
-        let shown = self.path.display();
-        let Some(text) = read_private(&self.path)? else {
-            return Ok(None);
+    pub(crate) fn server_preferences_path(&self, id: ServerId) -> PathBuf {
+        self.path.with_extension(format!("{id}.layout.json"))
+    }
+
+    fn registry_path(&self) -> PathBuf {
+        self.path.with_extension("servers.json")
+    }
+
+    pub fn load(&self) -> Result<ServerRegistry, String> {
+        let registry_path = self.registry_path();
+        let canonical = read_private_limited(&registry_path, MAX_REGISTRY_BYTES)?;
+        let migrated = canonical.is_some();
+        let text = match canonical {
+            Some(text) => text,
+            None => match read_private_limited(&self.path, MAX_REGISTRY_BYTES)? {
+                Some(text) => text,
+                None => return Ok(ServerRegistry::default()),
+            },
         };
-        let stored: StoredProfile = serde_json::from_str(&text).map_err(|err| {
+        let shown = if migrated {
+            registry_path.display()
+        } else {
+            self.path.display()
+        };
+        let invalid_json = |err: serde_json::Error| {
             format!(
                 "The desktop profile {shown} is not valid (line {}, column {}).",
                 err.line(),
                 err.column()
             )
-        })?;
-        let origin = Origin::parse(&stored.origin)
-            .map_err(|err| format!("The desktop profile {shown} is not valid. {err}"))?;
-        let token = OwnerToken::parse(&stored.owner_token)
-            .map_err(|err| format!("The desktop profile {shown} is not valid. {err}"))?;
-        Ok(Some(Profile { origin, token }))
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(invalid_json)?;
+        let profile = |stored: StoredProfile| {
+            Profile::parse(&stored.origin, &stored.owner_token)
+                .map_err(|err| format!("The desktop profile {shown} is not valid. {err}"))
+        };
+        if value.get("schema_version").is_some() {
+            let stored: StoredRegistry = serde_json::from_str(&text).map_err(invalid_json)?;
+            if stored.schema_version != REGISTRY_SCHEMA {
+                return Err(format!(
+                    "The desktop profile {shown} uses unsupported schema {}. Update the desktop app before opening it.",
+                    stored.schema_version
+                ));
+            }
+            let registry = ServerRegistry {
+                servers: stored
+                    .servers
+                    .into_iter()
+                    .map(|stored| {
+                        Ok(SavedServer {
+                            id: stored.id,
+                            name: server_name(&stored.name)?,
+                            profile: profile(StoredProfile {
+                                origin: stored.origin,
+                                owner_token: stored.owner_token,
+                            })?,
+                        })
+                    })
+                    .collect::<Result<_, String>>()?,
+                selected: stored.selected,
+                legacy_server: stored.legacy_server,
+            };
+            registry
+                .validate()
+                .map_err(|err| format!("The desktop profile {shown} is not valid. {err}"))?;
+            if !migrated {
+                self.save(&registry)?;
+            }
+            return Ok(registry);
+        }
+        let stored: StoredProfile = serde_json::from_str(&text).map_err(invalid_json)?;
+        let mut registry = ServerRegistry::default();
+        let id = registry.upsert(profile(stored)?, None, None)?;
+        registry.selected = Some(id);
+        registry.legacy_server = Some(id);
+        self.save(&registry)?;
+        Ok(registry)
     }
 
     /// Replace the profile atomically: a private temporary file in the same
     /// private directory, synced, then renamed over the old one.
-    pub fn save(&self, profile: &Profile) -> Result<(), String> {
+    pub fn save(&self, registry: &ServerRegistry) -> Result<(), String> {
+        registry.validate()?;
+        let json = serde_json::to_vec_pretty(&StoredRegistry {
+            schema_version: REGISTRY_SCHEMA,
+            selected: registry.selected,
+            legacy_server: registry.legacy_server,
+            servers: registry
+                .servers
+                .iter()
+                .map(|server| StoredServer {
+                    id: server.id,
+                    name: server.name.clone(),
+                    origin: server.profile.origin.as_str().to_owned(),
+                    owner_token: server.profile.token.expose().to_owned(),
+                })
+                .collect(),
+        })
+        .expect("registry serializes");
+        if json.len() as u64 + 1 > MAX_REGISTRY_BYTES {
+            return Err("The saved server registry is too large.".into());
+        }
+        Self::at(self.registry_path()).write_json(&json)?;
+        if let Some(selected) = registry.selected.and_then(|id| registry.find(id)) {
+            let legacy = serde_json::to_vec_pretty(&StoredProfile {
+                origin: selected.profile.origin.as_str().to_owned(),
+                owner_token: selected.profile.token.expose().to_owned(),
+            })
+            .expect("profile serializes");
+            self.write_json(&legacy)?;
+        }
+        Ok(())
+    }
+
+    fn write_json(&self, json: &[u8]) -> Result<(), String> {
         let shown = self.path.display();
         let fail = |err: std::io::Error| format!("Cannot save the desktop profile {shown}: {err}");
         let parent = match self.path.parent() {
@@ -248,11 +495,6 @@ impl ProfileStore {
             .and_then(|name| name.to_str())
             .unwrap_or("desktop.json");
         let tmp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-        let json = serde_json::to_vec_pretty(&StoredProfile {
-            origin: profile.origin.as_str().to_owned(),
-            owner_token: profile.token.expose().to_owned(),
-        })
-        .expect("profile serializes");
         let written = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -260,7 +502,7 @@ impl ProfileStore {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&tmp)?;
-            file.write_all(&json)?;
+            file.write_all(json)?;
             file.write_all(b"\n")?;
             file.sync_all()?;
             std::fs::rename(&tmp, &self.path)?;
@@ -279,6 +521,10 @@ pub(crate) fn current_uid() -> u32 {
 }
 
 pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {
+    read_private_limited(path, 16 * 1024)
+}
+
+fn read_private_limited(path: &Path, limit: u64) -> Result<Option<String>, String> {
     let shown = path.display();
     let mut file = match OpenOptions::new()
         .read(true)
@@ -300,9 +546,12 @@ pub(crate) fn read_private(path: &Path) -> Result<Option<String>, String> {
     }
     let mut text = String::new();
     Read::by_ref(&mut file)
-        .take(16 * 1024)
+        .take(limit + 1)
         .read_to_string(&mut text)
         .map_err(|err| format!("{shown}: {err}"))?;
+    if text.len() as u64 > limit {
+        return Err(format!("{shown} exceeds the file size limit."));
+    }
     Ok(Some(text))
 }
 
@@ -416,13 +665,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/desktop.json");
         let store = ProfileStore { path: path.clone() };
-        assert_eq!(store.load().unwrap(), None, "nothing saved yet");
+        assert_eq!(
+            store.load().unwrap(),
+            ServerRegistry::default(),
+            "nothing saved yet"
+        );
         let profile = Profile {
             origin: Origin::parse("else.example.com").unwrap(),
             token: OwnerToken::parse(&"A".repeat(43)).unwrap(),
         };
-        store.save(&profile).unwrap();
-        assert_eq!(store.load().unwrap().as_ref(), Some(&profile));
+        let mut registry = ServerRegistry::default();
+        let id = registry
+            .upsert(profile.clone(), Some("Studio".into()), None)
+            .unwrap();
+        registry.selected = Some(id);
+        store.save(&registry).unwrap();
+        assert_eq!(store.load().unwrap(), registry);
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
@@ -430,13 +688,23 @@ mod tests {
             origin: Origin::parse("127.0.0.1:7878").unwrap(),
             ..profile.clone()
         };
-        store.save(&replaced).unwrap();
-        assert_eq!(store.load().unwrap(), Some(replaced));
+        registry.upsert(replaced.clone(), None, Some(id)).unwrap();
+        store.save(&registry).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.find(id).unwrap().profile, replaced);
+        assert_eq!(loaded.find(id).unwrap().name, "Studio");
+        assert_eq!(loaded.selected, Some(id));
         let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names, ["desktop.json"], "no temporary file is left behind");
+        let mut names = names;
+        names.sort();
+        assert_eq!(
+            names,
+            ["desktop.json", "desktop.servers.json"],
+            "no temporary file is left behind"
+        );
         assert!(!format!("{profile:?}").contains(&"A".repeat(43)));
     }
 
@@ -482,13 +750,220 @@ mod tests {
             origin: Origin::parse("127.0.0.1:7878").unwrap(),
             token: OwnerToken::parse(&secret).unwrap(),
         };
+        let mut registry = ServerRegistry::default();
+        registry.upsert(profile, None, None).unwrap();
         let err = ProfileStore {
             path: shared.join("desktop.json"),
         }
-        .save(&profile)
+        .save(&registry)
         .unwrap_err();
         assert!(err.contains("0700"), "{err}");
         assert!(!shared.join("desktop.json").exists());
+    }
+
+    fn profile(address: &str) -> Profile {
+        Profile::parse(address, &"A".repeat(43)).unwrap()
+    }
+
+    fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn legacy_profile_migrates_once_without_changing_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("desktop.json");
+        let store = ProfileStore::at(path.clone());
+        write_private(
+            &path,
+            format!(
+                r#"{{"origin":"https://studio.example.com","owner_token":"{}"}}"#,
+                "A".repeat(43)
+            ),
+        );
+        let migrated = store.load().unwrap();
+        let id = migrated.selected.unwrap();
+        assert_eq!(migrated.legacy_server, Some(id));
+        assert_eq!(
+            migrated.find(id).unwrap().profile,
+            profile("https://studio.example.com")
+        );
+        let bytes = std::fs::read(store.registry_path()).unwrap();
+        let second = store.load().unwrap();
+        assert_eq!(second, migrated);
+        assert_eq!(std::fs::read(store.registry_path()).unwrap(), bytes);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["schema_version"],
+            1
+        );
+    }
+
+    #[test]
+    fn older_desktop_reconnections_cannot_overwrite_saved_servers() {
+        #[derive(serde::Deserialize)]
+        struct LegacyProfile {
+            origin: String,
+            owner_token: String,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = ProfileStore::at(dir.path().join("desktop.json"));
+        let mut registry = ServerRegistry::default();
+        let a = registry
+            .upsert(
+                profile("https://a.example.com"),
+                Some("Studio".into()),
+                None,
+            )
+            .unwrap();
+        registry
+            .upsert(profile("https://b.example.com"), Some("Build".into()), None)
+            .unwrap();
+        registry.selected = Some(a);
+        store.save(&registry).unwrap();
+        let legacy: LegacyProfile =
+            serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(legacy.origin, "https://a.example.com");
+        assert_eq!(legacy.owner_token, "A".repeat(43));
+        write_private(
+            store.path(),
+            serde_json::to_vec(&StoredProfile {
+                origin: "https://c.example.com".into(),
+                owner_token: "B".repeat(43),
+            })
+            .unwrap(),
+        );
+        assert_eq!(store.load().unwrap(), registry);
+    }
+
+    #[test]
+    fn registry_preserves_identity_and_names_and_rejects_duplicate_edits() {
+        let mut registry = ServerRegistry::default();
+        let first = registry
+            .upsert(
+                profile("https://studio.example.com"),
+                Some(" Studio ".into()),
+                None,
+            )
+            .unwrap();
+        let second = registry
+            .upsert(
+                profile("https://home.example.com"),
+                Some("Home".into()),
+                None,
+            )
+            .unwrap();
+        registry.selected = Some(first);
+        let reconnected = registry
+            .upsert(profile("https://STUDIO.example.com:443/"), None, None)
+            .unwrap();
+        assert_eq!(reconnected, first);
+        assert_eq!(registry.servers.len(), 2);
+        assert_eq!(registry.find(first).unwrap().name, "Studio");
+        let before = registry.clone();
+        assert!(
+            registry
+                .upsert(
+                    profile("https://home.example.com"),
+                    Some("Renamed".into()),
+                    Some(first)
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .upsert(
+                    profile("https://third.example.com"),
+                    Some(" ".into()),
+                    Some(first)
+                )
+                .is_err()
+        );
+        assert_eq!(registry, before);
+        assert!(registry.remove(first).is_err());
+        registry.remove(second).unwrap();
+        assert!(registry.find(second).is_none());
+        assert_eq!(registry.selected, Some(first));
+        assert_eq!(
+            registry
+                .upsert(
+                    profile("https://new.example.com"),
+                    Some("Renamed".into()),
+                    Some(first)
+                )
+                .unwrap(),
+            first
+        );
+        assert_eq!(registry.find(first).unwrap().name, "Renamed");
+        assert_eq!(
+            registry.find(first).unwrap().profile.origin.as_str(),
+            "https://new.example.com"
+        );
+    }
+
+    #[test]
+    fn invalid_registries_are_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop.json");
+        let store = ProfileStore::at(path.clone());
+        let id = Uuid::new_v4();
+        let saved = serde_json::json!({
+            "id": id,
+            "name": "Studio",
+            "origin": "https://studio.example.com",
+            "owner_token": "A".repeat(43),
+        });
+        let different_id = {
+            let mut value = saved.clone();
+            value["id"] = serde_json::json!(Uuid::new_v4());
+            value
+        };
+        for invalid in [
+            serde_json::json!({"schema_version":2,"selected":id,"servers":[saved.clone()]}),
+            serde_json::json!({"schema_version":1,"selected":Uuid::new_v4(),"servers":[saved.clone()]}),
+            serde_json::json!({"schema_version":1,"selected":id,"servers":[saved.clone(),saved.clone()]}),
+            serde_json::json!({"schema_version":1,"selected":id,"servers":[saved.clone(),different_id]}),
+            serde_json::json!({"schema_version":1,"selected":id,"legacy_server":Uuid::new_v4(),"servers":[saved]}),
+        ] {
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            write_private(&path, &bytes);
+            assert!(store.load().is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        write_private(&path, vec![b' '; MAX_REGISTRY_BYTES as usize + 1]);
+        assert!(store.load().unwrap_err().contains("size limit"));
+    }
+
+    #[test]
+    fn registry_size_and_invalid_selection_are_checked_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = ProfileStore::at(dir.path().join("desktop.json"));
+        let mut registry = ServerRegistry::default();
+        for index in 0..MAX_SERVERS {
+            registry
+                .upsert(
+                    profile(&format!("https://server-{index}.example.com")),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let before = registry.clone();
+        assert!(
+            registry
+                .upsert(profile("https://extra.example.com"), None, None)
+                .is_err()
+        );
+        assert_eq!(registry, before);
+        store.save(&registry).unwrap();
+        assert_eq!(store.load().unwrap(), registry);
+        let bytes = std::fs::read(store.registry_path()).unwrap();
+        registry.selected = Some(Uuid::new_v4());
+        assert!(store.save(&registry).is_err());
+        assert_eq!(std::fs::read(store.registry_path()).unwrap(), bytes);
     }
 
     #[test]

@@ -69,9 +69,9 @@ pub fn newest(listing: &str) -> Option<Version> {
         .max()
 }
 
-/// The release `current` points at (`versions/X.Y.Z`).
-pub fn installed(home: &Path) -> Result<Version, String> {
-    let link = home.join("current");
+/// The component's activated release, falling back to an unmigrated installation.
+pub fn installed(home: &Path, component: super::Component) -> Result<Version, String> {
+    let link = crate::launch::component_directory(home, component.pointer());
     let target = std::fs::read_link(&link).map_err(|err| {
         format!(
             "Cannot tell which release is installed ({}: {err}).",
@@ -196,8 +196,36 @@ a8\trefs/tags/release-9.9.9
     fn the_installed_release_is_what_current_points_at() {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("versions/0.0.20", dir.path().join("current")).unwrap();
-        assert_eq!(installed(dir.path()), Ok(v("0.0.20")));
+        assert_eq!(
+            installed(dir.path(), super::super::Component::App),
+            Ok(v("0.0.20"))
+        );
         let other = tempfile::tempdir().unwrap();
-        assert!(installed(other.path()).unwrap_err().contains("Cannot tell"));
+        assert!(
+            installed(other.path(), super::super::Component::App)
+                .unwrap_err()
+                .contains("Cannot tell")
+        );
+    }
+
+    #[test]
+    fn component_pointers_override_legacy_and_each_other() {
+        use super::super::Component::{App, Server};
+        let dir = tempfile::tempdir().unwrap();
+        for (pointer, target) in [
+            ("current", "versions/0.0.9"),
+            ("app-current", "versions/0.0.20"),
+            ("server-current", "versions/0.0.10"),
+        ] {
+            std::os::unix::fs::symlink(target, dir.path().join(pointer)).unwrap();
+        }
+        assert_eq!(installed(dir.path(), App), Ok(v("0.0.20")));
+        assert_eq!(installed(dir.path(), Server), Ok(v("0.0.10")));
+        std::fs::remove_file(dir.path().join("app-current")).unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("app-current")).unwrap();
+        assert!(
+            installed(dir.path(), App).is_err(),
+            "a broken component pointer must never use legacy current"
+        );
     }
 }

@@ -10,6 +10,7 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
   --both               the server and the app (the default on a fresh machine)
   --server-only        the server only (home hardware or a VPS)
   --app-only           the app only, connecting to a server elsewhere
+                       component updates use app-current and server-current
   --from-source        build locally instead of downloading release binaries
   --autostart          start the API by itself: at boot (Linux) or at login (macOS)
   --no-autostart       only start it with: elsebot start
@@ -51,6 +52,8 @@ if [ -n "$TEST_CACHE" ]; then
 fi
 VERSIONS="$ELSE_HOME/versions"
 CURRENT="$ELSE_HOME/current"
+APP_CURRENT="$ELSE_HOME/app-current"
+SERVER_CURRENT="$ELSE_HOME/server-current"
 BIN="$ELSE_HOME/bin"
 CONFIG="$ELSE_HOME/config"
 DATA="$ELSE_HOME/data"
@@ -120,8 +123,8 @@ installed_components() {
 		*) die "invalid saved install components in $COMPONENTS_FILE" ;;
 		esac
 	fi
-	if [ -f "$ENV_FILE" ] || [ -x "$CURRENT/bin/else-api" ]; then server=1; fi
-	[ -x "$CURRENT/bin/else-desktop" ] && app=1
+	if [ -f "$ENV_FILE" ] || [ -x "$SERVER_CURRENT/bin/else-api" ] || [ -x "$CURRENT/bin/else-api" ]; then server=1; fi
+	{ [ -x "$APP_CURRENT/bin/else-desktop" ] || [ -x "$CURRENT/bin/else-desktop" ]; } && app=1
 	case "$server$app" in
 	11) echo both ;;
 	10) echo server ;;
@@ -154,14 +157,10 @@ choose_components() {
 		fi
 	fi
 	COMPONENTS="$choice"
-	if [ -n "$installed" ] && [ "$installed" != "$choice" ]; then
-		COMPONENTS=both
-		info "Keeping the installed $installed: installing both"
-	fi
 }
 
 remember_components() {
-	printf '%s\n' "$COMPONENTS" >"$COMPONENTS_FILE.tmp"
+	installed_components >"$COMPONENTS_FILE.tmp"
 	mv -f "$COMPONENTS_FILE.tmp" "$COMPONENTS_FILE"
 }
 
@@ -462,14 +461,10 @@ fetch_source() {
 }
 
 installed_version() {
-	local bin
-	for bin in else-api else-desktop; do
-		if [ -x "$CURRENT/bin/$bin" ]; then
-			"$CURRENT/bin/$bin" --version 2>/dev/null | awk '{print $2}'
-			return
-		fi
-	done
-	return 1
+	local pointer="$APP_CURRENT" bin=else-desktop
+	if want_server; then pointer="$SERVER_CURRENT"; bin=else-api; fi
+	[ -x "$pointer/bin/$bin" ] || return 1
+	"$pointer/bin/$bin" --version 2>/dev/null | awk '{print $2}'
 }
 
 source_version() {
@@ -523,6 +518,7 @@ build_release() {
 }
 
 install_release() (
+	migrate_pointers
 	local version="$1" dest="$VERSIONS/$1" pkg missing=""
 	local built_profile stage payload
 	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
@@ -560,30 +556,99 @@ install_release() (
 	ok "installed into $dest"
 )
 
+point_to() {
+	local pointer="$1" target="$2"
+	ln -sfn "$target" "$pointer.tmp"
+	mv -fT "$pointer.tmp" "$pointer" 2>/dev/null || mv -fh "$pointer.tmp" "$pointer"
+}
+
+sync_legacy_pointer() {
+	local target
+	target="$(readlink "$SERVER_CURRENT" 2>/dev/null || readlink "$APP_CURRENT" 2>/dev/null || true)"
+	[ -z "$target" ] || point_to "$CURRENT" "$target"
+}
+
+migrate_pointers() {
+	local target
+	target="$(readlink "$CURRENT" 2>/dev/null || true)"
+	[ -n "$target" ] || return 0
+	if [ ! -L "$SERVER_CURRENT" ] && [ -x "$CURRENT/bin/else-api" ]; then point_to "$SERVER_CURRENT" "$target"; fi
+	if [ ! -L "$APP_CURRENT" ] && [ -x "$CURRENT/bin/else-desktop" ]; then point_to "$APP_CURRENT" "$target"; fi
+	if [ "$(readlink "$BIN/else-api" 2>/dev/null || true)" = ../current/bin/else-api ]; then
+		ln -sfn ../server-current/bin/else-api "$BIN/else-api"
+	fi
+	if [ "$(readlink "$BIN/else-desktop" 2>/dev/null || true)" = ../current/bin/else-desktop ]; then
+		ln -sfn ../app-current/bin/else-desktop "$BIN/else-desktop"
+	fi
+}
+
+activate_component() {
+	local pointer="$1" target="versions/$2" previous
+	previous="$(readlink "$pointer" 2>/dev/null || true)"
+	if [ -n "$previous" ] && [ "$previous" != "$target" ]; then
+		point_to "${pointer%-current}-previous" "$previous"
+	fi
+	point_to "$pointer" "$target"
+}
+
 switch_to() {
-	ln -sfn "versions/$1" "$ELSE_HOME/current.tmp"
-	mv -fT "$ELSE_HOME/current.tmp" "$CURRENT" 2>/dev/null || {
-		# BSD mv has no -T: replace the link in two steps.
-		rm -f "$CURRENT"
-		mv -f "$ELSE_HOME/current.tmp" "$CURRENT"
-	}
+	if want_server; then activate_component "$SERVER_CURRENT" "$1"; fi
+	if want_app; then activate_component "$APP_CURRENT" "$1"; fi
+	sync_legacy_pointer
+}
+
+restore_pointers() {
+	local pointer target
+	for pointer in app-current server-current app-previous server-previous; do
+		case "$pointer" in
+		app-*) want_app || continue ;;
+		server-*) want_server || continue ;;
+		esac
+		case "$pointer" in
+		app-current) target="$OLD_APP" ;;
+		server-current) target="$OLD_SERVER" ;;
+		app-previous) target="$OLD_APP_PREVIOUS" ;;
+		server-previous) target="$OLD_SERVER_PREVIOUS" ;;
+		esac
+		if [ -n "$target" ]; then point_to "$ELSE_HOME/$pointer" "$target"; else rm -f "$ELSE_HOME/$pointer"; fi
+	done
+	sync_legacy_pointer
 }
 
 prune_versions() {
-	local keep_a="$1" keep_b="${2:-}" dir name
+	local dir pointer referenced
 	for dir in "$VERSIONS"/*; do
 		[ -d "$dir" ] || continue
-		name="$(basename "$dir")"
-		[ "$name" = "$keep_a" ] || [ "$name" = "$keep_b" ] || rm -rf "$dir"
+		referenced=0
+		for pointer in current app-current server-current app-previous server-previous; do
+			if [ -L "$ELSE_HOME/$pointer" ] && [ "$dir" -ef "$ELSE_HOME/$pointer" ]; then referenced=1; break; fi
+		done
+		[ "$referenced" = 1 ] || rm -rf "$dir"
 	done
+}
+
+lock_installation() {
+	local lock="$ELSE_HOME/run/install.lock"
+	mkdir -p "$ELSE_HOME/run"
+	if [ "${ELSE_INSTALL_LOCK_PID:-}" = "$PPID" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$PPID" ]; then
+		return
+	fi
+	if [ "${ELSE_INSTALL_LOCK_PID:-}" != "$$" ] || [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$$" ]; then
+		mkdir "$lock" 2>/dev/null || die "another installer holds $lock; if it was interrupted, remove this directory after checking that no installer is running"
+		printf '%s\n' "$$" >"$lock/pid"
+		export ELSE_INSTALL_LOCK_PID="$$"
+	fi
+	trap 'rm -rf "$ELSE_HOME/run/install.lock"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 }
 
 install_commands() {
 	mkdir -p "$BIN" "$LINK_PREFIX/bin" "$CONFIG"
 	chmod 700 "$CONFIG"
 	install -m 755 "$SRC/scripts/elsebot" "$BIN/elsebot"
-	local manager=process previous="" previous_autostart=""
-	if [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ]; then
+	local manager=process previous="" previous_autostart="" previous_app=""
+	if want_server && [ -z "${ELSE_INSTALL_NO_SYSTEMD:-}" ]; then
 		if [ "$DISTRO" = macos ]; then
 			manager=launchd
 		elif systemctl --user show-environment >/dev/null 2>&1; then
@@ -593,10 +658,14 @@ install_commands() {
 	if [ -f "$CONFIG/elsebot.env" ]; then
 		previous="$(sed -n 's/^ELSEBOT_MANAGER=//p' "$CONFIG/elsebot.env")"
 		previous_autostart="$(sed -n 's/^ELSEBOT_AUTOSTART=//p' "$CONFIG/elsebot.env")"
+		previous_app="$(sed -n 's/^ELSEBOT_APP=//p' "$CONFIG/elsebot.env")"
+		if ! want_server; then SERVICE="$(sed -n 's/^ELSEBOT_SERVICE=//p' "$CONFIG/elsebot.env")"; fi
 	fi
-	if [ -n "$previous" ] && [ "$previous" != "$manager" ] && [ -x "$BIN/elsebot" ]; then
+	if ! want_server && [ -n "$previous" ]; then manager="$previous"; fi
+	if want_server && [ -n "$previous" ] && [ "$previous" != "$manager" ] && [ -x "$BIN/elsebot" ]; then
 		elsebot stop >/dev/null 2>&1 || true
 	fi
+	if ! want_server; then AUTOSTART="$previous_autostart"; fi
 	if [ -z "$AUTOSTART" ]; then AUTOSTART="$previous_autostart"; fi
 	if [ -z "$AUTOSTART" ] && want_server; then
 		AUTOSTART=0
@@ -607,16 +676,19 @@ install_commands() {
 		fi
 	fi
 	printf 'ELSEBOT_SERVICE=%s\nELSEBOT_MANAGER=%s\nELSEBOT_AUTOSTART=%s\n' \
-		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env"
+		"$SERVICE" "$manager" "$AUTOSTART" >"$CONFIG/elsebot.env.tmp"
 	if [ "$DISTRO" = macos ] && want_app; then
 		if [ -d "$HOME/.else" ] && [ "$(cd "$ELSE_HOME" && pwd -P)" = "$(cd "$HOME/.else" && pwd -P)" ]; then
 			APP="$HOME/Applications/else.bot.app"
 		fi
 		publish_app
-		printf 'ELSEBOT_APP=%q\n' "$APP" >>"$CONFIG/elsebot.env"
+		printf 'ELSEBOT_APP=%q\n' "$APP" >>"$CONFIG/elsebot.env.tmp"
+	elif [ -n "$previous_app" ]; then
+		printf 'ELSEBOT_APP=%s\n' "$previous_app" >>"$CONFIG/elsebot.env.tmp"
 	fi
-	if want_server; then ln -sfn ../current/bin/else-api "$BIN/else-api"; fi
-	if want_app; then ln -sfn ../current/bin/else-desktop "$BIN/else-desktop"; fi
+	mv -f "$CONFIG/elsebot.env.tmp" "$CONFIG/elsebot.env"
+	if want_server; then ln -sfn ../server-current/bin/else-api "$BIN/else-api"; fi
+	if want_app; then ln -sfn ../app-current/bin/else-desktop "$BIN/else-desktop"; fi
 	if [ ! -e "$LINK_PREFIX/bin/elsebot" ] || [ -L "$LINK_PREFIX/bin/elsebot" ]; then
 		ln -sfn "$BIN/elsebot" "$LINK_PREFIX/bin/elsebot"
 	fi
@@ -640,8 +712,8 @@ EOF
 
 publish_app() {
 	local status=0
-	python3 "$SRC/scripts/macos_app.py" --binary "$CURRENT/bin/else-desktop" --app "$APP" \
-		--home "$ELSE_HOME" --version "$("$CURRENT/bin/else-desktop" --version | awk '{print $2}')" || status=$?
+	python3 "$SRC/scripts/macos_app.py" --binary "$APP_CURRENT/bin/else-desktop" --app "$APP" \
+		--home "$ELSE_HOME" --version "$("$APP_CURRENT/bin/else-desktop" --version | awk '{print $2}')" || status=$?
 	case "$status" in
 	0) ;;
 	3)
@@ -815,7 +887,7 @@ prepare_guest_image() {
 run_setup() {
 	step "else-api setup"
 	local log="$LOGS/setup.log"
-	if (cd "$CONFIG" && "$CURRENT/bin/else-api" setup) >"$log" 2>&1; then
+	if (cd "$CONFIG" && "$SERVER_CURRENT/bin/else-api" setup) >"$log" 2>&1; then
 		grep -v ' INFO \| WARN ' "$log" | sed 's/^/    /'
 		return 0
 	fi
@@ -930,7 +1002,7 @@ backup_if_migrating() {
 	[ -z "$added" ] && return 0
 	step "Backup before the database changes"
 	local log="$LOGS/backup-before-$to.log"
-	if (cd "$CONFIG" && "$CURRENT/bin/else-api" backup) >"$log" 2>&1; then
+	if (cd "$CONFIG" && "$SERVER_CURRENT/bin/else-api" backup) >"$log" 2>&1; then
 		ok "$(sed -n 's/^backup set: //p' "$log" | tail -1)"
 	else
 		tail -10 "$log" >&2
@@ -981,7 +1053,12 @@ stage2() {
 	local target installed mode database_url=""
 	target="$(source_version)"
 	[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
+	migrate_pointers
 	choose_components
+	OLD_APP="$(readlink "$APP_CURRENT" 2>/dev/null || true)"
+	OLD_SERVER="$(readlink "$SERVER_CURRENT" 2>/dev/null || true)"
+	OLD_APP_PREVIOUS="$(readlink "$ELSE_HOME/app-previous" 2>/dev/null || true)"
+	OLD_SERVER_PREVIOUS="$(readlink "$ELSE_HOME/server-previous" 2>/dev/null || true)"
 	installed="$(installed_version || true)"
 	if want_server; then
 		[ ! -f "$ENV_FILE" ] || database_url="$(env_value DATABASE_URL)"
@@ -1027,8 +1104,8 @@ stage2() {
 		step "Switch to $target"
 		switch_to "$target"
 		install_commands
-		if [ -n "$installed" ] && [ "$installed" != "$target" ]; then prune_versions "$target" "$installed"; fi
-		ok "the app is installed; no server runs on this machine"
+		if [ -n "$installed" ] && [ "$installed" != "$target" ]; then prune_versions; fi
+		ok "the app is installed"
 	fi
 	if want_app; then
 		if [ "$DISTRO" = macos ]; then
@@ -1037,7 +1114,7 @@ stage2() {
 			next "open the app: elsebot desktop (or else.bot in your launcher)"
 		fi
 	fi
-	if ! want_server; then
+	if ! want_server && [ ! -L "$SERVER_CURRENT" ]; then
 		next "on first launch, enter your server's address and owner token (on the server: cat ~/.else/data/owner-token)"
 	fi
 	remember_components
@@ -1078,12 +1155,12 @@ install_server() {
 		if ! run_setup || ! start_api; then
 			warn "$target did not start; switching back to $installed"
 			elsebot stop >/dev/null 2>&1 || true
-			switch_to "$installed"
+			restore_pointers
 			install_commands
 			elsebot start >/dev/null 2>&1 || true
 			die "the update to $target failed and $installed runs again (logs: elsebot logs). If the database was changed, restore the backup above."
 		fi
-		prune_versions "$target" "$installed"
+		prune_versions
 		ok "updated to $target (kept $installed in $VERSIONS)"
 	else
 		switch_to "$target"
@@ -1143,9 +1220,23 @@ main() {
 	info "System: $DISTRO_NAME ($ARCH)"
 	if [ "${ELSE_INSTALL_STAGE:-1}" != 2 ]; then
 		ensure_bootstrap_tools
+		lock_installation
 		resolve_release
 		fetch_source
-		if ! bash "$SRC/install.sh" --help 2>/dev/null | grep -q -- '--from-source'; then
+		local installer_help inventory
+		installer_help="$(bash "$SRC/install.sh" --help 2>/dev/null)"
+		inventory="$(installed_components)"
+		if ! printf '%s' "$installer_help" | grep -q -- 'app-current'; then
+			if [ -L "$APP_CURRENT" ] || [ -L "$SERVER_CURRENT" ]; then
+				die "this release's installer predates component pointers; choose a release that supports component updates"
+			fi
+			case "$COMPONENTS_FLAG/$inventory" in
+			app/server | app/both | server/app | server/both)
+				die "this release's installer cannot update components independently; choose a newer release or update both components explicitly with --both"
+				;;
+			esac
+		fi
+		if ! printf '%s' "$installer_help" | grep -q -- '--from-source'; then
 			[ "$FROM_SOURCE" = 1 ] || die "this release's installer requires --from-source"
 			local argument forwarded=()
 			for argument in ${ARGS[@]+"${ARGS[@]}"}; do
@@ -1154,9 +1245,11 @@ main() {
 			ARGS=(${forwarded[@]+"${forwarded[@]}"})
 		fi
 		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
-		exec bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		return
 	fi
 
+	lock_installation
 	mkdir -p "$LOGS"
 	stage2
 	summary

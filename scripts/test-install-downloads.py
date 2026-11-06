@@ -30,6 +30,18 @@ detect_platform() {
 }
 linux_packages() { apt_packages > "$TEST_PACKAGES"; }
 ensure_bootstrap_tools() { command -v git curl >/dev/null; }
+if [ "${TEST_SERVER:-0}" = 1 ]; then
+    linux_access() { :; }
+    ensure_msb() { :; }
+    decide_guest_image() { GUEST_IMAGE_STATE=skip; }
+    refresh_provider_paths() { :; }
+    check_providers() { :; }
+    api_running() { [ "${TEST_RUNNING:-1}" = 1 ]; }
+    prepare_running_api() { echo gate >> "$ELSE_HOME/server-actions"; }
+    elsebot() { echo "$*" >> "$ELSE_HOME/server-actions"; }
+    run_setup() { [ "${TEST_FAIL_SETUP:-0}" != 1 ]; }
+    start_api() { echo ready >> "$ELSE_HOME/server-actions"; }
+fi
 '''
 
 ACTION = r'''
@@ -44,7 +56,7 @@ fi
 '''
 
 HARNESS = SETUP + ACTION
-TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi\n' + HARNESS
+TAGGED_INSTALLER = 'if [ "${1:-}" = --help ]; then echo --from-source app-current; exit 0; fi\n' + HARNESS
 
 
 def executable(path, text):
@@ -99,7 +111,8 @@ class Downloads(unittest.TestCase):
         self.home = self.root / "home"
         self.home.mkdir()
         self.installation = self.home / "installation"
-        self.environment = dict(os.environ, HOME=str(self.home), ELSE_HOME=str(self.installation),
+        self.environment = dict(os.environ, HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / ".config"),
+                                XDG_DATA_HOME=str(self.home / ".local/share"), ELSE_HOME=str(self.installation),
                                 ELSE_REPO=str(self.repo), ELSE_RELEASES_URL=f"http://127.0.0.1:{server.server_port}/releases",
                                 ELSE_INSTALL_NO_SYSTEMD="1", ELSE_AUTOSTART="0",
                                 TEST_INSTALLER=str(ROOT / "install.sh"), TEST_DISTRO="debian", TEST_ARCH="x86_64",
@@ -189,6 +202,164 @@ class Downloads(unittest.TestCase):
         self.assertEqual((self.installation / "current").readlink(), Path("versions/0.0.2"))
         self.assertTrue((self.installation / "versions/0.0.1/bin/else-desktop").is_file())
 
+    def pointer(self, name):
+        return (self.installation / name).readlink()
+
+    def install_both(self, version="0.0.1", **environment):
+        self.run_installer("--yes", "--both", "--version", version, TEST_SERVER="1", **environment)
+
+    def test_app_update_preserves_server_and_installed_inventory(self):
+        self.install_both()
+        actions = self.installation / "server-actions"
+        actions.unlink()
+        settings = self.installation / "config/elsebot.env"
+        settings.write_text("ELSEBOT_SERVICE=custom-api\nELSEBOT_MANAGER=systemd\nELSEBOT_AUTOSTART=1\n")
+        self.run_installer("--yes", "--app-only", "--no-autostart", "--version", "0.0.2")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertEqual(self.pointer("server-current"), Path("versions/0.0.1"))
+        self.assertEqual(self.pointer("current"), Path("versions/0.0.1"))
+        self.assertEqual((self.installation / "config/components").read_text(), "both\n")
+        self.assertEqual(settings.read_text(), "ELSEBOT_SERVICE=custom-api\nELSEBOT_MANAGER=systemd\nELSEBOT_AUTOSTART=1\n")
+        self.assertFalse(actions.exists(), "app updates must never call the server")
+        self.assertEqual((self.installation / "bin/else-api").readlink(), Path("../server-current/bin/else-api"))
+        self.assertEqual((self.installation / "bin/else-desktop").readlink(), Path("../app-current/bin/else-desktop"))
+
+    def test_server_update_keeps_app_and_macos_publication(self):
+        self.install_both(TEST_DISTRO="macos", TEST_ARCH="aarch64")
+        app = self.installation / "Applications/else.bot.app/Contents/MacOS/else-desktop"
+        original = app.read_bytes()
+        app_pointer_time = (self.installation / "app-current").lstat().st_mtime_ns
+        desktop_link_time = (self.installation / "bin/else-desktop").lstat().st_mtime_ns
+        metadata = self.installation / "config/elsebot.env"
+        app_setting = next(line for line in metadata.read_text().splitlines() if line.startswith("ELSEBOT_APP="))
+        self.run_installer("--yes", "--server-only", "--version", "0.0.2", TEST_SERVER="1",
+                           TEST_DISTRO="macos", TEST_ARCH="aarch64")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.1"))
+        self.assertEqual(self.pointer("server-current"), Path("versions/0.0.2"))
+        self.assertEqual(self.pointer("current"), Path("versions/0.0.2"))
+        self.assertEqual(app.read_bytes(), original)
+        self.assertEqual((self.installation / "app-current").lstat().st_mtime_ns, app_pointer_time)
+        self.assertEqual((self.installation / "bin/else-desktop").lstat().st_mtime_ns, desktop_link_time)
+        self.assertIn(app_setting, metadata.read_text().splitlines())
+        self.assertEqual((self.installation / "config/components").read_text(), "both\n")
+
+    def test_legacy_combined_migration_pins_both_before_app_activation(self):
+        self.install_both()
+        for name in ("app-current", "server-current"):
+            (self.installation / name).unlink()
+        for binary in ("else-api", "else-desktop"):
+            link = self.installation / f"bin/{binary}"
+            link.unlink()
+            link.symlink_to(f"../current/bin/{binary}")
+        target = self.installation / "versions/0.0.1"
+        (self.installation / "current").unlink()
+        (self.installation / "current").symlink_to(target)
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.assertEqual(self.pointer("server-current"), target)
+        self.assertEqual(self.pointer("app-previous"), target)
+        self.assertEqual(self.pointer("current"), target)
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertEqual((self.installation / "bin/else-api").readlink(), Path("../server-current/bin/else-api"))
+        self.assertEqual((self.installation / "bin/else-desktop").readlink(), Path("../app-current/bin/else-desktop"))
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.assertEqual(self.pointer("server-current"), target, "migration retry must keep the server pinned")
+
+    def test_adding_components_keeps_the_existing_components_version(self):
+        self.run_installer("--yes", "--server-only", "--version", "0.0.1", TEST_SERVER="1")
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.assertEqual(self.pointer("server-current"), Path("versions/0.0.1"))
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertEqual((self.installation / "config/components").read_text(), "both\n")
+
+    def test_unsafe_old_component_installer_is_refused(self):
+        self.install_both()
+        (self.repo / "install.sh").write_text('if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi\nexit 73\n')
+        self.git("add", "install.sh")
+        self.git("commit", "-qm", "old installer")
+        self.git("tag", "-f", "v0.0.2")
+        result = self.run_installer("--yes", "--app-only", "--version", "0.0.2", success=False)
+        self.assertIn("predates component pointers", result.stderr)
+        self.assertEqual(self.pointer("server-current"), Path("versions/0.0.1"))
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.1"))
+        self.assertFalse((self.installation / "run/install.lock").exists())
+
+    def test_command_consumers_use_their_components_release(self):
+        self.install_both()
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        for arguments, expected in ((["version"], "0.0.1"), (["api", "--version"], "else-api 0.0.1"),
+                                    (["desktop", "--version"], "else-desktop 0.0.2")):
+            result = subprocess.run([str(self.installation / "bin/elsebot"), *arguments],
+                                    env=self.environment, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), expected)
+        stubs = self.root / "stubs"
+        executable(stubs / "systemctl", "#!/bin/sh\nexit 0\n")
+        metadata = self.installation / "config/elsebot.env"
+        metadata.write_text("ELSEBOT_SERVICE=fixture-api\nELSEBOT_MANAGER=systemd\nELSEBOT_AUTOSTART=0\n")
+        subprocess.run([str(self.installation / "bin/elsebot"), "service-install"], check=True,
+                       env=dict(self.environment, PATH=f"{stubs}:{os.environ['PATH']}"), capture_output=True)
+        unit = self.home / ".config/systemd/user/fixture-api.service"
+        self.assertIn(f"ExecStart={self.installation}/server-current/bin/else-api serve", unit.read_text())
+        executable(stubs / "plutil", "#!/bin/sh\nexit 0\n")
+        metadata.write_text("ELSEBOT_SERVICE=fixture-api\nELSEBOT_MANAGER=launchd\nELSEBOT_AUTOSTART=0\n")
+        subprocess.run([str(self.installation / "bin/elsebot"), "service-install"], check=True,
+                       env=dict(self.environment, PATH=f"{stubs}:{os.environ['PATH']}"), capture_output=True)
+        plist = self.installation / "config/bot.else.fixture-api.plist"
+        self.assertEqual(plistlib.loads(plist.read_bytes())["ProgramArguments"],
+                         [f"{self.installation}/server-current/bin/else-api", "serve"])
+
+    def test_default_update_still_updates_both_installed_components(self):
+        self.install_both()
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.run_installer("--yes", "--version", "0.0.2", TEST_SERVER="1")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertEqual(self.pointer("server-current"), Path("versions/0.0.2"))
+
+    def test_failed_server_update_restores_each_selected_component_and_rollback(self):
+        self.install_both()
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        pointers = {name: self.pointer(name) for name in ("app-current", "server-current", "app-previous", "current")}
+        for component in ("--server-only", "--both"):
+            with self.subTest(component=component):
+                self.run_installer("--yes", component, "--version", "0.0.2", success=False,
+                                   TEST_SERVER="1", TEST_FAIL_SETUP="1")
+                self.assertEqual({name: self.pointer(name) for name in pointers}, pointers)
+                self.assertFalse((self.installation / "server-previous").exists())
+        self.assertTrue((self.installation / "versions/0.0.1/bin/else-api").is_file())
+        self.assertTrue((self.installation / "versions/0.0.2/bin/else-desktop").is_file())
+
+    def test_prune_retains_all_active_and_previous_component_releases(self):
+        self.install_both()
+        for version in ("0.0.3", "0.0.4", "0.0.5"):
+            (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+            self.git("add", "Cargo.toml")
+            self.git("commit", "-qm", version)
+            self.git("tag", f"v{version}")
+            self.assets(version)
+        self.run_installer("--yes", "--server-only", "--version", "0.0.2", TEST_SERVER="1")
+        for version in ("0.0.3", "0.0.4", "0.0.5"):
+            self.run_installer("--yes", "--app-only", "--version", version)
+        kept = {path.name for path in (self.installation / "versions").iterdir()}
+        self.assertEqual(kept, {"0.0.1", "0.0.2", "0.0.4", "0.0.5"})
+        self.assertEqual(self.pointer("server-previous"), Path("versions/0.0.1"))
+        self.assertEqual(self.pointer("app-previous"), Path("versions/0.0.4"))
+
+    def test_installation_lock_is_held_across_tagged_installer(self):
+        (self.repo / "install.sh").write_text(
+            'if [ "${1:-}" = --help ]; then echo --from-source app-current; exit 0; fi\n'
+            'test -d "$ELSE_HOME/run/install.lock" || exit 71\n'
+            'echo held > "$ELSE_HOME/lock-observed"\n' + HARNESS)
+        self.git("add", "install.sh")
+        self.git("commit", "-qm", "observe installer lock")
+        self.git("tag", "-f", "v0.0.2")
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.assertTrue((self.installation / "lock-observed").is_file())
+        lock = self.installation / "run/install.lock"
+        self.assertFalse(lock.exists())
+        lock.mkdir()
+        result = self.run_installer("--yes", "--app-only", "--version", "0.0.1", success=False)
+        self.assertIn("another installer holds", result.stderr)
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+
     def test_failed_publication_never_exposes_an_incomplete_version(self):
         self.run_installer(TEST_ACTION="release", ELSE_VERSION="0.0.1")
         result = self.run_installer(success=False, before_action='mv() { return 74; }\n',
@@ -212,7 +383,7 @@ mv() {
 
     def test_versioned_installer_handoff(self):
         (self.repo / "install.sh").write_text('''
-if [ "${1:-}" = --help ]; then echo --from-source; exit 0; fi
+if [ "${1:-}" = --help ]; then echo --from-source app-current; exit 0; fi
 printf '%s\\n' "$ELSE_INSTALL_STAGE" > "$TEST_PHASE"
 ''' + HARNESS)
         self.git("add", "install.sh")

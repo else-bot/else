@@ -107,6 +107,8 @@ pub struct Limits {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Capabilities {
+    #[serde(default)]
+    pub api_version: Option<String>,
     pub providers: Vec<ProviderInfo>,
     pub limits: Limits,
     /// What new bots start with.

@@ -21,6 +21,12 @@ pub(super) struct View {
     _remove: Option<Task<()>>,
 }
 
+impl View {
+    pub(super) fn has_unsaved_work(&self) -> bool {
+        self.removing.is_some()
+    }
+}
+
 impl Shell {
     pub(super) fn open_mcp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = &self.active else { return };

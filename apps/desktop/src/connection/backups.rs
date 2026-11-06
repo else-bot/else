@@ -30,6 +30,9 @@ pub(super) struct View {
 }
 
 impl View {
+    pub(super) fn has_unsaved_work(&self) -> bool {
+        self.editor.is_some() || self.busy()
+    }
     fn busy(&self) -> bool {
         self.operation != Operation::Idle
     }

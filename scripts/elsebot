@@ -22,6 +22,10 @@ self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
 ELSE_HOME="${ELSE_HOME:-$(cd "$(dirname "$self")/.." && pwd -P)}"
 CONFIG="$ELSE_HOME/config"
 CURRENT="$ELSE_HOME/current"
+APP_CURRENT="$ELSE_HOME/app-current"
+SERVER_CURRENT="$ELSE_HOME/server-current"
+[ -e "$APP_CURRENT" ] || [ -L "$APP_CURRENT" ] || APP_CURRENT="$CURRENT"
+[ -e "$SERVER_CURRENT" ] || [ -L "$SERVER_CURRENT" ] || SERVER_CURRENT="$CURRENT"
 LOGS="$ELSE_HOME/logs"
 RUN="$ELSE_HOME/run"
 ELSEBOT_SERVICE=else-api
@@ -56,7 +60,11 @@ dotenv_value() {
 }
 setting() { [ -f "$CONFIG/.env" ] && dotenv_value "$(sed -n "s/^$1=//p" "$CONFIG/.env" | tail -1)"; }
 api_addr() { local bind; bind="$(setting ELSE_API_BIND)"; echo "${bind:-127.0.0.1:7878}"; }
-installed() { [ -x "$CURRENT/bin/$1" ] && "$CURRENT/bin/$1" --version 2>/dev/null | awk '{print $2}'; }
+installed() {
+	local pointer="$SERVER_CURRENT"
+	[ "$1" != else-desktop ] || pointer="$APP_CURRENT"
+	[ -x "$pointer/bin/$1" ] && "$pointer/bin/$1" --version 2>/dev/null | awk '{print $2}'
+}
 running_version() {
 	curl -fsS --max-time 3 "http://$(api_addr)/healthz" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
 }
@@ -100,7 +108,7 @@ launchd_install() {
 	<string>$(xml "$LABEL")</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>$(xml "$CURRENT/bin/else-api")</string>
+		<string>$(xml "$SERVER_CURRENT/bin/else-api")</string>
 		<string>serve</string>
 	</array>
 	<key>WorkingDirectory</key>
@@ -179,7 +187,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=$CONFIG
-ExecStart=$CURRENT/bin/else-api serve
+ExecStart=$SERVER_CURRENT/bin/else-api serve
 Environment=PATH=$ELSE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=5
@@ -209,9 +217,9 @@ process_pid() {
 }
 
 need_api() {
-	[ -x "$CURRENT/bin/else-api" ] && return 0
-	[ -x "$CURRENT/bin/else-desktop" ] &&
-		die "this installation in $ELSE_HOME has only the app; add the server with: elsebot update --both"
+	[ -x "$SERVER_CURRENT/bin/else-api" ] && return 0
+	[ -x "$APP_CURRENT/bin/else-desktop" ] &&
+		die "this installation in $ELSE_HOME has only the app; add the server with: elsebot update --server-only"
 	die "else.bot is not installed in $ELSE_HOME"
 }
 
@@ -229,10 +237,10 @@ start() {
 		# command: perl (part of macOS) calls setsid(2) and execs the API, so
 		# the pid stays the API's.
 		if command -v setsid >/dev/null 2>&1; then
-			nohup setsid "$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+			nohup setsid "$SERVER_CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
 		else
 			nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
-				"$CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
+				"$SERVER_CURRENT/bin/else-api" serve >>"$LOGS/else-api.log" 2>&1 </dev/null &
 		fi
 		echo $! >"$(pid_file)"
 	)
@@ -268,8 +276,9 @@ cmd="${1:-status}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
 status)
-	echo "installed: $(installed else-api || installed else-desktop || echo none) ($ELSE_HOME)"
-	if [ ! -x "$CURRENT/bin/else-api" ]; then
+	echo "server:    $(installed else-api || echo none) ($ELSE_HOME)"
+	echo "app:       $(installed else-desktop || echo none)"
+	if [ ! -x "$SERVER_CURRENT/bin/else-api" ]; then
 		echo "API:       not on this machine (the app connects to a server elsewhere)"
 	elif is_active; then
 		echo "API:       running on http://$(api_addr), version $(running_version || echo unknown) ($ELSEBOT_MANAGER)"
@@ -291,8 +300,8 @@ update)
 	ELSE_HOME="$ELSE_HOME" bash "$tmp" "$@"
 	;;
 desktop)
-	[ -x "$CURRENT/bin/else-desktop" ] || die "the app is not installed; add it with: elsebot update --both"
-	case "${1:-}" in version | --version | -V) exec "$CURRENT/bin/else-desktop" "$@" ;; esac
+	[ -x "$APP_CURRENT/bin/else-desktop" ] || die "the app is not installed; add it with: elsebot update --app-only"
+	case "${1:-}" in version | --version | -V) exec "$APP_CURRENT/bin/else-desktop" "$@" ;; esac
 	cd /
 	unset ELSE_DESKTOP_CONFIG_FILE ELSE_API_URL ELSE_OWNER_TOKEN ELSE_OWNER_TOKEN_FILE OWNER_TOKEN_FILE ELSE_DATA_DIR
 	if [ "$(uname -s)" = Darwin ]; then
@@ -301,7 +310,7 @@ desktop)
 		if [ $# -gt 0 ]; then exec open -a "$ELSEBOT_APP" --args "$@"; fi
 		exec open -a "$ELSEBOT_APP"
 	fi
-	ELSE_HOME="$ELSE_HOME" exec "$CURRENT/bin/else-desktop" "$@"
+	ELSE_HOME="$ELSE_HOME" exec "$APP_CURRENT/bin/else-desktop" "$@"
 	;;
 start) start ;;
 stop) stop ;;
@@ -316,7 +325,7 @@ logs)
 	;;
 api)
 	need_api
-	cd "$CONFIG" && exec "$CURRENT/bin/else-api" "$@"
+	cd "$CONFIG" && exec "$SERVER_CURRENT/bin/else-api" "$@"
 	;;
 db)
     command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is not installed (needed only for SQL inspection)"
@@ -338,7 +347,8 @@ paths)
 	cat <<EOF
 home:        $ELSE_HOME
 source:      $ELSE_HOME/src
-release:     $(readlink "$CURRENT" 2>/dev/null || echo none)
+server:      $(readlink "$SERVER_CURRENT" 2>/dev/null || echo none)
+app release: $(readlink "$APP_CURRENT" 2>/dev/null || echo none)
 settings:    $CONFIG/.env
 app server:  $CONFIG/desktop.json
 ${ELSEBOT_APP:+app:         $ELSEBOT_APP
