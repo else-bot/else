@@ -64,6 +64,7 @@ gpui_kit::assets::icon_assets!(
         Users,
         MessageSquareOff,
         MessageSquare,
+        Plug,
         CloudUpload,
         Pencil,
         Lock,
