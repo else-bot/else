@@ -17,6 +17,7 @@ done
 [ -n "$bump" ] || usage
 
 remote=origin
+echo "Fetching main from $remote..."
 git fetch --no-tags "$remote" "+refs/heads/main:refs/remotes/$remote/main" ||
 	die "cannot fetch main from $remote"
 
@@ -39,9 +40,11 @@ remote_tag="$(git ls-remote --tags "$remote" "refs/tags/$tag")" ||
 
 ensure_pr() {
 	local url body
+	echo "Looking up the pull request for $branch..."
 	url="$(gh pr list --base main --head "$branch" --state open --json url --jq '.[0].url // empty')" ||
 		die "gh cannot list pull requests; run gh auth login"
 	if [ -z "$url" ]; then
+		echo "Opening the release pull request..."
 		body="$(mktemp)"
 		cat >"$body" <<EOF
 Releases $tag from main.
@@ -75,15 +78,34 @@ fi
 
 work="$(mktemp -d)"
 trap 'git worktree remove --force "$work" >/dev/null 2>&1 || rm -rf "$work"' EXIT
+echo "Preparing $branch in a temporary worktree..."
 git worktree add -q --detach "$work" "$remote/main"
 (
 	cd "$work"
+	echo "Bumping workspace and lockfile versions to $version..."
 	sed -i.bak "/^\[workspace.package\]/,/^\[/s/^version = \".*\"/version = \"$version\"/" Cargo.toml
 	rm -f Cargo.toml.bak
-	cargo update --workspace -q
+	python3 - "$current" "$version" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+current, version = sys.argv[1:]
+lock = Path("Cargo.lock")
+contents = lock.read_text()
+for name in ("else-api", "else-desktop"):
+    contents, count = re.subn(
+        rf'(?m)^(name = "{name}"\nversion = )"{re.escape(current)}"$',
+        lambda match: match[1] + f'"{version}"', contents)
+    if count != 1:
+        sys.exit(f"release: expected one {name} {current} entry in Cargo.lock, found {count}")
+lock.write_text(contents)
+PY
 	[ "$(git diff --name-only | sort | tr '\n' ' ')" = "Cargo.lock Cargo.toml " ] ||
 		die "unexpected changes after the bump: $(git diff --name-only | tr '\n' ' ')"
-	git commit -q -am "chore(release): $tag"
-	git push -q "$remote" "HEAD:refs/heads/$branch" || die "cannot push $branch to $remote"
+	echo "Committing $tag (Git hooks may run)..."
+	git commit -am "chore(release): $tag"
+	echo "Pushing $branch to $remote..."
+	git push "$remote" "HEAD:refs/heads/$branch" || die "cannot push $branch to $remote"
 )
 ensure_pr
