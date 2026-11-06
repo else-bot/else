@@ -245,6 +245,65 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(question_row(&app, question).await.1, Some("b".into()));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn five_options_accept_exactly_one_answer_by_default_or_explicitly() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    for multiple in [None, Some(false)] {
+        let (turn, token) = running(&app, &main).await;
+        let mut args = json!({
+            "question": "What should I prepare for the changelog?",
+            "choices": ["Skip posting", "Prepare a Discord + Telegram draft",
+                "Prepare a Discord + Telegram + X draft", "Edit the draft first", "Something else"],
+        });
+        if let Some(multiple) = multiple {
+            args["multiple"] = json!(multiple);
+        }
+        let pending = tool_text(&tool(&app, &token, "ask_owner", args).await);
+        let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(pending["multiple"], false);
+        wait(&app, turn, "waiting").await;
+        let shown = shown_turn(&app, &main, turn).await;
+        let card = &shown["questions"][0];
+        assert_eq!(card["multiple"], false);
+        assert_eq!(card["choices"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            card["choices"][3],
+            json!({ "id": "d", "label": "Edit the draft first" })
+        );
+        assert_eq!(
+            card["choices"][4],
+            json!({ "id": "e", "label": "Something else" })
+        );
+
+        for invalid in [json!(["d"]), json!(["a", "d"])] {
+            let refused = select(&app, &main, question, invalid).await;
+            assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.body["error"]["code"], "invalid_choice");
+        }
+        assert_eq!(status(&app, turn).await, "waiting");
+        let chosen = answer(&app, &main, question, "d").await;
+        assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+        assert_eq!(chosen.body["question"]["answer"], "d");
+        assert_eq!(chosen.body["requeued"], true);
+        wait(&app, turn, "completed").await;
+        let shown = shown_turn(&app, &main, turn).await;
+        assert_eq!(shown["questions"][0]["status"], "answered");
+        assert_eq!(shown["questions"][0]["answer"], "d");
+        assert_eq!(journaled(&app, &main, question).await["answer"], "d");
+        let packet = synthetic.packets().await.last().unwrap().clone();
+        assert!(
+            packet.contains("The owner chose: Edit the draft first"),
+            "{packet}"
+        );
+        assert_eq!(
+            answer(&app, &main, question, "a").await.status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(question_row(&app, question).await.1, Some("d".into()));
+    }
+}
+
 fn multiple_args() -> Value {
     json!({
         "question": "Which inbox tasks should I take care of?",

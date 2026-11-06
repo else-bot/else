@@ -130,18 +130,24 @@ def draft_reply(turn, latest, packet, stopped):
 
 def stream(turn, latest, packet, stopped):
     try:
-        question_modes = {'[ui:question]': False, '[ui:multiple]': True}
+        question_modes = {'[ui:question]': False, '[ui:single]': False, '[ui:multiple]': True}
         marker = next((marker for marker in question_modes if packet.rstrip().endswith(marker)), None)
         if marker and '[else.bot owner answers]' not in packet:
             multiple = question_modes[marker]
-            outgoing_tool('ask_owner', {
+            args = {
                 'question': 'Which inbox tasks should I take care of?' if multiple else
                     'Should I automatically archive cold recruiter emails in your personal Gmail?',
                 'choices': ['Archive cold recruiter emails', 'Unsubscribe from newsletters',
                     'Label receipts and invoices', 'Draft replies to starred emails',
                     'Summarize unread threads'] if multiple else ['Yes, archive them', 'No, keep them visible'],
                 'multiple': multiple,
-            })
+            }
+            if marker == '[ui:single]':
+                args.update(question='What should I prepare for the changelog?', choices=[
+                    'Skip posting', 'Prepare a Discord + Telegram draft',
+                    'Prepare a Discord + Telegram + X draft', 'Edit the draft first',
+                    'Something else'])
+            outgoing_tool('ask_owner', args)
             finish(turn, stopped, 'completed')
             return
         if draft_reply(turn, latest, packet, stopped):
