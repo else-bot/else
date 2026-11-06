@@ -1,4 +1,5 @@
 use super::ElseApp;
+use super::bot_activity::{BotActivity, Disclosure, group_activity};
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
 use super::task_reply::state::{TaskReply, task_replies};
@@ -28,9 +29,17 @@ pub(super) struct TranscriptRow {
     pub(super) footer_stamp: Option<DateTime<Utc>>,
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
+    pub(super) activity: Option<BotActivity>,
     routine_status: Option<(String, bool)>,
     reaction: Option<crate::model::ReactionKind>,
     state: Option<String>,
+}
+
+impl TranscriptRow {
+    pub(super) fn contains(&self, key: RowKey) -> bool {
+        self.key == key
+            || matches!(key, RowKey::Item(id) if self.activity.as_ref().is_some_and(|activity| activity.items.contains(&id)))
+    }
 }
 
 fn first_unread_row(
@@ -193,6 +202,7 @@ pub(super) struct ConversationView {
     pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
+    pub(super) bot_disclosures: HashSet<Disclosure>,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
@@ -213,7 +223,7 @@ impl ConversationView {
         };
         self.rows
             .iter()
-            .position(|row| row.key == key)
+            .position(|row| row.contains(key))
             .or_else(|| task.and_then(|task| self.rows.iter().position(|row| row.key == task)))
     }
 
@@ -238,6 +248,7 @@ impl ConversationView {
             social_forms: HashMap::new(),
             expanded_drafts: HashSet::new(),
             expanded_tasks: HashSet::new(),
+            bot_disclosures: HashSet::new(),
             reply_transitions: HashMap::new(),
             _reply_clock: None,
             latest_seen: false,
@@ -559,10 +570,12 @@ impl ElseApp {
                         RowKey::Task(id) => tasks.get(&id).cloned(),
                         _ => None,
                     },
+                    activity: None,
                     state,
                 }
             })
             .collect();
+        let rows = group_activity(rows, conversation);
         let old = std::mem::take(&mut view.rows);
         view.reply_transitions
             .retain(|_, at| at.elapsed() < Duration::from_millis(320));
@@ -663,7 +676,7 @@ impl ElseApp {
                     .map_or(key, |item| RowKey::Task(item.turn_id)),
                 _ => key,
             };
-            if let Some(ix) = rows.iter().position(|r| r.key == key) {
+            if let Some(ix) = rows.iter().position(|r| r.contains(key)) {
                 view.list.remeasure_items(ix..ix + 1);
             }
         }
@@ -810,6 +823,148 @@ mod tests {
         RowKey::Item(Uuid::from_u128(id))
     }
 
+    fn activity_conversation() -> Conversation {
+        let items: Vec<_> = (1..=8)
+            .map(|id| {
+                let mut item = json!({
+                    "id": Uuid::from_u128(id), "seq": id,
+                    "turn_id": Uuid::from_u128(id + 100),
+                    "kind": match id { 3 => "user", 6 => "assistant", _ => "status" },
+                    "text": format!("Full message {id}")
+                });
+                if matches!(id, 1 | 7) {
+                    item["bot_task"] = json!({
+                        "sender_bot_id": Uuid::from_u128(90), "sender_name": "Dev",
+                        "prompt": "Complete original task"
+                    });
+                } else if matches!(id, 2 | 4 | 5 | 8) {
+                    item["bot_reply"] = json!({
+                        "sender_bot_id": Uuid::from_u128(90), "sender_name": "Dev",
+                        "prompt": "Complete original task",
+                        "status": match id { 4 => "failed", 5 => "cancelled", _ => "completed" }
+                    });
+                }
+                item
+            })
+            .collect();
+        Conversation::from_snapshot(serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": items, "turns": [],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        })).unwrap()).unwrap()
+    }
+
+    fn transcript_row(key: RowKey) -> TranscriptRow {
+        TranscriptRow {
+            key,
+            unread_start: false,
+            footer_stamp: None,
+            routine: None,
+            task: None,
+            activity: None,
+            routine_status: None,
+            reaction: None,
+            state: None,
+        }
+    }
+
+    #[test]
+    fn bot_activity_groups_adjacent_exchanges_without_hiding_owner_or_action_rows() {
+        let c = activity_conversation();
+        let question = RowKey::Question(Uuid::from_u128(40));
+        let task = RowKey::Task(Uuid::from_u128(41));
+        let keys = [
+            item(1),
+            item(2),
+            item(3),
+            item(4),
+            item(5),
+            item(6),
+            question,
+            item(7),
+            item(8),
+            task,
+        ];
+        let rows = super::group_activity(keys.into_iter().map(transcript_row).collect(), Some(&c));
+        assert_eq!(
+            rows.iter().map(|row| row.key).collect::<Vec<_>>(),
+            [item(1), item(3), item(4), item(6), question, item(7), task]
+        );
+        assert_eq!(
+            rows[0].activity.as_ref().unwrap().items,
+            [Uuid::from_u128(1), Uuid::from_u128(2)]
+        );
+        assert_eq!(
+            rows[2].activity.as_ref().unwrap().items,
+            [Uuid::from_u128(4), Uuid::from_u128(5)]
+        );
+        assert!(rows[1].activity.is_none());
+        assert!(rows[3].activity.is_none());
+        assert_eq!(c.item(Uuid::from_u128(2)).unwrap().text, "Full message 2");
+        assert_eq!(
+            c.item(Uuid::from_u128(2))
+                .unwrap()
+                .bot_reply
+                .as_ref()
+                .unwrap()
+                .prompt,
+            "Complete original task"
+        );
+        let mut view = ConversationView::new(Uuid::from_u128(80));
+        view.conversation = Some(c);
+        view.rows = rows;
+        assert_eq!(view.row_index(item(2)), Some(0));
+        assert_eq!(view.row_index(item(5)), Some(2));
+        assert_eq!(view.row_index(item(6)), Some(3));
+    }
+
+    #[test]
+    fn bot_activity_keeps_unread_and_routine_boundaries() {
+        let c = activity_conversation();
+        let first = transcript_row(item(1));
+        let mut second = transcript_row(item(2));
+        second.unread_start = true;
+        let rows = super::group_activity(vec![first.clone(), second], Some(&c));
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].unread_start);
+        let mut routine = transcript_row(item(2));
+        routine.routine = Some(RoutineRow {
+            turn: Uuid::from_u128(102),
+            first: true,
+            last: true,
+        });
+        let rows = super::group_activity(vec![first, routine], Some(&c));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].routine.unwrap().turn, Uuid::from_u128(102));
+        assert_eq!(
+            rows[1].activity.as_ref().unwrap().items,
+            [Uuid::from_u128(2)]
+        );
+        let mut first = transcript_row(item(1));
+        first.routine = Some(RoutineRow {
+            turn: Uuid::from_u128(102),
+            first: true,
+            last: false,
+        });
+        let mut second = transcript_row(item(2));
+        second.routine = Some(RoutineRow {
+            turn: Uuid::from_u128(102),
+            first: false,
+            last: true,
+        });
+        let rows = super::group_activity(vec![first, second], Some(&c));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].routine,
+            Some(RoutineRow {
+                turn: Uuid::from_u128(102),
+                first: true,
+                last: true
+            })
+        );
+    }
+
     #[test]
     fn unread_divider_precedes_the_first_unread_reply_and_includes_appended_text() {
         let c = routine_conversation();
@@ -857,6 +1012,7 @@ mod tests {
             footer_stamp: None,
             routine: None,
             task: None,
+            activity: None,
             routine_status: None,
             reaction: None,
             state: None,
