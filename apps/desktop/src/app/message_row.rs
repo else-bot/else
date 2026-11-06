@@ -28,6 +28,36 @@ impl ElseApp {
         else {
             return div().into_any_element();
         };
+        if let RowKey::Item(id) = row.key
+            && let Some(view) = self.view.as_ref()
+            && let Some(conversation) = view.conversation.as_ref()
+            && let Some(item) = conversation.item(id)
+            && conversation.is_feedback_acknowledgement(item)
+        {
+            let bot = view.bot_id;
+            let position = crate::api::ReplyPosition {
+                item_seq: item.seq,
+                text_bytes: item.text.len() as i64,
+            };
+            let owner = cx.entity().downgrade();
+            return div()
+                .w_full()
+                .h_0()
+                .on_prepaint(move |bounds, window, cx| {
+                    let owner = owner.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = owner.update(cx, |app, cx| {
+                            app.reply_laid_out(
+                                bot,
+                                super::conversation::ReplyLayout { position, bounds },
+                                window,
+                                cx,
+                            );
+                        });
+                    });
+                })
+                .into_any_element();
+        }
         let body = if let Some(task) = row.task.as_ref() {
             self.render_task_reply(task, cx)
         } else {
@@ -168,32 +198,6 @@ impl ElseApp {
                 side.pr(px(60.))
             };
             side.child(card)
-        };
-        let reacted = |card: AnyElement, kind: ReactionKind| {
-            const HEIGHT: f32 = 30.;
-            div()
-                .relative()
-                .w_full()
-                .pt(px(HEIGHT / 2.))
-                .child(card)
-                .child(
-                    h_flex()
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .h(px(HEIGHT))
-                        .min_w(px(HEIGHT + 4.))
-                        .px_1p5()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(theme.secondary)
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(px(16.))
-                        .line_height(px(20.))
-                        .child(kind.mark()),
-                )
-                .into_any_element()
         };
         let note = |text: String, error: bool| {
             div()
@@ -351,7 +355,7 @@ impl ElseApp {
                     None => card.into_any_element(),
                 };
                 let card = match conversation.reaction_for(id).filter(|_| !user) {
-                    Some(kind) => reacted(card, kind),
+                    Some(kind) => with_reaction(card, kind, cx),
                     None => card,
                 };
                 let card = match Author::of(&item.kind) {
@@ -378,7 +382,15 @@ impl ElseApp {
                     .children(footer.map(|at| beside(user, note(at, false))));
                 column.into_any_element()
             }
-            RowKey::Task(_) => return None,
+            RowKey::Task(id) => {
+                let turn = view.conversation.as_ref()?.turn(id)?;
+                gpui_kit::component::v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(self.render_turn_status(turn, view.bot_id, cx)?)
+                    .children(footer.map(|at| note(at, false)))
+                    .into_any_element()
+            }
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
             RowKey::Question(id) => self.render_question_card(id, cx),
             RowKey::Draft(id) => self.render_draft_card(id, cx),
@@ -475,6 +487,37 @@ impl ElseApp {
             }
         })
     }
+}
+
+pub(super) fn with_reaction(
+    message: AnyElement,
+    kind: ReactionKind,
+    cx: &mut Context<ElseApp>,
+) -> AnyElement {
+    const SIZE: f32 = 30.;
+    let theme = cx.theme();
+    div()
+        .relative()
+        .w_full()
+        .pt(px(SIZE / 2.))
+        .pr(px(SIZE / 2.))
+        .child(message)
+        .child(
+            h_flex()
+                .absolute()
+                .top_0()
+                .right_0()
+                .size(px(SIZE))
+                .justify_center()
+                .rounded_full()
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(16.))
+                .line_height(px(20.))
+                .child(kind.mark()),
+        )
+        .into_any_element()
 }
 
 fn routine_banner(run: &crate::model::RoutineRun, cx: &mut Context<ElseApp>) -> AnyElement {

@@ -28,6 +28,7 @@ pub(super) struct TranscriptRow {
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
     routine_status: Option<(String, bool)>,
+    reaction: Option<crate::model::ReactionKind>,
     state: Option<String>,
 }
 
@@ -380,9 +381,28 @@ impl ElseApp {
                 })
             })
             .collect();
+        requests.extend(conversation.into_iter().flat_map(|c| {
+            c.turns_in_order()
+                .into_iter()
+                .filter(|turn| {
+                    c.reaction_in(turn.id).is_some()
+                        && matches!(turn.status.as_str(), "failed" | "interrupted" | "uncertain")
+                })
+                .map(|turn| {
+                    (
+                        RowKey::Task(turn.id),
+                        c.items()
+                            .rev()
+                            .find(|item| item.turn_id == turn.id)
+                            .map(|item| item.id),
+                    )
+                })
+        }));
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
         for item in &items {
-            if item.kind != "assistant" || !tasks.contains_key(&item.turn_id) {
+            if item.reaction.is_none()
+                && (item.kind != "assistant" || !tasks.contains_key(&item.turn_id))
+            {
                 rows.push(RowKey::Item(item.id));
             }
             let format = if item.kind == "assistant" || item.bot_reply.is_some() {
@@ -440,6 +460,8 @@ impl ElseApp {
                         .map_or((None, None), |item| {
                             let author = Author::of(&item.kind).filter(|_| {
                                 item.reaction.is_none()
+                                    && !conversation
+                                        .is_some_and(|c| c.is_feedback_acknowledgement(item))
                                     && conversation
                                         .and_then(|c| c.turn(item.turn_id))
                                         .is_none_or(|turn| turn.routine.is_none())
@@ -496,6 +518,10 @@ impl ElseApp {
                     footer_stamp: footer_stamp.filter(|_| routine.is_none()),
                     routine,
                     routine_status,
+                    reaction: match key {
+                        RowKey::Item(id) => conversation.and_then(|c| c.reaction_for(id)),
+                        _ => None,
+                    },
                     task: match key {
                         RowKey::Task(id) => tasks.get(&id).cloned(),
                         _ => None,
@@ -709,6 +735,7 @@ mod tests {
             routine: None,
             task: None,
             routine_status: None,
+            reaction: None,
             state: None,
         })
         .collect();

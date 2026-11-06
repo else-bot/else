@@ -210,6 +210,8 @@ pub struct Turn {
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub reaction: Option<Reaction>,
+    #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
     /// Absent from servers without owner questions.
     #[serde(default)]
@@ -459,7 +461,14 @@ impl Conversation {
         self.turns
             .values()
             .max_by_key(|turn| turn.turn_no)
-            .filter(|turn| !self.items().any(|item| item.turn_id == turn.id))
+            .filter(|turn| {
+                (self.reaction_in(turn.id).is_some()
+                    && matches!(
+                        turn.status.as_str(),
+                        "queued" | "preparing" | "sending" | "running" | "cancelling" | "waiting"
+                    ))
+                    || !self.items().any(|item| item.turn_id == turn.id)
+            })
     }
 
     /// Where `id` sits in its run of same-kind items from one turn, such as
@@ -578,6 +587,30 @@ impl Conversation {
             .map(|r| r.kind)
     }
 
+    pub fn reaction_in(&self, turn_id: Uuid) -> Option<ReactionKind> {
+        self.turn(turn_id)
+            .and_then(|turn| turn.reaction.map(|reaction| reaction.kind))
+            .or_else(|| {
+                self.items()
+                    .filter(|item| item.turn_id == turn_id)
+                    .find_map(|item| item.reaction.map(|reaction| reaction.kind))
+            })
+    }
+
+    pub fn is_feedback_acknowledgement(&self, item: &Item) -> bool {
+        item.kind == "assistant"
+            && self.reaction_in(item.turn_id).is_some()
+            && item
+                .text
+                .trim()
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case("Thanks, noted")
+            && !item
+                .parts
+                .iter()
+                .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }))
+    }
+
     pub fn has_request(&self, request_id: Uuid) -> bool {
         self.items
             .values()
@@ -649,6 +682,74 @@ mod tests {
         ))
         .unwrap();
         assert!(c.latest_unshown_turn().is_none());
+    }
+
+    #[test]
+    fn feedback_acknowledgements_are_hidden_but_useful_replies_and_files_stay_visible() {
+        let mut feedback = reaction(2, 2, 1, "thumbs_up");
+        let mut reply = item(3, 3, "assistant", "  Thanks, noted.\n");
+        reply["turn_id"] = feedback["turn_id"].clone();
+        let normal = item(4, 4, "assistant", "Thanks, noted.");
+        let c = Conversation::from_snapshot(snapshot(
+            1,
+            vec![
+                item(1, 1, "assistant", "Done"),
+                feedback.clone(),
+                reply.clone(),
+                normal,
+            ],
+            None,
+        ))
+        .unwrap();
+        assert!(c.is_feedback_acknowledgement(c.item(Uuid::from_u128(3)).unwrap()));
+        assert!(!c.is_feedback_acknowledgement(c.item(Uuid::from_u128(4)).unwrap()));
+        assert_eq!(c.latest_reply().unwrap().id, Uuid::from_u128(4));
+        for text in [
+            "What went wrong?",
+            "Thanks, noted. I updated the task.",
+            "Thanks, noted. Should I update the task?",
+        ] {
+            let mut useful: Item = serde_json::from_value(reply.clone()).unwrap();
+            useful.text = text.into();
+            assert!(!c.is_feedback_acknowledgement(&useful));
+        }
+        let mut file: Item = serde_json::from_value(reply.clone()).unwrap();
+        file.parts.push(crate::attachments::MessagePart::File {
+            file: crate::attachments::Attachment {
+                id: Uuid::new_v4(),
+                name: "report.txt".into(),
+                media_type: "text/plain".into(),
+                size: 12,
+            },
+        });
+        assert!(!c.is_feedback_acknowledgement(&file));
+        feedback["reaction"]["kind"] = json!("thumbs_down");
+        let c = Conversation::from_snapshot(snapshot(1, vec![feedback, reply], None)).unwrap();
+        assert!(c.is_feedback_acknowledgement(c.latest_reply().unwrap()));
+        assert_eq!(
+            c.latest_reply().unwrap().seq,
+            3,
+            "hidden text still has a read position"
+        );
+    }
+
+    #[test]
+    fn feedback_keeps_its_working_status_available() {
+        let feedback = reaction(2, 2, 1, "thumbs_up");
+        let turn_id = feedback["turn_id"].clone();
+        let mut page = snapshot(1, vec![feedback], None);
+        for status in ["queued", "running", "waiting", "cancelling"] {
+            page.turns = vec![
+                serde_json::from_value(json!({
+                    "id": turn_id, "request_id": Uuid::new_v4(), "turn_no": 2,
+                    "provider_id": "synthetic", "status": status, "error": null,
+                    "effect_uncertain": false
+                }))
+                .unwrap(),
+            ];
+            let c = Conversation::from_snapshot(page.clone()).unwrap();
+            assert_eq!(c.latest_unshown_turn().unwrap().status, status);
+        }
     }
 
     #[test]

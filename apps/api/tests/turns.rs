@@ -886,6 +886,7 @@ async fn a_reaction_is_saved_with_its_feedback_message() {
     assert_eq!(sent.status, StatusCode::ACCEPTED, "{:?}", sent.body);
     let expected = json!({ "item_id": assistant, "kind": "thumbs_up" });
     assert_eq!(sent.body["item"]["reaction"], expected);
+    assert_eq!(sent.body["turn"]["reaction"], expected);
     let feedback = sent.body["item"]["id"].clone();
     let turn = sent.body["turn"]["id"].as_str().unwrap();
     assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
@@ -897,6 +898,12 @@ async fn a_reaction_is_saved_with_its_feedback_message() {
     let saved = items.iter().find(|i| i["id"] == feedback).unwrap();
     assert_eq!(saved["reaction"], expected);
     assert_eq!(saved["text"], "👍 Feedback on your earlier message");
+    let page = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation?limit=1"), None)
+        .await;
+    assert_eq!(page.body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page.body["items"][0]["kind"], "assistant");
+    assert_eq!(page.body["turns"][0]["reaction"], expected);
     assert!(
         items
             .iter()
@@ -923,6 +930,7 @@ async fn a_reaction_is_saved_with_its_feedback_message() {
         )
         .await;
     assert_eq!(lookup.body["item"]["reaction"], expected);
+    assert_eq!(lookup.body["turn"]["reaction"], expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]
