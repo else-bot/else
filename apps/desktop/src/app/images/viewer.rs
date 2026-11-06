@@ -3,7 +3,7 @@ use crate::app::ElseApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -75,6 +75,10 @@ impl Render for ImageViewer {
         let current = &gallery.files[self.selected];
         let ready = matches!(current.state, ImageState::Ready(_));
         let theme = cx.theme().clone();
+        let overlay_button = ButtonCustomVariant::new(cx)
+            .foreground(white())
+            .hover(white().opacity(0.12))
+            .active(white().opacity(0.2));
         let index = self.selected;
         let image_menu = self.gallery.downgrade();
         let stage = div()
@@ -111,11 +115,12 @@ impl Render for ImageViewer {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(theme.muted_foreground)
+                                    .text_color(white().opacity(0.7))
                                     .child(error),
                             )
                             .child(
                                 Button::new("retry-image")
+                                    .custom(overlay_button)
                                     .focus_ring(false)
                                     .cursor_pointer()
                                     .label("Retry")
@@ -200,7 +205,7 @@ impl Render for ImageViewer {
             .inset_0()
             .size_full()
             .bg(black().opacity(0.9))
-            .text_color(theme.foreground)
+            .text_color(white())
             .track_focus(&self.focus)
             .focus_trap("image-viewer", &self.focus)
             .on_key_down(cx.listener(|viewer, event: &KeyDownEvent, window, cx| {
@@ -233,7 +238,7 @@ impl Render for ImageViewer {
                         Button::new("close-image-viewer")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
+                            .custom(overlay_button)
                             .icon(IconName::Close)
                             .label("Close  Esc")
                             .accessibility_label("Close image viewer")
@@ -255,7 +260,7 @@ impl Render for ImageViewer {
                         Button::new("previous-image")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
+                            .custom(overlay_button)
                             .icon(IconName::ChevronLeft)
                             .accessibility_label("Previous image")
                             .on_click(cx.listener(|viewer, _, _, cx| viewer.step(false, cx)))
@@ -265,7 +270,7 @@ impl Render for ImageViewer {
                         Button::new("next-image")
                             .focus_ring(false)
                             .cursor_pointer()
-                            .ghost()
+                            .custom(overlay_button)
                             .icon(IconName::ChevronRight)
                             .accessibility_label("Next image")
                             .on_click(cx.listener(|viewer, _, _, cx| viewer.step(true, cx)))
@@ -284,6 +289,7 @@ impl Render for ImageViewer {
                     .py_3()
                     .gap_2()
                     .bg(theme.sidebar)
+                    .text_color(theme.foreground)
                     .child(
                         v_flex()
                             .flex_1()

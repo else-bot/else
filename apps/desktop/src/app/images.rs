@@ -36,6 +36,42 @@ pub(super) fn image_files(parts: &[MessagePart]) -> Vec<Attachment> {
     files
 }
 
+pub(super) struct UnavailableImage;
+
+impl gpui_kit::base::text::MarkdownPlugin for UnavailableImage {
+    fn name(&self) -> &str {
+        "unavailable-image"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown::mdast::Node,
+        _: &gpui_kit::base::text::MarkdownParseContext<'_>,
+    ) -> Option<gpui_kit::base::text::MarkdownNode> {
+        unavailable_image_label(node).map(|label| {
+            gpui_kit::base::text::MarkdownNode::new("unavailable-image", ())
+                .text(format!("Image unavailable: {label}"))
+        })
+    }
+}
+
+fn unavailable_image_label(node: &markdown::mdast::Node) -> Option<&str> {
+    use markdown::mdast::Node;
+    match node {
+        Node::Image(image) => Some(if image.alt.is_empty() {
+            &image.url
+        } else {
+            &image.alt
+        }),
+        Node::ImageReference(image) => Some(if image.alt.is_empty() {
+            &image.identifier
+        } else {
+            &image.alt
+        }),
+        _ => None,
+    }
+}
+
 pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Vec<MessagePart>) {
     if !parts
         .iter()
@@ -437,6 +473,23 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejected_markdown_images_have_visible_labels_without_changing_code_examples() {
+        fn labels(node: &markdown::mdast::Node) -> Vec<String> {
+            let mut result = super::unavailable_image_label(node)
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<Vec<_>>();
+            for child in node.children().into_iter().flatten() {
+                result.extend(labels(child));
+            }
+            result
+        }
+        let source = "![bad](bad.png) ![ref][image] ![](empty.png)\n\n[image]: missing.png\n\n`![code](code.png)`\n\n```md\n![example](example.png)\n```";
+        let tree = markdown::to_mdast(source, &markdown::ParseOptions::default()).unwrap();
+        assert_eq!(labels(&tree), ["bad", "ref", "empty.png"]);
+    }
+
     use super::{image_files, load_image, without_images};
     use crate::attachments::{Attachment, MessagePart};
     use uuid::Uuid;

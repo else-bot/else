@@ -1,5 +1,5 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
-use super::images::{MessageImages, without_images};
+use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
@@ -236,7 +236,11 @@ impl RowText {
                 })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
-                .markdown_extensions(MarkdownExtensions::default().plugin(MentionPlugin(mentions)))
+                .markdown_extensions(
+                    MarkdownExtensions::default()
+                        .plugin(MentionPlugin(mentions))
+                        .plugin(UnavailableImage),
+                )
                 .w_full()
                 .text_sm()
                 .line_height(rems(1.375))
