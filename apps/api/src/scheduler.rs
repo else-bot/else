@@ -340,7 +340,12 @@ impl Scheduler {
                 }
             }
         }
-        let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id);
+        let project = input
+            .delegation
+            .host_tools()
+            .then(|| self.registry.get(&provider_id)?.project_dir(input.bot_id))
+            .flatten();
+        let sink = SqliteSink::new(self.pool.clone(), &input, &provider_id, project);
         let outcome = match self.registry.get(&provider_id) {
             None => TurnOutcome::Failed {
                 code: "provider_unavailable".into(),

@@ -41,11 +41,24 @@ pub async fn store(
     media_type: &str,
     data: &[u8],
 ) -> Result<(Attachment, bool), StoreError> {
-    let digest = Sha256::digest(data).to_vec();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let result = store_in(&mut tx, bot_id, id, name, media_type, data).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn store_in(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    id: Uuid,
+    name: &str,
+    media_type: &str,
+    data: &[u8],
+) -> Result<(Attachment, bool), StoreError> {
+    let digest = Sha256::digest(data).to_vec();
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     match status.as_deref() {
         None => return Err(StoreError::NotFound),
@@ -55,7 +68,7 @@ pub async fn store(
     let saved: Option<(Uuid, String, String, Vec<u8>)> =
         sqlx::query_as("SELECT bot_id, name, media_type, sha256 FROM attachments WHERE id = ?1")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?;
     let created = match saved {
         Some((owner, saved_name, saved_type, saved_digest))
@@ -79,12 +92,11 @@ pub async fn store(
             .bind(data.len() as i64)
             .bind(&digest)
             .bind(data)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             true
         }
     };
-    tx.commit().await?;
     let file = Attachment {
         id,
         name: name.to_owned(),

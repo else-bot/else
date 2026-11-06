@@ -1,4 +1,4 @@
-//! Owner attachments staged in a bot's project directory, where its
+//! Conversation attachments staged in a bot's project directory, where its
 //! provider runs start and its computer mounts `~/work`, so the bot can open
 //! them with its own tools. SQLite keeps the authoritative bytes; a staged
 //! copy is rewritten whenever it differs.

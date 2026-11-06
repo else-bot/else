@@ -5,6 +5,7 @@ pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
 pub mod host;
+pub(crate) mod output_images;
 pub mod prompt;
 pub mod synthetic;
 

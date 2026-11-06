@@ -52,7 +52,7 @@ pub struct HistoryEntry {
     pub text: String,
     /// The owner turn's recorded status (`completed`, `interrupted`, ...).
     pub status: String,
-    /// An owner message's ordered parts; empty for plain text.
+    /// A conversation message's ordered parts; empty for plain text.
     pub parts: Vec<MessagePart>,
 }
 
@@ -339,6 +339,10 @@ pub trait Provider: Send + Sync {
     /// Opaque stable ID used in requests and records.
     fn id(&self) -> &'static str;
     fn label(&self) -> &'static str;
+    /// The bot's own project, where files in assistant image replies live.
+    fn project_dir(&self, _bot_id: Uuid) -> Option<std::path::PathBuf> {
+        None
+    }
     fn availability(&self) -> Availability;
     /// Whether accepted turns snapshot a saved profile for this provider.
     fn uses_profile(&self) -> bool;

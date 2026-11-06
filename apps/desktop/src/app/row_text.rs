@@ -1,4 +1,5 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
+use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
@@ -21,6 +22,7 @@ pub(super) enum RowFormat {
 pub(super) struct RowSource {
     pub text: String,
     pub parts: Vec<MessagePart>,
+    pub format: RowFormat,
 }
 
 pub(super) struct RowText {
@@ -33,6 +35,8 @@ pub(super) struct RowText {
     files: HashMap<Uuid, Attachment>,
     owner: WeakEntity<ElseApp>,
     bot: Uuid,
+    images: Entity<MessageImages>,
+    _observe_images: Subscription,
 }
 
 enum Widget {
@@ -47,7 +51,7 @@ impl RowText {
     pub(super) fn new(
         key: RowKey,
         source: RowSource,
-        format: RowFormat,
+        client: Arc<crate::api::Client>,
         bots: &Arc<MentionRegistry>,
         bot: Uuid,
         window: &mut Window,
@@ -56,13 +60,15 @@ impl RowText {
         let RowSource {
             text: source,
             parts,
+            format,
         } = source;
+        let (visible, visible_parts) = without_images(&source, &parts);
         let mut mentions = match format {
-            RowFormat::Plain => BotMention::find(&source, bots),
-            RowFormat::Markdown => BotMention::in_markdown(&source, bots),
+            RowFormat::Plain => BotMention::find(&visible, bots),
+            RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
         };
-        let content = plain_content(&source, &parts, &mut mentions);
-        let display = MentionDisplay::new(&source, &mentions);
+        let content = plain_content(&visible, &visible_parts, &mut mentions);
+        let display = MentionDisplay::new(&visible, &mentions);
         let widget = match format {
             RowFormat::Plain => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
@@ -95,6 +101,8 @@ impl RowText {
                 Widget::Markdown { state, _observe }
             }
         };
+        let (images, observe_images) =
+            ElseApp::message_images(client, key, bot, &parts, window, cx);
         Self {
             source,
             mentions,
@@ -105,6 +113,8 @@ impl RowText {
             parts,
             owner: cx.entity().downgrade(),
             bot,
+            images,
+            _observe_images: observe_images,
         }
     }
 
@@ -120,6 +130,9 @@ impl RowText {
             Widget::Plain(_) => Some(self.source.len()),
             Widget::Markdown { state, .. } => {
                 let rendered = state.read(cx).rendered_text();
+                if rendered.source() == self.display.text {
+                    return Some(self.source.len());
+                }
                 self.display
                     .text
                     .starts_with(rendered.source())
@@ -150,20 +163,23 @@ impl RowText {
         let RowSource {
             text: source,
             parts,
+            ..
         } = source;
         if self.source == source && self.parts == parts && Arc::ptr_eq(&self.bots, bots) {
             return false;
         }
+        let (visible, visible_parts) = without_images(&source, &parts);
+        self.images.update(cx, |images, cx| images.sync(&parts, cx));
         let mut mentions = match self.format() {
-            RowFormat::Plain => BotMention::find(&source, bots),
-            RowFormat::Markdown => BotMention::in_markdown(&source, bots),
+            RowFormat::Plain => BotMention::find(&visible, bots),
+            RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
         };
         self.bots = bots.clone();
-        let content = plain_content(&source, &parts, &mut mentions);
+        let content = plain_content(&visible, &visible_parts, &mut mentions);
         if self.source == source && self.parts == parts && self.mentions == mentions {
             return false;
         }
-        let display = MentionDisplay::new(&source, &mentions);
+        let display = MentionDisplay::new(&visible, &mentions);
         match &self.widget {
             Widget::Plain(state) => {
                 state.update(cx, |state, cx| state.set_value(content, window, cx))
@@ -187,7 +203,7 @@ impl RowText {
         let preview_files = files.clone();
         let owner = self.owner.clone();
         let bot = self.bot;
-        match &self.widget {
+        let body = match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
                 .readonly(true)
                 .appearance(false)
@@ -220,7 +236,11 @@ impl RowText {
                 })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
-                .markdown_extensions(MarkdownExtensions::default().plugin(MentionPlugin(mentions)))
+                .markdown_extensions(
+                    MarkdownExtensions::default()
+                        .plugin(MentionPlugin(mentions))
+                        .plugin(UnavailableImage),
+                )
                 .w_full()
                 .text_sm()
                 .line_height(rems(1.375))
@@ -241,7 +261,14 @@ impl RowText {
                         .build(window, cx)
                 })
                 .into_any_element(),
-        }
+        };
+        use gpui_kit::prelude::FluentBuilder as _;
+        gpui_kit::component::v_flex()
+            .w_full()
+            .gap_2()
+            .when(!self.display.text.trim().is_empty(), |column| column.child(body))
+            .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
+            .into_any_element()
     }
 }
 
