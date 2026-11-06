@@ -120,19 +120,9 @@ impl Shell {
             let shell = shell.clone();
             let shell_close = shell_close.clone();
             let viewport = window.viewport_size();
-            let height = if shell.upgrade().is_some_and(|shell| {
-                matches!(
-                    shell.read(cx).settings_section(),
-                    Some(SettingsSection::Backups | SettingsSection::Email)
-                )
-            }) {
-                px(760.)
-            } else {
-                px(660.)
-            };
             dialog
                 .w((viewport.width - px(64.)).min(px(1040.)))
-                .h((viewport.height - px(64.)).min(height))
+                .h((viewport.height - px(64.)).min(px(760.)))
                 .centered()
                 .entrance(DialogEntrance::None)
                 .p_0()
