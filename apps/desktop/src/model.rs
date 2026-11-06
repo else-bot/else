@@ -294,6 +294,10 @@ pub struct Routine {
     pub cron: String,
     pub timezone: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<crate::api::ProfileChoice>,
+    #[serde(default)]
+    pub requested_model: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub last_run: Option<LastRun>,

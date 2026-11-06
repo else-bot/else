@@ -755,6 +755,21 @@ impl Client {
         .map(|(_, v)| v.routine)
     }
 
+    pub async fn set_routine_model(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+        model: Option<ProfileChoice>,
+    ) -> Result<Routine, ClientError> {
+        self.call::<RoutineEnvelope>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}/routines/{routine}"),
+            Some(json!({ "model": model })),
+        )
+        .await
+        .map(|(_, v)| v.routine)
+    }
+
     /// Delete a routine: it never runs again and a run already admitted
     /// finishes. Deleting it again succeeds.
     pub async fn delete_routine(
