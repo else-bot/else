@@ -7,7 +7,9 @@ use crate::app::providers::{HandoffContext, JobReceipt, Selection};
 /// Version of the checkpoint request and the handoff block in packets.
 pub const PROMPT_VERSION: &str = "else-handoff-v1";
 
-/// The provider of the owner turn just before `turn_no`, if any.
+/// The provider of the owner turn just before `turn_no` in the same session
+/// lane, if any: a routine run on its own model never hands off to or from
+/// the bot's chat.
 pub async fn previous_provider(
     pool: &SqlitePool,
     conversation_id: Uuid,
@@ -16,6 +18,8 @@ pub async fn previous_provider(
     sqlx::query_scalar(
         "SELECT t.provider_id FROM turns t JOIN items i ON i.id = t.owner_item_id
          WHERE t.conversation_id = ?1 AND t.turn_no < ?2 AND i.kind IN ('user', 'routine')
+           AND t.session_lane = (SELECT session_lane FROM turns
+                                 WHERE conversation_id = ?1 AND turn_no = ?2)
          ORDER BY t.turn_no DESC LIMIT 1",
     )
     .bind(conversation_id)
@@ -90,7 +94,8 @@ pub async fn insert(
              prompt_version)
          SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7,
              (SELECT id FROM provider_sessions WHERE conversation_id = ?3
-                AND provider_id = ?6 AND status = 'active'),
+                AND provider_id = ?6 AND status = 'active'
+                AND lane = (SELECT session_lane FROM turns WHERE id = ?4)),
              ?8, ?9, ?10, ?11, ?12
          WHERE EXISTS (SELECT 1 FROM turns WHERE id = ?4 AND status IN {})
          ON CONFLICT (turn_id, attempt) DO NOTHING",

@@ -12,16 +12,24 @@
 //! `next_due_at` past now (missed occurrences coalesce into this one run),
 //! and either queues a turn whose source is a hidden `routine` item or
 //! records why it was skipped. Run status is the turn's own status.
+//!
+//! A routine either inherits the bot's live model or has its own. A run on
+//! its own model snapshots that profile into its turn, leaves the bot's
+//! profile alone, and keeps its native sessions in a lane of its own, so it
+//! neither resets the bot's chat session nor triggers provider handoffs.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
+use sqlx::types::Json;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
-use crate::app::providers::{Origin, RoutineRun};
-use crate::app::routines::{InvalidRoutine, MAX_PER_BOT, RoutineName, RoutinePrompt, Schedule};
+use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
+use crate::app::routines::{
+    InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule,
+};
 use crate::providers::Registry;
 
 /// Due routines admitted per scheduler scan.
@@ -100,6 +108,7 @@ pub struct Routine {
     pub cron: String,
     pub timezone: String,
     pub enabled: bool,
+    pub model: ModelSetting,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -117,6 +126,8 @@ struct Row {
     cron: String,
     timezone: String,
     enabled: bool,
+    model: Option<Json<RoutineModel>>,
+    requested_model: Option<String>,
     next_due_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -157,6 +168,7 @@ impl From<Row> for Routine {
             cron: row.cron,
             timezone: row.timezone,
             enabled: row.enabled,
+            model: setting(row.model, row.requested_model),
             next_run_at: row.next_due_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -166,9 +178,23 @@ impl From<Row> for Routine {
     }
 }
 
+fn setting(model: Option<Json<RoutineModel>>, requested: Option<String>) -> ModelSetting {
+    match model {
+        Some(Json(model)) => ModelSetting::Own(model),
+        None => ModelSetting::Inherit { requested },
+    }
+}
+
+fn columns(model: &ModelSetting) -> (Option<Json<&RoutineModel>>, Option<&str>) {
+    match model {
+        ModelSetting::Own(model) => (Some(Json(model)), None),
+        ModelSetting::Inherit { requested } => (None, requested.as_deref()),
+    }
+}
+
 const SELECT: &str =
     "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone, r.enabled,
-        r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
+        r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r
@@ -251,6 +277,11 @@ pub struct NewRoutine<'a> {
     pub name: &'a RoutineName,
     pub prompt: &'a RoutinePrompt,
     pub schedule: &'a Schedule,
+    pub model: &'a ModelSetting,
+    /// The model arguments as the bot sent them, if any: a retry with the
+    /// same request returns the same routine even if resolving would now
+    /// differ.
+    pub model_request: Option<&'a str>,
 }
 
 fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
@@ -260,7 +291,10 @@ fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
         routine.prompt.as_str(),
         routine.schedule.cron(),
         routine.schedule.timezone(),
-    ] {
+    ]
+    .into_iter()
+    .chain(routine.model_request)
+    {
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
@@ -310,10 +344,11 @@ pub async fn create(
         return Err(RoutineError::Limit);
     }
     let id = Uuid::new_v4();
+    let (model, requested_model) = columns(routine.model);
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
-             next_due_at, created_turn_id, created_name, request_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10)",
+             next_due_at, created_turn_id, created_name, request_hash, model, requested_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -325,6 +360,8 @@ pub async fn create(
     .bind(routine.schedule.next_after(now).map(ts))
     .bind(caller.turn_id)
     .bind(&hash)
+    .bind(model)
+    .bind(requested_model)
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
@@ -341,6 +378,19 @@ pub struct Patch {
     pub cron: Option<String>,
     pub timezone: Option<String>,
     pub enabled: Option<bool>,
+    pub model: Option<ModelSetting>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RoutineSettings {
+    name: String,
+    prompt: String,
+    cron: String,
+    timezone: String,
+    enabled: bool,
+    next_due_at: Option<String>,
+    model: Option<Json<RoutineModel>>,
+    requested_model: Option<String>,
 }
 
 /// Apply `patch`. Setting values a routine already has changes nothing, so
@@ -357,15 +407,25 @@ pub async fn update(
 ) -> Result<Routine, RoutineError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_by(&mut tx, by).await?;
-    let current: Option<(String, String, String, String, bool, Option<String>)> = sqlx::query_as(
-        "SELECT name, prompt, cron, timezone, enabled, next_due_at FROM routines
-         WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
+    let current: Option<RoutineSettings> = sqlx::query_as(
+        "SELECT name, prompt, cron, timezone, enabled, next_due_at, model, requested_model
+         FROM routines WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(by.bot_id())
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((name, prompt, cron, timezone, enabled, next_due)) = current else {
+    let Some(RoutineSettings {
+        name,
+        prompt,
+        cron,
+        timezone,
+        enabled,
+        next_due_at: next_due,
+        model,
+        requested_model: requested,
+    }) = current
+    else {
         return Err(RoutineError::NotFound);
     };
     let schedule = Schedule::parse_due(
@@ -378,6 +438,8 @@ pub async fn update(
         .prompt
         .map_or(prompt.clone(), |p| p.as_str().to_owned());
     let new_enabled = patch.enabled.unwrap_or(enabled);
+    let new_model = patch.model.unwrap_or_else(|| setting(model, requested));
+    let (model, requested_model) = columns(&new_model);
     let rescheduled = schedule.cron() != cron || schedule.timezone() != timezone;
     let next_due = if !new_enabled {
         None
@@ -403,9 +465,11 @@ pub async fn update(
     let changed = sqlx::query(
         "UPDATE routines SET name = ?2, prompt = ?3, cron = ?4, timezone = ?5, enabled = ?6,
              next_due_at = ?7, prompt_revision = prompt_revision + (prompt IS NOT ?3),
+             model = ?8, requested_model = ?9,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND (name IS NOT ?2 OR prompt IS NOT ?3 OR cron IS NOT ?4
-             OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7)",
+             OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7
+             OR model IS NOT ?8 OR requested_model IS NOT ?9)",
     )
     .bind(id)
     .bind(&new_name)
@@ -414,6 +478,8 @@ pub async fn update(
     .bind(schedule.timezone())
     .bind(new_enabled)
     .bind(&next_due)
+    .bind(model)
+    .bind(requested_model)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -554,9 +620,31 @@ struct Due {
     prompt_revision: i64,
     cron: String,
     timezone: String,
+    model: Option<Json<RoutineModel>>,
     due_at: String,
     last_turn_no: i64,
     last_item_seq: i64,
+}
+
+struct Chosen {
+    provider_id: &'static str,
+    profile: Option<(i64, Json<Profile>)>,
+    lane: String,
+}
+
+/// A run on the routine's own model, if its provider can run it now. An
+/// unavailable choice skips the run rather than switching models; the
+/// profile revision 0 marks a routine's own profile, not a bot revision.
+fn own_model(registry: &Registry, own: &RoutineModel, routine_id: Uuid) -> Option<Chosen> {
+    let provider = registry
+        .get(&own.provider_id)
+        .filter(|p| p.uses_profile() && p.availability() == Availability::Available)?;
+    provider.validate_profile(&own.profile).ok()?;
+    Some(Chosen {
+        provider_id: provider.id(),
+        profile: Some((0, Json(own.profile.clone()))),
+        lane: format!("routine:{routine_id}"),
+    })
 }
 
 async fn admit(
@@ -568,7 +656,7 @@ async fn admit(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
         "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
-                r.next_due_at AS due_at, c.last_turn_no, c.last_item_seq
+                r.model, r.next_due_at AS due_at, c.last_turn_no, c.last_item_seq
          FROM routines r JOIN bots b ON b.id = r.bot_id
          JOIN conversations c ON c.id = r.conversation_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
@@ -586,6 +674,7 @@ async fn admit(
         prompt_revision,
         cron,
         timezone,
+        model,
         due_at,
         last_turn_no,
         last_item_seq,
@@ -630,14 +719,22 @@ async fn admit(
         Err(Skip::Overlap)
     } else if queued >= MAX_QUEUED_TURNS {
         Err(Skip::QueueFull)
+    } else if let Some(Json(own)) = &model {
+        own_model(registry, own, id).ok_or(Skip::ProviderUnavailable)
     } else {
         bot_profiles::for_admission(&mut tx, registry, bot_id)
             .await?
+            .map(|chosen| Chosen {
+                provider_id: chosen.provider_id,
+                profile: chosen.profile,
+                lane: String::new(),
+            })
             .ok_or(Skip::ProviderUnavailable)
     };
-    let bot_profiles::TurnProvider {
+    let Chosen {
         provider_id,
         profile,
+        lane,
     } = match chosen {
         Ok(chosen) => chosen,
         Err(skip) => {
@@ -666,8 +763,8 @@ async fn admit(
     hasher.update(run_id.as_bytes());
     sqlx::query(
         "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, profile_revision, profile)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             owner_item_id, provider_id, profile_revision, profile, session_lane)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(turn_id)
     .bind(bot_id)
@@ -679,6 +776,7 @@ async fn admit(
     .bind(provider_id)
     .bind(profile.as_ref().map(|(revision, _)| *revision))
     .bind(profile.as_ref().map(|(_, profile)| profile))
+    .bind(&lane)
     .execute(&mut *tx)
     .await?;
     sqlx::query(

@@ -178,6 +178,16 @@ pub async fn harness_with(
     max_active: usize,
     mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
 ) -> Harness {
+    harness_with_providers(max_active, mail, Vec::new()).await
+}
+
+/// A recorder harness whose registry also has `extra` providers after the
+/// default recorder.
+pub async fn harness_with_providers(
+    max_active: usize,
+    mail: Option<Arc<dyn else_api::connectors::types::MailTransport>>,
+    extra: Vec<Arc<dyn Provider>>,
+) -> Harness {
     let db = Arc::new(TestDb::migrated().await);
     else_api::db::installation::setup(&db.pool).await.unwrap();
     sqlx::query("UPDATE installation SET default_provider_id = 'synthetic'")
@@ -195,7 +205,9 @@ pub async fn harness_with(
         inner: Synthetic::new(Duration::from_millis(5)),
         mailbox,
     });
-    let registry = else_api::providers::Registry::new(vec![recorder.clone()]);
+    let mut providers: Vec<Arc<dyn Provider>> = vec![recorder.clone()];
+    providers.extend(extra);
+    let registry = else_api::providers::Registry::new(providers);
     let app = match mail {
         Some(mail) => TestApp::with_mail(db, max_active, registry, mail),
         None => TestApp::with_registry(db, max_active, registry),

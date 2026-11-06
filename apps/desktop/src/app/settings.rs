@@ -163,33 +163,111 @@ enum ModelState {
 
 pub(super) struct ModelDialog {
     bot: Uuid,
+    target: ModelTarget,
     saved: Option<ProfileChoice>,
     picker: Entity<ProfilePicker>,
     save: Save,
     _picker: Subscription,
 }
 
+enum ModelTarget {
+    Bot,
+    Routine {
+        id: Uuid,
+        name: String,
+        use_bot_model: bool,
+        unresolved: bool,
+    },
+}
+
+enum SavedModel {
+    Bot(BotProfile),
+    Routine(Box<Routine>),
+}
+
+enum ModelChange {
+    Bot(ProfileChoice),
+    Routine {
+        id: Uuid,
+        choice: Option<ProfileChoice>,
+    },
+}
+
 impl ModelDialog {
+    fn change(&self, cx: &App) -> Option<ModelChange> {
+        if self.save.busy() || !self.dirty(cx) {
+            return None;
+        }
+        match self.target {
+            ModelTarget::Bot => self.choice(cx).map(ModelChange::Bot),
+            ModelTarget::Routine { id, .. } if self.inherits() => {
+                Some(ModelChange::Routine { id, choice: None })
+            }
+            ModelTarget::Routine { id, .. } => self.choice(cx).map(|choice| ModelChange::Routine {
+                id,
+                choice: Some(choice),
+            }),
+        }
+    }
+
+    fn routine_id(&self) -> Option<Uuid> {
+        match self.target {
+            ModelTarget::Bot => None,
+            ModelTarget::Routine { id, .. } => Some(id),
+        }
+    }
+
+    fn choice(&self, cx: &App) -> Option<ProfileChoice> {
+        if self.inherits() {
+            None
+        } else {
+            self.picker.read(cx).choice()
+        }
+    }
+
+    fn inherits(&self) -> bool {
+        matches!(
+            self.target,
+            ModelTarget::Routine {
+                use_bot_model: true,
+                ..
+            }
+        )
+    }
+
     fn dirty(&self, cx: &App) -> bool {
-        self.picker.read(cx).choice() != self.saved
+        self.choice(cx) != self.saved
+            || matches!(
+                self.target,
+                ModelTarget::Routine {
+                    unresolved: true,
+                    ..
+                }
+            )
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum RoutineSave {
     Saving { attempt: Uuid, enabled: bool },
+    Model { attempt: Uuid },
     Deleting { attempt: Uuid },
     Failed(String),
 }
 
 impl RoutineSave {
     fn busy(&self) -> bool {
-        matches!(self, Self::Saving { .. } | Self::Deleting { .. })
+        matches!(
+            self,
+            Self::Saving { .. } | Self::Model { .. } | Self::Deleting { .. }
+        )
     }
 
     fn attempt(&self) -> Option<Uuid> {
         match self {
-            Self::Saving { attempt, .. } | Self::Deleting { attempt } => Some(*attempt),
+            Self::Saving { attempt, .. } | Self::Model { attempt } | Self::Deleting { attempt } => {
+                Some(*attempt)
+            }
             Self::Failed(_) => None,
         }
     }
@@ -526,17 +604,55 @@ impl ElseApp {
     }
 
     fn open_model_dialog(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(caps) = self.caps.clone() else {
-            return;
-        };
         let Some(ModelState::Ready(saved)) = self.settings.get(&bot).map(|s| &s.model) else {
             return;
         };
         let saved = saved.as_ref().map(|p| p.choice.clone());
-        let picker = cx.new(|cx| ProfilePicker::new(&caps, saved.as_ref(), window, cx));
+        self.open_model_editor(bot, ModelTarget::Bot, saved, window, cx);
+    }
+
+    fn open_routine_model_dialog(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(routine) = self.changeable_routine(bot, routine) else {
+            return;
+        };
+        let target = ModelTarget::Routine {
+            id: routine.id,
+            name: routine.name.clone(),
+            use_bot_model: routine.model.is_none(),
+            unresolved: routine.requested_model.is_some(),
+        };
+        let saved = routine.model.clone();
+        self.open_model_editor(bot, target, saved, window, cx);
+    }
+
+    fn open_model_editor(
+        &mut self,
+        bot: Uuid,
+        target: ModelTarget,
+        saved: Option<ProfileChoice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(caps) = self.caps.clone() else {
+            return;
+        };
+        let initial = saved.as_ref().or_else(|| {
+            self.settings.get(&bot).and_then(|s| match &s.model {
+                ModelState::Ready(Some(profile)) => Some(&profile.choice),
+                _ => None,
+            })
+        });
+        let picker = cx.new(|cx| ProfilePicker::new(&caps, initial, window, cx));
         let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
         let holder = cx.new(|_| ModelDialog {
             bot,
+            target,
             saved,
             picker: picker.clone(),
             save: Save::Idle,
@@ -550,12 +666,50 @@ impl ElseApp {
             let connected = app
                 .upgrade()
                 .is_some_and(|app| app.read(cx).connection == Connection::Connected);
-            let ready = form.dirty(cx) && form.picker.read(cx).choice().is_some();
+            let ready = form.change(cx).is_some();
+            let routine = form.routine_id().is_some();
+            let inherit_holder = holder.clone();
+            let inheritance = routine.then(|| {
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex().flex_1().gap_1()
+                            .child(div().text_sm().child("Use bot model"))
+                            .child(muted("Follow the bot's model, including future changes.", cx)),
+                    )
+                    .child(
+                        Switch::new("routine-inherit-model")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .checked(form.inherits())
+                            .disabled(saving || !connected)
+                            .accessibility_label("Use bot model")
+                            .on_click(move |enabled: &bool, window, cx| {
+                                inherit_holder.update(cx, |form, cx| {
+                                    if let ModelTarget::Routine { use_bot_model, .. } = &mut form.target {
+                                        *use_bot_model = *enabled;
+                                        cx.notify();
+                                    }
+                                });
+                                window.refresh();
+                            }),
+                    )
+            });
             let body = v_flex()
                 .gap_3()
-                .child(picker.clone())
+                .children(match &form.target {
+                    ModelTarget::Routine { name, .. } => Some(div().text_sm().truncate().child(name.clone())),
+                    ModelTarget::Bot => None,
+                })
+                .children(inheritance)
+                .when(!form.inherits(), |body| body.child(picker.clone()))
                 .child(muted(
-                    "Changes apply from the bot's next message; work already running is unaffected.",
+                    if routine {
+                        "Applies to future runs. Runs already queued or running keep their model."
+                    } else {
+                        "Changes apply from the bot's next message; work already running is unaffected."
+                    },
                     cx,
                 ))
                 .children(match &form.save {
@@ -567,7 +721,7 @@ impl ElseApp {
             let app_close = app.clone();
             let mine = holder.clone();
             dialog
-                .title("Change model")
+                .title(if routine { "Routine model" } else { "Change model" })
                 .w(px(420.))
                 .on_ok(move |_, window, cx| {
                     let _ = app_ok.update(cx, |app, cx| app.apply_model(window, cx));
@@ -609,17 +763,24 @@ impl ElseApp {
         let (client, Some(holder)) = (self.client.clone(), self.model_dialog.clone()) else {
             return;
         };
-        let (bot, picker) = {
+        let (bot, routine, picker, change) = {
             let form = holder.read(cx);
-            (form.bot, form.picker.clone())
+            let Some(change) = form.change(cx) else {
+                return;
+            };
+            (form.bot, form.routine_id(), form.picker.clone(), change)
         };
-        let Some(choice) = picker.read(cx).choice() else {
-            return;
-        };
-        if holder.read(cx).save.busy() || !holder.read(cx).dirty(cx) {
+        let attempt = Uuid::new_v4();
+        if let Some(routine) = routine
+            && !self.begin_routine_change(bot, routine, RoutineSave::Model { attempt })
+        {
+            holder.update(cx, |form, cx| {
+                form.save = Save::Failed("This routine can't be changed right now. Reopen its model settings and try again.".into());
+                cx.notify();
+            });
+            window.refresh();
             return;
         }
-        let attempt = Uuid::new_v4();
         picker.update(cx, |picker, cx| picker.set_disabled(true, cx));
         holder.update(cx, |form, cx| {
             form.save = Save::Saving(attempt);
@@ -627,17 +788,45 @@ impl ElseApp {
         });
         window.refresh();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.set_bot_profile(bot, choice).await;
+            let result = match change {
+                ModelChange::Routine { id, choice } => client
+                    .set_routine_model(bot, id, choice)
+                    .await
+                    .map(|saved| SavedModel::Routine(Box::new(saved))),
+                ModelChange::Bot(choice) => client
+                    .set_bot_profile(bot, choice)
+                    .await
+                    .map(SavedModel::Bot),
+            };
             let _ = this.update_in(cx, |app, window, cx| {
                 if holder.read(cx).save != Save::Saving(attempt) {
                     return;
                 }
+                if let Some(routine) = routine
+                    && let Some(entry) = current_change(&mut app.settings, bot, routine, attempt)
+                {
+                    entry.routines.remove(&routine);
+                }
                 match result {
                     Ok(saved) => {
-                        if let Some(entry) = app.settings.get_mut(&bot)
-                            && matches!(entry.model, ModelState::Ready(_))
-                        {
-                            entry.model = ModelState::Ready(Some(saved));
+                        match saved {
+                            SavedModel::Bot(saved) => {
+                                if let Some(entry) = app.settings.get_mut(&bot)
+                                    && matches!(entry.model, ModelState::Ready(_))
+                                {
+                                    entry.model = ModelState::Ready(Some(saved));
+                                }
+                            }
+                            SavedModel::Routine(saved) => {
+                                if let Some(conversation) = app
+                                    .view
+                                    .as_mut()
+                                    .filter(|view| view.bot_id == bot)
+                                    .and_then(|view| view.conversation.as_mut())
+                                {
+                                    conversation.apply_routine(*saved);
+                                }
+                            }
                         }
                         if app.model_dialog.as_ref() == Some(&holder) {
                             app.model_dialog = None;
@@ -646,6 +835,14 @@ impl ElseApp {
                         cx.notify();
                     }
                     Err(err) => {
+                        if let Some(routine) = routine
+                            && let Some(entry) = app.settings.get_mut(&bot)
+                        {
+                            entry.routines.insert(
+                                routine,
+                                RoutineSave::Failed(format!("Couldn't save. {err}")),
+                            );
+                        }
                         picker.update(cx, |picker, cx| picker.set_disabled(false, cx));
                         holder.update(cx, |form, cx| {
                             form.save = Save::Failed(err.to_string());
@@ -801,24 +998,22 @@ impl ElseApp {
                 .child(
                     Input::new(&details.name)
                         .focus_ring(false)
-                        .text_center()
+                        .text_left()
                         .font_weight(FontWeight::SEMIBOLD),
                 )
                 .into_any_element()
         } else {
-            let (hover, border) = (theme.sidebar_accent, theme.border);
+            let hover = theme.sidebar_accent;
             div()
                 .id("bot-name")
                 .max_w_full()
                 .px_2()
                 .py_0p5()
                 .rounded(theme.radius)
-                .border_1()
-                .border_color(transparent_black())
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover).border_color(border))
+                .hover(move |style| style.bg(hover))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_center()
+                .text_left()
                 .truncate()
                 .aria_description("Click to rename")
                 .child(details.sync.desired.name.clone())
@@ -844,13 +1039,19 @@ impl ElseApp {
                         .on_click(cx.listener(move |app, _, _, cx| app.flush_details(bot, cx))),
                 )
         });
-        v_flex()
+        h_flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .child(self.render_avatar_editor(bot, details, cx))
-            .child(h_flex().w_full().justify_center().child(name))
-            .children(problem)
-            .children(error)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(name)
+                    .children(problem)
+                    .children(error),
+            )
             .into_any_element()
     }
 
@@ -868,9 +1069,9 @@ impl ElseApp {
         };
         let badge = div()
             .absolute()
-            .right(px(2.))
-            .bottom(px(2.))
-            .size(px(26.))
+            .right(px(-2.))
+            .bottom(px(-2.))
+            .size(px(18.))
             .rounded_full()
             .flex()
             .items_center()
@@ -883,16 +1084,16 @@ impl ElseApp {
             .opacity(if details.picking { 1. } else { 0. })
             .group_hover("avatar-editor", |style| style.opacity(1.))
             .child(
-                Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(14.))),
+                Icon::new(gpui_kit::assets::IconName::PencilLine).with_size(Size::Size(px(10.))),
             );
         let hero = Button::new("edit-avatar")
             .focus_ring(false)
             .cursor_pointer()
             .ghost()
-            .w(px(112.))
-            .h(px(112.))
+            .w(px(48.))
+            .h(px(48.))
             .p_0()
-            .rounded(px(28.))
+            .rounded(px(12.))
             .accessibility_label(editing)
             .toggled(details.picking)
             .child(
@@ -902,7 +1103,7 @@ impl ElseApp {
                     .child(bot_avatar(
                         ElementId::Name(format!("settings-avatar-{bot}").into()),
                         details.sync.desired.avatar,
-                        px(96.),
+                        px(40.),
                     ))
                     .child(badge),
             );
@@ -969,10 +1170,7 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content = match saved {
-            None => v_flex().child(muted(
-                "No model yet. The bot uses the defaults once they are set.",
-                cx,
-            )),
+            None => v_flex().child(muted("No model yet. Choose a bot model.", cx)),
             Some(saved) => {
                 let choice = &saved.choice;
                 let speed = if choice.service_tier == "priority" {
@@ -980,14 +1178,10 @@ impl ElseApp {
                 } else {
                     "Standard speed"
                 };
-                let offered = self.caps.as_ref().is_none_or(|caps| {
-                    caps.providers.iter().any(|p| {
-                        p.id == choice.provider_id && p.catalog.models.contains(&choice.model)
-                    })
-                });
+                let offered = self.model_available(choice);
                 v_flex()
                     .gap_1()
-                    .child(muted("Now using", cx))
+                    .child(muted("Bot model", cx))
                     .child(
                         div()
                             .text_sm()
@@ -1001,7 +1195,7 @@ impl ElseApp {
                     )))
                     .children((!offered).then(|| {
                         note(
-                            "This provider no longer offers the saved model. It stays until you apply another.",
+                            "Saved model is unavailable. Choose another model.",
                             true,
                             cx,
                         )
@@ -1029,6 +1223,18 @@ impl ElseApp {
             .child(Icon::new(IconName::ChevronRight).flex_none())
             .on_click(cx.listener(move |app, _, window, cx| app.open_model_dialog(bot, window, cx)))
             .into_any_element()
+    }
+
+    fn model_available(&self, choice: &ProfileChoice) -> bool {
+        self.caps.as_ref().is_none_or(|caps| {
+            caps.providers.iter().any(|provider| {
+                provider.id == choice.provider_id
+                    && provider.cli_available
+                    && provider.catalog.models.contains(&choice.model)
+                    && provider.catalog.efforts.contains(&choice.reasoning_effort)
+                    && provider.catalog.tiers.contains(&choice.service_tier)
+            })
+        })
     }
 }
 
@@ -1114,43 +1320,90 @@ impl ElseApp {
                 .filter(|(_, error)| *error)
                 .map(|(text, _)| text),
         };
+        let choice = routine.model.as_ref().or_else(|| {
+            self.settings
+                .get(&bot)
+                .and_then(|entry| match &entry.model {
+                    ModelState::Ready(Some(profile)) => Some(&profile.choice),
+                    _ => None,
+                })
+        });
+        let model_title = match (&routine.model, choice) {
+            (Some(choice), _) => model_label(&choice.model),
+            (None, Some(choice)) => format!("Bot model · {}", model_label(&choice.model)),
+            (None, None) => "Bot model".to_owned(),
+        };
+        let model_details = choice
+            .map(|choice| {
+                let speed = if choice.service_tier == "priority" {
+                    "Fast"
+                } else {
+                    "Standard"
+                };
+                format!(
+                    "{} · {} reasoning · {speed}",
+                    self.provider_label(&choice.provider_id),
+                    effort_label(&choice.reasoning_effort)
+                )
+            })
+            .unwrap_or_else(|| "No model yet. Choose a bot model.".to_owned());
+        let unavailable = routine
+            .model
+            .as_ref()
+            .is_some_and(|choice| !self.model_available(choice));
         let theme = cx.theme();
-        let (hover_bg, hover_border) = (theme.sidebar_accent, theme.border);
-        let pill = h_flex()
-            .id(ElementId::Name(format!("routine-pill-{id}").into()))
+        let warning = routine
+            .requested_model
+            .as_ref()
+            .map(|requested| format!("Couldn't use \"{requested}\". Using bot model."))
+            .or_else(|| {
+                unavailable.then(|| "Saved model is unavailable. Choose another model.".to_owned())
+            });
+        let model_control = Button::new(ElementId::Name(format!("routine-model-{id}").into()))
+            .focus_ring(false)
+            .cursor_pointer()
+            .ghost()
+            .with_size(Size::Size(px(16.)))
             .w_full()
-            .gap_2()
-            .items_center()
-            .px_3()
-            .py_2()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.sidebar_border)
-            .bg(theme.sidebar_accent.opacity(0.4))
-            .hover(move |style| style.bg(hover_bg).border_color(hover_border))
+            .py_1()
+            .px_0()
+            .accessibility_label(format!("Change model for {}", routine.name))
+            .icon(IconName::Cpu)
+            .loading(matches!(save, Some(RoutineSave::Model { .. })))
+            .disabled(busy || !connected || self.caps.is_none())
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
+                    .items_start()
+                    .text_left()
+                    .whitespace_normal()
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(routine.name.clone()),
+                            .child(model_title.clone()),
                     )
-                    .child(muted(schedule.clone(), cx).truncate())
-                    .children(problem.map(|text| note(text, true, cx))),
+                    .child(muted(model_details.clone(), cx)),
             )
+            .child(Icon::new(IconName::ChevronRight).flex_none())
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.open_routine_model_dialog(bot, id, window, cx)
+            }));
+        let summary = v_flex()
+            .id(ElementId::Name(format!("routine-pill-{id}").into()))
+            .w_full()
+            .gap_0p5()
             .child(
-                h_flex()
-                    .flex_none()
-                    .gap_1()
-                    .items_center()
-                    .child(delete)
-                    .child(switch),
-            );
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(routine.name.clone()),
+            )
+            .child(muted(schedule.clone(), cx).truncate())
+            .children(problem.map(|text| note(text, true, cx)));
         let name = routine.name.clone();
         let prompt = routine.prompt.clone();
         let next = match (routine.enabled, routine.next_run_at) {
@@ -1158,11 +1411,11 @@ impl ElseApp {
             (true, Some(at)) => Some(format!("Next run {}", local_time(at, &routine.timezone))),
             (true, None) => Some("No further runs".to_owned()),
         };
-        HoverCard::new(ElementId::Name(format!("routine-card-{id}").into()))
+        let description = HoverCard::new(ElementId::Name(format!("routine-card-{id}").into()))
             .w_full()
             .anchor(Anchor::RightCenter)
             .open_delay(Duration::from_millis(300))
-            .trigger(pill)
+            .trigger(summary)
             .content(move |_, _, cx| {
                 let theme = cx.theme();
                 let line =
@@ -1244,6 +1497,33 @@ impl ElseApp {
                         .h(px(16.)),
                     )
             })
+            .into_any_element();
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_3()
+            .rounded(theme.radius_lg)
+            .bg(theme.sidebar_accent.opacity(0.4))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(description))
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .items_center()
+                            .child(delete)
+                            .child(switch),
+                    ),
+            )
+            .children(
+                warning.map(|warning| div().text_xs().text_color(theme.warning).child(warning)),
+            )
+            .child(div().w_full().h(px(1.)).bg(theme.sidebar_border))
+            .child(model_control)
             .into_any_element()
     }
 }

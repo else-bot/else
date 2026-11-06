@@ -4,6 +4,7 @@
 
 use serde_json::{Value, json};
 
+use crate::app::routines::ModelSetting;
 use crate::db::bots::{BotRecord, BotStatus};
 use crate::db::routines::Routine;
 use crate::db::turns::{ItemRecord, TurnRecord};
@@ -124,6 +125,14 @@ pub fn routine_json(routine: &Routine) -> Value {
         "cron": routine.cron,
         "timezone": routine.timezone,
         "enabled": routine.enabled,
+        "model": match &routine.model {
+            ModelSetting::Own(model) => json!(model),
+            ModelSetting::Inherit { .. } => Value::Null,
+        },
+        "requested_model": match &routine.model {
+            ModelSetting::Inherit { requested } => json!(requested),
+            ModelSetting::Own(_) => Value::Null,
+        },
         "next_run_at": routine.next_run_at,
         "created_at": routine.created_at,
         "updated_at": routine.updated_at,
