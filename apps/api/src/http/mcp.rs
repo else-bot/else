@@ -85,7 +85,9 @@ pub async fn endpoint(
             let needs = match params["name"].as_str() {
                 Some("delegate") => Tool::Delegate,
                 Some("mcp_install") => Tool::ManageMcp,
-                Some("mcp_list" | "mcp_request") => Tool::Mcp,
+                Some("mcp_list" | "mcp_request" | "mcp_connect" | "mcp_connection_status") => {
+                    Tool::Mcp
+                }
                 Some("create_bot") => Tool::CreateBot,
                 Some("rename_bot") => Tool::RenameBot,
                 Some("request_secret") => Tool::RequestSecret,
@@ -410,7 +412,7 @@ fn entry_json(bot_id: Uuid, entry: &EntryRow, offset: usize, max: usize) -> Valu
 async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Value {
     let (result, log) = match name {
         "memory_bots" => bots(state, grant).await,
-        "mcp_list" | "mcp_install" | "mcp_request" => {
+        "mcp_list" | "mcp_install" | "mcp_request" | "mcp_connect" | "mcp_connection_status" => {
             super::shared_mcp::call(state, grant, name, args).await
         }
         "memory_search" => search(state, grant, args).await,

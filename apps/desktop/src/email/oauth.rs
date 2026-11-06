@@ -1,19 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::{
-    Router,
-    extract::{RawQuery, State},
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::get,
-};
-use tokio::{
-    net::TcpListener,
-    sync::{mpsc, oneshot},
-};
 use url::Url;
 
 use crate::api::{Client, ClientError, EmailAuthorization, EmailProvider};
+use crate::oauth_callback::{self, Outcome, WaitError};
 
 const GOOGLE_REGISTRATION: Option<(&str, &str)> =
     include!(concat!(env!("OUT_DIR"), "/google_oauth.rs"));
@@ -77,8 +67,7 @@ impl Provider {
 
 pub(super) struct SignIn {
     pub authorization: EmailAuthorization,
-    callback: oneshot::Receiver<Result<Callback, String>>,
-    _cancel: oneshot::Sender<()>,
+    callback: oauth_callback::Pending,
     client: Arc<Client>,
 }
 
@@ -128,18 +117,10 @@ impl SignIn {
         address: String,
         (client_id, client_secret): (&str, Option<&str>),
     ) -> Result<Self, ClientError> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|_| {
+        let (listener, callback) = oauth_callback::Listener::bind().await.map_err(|_| {
             ClientError::Protocol("Cannot open the local email sign-in callback.".into())
         })?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| ClientError::Protocol(e.to_string()))?
-            .port();
-        let (redirect_uri, path) = provider.callback(port);
-        let callback_host = Url::parse(&redirect_uri)
-            .expect("local callback URL")
-            .authority()
-            .to_owned();
+        let (redirect_uri, _) = provider.callback(listener.port());
         let authorization = client
             .clone()
             .authorize_email(
@@ -150,12 +131,9 @@ impl SignIn {
                 redirect_uri.clone(),
             )
             .await?;
-        let (callback_tx, callback) = oneshot::channel();
-        let (cancel, cancel_rx) = oneshot::channel();
         let signin = Self {
             authorization,
             callback,
-            _cancel: cancel,
             client,
         };
         let state = authorization_state(
@@ -167,21 +145,31 @@ impl SignIn {
         .ok_or_else(|| {
             ClientError::Protocol("The API returned an invalid email sign-in URL.".into())
         })?;
-        tokio::spawn(serve(
-            listener,
-            path,
-            callback_host,
+        listener.start(
+            &Url::parse(&redirect_uri).expect("local callback URL"),
             state,
-            callback_tx,
-            cancel_rx,
-        ));
+            Duration::from_secs(600),
+        );
         Ok(signin)
     }
 
     pub async fn wait(&mut self) -> Result<Callback, String> {
-        (&mut self.callback)
-            .await
-            .map_err(|_| "Email sign-in stopped. Try again.".to_owned())?
+        let callback = self.callback.wait().await.map_err(|error| match error {
+            WaitError::Stopped => "Email sign-in stopped. Try again.",
+            WaitError::Expired => "Email sign-in expired. Try again.",
+        })?;
+        match callback.outcome {
+            Outcome::Code(code) => Ok(Callback {
+                state: callback.state,
+                code,
+            }),
+            Outcome::Error(error) => Err(if error == "access_denied" {
+                "Email sign-in was cancelled. You can try again."
+            } else {
+                "Your email provider could not authorize this account. Try signing in again."
+            }
+            .into()),
+        }
     }
 }
 
@@ -221,113 +209,14 @@ fn authorization_state(
     one("state").filter(|s| !s.is_empty() && s.len() <= 128)
 }
 
-fn parse_callback(query: &str, expected_state: &str) -> Option<Result<Callback, String>> {
-    if query.len() > 16_384 {
-        return None;
-    }
-    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    let one = |name: &str| {
-        let mut values = pairs
-            .iter()
-            .filter(|(key, _)| key == name)
-            .map(|(_, value)| value.as_ref());
-        let value = values.next()?;
-        values.next().is_none().then_some(value)
-    };
-    if one("state")? != expected_state {
-        return None;
-    }
-    if let Some(error) = one("error") {
-        if pairs.iter().any(|(key, _)| key == "code") {
-            return None;
-        }
-        return Some(Err(if error == "access_denied" {
-            "Email sign-in was cancelled. You can try again."
-        } else {
-            "Your email provider could not authorize this account. Try signing in again."
-        }
-        .into()));
-    }
-    if pairs.iter().any(|(key, _)| key == "error") {
-        return None;
-    }
-    let code = one("code")?;
-    if code.is_empty() || code.len() > 8192 {
-        return None;
-    }
-    Some(Ok(Callback {
-        state: expected_state.into(),
-        code: code.into(),
-    }))
-}
-
-#[derive(Clone)]
-struct BrowserCallback {
-    state: String,
-    host: String,
-    requests: mpsc::Sender<Result<Callback, String>>,
-}
-
-async fn receive(
-    State(callback): State<BrowserCallback>,
-    headers: HeaderMap,
-    RawQuery(query): RawQuery,
-) -> Response {
-    if headers.get("host").and_then(|v| v.to_str().ok()) != Some(callback.host.as_str()) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let Some(result) = parse_callback(query.as_deref().unwrap_or_default(), &callback.state) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "This sign-in response is invalid. Return to else.bot and try again.",
-        )
-            .into_response();
-    };
-    if callback.requests.send(result).await.is_err() {
-        return StatusCode::GONE.into_response();
-    }
-    (
-        [("cache-control", "no-store"), ("referrer-policy", "no-referrer"),
-         ("content-security-policy", "default-src 'none'; frame-ancestors 'none'")],
-        Html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>else.bot sign-in</title><h1>Return to else.bot</h1><p>Your sign-in response was received. You can close this tab.</p></html>"),
-    ).into_response()
-}
-
-async fn serve(
-    listener: TcpListener,
-    path: String,
-    host: String,
-    state: String,
-    callback: oneshot::Sender<Result<Callback, String>>,
-    cancel: oneshot::Receiver<()>,
-) {
-    let (requests, mut receiver) = mpsc::channel(1);
-    let router = Router::new()
-        .route(&path, get(receive))
-        .with_state(BrowserCallback {
-            state,
-            host,
-            requests,
-        });
-    let (shutdown, shutdown_rx) = oneshot::channel::<()>();
-    let server = axum::serve(listener, router).with_graceful_shutdown(async {
-        let _ = shutdown_rx.await;
-    });
-    let server = std::future::IntoFuture::into_future(server);
-    tokio::pin!(server);
-    tokio::select! {
-        result = receiver.recv() => { let _ = callback.send(result.unwrap_or_else(|| Err("Email sign-in stopped. Try again.".into()))); }
-        _ = cancel => {}
-        _ = tokio::time::sleep(Duration::from_secs(600)) => { let _ = callback.send(Err("Email sign-in expired. Try again.".into())); }
-        _ = &mut server => { let _ = callback.send(Err("The local email callback stopped. Try again.".into())); return; }
-    }
-    let _ = shutdown.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        http::{HeaderMap, StatusCode},
+    };
+    use tokio::{net::TcpListener, sync::mpsc};
 
     const FIXTURE_REGISTRATION: (&str, Option<&str>) =
         ("fixture.apps.googleusercontent.com", Some("fixture-secret"));
@@ -483,7 +372,7 @@ mod tests {
             let client =
                 Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
             let mut signin =
-                SignIn::start_registered(client, provider, address.into(), registration)
+                SignIn::start_registered(client.clone(), provider, address.into(), registration)
                     .await
                     .unwrap();
             let callback = starts.recv().await.unwrap();
@@ -513,99 +402,25 @@ mod tests {
                     .to_string(),
                 "11111111-1111-4111-8111-111111111111"
             );
+            let mut denied =
+                SignIn::start_registered(client.clone(), provider, address.into(), registration)
+                    .await
+                    .unwrap();
+            let callback = starts.recv().await.unwrap();
+            let response = reqwest::Client::builder().no_proxy().build().unwrap()
+                .get(format!("{callback}?state=bound-state&error=access_denied&error_description=untrusted%20secret"))
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let error = denied.wait().await.err().unwrap();
+            assert!(error.contains("cancelled"));
+            assert!(!error.contains("untrusted secret"));
+            drop(denied);
+            tokio::time::timeout(Duration::from_secs(5), cancellations.recv())
+                .await
+                .unwrap()
+                .unwrap();
             server.abort();
         }
-    }
-
-    async fn listener() -> (
-        String,
-        oneshot::Receiver<Result<Callback, String>>,
-        oneshot::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/callback", listener.local_addr().unwrap());
-        let (result, callback) = oneshot::channel();
-        let (cancel, cancelled) = oneshot::channel();
-        let task = tokio::spawn(serve(
-            listener,
-            "/callback".into(),
-            Url::parse(&url).unwrap().authority().to_owned(),
-            "expected-state".into(),
-            result,
-            cancelled,
-        ));
-        (url, callback, cancel, task)
-    }
-
-    #[tokio::test]
-    async fn browser_callback_rejects_forgery_then_delivers_code_once() {
-        let (url, callback, _cancel, task) = listener().await;
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for query in [
-            "state=wrong&code=stolen",
-            "state=expected-state&state=wrong&code=stolen",
-            "state=expected-state&code=one&code=two",
-            "state=expected-state&code=one&error=access_denied",
-        ] {
-            assert_eq!(
-                client
-                    .get(format!("{url}?{query}"))
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::BAD_REQUEST
-            );
-        }
-        assert_eq!(
-            client
-                .get(format!("{url}?state=expected-state&code=stolen"))
-                .header("host", "attacker.example")
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::BAD_REQUEST
-        );
-        let response = client
-            .get(format!("{url}?state=expected-state&code=valid%2Bcode"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        assert!(!response.text().await.unwrap().contains("valid+code"));
-        let result = callback.await.unwrap().unwrap();
-        assert_eq!(result.state, "expected-state");
-        assert_eq!(result.code, "valid+code");
-        task.await.unwrap();
-        assert!(client.get(url).send().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn denial_and_cancellation_close_the_listener() {
-        let (url, callback, _cancel, task) = listener().await;
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        assert_eq!(
-            client
-                .get(format!("{url}?state=expected-state&error=access_denied&error_description=untrusted%20secret"))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
-        let error = callback.await.unwrap().err().unwrap();
-        assert!(error.contains("cancelled"));
-        assert!(!error.contains("untrusted secret"));
-        task.await.unwrap();
-        let (url, callback, cancel, task) = listener().await;
-        drop(cancel);
-        task.await.unwrap();
-        assert!(callback.await.is_err());
-        assert!(client.get(url).send().await.is_err());
     }
 
     #[test]

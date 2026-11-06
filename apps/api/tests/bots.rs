@@ -519,19 +519,23 @@ async fn avatars_persist_with_the_name_and_journal_only_changes() {
     let initial = created.body["bot"]["avatar"].clone();
     assert!(initial["shape"].is_string() && initial["color"].is_string());
 
-    let pink_cloud = json!({ "shape": "cloud", "color": "pink" });
-    let saved = update(&app, &id, json!({ "avatar": pink_cloud })).await;
+    let changed_avatar = if initial["shape"] == "cloud" {
+        json!({ "shape": "star", "color": "pink" })
+    } else {
+        json!({ "shape": "cloud", "color": "pink" })
+    };
+    let saved = update(&app, &id, json!({ "avatar": changed_avatar })).await;
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
-    assert_eq!(saved.body["bot"]["avatar"], pink_cloud);
+    assert_eq!(saved.body["bot"]["avatar"], changed_avatar);
     assert_eq!(
         saved.body["bot"]["name"], "Work",
         "an avatar-only save keeps the name"
     );
     let events = updated_events(&app, &id).await;
     assert_eq!(events.len(), 1, "one bot.updated for the change");
-    assert_eq!(events[0]["bot"]["avatar"], pink_cloud);
+    assert_eq!(events[0]["bot"]["avatar"], changed_avatar);
 
-    let again = update(&app, &id, json!({ "avatar": pink_cloud })).await;
+    let again = update(&app, &id, json!({ "avatar": changed_avatar })).await;
     assert_eq!(again.body, saved.body, "a retry returns the same bot");
     assert_eq!(
         updated_events(&app, &id).await.len(),
@@ -541,7 +545,7 @@ async fn avatars_persist_with_the_name_and_journal_only_changes() {
 
     let renamed = update(&app, &id, json!({ "name": "Planner" })).await;
     assert_eq!(
-        renamed.body["bot"]["avatar"], pink_cloud,
+        renamed.body["bot"]["avatar"], changed_avatar,
         "a name-only save keeps the avatar"
     );
 

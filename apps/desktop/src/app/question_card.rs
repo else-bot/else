@@ -18,6 +18,7 @@ use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question, QuestionAnswer};
 
 mod choice;
+pub(super) mod mcp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
@@ -169,6 +170,9 @@ impl ElseApp {
             return div().into_any_element();
         };
         let submit = view.question_submits.get(&id);
+        if question.mcp_connection().is_some() {
+            return self.render_mcp_card(question, cx);
+        }
         if !question.is_approval() {
             return self.render_choice_card(question, submit, cx);
         }
@@ -213,20 +217,9 @@ impl ElseApp {
             );
         }
         card = card.child(note(match question.kind.as_str() {
-            "external" => "Approval covers exactly this action, once. Sending, posting, or \
-                               paying is never allowed in advance."
-                .to_owned(),
-            _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => {
-                "Always allow for this routine remembers destructive \
-                    approval for its saved task on future runs. Other routines and chat requests \
-                    still need approval. Changing the task clears this permission."
-                    .to_owned()
-            }
-            _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => {
-                "Approve once covers exactly this action. Always allow lets this bot take \
-                      destructive actions without asking."
-                    .to_owned()
-            }
+            "external" => "Approval covers exactly this action, once. Sending, posting, or paying is never allowed in advance.".to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task on future runs. Other routines and chat requests still need approval. Changing the task clears this permission.".to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Approve once covers exactly this action. Always allow lets this bot take destructive actions without asking.".to_owned(),
             _ => "Approval covers exactly this action, once.".to_owned(),
         }));
         let mut buttons = h_flex().w_full().flex_wrap().justify_end().gap_2();
@@ -237,6 +230,7 @@ impl ElseApp {
             {
                 Some(SubmitState::Sending) => "Sending…".to_owned(),
                 Some(SubmitState::Recorded) => "Recorded".to_owned(),
+
                 _ => choice.label.clone(),
             };
             let choice_id = choice.id.clone();
@@ -306,6 +300,7 @@ mod tests {
             id: Uuid::nil(),
             kind: kind.into(),
             title: "t".into(),
+            action: None,
             context: None,
             choices,
             multiple: false,

@@ -167,6 +167,8 @@ pub struct Question {
     pub kind: String,
     pub title: String,
     #[serde(default)]
+    pub action: Option<QuestionAction>,
+    #[serde(default)]
     pub context: Option<String>,
     pub choices: Vec<QuestionChoice>,
     #[serde(default)]
@@ -180,7 +182,17 @@ pub struct Question {
     pub settled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct QuestionAction {
+    #[serde(default)]
+    pub mcp_connection: Option<crate::api::McpConsent>,
+}
+
 impl Question {
+    pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
+        self.action.as_ref()?.mcp_connection.as_ref()
+    }
+
     pub fn is_pending(&self) -> bool {
         self.status == "pending"
     }

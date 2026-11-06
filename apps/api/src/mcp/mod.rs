@@ -1,5 +1,6 @@
 //! Shared MCP packages. Each package actor owns its files and live connection.
 
+pub mod oauth;
 mod transport;
 pub(crate) use transport::METHODS;
 
@@ -34,6 +35,12 @@ pub enum Error {
         "The MCP connection failed. Check its setup; do not repeat a mutation whose outcome is unknown."
     )]
     Connection,
+    #[error("The owner needs to sign in to this MCP.")]
+    AuthRequired(Box<oauth::ConnectionStatus>),
+    #[error("The MCP requires OAuth authorization.")]
+    AuthChallenge(String),
+    #[error("The MCP authorization expired or was revoked. Sign in again.")]
+    OAuthRevoked,
     #[error("The MCP request timed out and may have completed. Check its outcome before retrying.")]
     Timeout,
     #[error("The MCP library is paused for a backup or update. Try again afterward.")]
@@ -237,9 +244,44 @@ pub struct Package {
 
 struct Slot {
     path: PathBuf,
-    connection: Option<transport::Connection>,
+    sessions: HashMap<Uuid, oauth::Session>,
+    oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     retired: bool,
     gate: Arc<crate::maintenance::Gate>,
+}
+
+impl Slot {
+    async fn package(&self) -> Result<Package, Error> {
+        if self.retired {
+            return Err(Error::NotFound);
+        }
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || read_package(&path))
+            .await
+            .map_err(|_| Error::Connection)?
+    }
+
+    async fn session(
+        &mut self,
+        bot: Uuid,
+        config: &Transport,
+    ) -> Result<&mut oauth::Session, Error> {
+        let owner = match config {
+            Transport::Stdio { .. } => Uuid::nil(),
+            Transport::Http { .. } => bot,
+        };
+        if !self.sessions.contains_key(&owner) {
+            if self.sessions.len() >= 1024 {
+                return Err(Error::Invalid(
+                    "Too many bot connections for this MCP. Restart before connecting another bot.",
+                ));
+            }
+            let store = oauth::Store::new(self.path.clone(), owner, self.oauth_key.clone());
+            self.sessions
+                .insert(owner, oauth::Session::open(store).await?);
+        }
+        Ok(self.sessions.get_mut(&owner).expect("opened MCP session"))
+    }
 }
 
 #[derive(Clone)]
@@ -253,6 +295,7 @@ pub struct Library {
     root: PathBuf,
     gate: Arc<crate::maintenance::Gate>,
     slots: Actor<HashMap<String, Entry>>,
+    oauth_key: Option<Arc<crate::credentials::SecretKey>>,
 }
 
 impl Library {
@@ -261,13 +304,20 @@ impl Library {
             root,
             gate,
             slots: Actor::default(),
+            oauth_key: None,
         }
+    }
+
+    pub fn with_oauth_key(mut self, key: Option<Arc<crate::credentials::SecretKey>>) -> Self {
+        self.oauth_key = key;
+        self
     }
 
     async fn slot(&self, id: &PackageId) -> Result<Entry, Error> {
         let id = id.0.clone();
         let path = self.root.join(&id);
         let gate = self.gate.clone();
+        let oauth_key = self.oauth_key.clone();
         self.slots
             .call(move |slots| {
                 if !slots.contains_key(&id) && slots.len() >= 1024 {
@@ -281,7 +331,8 @@ impl Library {
                         epoch: Uuid::new_v4(),
                         actor: Actor::new(Slot {
                             path,
-                            connection: None,
+                            sessions: HashMap::new(),
+                            oauth_key,
                             retired: false,
                             gate,
                         }),
@@ -396,9 +447,10 @@ impl Library {
                     if slot.retired {
                         return Err(Error::NotFound);
                     }
-                    if let Some(mut connection) = slot.connection.take() {
-                        connection.shutdown().await;
-                    }
+                    futures_util::future::join_all(
+                        slot.sessions.values_mut().map(oauth::Session::close),
+                    )
+                    .await;
                     let path = slot.path.clone();
                     tokio::task::spawn_blocking(move || {
                         let parent = path.parent().expect("package parent");
@@ -434,44 +486,154 @@ impl Library {
         method: String,
         params: Value,
     ) -> Result<Value, Error> {
+        self.request_for(id, Uuid::nil(), method, params).await
+    }
+
+    pub async fn request_for(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        method: String,
+        params: Value,
+    ) -> Result<Value, Error> {
         self.installed_slot(id)
             .await?
             .actor
             .call_async(move |slot| {
                 Box::pin(async move {
                     let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    if slot.retired {
-                        return Err(Error::NotFound);
-                    }
-                    if slot.connection.is_none() {
-                        let path = slot.path.clone();
-                        let package = tokio::task::spawn_blocking(move || read_package(&path))
-                            .await
-                            .map_err(|_| Error::Connection)??;
-                        slot.connection = Some(
-                            transport::connect(
-                                &package.config,
-                                &slot.path,
-                                slot.path
-                                    .parent()
-                                    .and_then(Path::parent)
-                                    .expect("MCP data directory"),
-                            )
-                            .await?,
-                        );
-                    }
-                    let result = slot
-                        .connection
-                        .as_mut()
-                        .expect("connected MCP")
-                        .request(method, params)
-                        .await;
-                    if matches!(result, Err(Error::Connection | Error::Timeout))
-                        && let Some(mut connection) = slot.connection.take()
-                    {
-                        connection.shutdown().await;
-                    }
-                    result
+                    let package = slot.package().await?;
+                    slot.session(bot_id, &package.config)
+                        .await?
+                        .request(&package.config, method, params)
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn connection_status(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+    ) -> Result<oauth::ConnectionStatus, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let package = slot.package().await?;
+                    Ok(slot.session(bot_id, &package.config).await?.status())
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn authorize(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        redirect_uri: String,
+    ) -> Result<oauth::Started, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    slot.session(bot_id, &package.config)
+                        .await?
+                        .authorize(&package.config, redirect_uri)
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn complete_authorization(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        callback: oauth::Complete,
+    ) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    slot.session(bot_id, &package.config)
+                        .await?
+                        .complete(callback)
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn cancel_authorization(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    slot.session(bot_id, &package.config)
+                        .await?
+                        .cancel(request_id);
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn cancel_pending_authorization(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+    ) -> Result<oauth::ConnectionStatus, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    Ok(slot
+                        .session(bot_id, &package.config)
+                        .await?
+                        .cancel_pending())
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn disconnect(&self, id: &PackageId, bot_id: Uuid) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    slot.session(bot_id, &package.config)
+                        .await?
+                        .disconnect()
+                        .await
                 })
             })
             .await
@@ -644,235 +806,4 @@ fn install(path: &Path, input: &Installation, installed_by: String) -> Result<Su
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    fn input(id: &str) -> Installation {
-        Installation {
-            id: PackageId::try_from(id.to_owned()).unwrap(),
-            name: "T3 Code".into(),
-            description: "Code and threads".into(),
-            skill: "Use T3 for code tasks.".into(),
-            documentation: "Read the schemas before calling a tool.".into(),
-            config: Transport::Http {
-                url: "http://127.0.0.1:1/mcp".into(),
-                headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn packages_survive_restart_and_are_private_shared_and_removable() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("mcp");
-        let gate = Arc::new(crate::maintenance::Gate::default());
-        let library = Library::new(root.clone(), gate.clone());
-        let input = input("t3-code");
-        let installed = library
-            .install(input.clone(), "Maple".into())
-            .await
-            .unwrap();
-        let repeated = library
-            .install(input.clone(), "Scout".into())
-            .await
-            .unwrap();
-        assert_eq!(installed.installed_at, repeated.installed_at);
-        assert_eq!(repeated.installed_by, "Maple");
-        let reopened = Library::new(root.clone(), gate);
-        assert_eq!(reopened.list().await.unwrap().len(), 1);
-        let package = reopened.read(&input.id).await.unwrap();
-        assert_eq!(package.skill, input.skill);
-        assert_eq!(package.documentation, input.documentation);
-        assert_eq!(package.config.label(), "http");
-        let public = serde_json::to_string(&package).unwrap();
-        assert!(!public.contains("private-token"));
-        assert!(!public.contains("config"));
-        for name in ["manifest.json", "SKILL.md", "README.md", "config.json"] {
-            assert_eq!(
-                std::fs::metadata(root.join("t3-code").join(name))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        let mut changed = input.clone();
-        changed.skill = "Something different".into();
-        assert!(matches!(
-            reopened.install(changed, "Scout".into()).await,
-            Err(Error::Conflict)
-        ));
-        reopened.remove(&input.id).await.unwrap();
-        assert!(reopened.list().await.unwrap().is_empty());
-        assert!(matches!(
-            reopened.read(&input.id).await,
-            Err(Error::NotFound)
-        ));
-        assert!(matches!(
-            reopened
-                .request(&input.id, "tools/list".into(), serde_json::json!({}))
-                .await,
-            Err(Error::NotFound)
-        ));
-    }
-
-    #[tokio::test]
-    async fn simultaneous_same_id_installs_publish_one_complete_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let library = Library::new(temp.path().join("mcp"), Arc::default());
-        let a = input("shared");
-        let mut b = a.clone();
-        b.skill = "Different instructions".into();
-        let (a, b) = tokio::join!(
-            library.install(a, "Maple".into()),
-            library.install(b, "Scout".into())
-        );
-        assert_ne!(a.is_ok(), b.is_ok());
-        assert_eq!(library.list().await.unwrap().len(), 1);
-        let package = library.read(&input("shared").id).await.unwrap();
-        assert_eq!(
-            package.skill,
-            if a.is_ok() {
-                "Use T3 for code tasks."
-            } else {
-                "Different instructions"
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn unsafe_paths_links_and_reserved_credentials_are_rejected() {
-        for id in [
-            "",
-            "../escape",
-            "/absolute",
-            ".hidden",
-            "UPPER",
-            "id/nested",
-        ] {
-            assert!(PackageId::try_from(id.to_owned()).is_err());
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("mcp");
-        let library = Library::new(root.clone(), Arc::default());
-        let mut bad = input("bad");
-        bad.config = Transport::Stdio {
-            command: "env".into(),
-            args: vec![],
-            env: BTreeMap::from([("SECRET_KEY".into(), "must-not-be-injected".into())]),
-        };
-        assert!(matches!(
-            library.install(bad, "Maple".into()).await,
-            Err(Error::Invalid(_))
-        ));
-        assert!(!root.exists());
-        library
-            .install(input("safe"), "Maple".into())
-            .await
-            .unwrap();
-        std::fs::remove_file(root.join("safe/SKILL.md")).unwrap();
-        let outside = temp.path().join("outside");
-        std::fs::write(&outside, "private").unwrap();
-        symlink(&outside, root.join("safe/SKILL.md")).unwrap();
-        assert!(library.read(&input("safe").id).await.is_err());
-        library.remove(&input("safe").id).await.unwrap();
-        assert_eq!(std::fs::read_to_string(outside).unwrap(), "private");
-    }
-
-    #[tokio::test]
-    async fn nonexistent_probes_and_removed_packages_do_not_exhaust_actors() {
-        let temp = tempfile::tempdir().unwrap();
-        let library = Library::new(temp.path().join("mcp"), Arc::default());
-        for i in 0..1030 {
-            let id = PackageId::try_from(format!("missing-{i}")).unwrap();
-            assert!(matches!(library.read(&id).await, Err(Error::NotFound)));
-        }
-        for i in 0..3 {
-            let package = input(&format!("installed-{i}"));
-            library
-                .install(package.clone(), "Maple".into())
-                .await
-                .unwrap();
-            library.remove(&package.id).await.unwrap();
-            library
-                .install(package.clone(), "Scout".into())
-                .await
-                .unwrap();
-        }
-        assert_eq!(library.list().await.unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn discovery_ignores_stray_directories_and_can_remove_a_damaged_config() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("mcp");
-        let library = Library::new(root.clone(), Arc::default());
-        library
-            .install(input("valid"), "Maple".into())
-            .await
-            .unwrap();
-        std::fs::create_dir(root.join("Stray folder")).unwrap();
-        std::fs::create_dir(root.join("scratch")).unwrap();
-        std::fs::write(root.join("valid/config.json"), "broken").unwrap();
-        assert_eq!(library.list().await.unwrap().len(), 1);
-        library.remove(&input("valid").id).await.unwrap();
-        assert!(library.list().await.unwrap().is_empty());
-    }
-
-    #[test]
-    fn startup_cleanup_removes_only_unpublished_or_retired_package_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        for prefix in [".install-", ".removed-"] {
-            let dir = root.join(format!("{prefix}{}", Uuid::new_v4()));
-            std::fs::create_dir(&dir).unwrap();
-            std::fs::write(dir.join("config.json"), "private credentials").unwrap();
-        }
-        std::fs::create_dir(root.join(".unrelated")).unwrap();
-        std::fs::create_dir(root.join("installed")).unwrap();
-        cleanup(root).unwrap();
-        let mut names: Vec<_> = std::fs::read_dir(root)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        names.sort();
-        assert_eq!(names, vec![".unrelated", "installed"]);
-    }
-
-    #[tokio::test]
-    async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
-        let temp = tempfile::tempdir().unwrap();
-        let gate = Arc::new(crate::maintenance::Gate::default());
-        let library = Library::new(temp.path().join("mcp"), gate.clone());
-        library
-            .install(input("shared"), "Maple".into())
-            .await
-            .unwrap();
-        let _closed = gate
-            .close(std::time::Duration::from_secs(1))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(library.list().await.unwrap().len(), 1);
-        assert!(matches!(
-            library.install(input("new"), "Scout".into()).await,
-            Err(Error::Paused)
-        ));
-        assert!(matches!(
-            library.remove(&input("shared").id).await,
-            Err(Error::Paused)
-        ));
-        assert!(matches!(
-            library
-                .request(
-                    &input("shared").id,
-                    "tools/list".into(),
-                    serde_json::json!({})
-                )
-                .await,
-            Err(Error::Paused)
-        ));
-    }
-}
+mod tests;

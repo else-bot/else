@@ -1,0 +1,284 @@
+use super::*;
+use std::os::unix::fs::{PermissionsExt, symlink};
+
+fn input(id: &str) -> Installation {
+    Installation {
+        id: PackageId::try_from(id.to_owned()).unwrap(),
+        name: "T3 Code".into(),
+        description: "Code and threads".into(),
+        skill: "Use T3 for code tasks.".into(),
+        documentation: "Read the schemas before calling a tool.".into(),
+        config: Transport::Http {
+            url: "http://127.0.0.1:1/mcp".into(),
+            headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
+        },
+    }
+}
+
+#[tokio::test]
+async fn packages_survive_restart_and_are_private_shared_and_removable() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("mcp");
+    let gate = Arc::new(crate::maintenance::Gate::default());
+    let library = Library::new(root.clone(), gate.clone());
+    let input = input("t3-code");
+    let installed = library
+        .install(input.clone(), "Maple".into())
+        .await
+        .unwrap();
+    let repeated = library
+        .install(input.clone(), "Scout".into())
+        .await
+        .unwrap();
+    assert_eq!(installed.installed_at, repeated.installed_at);
+    assert_eq!(repeated.installed_by, "Maple");
+    let reopened = Library::new(root.clone(), gate);
+    assert_eq!(reopened.list().await.unwrap().len(), 1);
+    let package = reopened.read(&input.id).await.unwrap();
+    assert_eq!(package.skill, input.skill);
+    assert_eq!(package.documentation, input.documentation);
+    assert_eq!(package.config.label(), "http");
+    let public = serde_json::to_string(&package).unwrap();
+    assert!(!public.contains("private-token"));
+    assert!(!public.contains("config"));
+    for name in ["manifest.json", "SKILL.md", "README.md", "config.json"] {
+        assert_eq!(
+            std::fs::metadata(root.join("t3-code").join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let mut changed = input.clone();
+    changed.skill = "Something different".into();
+    assert!(matches!(
+        reopened.install(changed, "Scout".into()).await,
+        Err(Error::Conflict)
+    ));
+    reopened.remove(&input.id).await.unwrap();
+    assert!(reopened.list().await.unwrap().is_empty());
+    assert!(matches!(
+        reopened.read(&input.id).await,
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        reopened
+            .request(&input.id, "tools/list".into(), serde_json::json!({}))
+            .await,
+        Err(Error::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn simultaneous_same_id_installs_publish_one_complete_package() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let a = input("shared");
+    let mut b = a.clone();
+    b.skill = "Different instructions".into();
+    let (a, b) = tokio::join!(
+        library.install(a, "Maple".into()),
+        library.install(b, "Scout".into())
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert_eq!(library.list().await.unwrap().len(), 1);
+    let package = library.read(&input("shared").id).await.unwrap();
+    assert_eq!(
+        package.skill,
+        if a.is_ok() {
+            "Use T3 for code tasks."
+        } else {
+            "Different instructions"
+        }
+    );
+}
+
+#[tokio::test]
+async fn unsafe_paths_links_and_reserved_credentials_are_rejected() {
+    for id in [
+        "",
+        "../escape",
+        "/absolute",
+        ".hidden",
+        "UPPER",
+        "id/nested",
+    ] {
+        assert!(PackageId::try_from(id.to_owned()).is_err());
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("mcp");
+    let library = Library::new(root.clone(), Arc::default());
+    let mut bad = input("bad");
+    bad.config = Transport::Stdio {
+        command: "env".into(),
+        args: vec![],
+        env: BTreeMap::from([("SECRET_KEY".into(), "must-not-be-injected".into())]),
+    };
+    assert!(matches!(
+        library.install(bad, "Maple".into()).await,
+        Err(Error::Invalid(_))
+    ));
+    assert!(!root.exists());
+    library
+        .install(input("safe"), "Maple".into())
+        .await
+        .unwrap();
+    std::fs::remove_file(root.join("safe/SKILL.md")).unwrap();
+    let outside = temp.path().join("outside");
+    std::fs::write(&outside, "private").unwrap();
+    symlink(&outside, root.join("safe/SKILL.md")).unwrap();
+    assert!(library.read(&input("safe").id).await.is_err());
+    library.remove(&input("safe").id).await.unwrap();
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "private");
+}
+
+#[tokio::test]
+async fn nonexistent_probes_and_removed_packages_do_not_exhaust_actors() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    for i in 0..1030 {
+        let id = PackageId::try_from(format!("missing-{i}")).unwrap();
+        assert!(matches!(library.read(&id).await, Err(Error::NotFound)));
+    }
+    for i in 0..3 {
+        let package = input(&format!("installed-{i}"));
+        library
+            .install(package.clone(), "Maple".into())
+            .await
+            .unwrap();
+        library.remove(&package.id).await.unwrap();
+        library
+            .install(package.clone(), "Scout".into())
+            .await
+            .unwrap();
+    }
+    assert_eq!(library.list().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn discovery_ignores_stray_directories_and_can_remove_a_damaged_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("mcp");
+    let library = Library::new(root.clone(), Arc::default());
+    library
+        .install(input("valid"), "Maple".into())
+        .await
+        .unwrap();
+    std::fs::create_dir(root.join("Stray folder")).unwrap();
+    std::fs::create_dir(root.join("scratch")).unwrap();
+    std::fs::write(root.join("valid/config.json"), "broken").unwrap();
+    assert_eq!(library.list().await.unwrap().len(), 1);
+    library.remove(&input("valid").id).await.unwrap();
+    assert!(library.list().await.unwrap().is_empty());
+}
+
+#[test]
+fn startup_cleanup_removes_only_unpublished_or_retired_package_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for prefix in [".install-", ".removed-"] {
+        let dir = root.join(format!("{prefix}{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "private credentials").unwrap();
+    }
+    std::fs::create_dir(root.join(".unrelated")).unwrap();
+    std::fs::create_dir(root.join("installed")).unwrap();
+    cleanup(root).unwrap();
+    let mut names: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec![".unrelated", "installed"]);
+}
+
+#[tokio::test]
+async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(crate::maintenance::Gate::default());
+    let library = Library::new(temp.path().join("mcp"), gate.clone());
+    library
+        .install(input("shared"), "Maple".into())
+        .await
+        .unwrap();
+    let _closed = gate
+        .close(std::time::Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(library.list().await.unwrap().len(), 1);
+    assert!(matches!(
+        library.install(input("new"), "Scout".into()).await,
+        Err(Error::Paused)
+    ));
+    assert!(matches!(
+        library.remove(&input("shared").id).await,
+        Err(Error::Paused)
+    ));
+    assert!(matches!(
+        library
+            .request(
+                &input("shared").id,
+                "tools/list".into(),
+                serde_json::json!({})
+            )
+            .await,
+        Err(Error::Paused)
+    ));
+}
+
+#[tokio::test]
+async fn disconnect_closes_the_shared_stdio_session_for_every_bot() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::new(dir.path().join("mcp"), Arc::default());
+    let mut package = input("stdio-counter");
+    package.config = Transport::Stdio {
+        command: "python3".into(),
+        args: vec!["-u".into(), "-c".into(), r#"
+import json, sys
+calls = 0
+for line in sys.stdin:
+    message = json.loads(line)
+    if 'id' not in message:
+        continue
+    if message['method'] == 'initialize':
+        result = {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'counter', 'version': '1'}}
+    elif message['method'] == 'tools/list':
+        calls += 1
+        result = {'tools': [{'name': 'counter', 'description': str(calls), 'inputSchema': {'type': 'object'}}]}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+"#.into()],
+        env: BTreeMap::new(),
+    };
+    let id = package.id.clone();
+    library.install(package, "installer".into()).await.unwrap();
+    let first = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    for (bot, expected) in [(first, "1"), (other, "2")] {
+        let response = library
+            .request_for(&id, bot, "tools/list".into(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(response["tools"][0]["description"], expected);
+    }
+    library.disconnect(&id, other).await.unwrap();
+    for bot in [first, other] {
+        assert_eq!(
+            library.connection_status(&id, bot).await.unwrap().status,
+            "disconnected"
+        );
+    }
+    let response = library
+        .request_for(&id, first, "tools/list".into(), serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        response["tools"][0]["description"], "1",
+        "the process was restarted"
+    );
+    library.remove(&id).await.unwrap();
+}
