@@ -10,6 +10,7 @@ import plistlib
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -100,7 +101,20 @@ class ReleasePreflight(unittest.TestCase):
         scripts = self.repo / "scripts"
         scripts.mkdir()
         (scripts / "release.sh").write_text(Path(__file__).with_name("release.sh").read_text())
-        (self.repo / "Cargo.toml").write_text('[workspace.package]\nversion = "0.0.1"\n')
+        (self.repo / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["apps/api", "apps/desktop"]\n'
+            '[workspace.package]\nversion = "0.0.1"\n')
+        self.lock = 'version = 4\n'
+        for name in ("api", "desktop"):
+            member = self.repo / "apps" / name
+            (member / "src").mkdir(parents=True)
+            (member / "Cargo.toml").write_text(
+                f'[package]\nname = "else-{name}"\nversion.workspace = true\n')
+            (member / "src/main.rs").write_text("fn main() {}\n")
+            self.lock += f'\n[[package]]\nname = "else-{name}"\nversion = "0.0.1"\n'
+        self.lock += ('\n[[package]]\nname = "pinned-dependency"\nversion = "0.0.1"\n'
+                      'source = "git+https://example.invalid/dependency#' + 'a' * 40 + '"\n')
+        (self.repo / "Cargo.lock").write_text(self.lock)
         self.git("add", ".")
         self.git("commit", "-m", "initial release")
         self.git("tag", "v0.0.1")
@@ -143,6 +157,51 @@ class ReleasePreflight(unittest.TestCase):
         local_tag = self.git("rev-parse", "v0.0.2")
         self.assert_ready_to_confirm(self.preflight())
         self.assertEqual(self.git("rev-parse", "v0.0.2"), local_tag)
+
+    def test_preparation_needs_no_cargo_or_dependency_cache(self):
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        (fake_bin / "cargo").write_text(
+            '#!/bin/sh\necho "release preparation unexpectedly invoked Cargo" >&2\nexit 1\n')
+        (fake_bin / "cargo").chmod(0o755)
+        pr = self.root / "pr-created"
+        (fake_bin / "gh").write_text(f'''#!/bin/sh
+case "$1 $2" in
+"pr list") [ ! -f "{pr}" ] || echo https://example.invalid/pull/1 ;;
+"pr create") touch "{pr}"; echo https://example.invalid/pull/1 ;;
+*) exit 1 ;;
+esac
+''')
+        (fake_bin / "gh").chmod(0o755)
+        environment = dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                           CARGO_HOME=str(self.root / "empty-cargo-home"))
+        for name in ("Cargo.toml", "Cargo.lock"):
+            with (self.repo / name).open("a") as file:
+                file.write("\n# local uncommitted work\n")
+        checkout = {name: (self.repo / name).read_bytes() for name in ("Cargo.toml", "Cargo.lock")}
+        worktrees = self.git("worktree", "list", "--porcelain")
+        command = ["bash", str(self.repo / "scripts/release.sh"), "-y", "patch"]
+        result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Release pull request: https://example.invalid/pull/1", result.stdout)
+        ref = "refs/heads/release/v0.0.2"
+        head = self.git("--git-dir", str(self.remote), "rev-parse", ref)
+        self.assertEqual(self.git("rev-parse", f"{head}^"), self.git("rev-parse", "origin/main"))
+        self.assertEqual(self.git("diff-tree", "--no-commit-id", "--name-only", "-r", head).splitlines(),
+                         ["Cargo.lock", "Cargo.toml"])
+        manifest = tomllib.loads(self.git("show", f"{head}:Cargo.toml"))
+        self.assertEqual(manifest["workspace"]["package"]["version"], "0.0.2")
+        expected_lock = self.lock.replace('name = "else-api"\nversion = "0.0.1"',
+                                          'name = "else-api"\nversion = "0.0.2"').replace(
+                                              'name = "else-desktop"\nversion = "0.0.1"',
+                                              'name = "else-desktop"\nversion = "0.0.2"')
+        self.assertEqual(self.git("show", f"{head}:Cargo.lock"), expected_lock.strip())
+        self.assertEqual({name: (self.repo / name).read_bytes() for name in checkout}, checkout)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+        repeated = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=15)
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertIn("already exists on origin", repeated.stdout)
+        self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", ref), head)
 
 
 class Archives(unittest.TestCase):
