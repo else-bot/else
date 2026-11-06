@@ -249,7 +249,7 @@ impl Palette {
             ("caret", p.accent),
             ("link", p.accent),
             ("link.hover", p.accent.mix(p.foreground, 0.2)),
-            ("selection.background", p.selection),
+            ("selection.background", p.accent),
             ("list.background", p.background),
             ("list.hover.background", hover(p.surface)),
             ("list.active.background", p.selection),

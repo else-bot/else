@@ -387,7 +387,7 @@ impl Shell {
                                                         .text_xs()
                                                         .px_1p5()
                                                         .rounded_sm()
-                                                        .bg(theme.selection)
+                                                        .bg(theme.list_active)
                                                         .text_color(theme.primary)
                                                         .child("In use"),
                                                 )
