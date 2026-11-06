@@ -36,7 +36,6 @@ pub(super) struct RoutineRow {
     pub(super) turn: Uuid,
     pub(super) first: bool,
     pub(super) last: bool,
-    pub(super) tail: bool,
 }
 
 fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Option<RoutineRow>> {
@@ -75,11 +74,6 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             RowKey::Pending(_) => None,
         })
         .collect();
-    let tails: HashMap<_, _> = turns
-        .iter()
-        .enumerate()
-        .filter_map(|(ix, turn)| turn.map(|turn| (turn, ix)))
-        .collect();
     turns
         .iter()
         .enumerate()
@@ -88,7 +82,6 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 turn,
                 first: ix == 0 || turns[ix - 1] != Some(turn),
                 last: turns.get(ix + 1) != Some(&Some(turn)),
-                tail: tails.get(&turn) == Some(&ix),
             })
         })
         .collect()
@@ -481,14 +474,6 @@ impl ElseApp {
             .map(|((key, footer_stamp), routine)| {
                 let routine_turn = routine.and_then(|r| conversation?.turn(r.turn));
                 let routine_status = routine_turn.map(super::message_row::turn_label);
-                let footer_stamp = if let Some(routine) = routine {
-                    conversation
-                        .filter(|_| routine.tail)
-                        .and_then(|c| c.items().rev().find(|item| item.turn_id == routine.turn))
-                        .and_then(|item| item.created_at)
-                } else {
-                    footer_stamp
-                };
                 let state = conversation.and_then(|c| match key {
                     RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
                     RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
@@ -508,7 +493,7 @@ impl ElseApp {
                 });
                 TranscriptRow {
                     key,
-                    footer_stamp,
+                    footer_stamp: footer_stamp.filter(|_| routine.is_none()),
                     routine,
                     routine_status,
                     task: match key {
@@ -749,26 +734,22 @@ mod tests {
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: true,
-                    last: false,
-                    tail: false
+                    last: false
                 }),
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: false,
-                    last: false,
-                    tail: false
+                    last: false
                 }),
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: false,
-                    last: false,
-                    tail: false
+                    last: false
                 }),
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: false,
-                    last: true,
-                    tail: true
+                    last: true
                 }),
             ]
         );
@@ -791,21 +772,18 @@ mod tests {
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: true,
-                    last: true,
-                    tail: false
+                    last: true
                 }),
                 Some(RoutineRow {
                     turn: Uuid::from_u128(11),
                     first: true,
-                    last: true,
-                    tail: true
+                    last: true
                 }),
                 None,
                 Some(RoutineRow {
                     turn: Uuid::from_u128(10),
                     first: true,
-                    last: true,
-                    tail: true
+                    last: true
                 }),
                 None,
             ]
@@ -813,15 +791,15 @@ mod tests {
     }
 
     #[test]
-    fn streaming_a_new_message_moves_the_routine_footer() {
+    fn streaming_a_new_message_extends_the_routine_card() {
         let c = routine_conversation();
         let before = routine_rows(&[item(1)], Some(&c));
         let after = routine_rows(&[item(1), item(2)], Some(&c));
-        assert!(before[0].unwrap().last && before[0].unwrap().tail);
+        assert!(before[0].unwrap().last);
         assert!(after[0].unwrap().first);
-        assert!(!after[0].unwrap().last && !after[0].unwrap().tail);
+        assert!(!after[0].unwrap().last);
         assert!(!after[1].unwrap().first);
-        assert!(after[1].unwrap().last && after[1].unwrap().tail);
+        assert!(after[1].unwrap().last);
     }
 
     fn at(text: &str) -> DateTime<Utc> {
