@@ -199,24 +199,26 @@ pub fn prepare(dirs: &BotDirs, tool_url: Option<&str>, host_tools: bool) -> std:
     Ok(())
 }
 
-/// Whether the host configuration holds the native session's transcript.
+/// Directory holding native transcripts for the CLI's project.
 /// Sessions live under `projects/` in a directory named for the CLI's
 /// working directory, the bot's project by its resolved path, every
 /// character but ASCII letters and digits replaced by `-` (`/a/b.c` gives
 /// `-a-b-c`).
-pub fn session_exists(config_dir: &Path, project: &Path, native_id: &str) -> bool {
+pub fn project_sessions(config_dir: &Path, project: &Path) -> PathBuf {
     let project = fs::canonicalize(project).unwrap_or_else(|_| project.to_owned());
     let project: String = project
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    config_dir.join("projects").join(project)
+}
+
+/// Whether the host configuration holds this native session's transcript.
+pub fn session_exists(config_dir: &Path, project: &Path, native_id: &str) -> bool {
     uuid::Uuid::parse_str(native_id).is_ok()
         && fs::symlink_metadata(
-            config_dir
-                .join("projects")
-                .join(project)
-                .join(format!("{native_id}.jsonl")),
+            project_sessions(config_dir, project).join(format!("{native_id}.jsonl")),
         )
         .is_ok_and(|m| m.is_file())
 }
