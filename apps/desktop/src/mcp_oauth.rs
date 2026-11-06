@@ -1,26 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::{
-    Router,
-    extract::{RawQuery, State},
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::get,
-};
 use serde_json::{Value, json};
-use tokio::{
-    net::TcpListener,
-    sync::{mpsc, oneshot},
-};
 use url::Url;
 use uuid::Uuid;
 
 use crate::api::{Client, ClientError, McpAuthorization};
+use crate::oauth_callback::{self, Callback, WaitError};
 
 pub struct SignIn {
     pub authorization: McpAuthorization,
-    callback: oneshot::Receiver<Result<Value, String>>,
-    _cancel: oneshot::Sender<()>,
+    callback: oauth_callback::Pending,
     client: Arc<Client>,
     bot: Uuid,
     id: String,
@@ -43,33 +32,36 @@ impl SignIn {
     ) -> Result<Self, ClientError> {
         let this = client.clone();
         client.run(async move {
-            let listener = TcpListener::bind("127.0.0.1:0").await
+            let (listener, callback) = oauth_callback::Listener::bind().await
                 .map_err(|_| ClientError::Protocol("Cannot open the local sign-in callback.".into()))?;
-            let host = listener.local_addr().map_err(|_| ClientError::Protocol("Cannot read the local callback address.".into()))?.to_string();
-            let path = format!("/mcp/{}", Uuid::new_v4().simple());
-            let redirect = format!("http://{host}{path}");
+            let redirect = format!("http://127.0.0.1:{}/mcp/{}", listener.port(), Uuid::new_v4().simple());
             let authorization = this.clone().authorize_mcp(bot, id.clone(), redirect.clone()).await?;
-            let (callback_tx, callback) = oneshot::channel();
-            let (cancel_tx, cancel) = oneshot::channel();
-            let signin = Self { authorization, callback, _cancel: cancel_tx, client: this, bot, id };
+            let signin = Self { authorization, callback, client: this, bot, id };
             if json!(signin.authorization.provider) != expected["provider"] || json!(signin.authorization.scopes) != expected["scopes"] {
                 return Err(ClientError::Protocol("The provider or requested permissions changed. Cancel this card and ask the bot to connect again.".into()));
             }
             let state = authorization_state(&signin.authorization.authorization_url, &redirect)
                 .ok_or_else(|| ClientError::Protocol("The API returned an invalid MCP sign-in URL.".into()))?;
-            tokio::spawn(serve(listener, path, host, state, callback_tx, cancel, signin.authorization.expires_in.min(600)));
+            listener.start(&Url::parse(&redirect).expect("local callback URL"), state, Duration::from_secs(signin.authorization.expires_in));
             Ok(signin)
         }).await
     }
 
-    pub async fn wait(&mut self) -> Result<Value, ClientError> {
-        (&mut self.callback)
-            .await
-            .map_err(|_| ClientError::Protocol("Sign-in stopped. Try again.".into()))?
-            .map_err(ClientError::Protocol)
+    pub async fn wait(&mut self) -> Result<Callback, ClientError> {
+        self.callback.wait().await.map_err(|error| {
+            ClientError::Protocol(
+                match error {
+                    WaitError::Stopped => "Sign-in stopped. Try again.",
+                    WaitError::Expired => "Sign-in expired. Try again.",
+                }
+                .into(),
+            )
+        })
     }
 
-    pub async fn finish(&mut self, mut callback: Value) -> Result<(), ClientError> {
+    pub async fn finish(&mut self, callback: Callback) -> Result<(), ClientError> {
+        let mut callback = serde_json::to_value(callback)
+            .map_err(|_| ClientError::Protocol("The sign-in callback is invalid.".into()))?;
         callback["request_id"] = json!(self.authorization.request_id);
         self.client
             .clone()
@@ -105,172 +97,15 @@ fn authorization_state(value: &str, redirect: &str) -> Option<String> {
     one("state").filter(|s| !s.is_empty() && s.len() <= 128)
 }
 
-fn parse_callback(query: &str, state: &str) -> Option<Value> {
-    if query.len() > 16_384 {
-        return None;
-    }
-    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-    let one = |key: &str| {
-        let mut values = pairs
-            .iter()
-            .filter(|(k, _)| k == key)
-            .map(|(_, v)| v.as_ref());
-        let value = values.next()?;
-        values.next().is_none().then_some(value)
-    };
-    if one("state")? != state {
-        return None;
-    }
-    let iss = if pairs.iter().any(|(k, _)| k == "iss") {
-        Some(one("iss")?)
-    } else {
-        None
-    };
-    let code = one("code");
-    let error = one("error");
-    if pairs
-        .iter()
-        .filter(|(k, _)| k == "code" || k == "error")
-        .count()
-        != 1
-    {
-        return None;
-    }
-    if code.is_some_and(|s| s.is_empty() || s.len() > 8192) || error.is_some_and(|s| s.len() > 128)
-    {
-        return None;
-    }
-    Some(json!({"state":state,"code":code,"error":error,"iss":iss}))
-}
-
-#[derive(Clone)]
-struct Callback {
-    state: String,
-    host: String,
-    tx: mpsc::Sender<Value>,
-}
-
-async fn receive(
-    State(callback): State<Callback>,
-    headers: HeaderMap,
-    RawQuery(query): RawQuery,
-) -> Response {
-    if headers.get("host").and_then(|s| s.to_str().ok()) != Some(callback.host.as_str()) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let Some(value) = parse_callback(query.as_deref().unwrap_or_default(), &callback.state) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if callback.tx.try_send(value).is_err() {
-        return StatusCode::GONE.into_response();
-    }
-    ([("cache-control", "no-store"), ("referrer-policy", "no-referrer"), ("content-security-policy", "default-src 'none'; frame-ancestors 'none'")],
-        Html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>else.bot sign-in</title><h1>Return to else.bot</h1><p>Your sign-in response was received. You can close this tab.</p></html>")).into_response()
-}
-
-async fn serve(
-    listener: TcpListener,
-    path: String,
-    host: String,
-    state: String,
-    callback: oneshot::Sender<Result<Value, String>>,
-    cancel: oneshot::Receiver<()>,
-    expires: u64,
-) {
-    let (tx, mut rx) = mpsc::channel(1);
-    let router = Router::new()
-        .route(&path, get(receive))
-        .with_state(Callback { host, state, tx });
-    let (shutdown, stopped) = oneshot::channel::<()>();
-    let server = axum::serve(listener, router).with_graceful_shutdown(async {
-        let _ = stopped.await;
-    });
-    let server = std::future::IntoFuture::into_future(server);
-    tokio::pin!(server);
-    tokio::select! {
-        value = rx.recv() => { let _ = callback.send(value.ok_or_else(|| "Sign-in stopped.".into())); }
-        _ = cancel => {}
-        _ = tokio::time::sleep(Duration::from_secs(expires)) => { let _ = callback.send(Err("Sign-in expired. Try again.".into())); }
-        _ = &mut server => { let _ = callback.send(Err("The local sign-in callback stopped.".into())); return; }
-    }
-    let _ = shutdown.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        http::{HeaderMap, StatusCode},
+    };
+    use tokio::{net::TcpListener, sync::mpsc};
 
-    #[test]
-    fn callback_requires_state_and_one_unambiguous_outcome() {
-        assert_eq!(
-            parse_callback("state=valid&code=ok&iss=https%3A%2F%2Fissuer.test", "valid").unwrap()["code"],
-            "ok"
-        );
-        for query in [
-            "state=wrong&code=ok",
-            "state=valid&state=valid&code=ok",
-            "state=valid&code=ok&code=other",
-            "state=valid&code=ok&error=access_denied",
-            "state=valid&code=ok&iss=a&iss=b",
-            "state=valid&error=x&error=y",
-        ] {
-            assert!(parse_callback(query, "valid").is_none(), "{query}");
-        }
-        assert_eq!(
-            parse_callback("state=valid&error=access_denied", "valid").unwrap()["error"],
-            "access_denied"
-        );
-    }
-
-    #[tokio::test]
-    async fn loopback_accepts_only_matching_host_path_and_state() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let host = listener.local_addr().unwrap().to_string();
-        let (tx, rx) = oneshot::channel();
-        let (_cancel, cancel) = oneshot::channel();
-        let server = tokio::spawn(serve(
-            listener,
-            "/callback".into(),
-            host.clone(),
-            "valid".into(),
-            tx,
-            cancel,
-            10,
-        ));
-        let client = reqwest::Client::new();
-        let url = format!("http://{host}/callback");
-        assert_eq!(
-            client
-                .get(format!("{url}?state=wrong&code=bad"))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            400
-        );
-        assert_eq!(
-            client
-                .get(format!("{url}?state=valid&code=bad"))
-                .header("host", "attacker.test")
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            400
-        );
-        assert_eq!(
-            client
-                .get(format!("{url}?state=valid&code=good"))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            200
-        );
-        assert_eq!(rx.await.unwrap().unwrap()["code"], "good");
-        server.await.unwrap();
-    }
     #[tokio::test]
     async fn browser_callback_completes_on_selected_api_and_rejects_changed_consent() {
         use crate::config::{Origin, OwnerToken};

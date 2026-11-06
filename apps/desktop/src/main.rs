@@ -9,6 +9,7 @@ mod email;
 mod inbox;
 mod launch;
 mod mcp_oauth;
+mod oauth_callback;
 mod model;
 mod preferences;
 mod profile_picker;
