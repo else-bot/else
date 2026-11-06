@@ -19,6 +19,16 @@ pub(super) enum RowFormat {
     Markdown,
 }
 
+impl RowFormat {
+    pub(super) fn for_item(item: &crate::model::Item) -> Self {
+        if item.kind == "assistant" || item.bot_reply.is_some() {
+            Self::Markdown
+        } else {
+            Self::Plain
+        }
+    }
+}
+
 pub(super) struct RowSource {
     pub text: String,
     pub parts: Vec<MessagePart>,
@@ -314,11 +324,50 @@ fn activates_link(event: &ClickEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_content;
+    use super::{RowFormat, plain_content};
     use crate::api::Bot;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
+    use crate::app::reply::{Author, Draft, MessageReference};
     use crate::attachments::{Attachment, MessagePart, file_id};
+    use gpui_kit::component::input::InputContent;
     use uuid::Uuid;
+
+    #[test]
+    fn quoted_owner_replies_render_markdown_and_ordinary_messages_stay_literal() {
+        let item = |kind: &str, text: &str| {
+            serde_json::from_value(serde_json::json!({
+                "id": Uuid::nil(), "seq": 1, "turn_id": Uuid::nil(),
+                "kind": kind, "text": text
+            }))
+            .unwrap()
+        };
+        for text in [
+            "Keep **this** and `that` as typed.",
+            "Replying to your earlier message:\nThis is ordinary text.",
+            "Replying to your earlier message:\n> quoted\nnot quoted\n\nAnswer.",
+        ] {
+            assert_eq!(RowFormat::for_item(&item("user", text)), RowFormat::Plain);
+        }
+        for author in [Author::Owner, Author::Bot] {
+            let draft = Draft {
+                content: InputContent::new("You can already mark it as always approved."),
+                reply_to: Some(MessageReference {
+                    item: Uuid::nil(), author,
+                    text: "Created the routine for **04:00 Europe/Paris**.\n\nPreserve `main`.\n> An earlier quote.".into(),
+                }),
+                ..Draft::default()
+            };
+            let text = draft.message().unwrap();
+            assert_eq!(
+                RowFormat::for_item(&item("user", &text)),
+                RowFormat::Markdown
+            );
+        }
+        assert_eq!(
+            RowFormat::for_item(&item("assistant", "**Done**")),
+            RowFormat::Markdown
+        );
+    }
 
     #[test]
     fn mentions_and_files_share_a_row_without_overlap_or_id_collisions() {
