@@ -11,7 +11,8 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
   --server-only        the server only (home hardware or a VPS)
   --app-only           the app only, connecting to a server elsewhere
                        component updates use app-current and server-current
-  --from-source        build locally instead of downloading release binaries
+  --from-source        build locally instead of downloading release binaries;
+                       a release without binaries yet is built locally anyway
   --autostart          start the API by itself: at boot (Linux) or at login (macOS)
   --no-autostart       only start it with: elsebot start
   --skip-guest-image   do not download the guest VM image (bot computers then use a plain image)
@@ -405,8 +406,31 @@ releases_url() {
 	printf '%s/releases\n' "$repo"
 }
 
-download() {
-	curl --retry 3 --connect-timeout 15 -fsSL "$1" -o "$2"
+# Returns 0 when the file arrived, 3 when the server does not have it
+# (HTTP 404: not published yet), and 1 for any other failure.
+fetch_release_file() {
+	local code
+	rm -f "$2"
+	if ! code="$(curl --retry 3 --connect-timeout 15 -sSL -w '%{http_code}' -o "$2" "$1")"; then
+		rm -f "$2"
+		return 1
+	fi
+	case "$code" in
+	200 | 000) return 0 ;;
+	404) rm -f "$2"; return 3 ;;
+	*) rm -f "$2"; return 1 ;;
+	esac
+}
+
+# Prints the one well-formed checksum SHA256SUMS lists for an archive.
+release_checksum() {
+	local count hash
+	count="$(awk -v name="$2" '$2 == name {n++} END {print n + 0}' "$1")"
+	[ "$count" != 0 ] || die "SHA256SUMS has no checksum for $2"
+	[ "$count" = 1 ] || die "SHA256SUMS lists $2 more than once"
+	hash="$(awk -v name="$2" '$2 == name {print $1}' "$1")"
+	[[ "$hash" =~ ^[0-9a-f]{64}$ ]] || die "invalid checksum for $2"
+	printf '%s\n' "$hash"
 }
 
 release_platform() {
@@ -419,19 +443,11 @@ release_platform() {
 	esac
 }
 
+# The latest release is the newest stable vX.Y.Z tag, also before its
+# binaries are published: the installer then builds it from source.
 resolve_release() {
 	if [ -n "$WANT_VERSION" ]; then
 		WANT_VERSION="${WANT_VERSION#v}"
-	elif [ "$FROM_SOURCE" = 0 ]; then
-		local checksums base
-		base="$(releases_url)"
-		checksums="$(mktemp)"
-		if ! download "$base/latest/download/SHA256SUMS" "$checksums"; then
-			rm -f "$checksums"
-			die "the latest published release has no downloadable binaries; use --from-source for older releases"
-		fi
-		WANT_VERSION="$(sed -n 's/^[0-9a-f]*  else-api-v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)-linux-amd64\.tar\.gz$/\1/p' "$checksums")"
-		rm -f "$checksums"
 	else
 		local tags
 		tags="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
@@ -471,24 +487,50 @@ source_version() {
 	sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1
 }
 
+# Downloads verified binaries into $output. When the release does not
+# publish SHA256SUMS or a selected archive (yet), it sets RELEASE_MISSING and
+# leaves none of the binaries in $output. Published checksums and archives
+# that fail validation are fatal.
+RELEASE_MISSING=""
 download_release() {
-	local version="$1" tmp="$2" output="$3" platform base pkg archive hash member actual
+	local version="$1" tmp="$2" output="$3" platform base pkg archive hash member actual status=0 i=0
+	local hashes=()
 	shift 3
+	RELEASE_MISSING=""
 	platform="$(release_platform)"
 	base="$(releases_url)/download/v$version"
 	mkdir -p "$tmp"
-	download "$base/SHA256SUMS" "$tmp/SHA256SUMS" ||
-		die "cannot download checksums for v$version; use --from-source if this release has no binaries"
+	fetch_release_file "$base/SHA256SUMS" "$tmp/SHA256SUMS" || status=$?
+	case "$status" in
+	0) ;;
+	3)
+		RELEASE_MISSING="v$version publishes no binaries yet"
+		return 0
+		;;
+	*) die "cannot download checksums for v$version" ;;
+	esac
+	for pkg in "$@"; do
+		hash="$(release_checksum "$tmp/SHA256SUMS" "$pkg-v$version-$platform.tar.gz")"
+		hashes+=("$hash")
+	done
 	for pkg in "$@"; do
 		archive="$pkg-v$version-$platform.tar.gz"
-		hash="$(awk -v name="$archive" '$2 == name {print $1}' "$tmp/SHA256SUMS")"
-		[[ "$hash" =~ ^[0-9a-f]{64}$ ]] || die "missing or invalid checksum for $archive"
 		info "Downloading $archive"
-		download "$base/$archive" "$tmp/$archive" || die "cannot download $archive"
+		status=0
+		fetch_release_file "$base/$archive" "$tmp/$archive" || status=$?
+		case "$status" in
+		0) ;;
+		3)
+			RELEASE_MISSING="v$version publishes no $archive yet"
+			for archive in "$@"; do rm -f "$output/$archive"; done
+			return 0
+			;;
+		*) die "cannot download $archive" ;;
+		esac
 		if [ "$DISTRO" = macos ]; then
-			(cd "$tmp" && printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -) || die "checksum verification failed for $archive"
+			(cd "$tmp" && printf '%s  %s\n' "${hashes[i]}" "$archive" | shasum -a 256 -c -) || die "checksum verification failed for $archive"
 		else
-			(cd "$tmp" && printf '%s  %s\n' "$hash" "$archive" | sha256sum -c -) || die "checksum verification failed for $archive"
+			(cd "$tmp" && printf '%s  %s\n' "${hashes[i]}" "$archive" | sha256sum -c -) || die "checksum verification failed for $archive"
 		fi
 		member="$pkg"
 		if [ "$DISTRO" = macos ] && [ "$pkg" = else-desktop ]; then
@@ -498,13 +540,46 @@ download_release() {
 		chmod 755 "$output/$pkg"
 		actual="$("$output/$pkg" --version)" || die "cannot run $pkg on this host"
 		[ "$actual" = "$pkg $version" ] || die "$pkg reports '$actual', expected '$pkg $version'"
+		i=$((i + 1))
 	done
+}
+
+# Older tagged installers need --from-source before their prerequisites run.
+# Probe for unpublished assets without downloading the archives twice.
+release_unpublished() {
+	local version="$1" components="$2" platform base tmp pkg archive code packages status=0
+	RELEASE_MISSING=""
+	platform="$(release_platform)"
+	base="$(releases_url)/download/v$version"
+	tmp="$(mktemp -d)"
+	fetch_release_file "$base/SHA256SUMS" "$tmp/SHA256SUMS" || status=$?
+	if [ "$status" = 3 ]; then
+		RELEASE_MISSING="v$version publishes no binaries yet"
+	elif [ "$status" = 0 ]; then
+		packages="$([ "$components" = app ] || echo else-api) $([ "$components" = server ] || echo else-desktop)"
+		for pkg in $packages; do
+			if ! (release_checksum "$tmp/SHA256SUMS" "$pkg-v$version-$platform.tar.gz" >/dev/null); then
+				rm -rf "$tmp"
+				exit 1
+			fi
+		done
+		for pkg in $packages; do
+			archive="$pkg-v$version-$platform.tar.gz"
+			code="$(curl --retry 3 --connect-timeout 15 -sSIL -o /dev/null -w '%{http_code}' "$base/$archive" || true)"
+			if [ "$code" = 404 ]; then
+				RELEASE_MISSING="v$version publishes no $archive yet"
+				break
+			fi
+		done
+	fi
+	rm -rf "$tmp"
 }
 
 build_release() {
 	local version="$1" destination="$2" pkg args="" output="$BUILD_PROFILE" log
 	shift 2
 	log="$LOGS/build-$version.log"
+	mkdir -p "$LOGS"
 	[ "$BUILD_PROFILE" != dev ] || output=debug
 	ensure_rust
 	info "Building $* ($BUILD_PROFILE); the first build takes several minutes"
@@ -544,6 +619,14 @@ install_release() (
 	else
 		# shellcheck disable=SC2086
 		download_release "$version" "$stage/downloads" "$payload/bin" $missing
+		if [ -n "$RELEASE_MISSING" ]; then
+			info "$RELEASE_MISSING; building$missing from source"
+			rm -rf "$stage/downloads"
+			FROM_SOURCE=1
+			if [ "$DISTRO" = macos ]; then macos_prerequisites; else linux_packages; fi
+			# shellcheck disable=SC2086
+			build_release "$version" "$payload/bin" $missing
+		fi
 	fi
 	printf '%s\n' "$BUILD_PROFILE" >"$payload/.build-profile"
 	if [ -d "$dest" ]; then
@@ -1258,12 +1341,26 @@ main() {
 			esac
 		fi
 		if ! printf '%s' "$installer_help" | grep -q -- '--from-source'; then
-			[ "$FROM_SOURCE" = 1 ] || die "this release's installer requires --from-source"
+			# This release predates release binaries: its installer always builds.
+			[ "$FROM_SOURCE" = 1 ] || info "v$WANT_VERSION has no release binaries; its installer builds it from source"
 			local argument forwarded=()
 			for argument in ${ARGS[@]+"${ARGS[@]}"}; do
 				if [ "$argument" != --from-source ]; then forwarded+=("$argument"); fi
 			done
 			ARGS=(${forwarded[@]+"${forwarded[@]}"})
+		elif [ "$FROM_SOURCE" = 0 ] && ! printf '%s' "$installer_help" | grep -q -- 'without binaries yet'; then
+			# This release's installer cannot fall back to a source build itself.
+			choose_components
+			case "$COMPONENTS" in
+			both) ARGS+=(--both) ;;
+			server) ARGS+=(--server-only) ;;
+			app) ARGS+=(--app-only) ;;
+			esac
+			release_unpublished "$WANT_VERSION" "$COMPONENTS"
+			if [ -n "$RELEASE_MISSING" ]; then
+				info "$RELEASE_MISSING; building it from source"
+				ARGS+=(--from-source)
+			fi
 		fi
 		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
 		bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
