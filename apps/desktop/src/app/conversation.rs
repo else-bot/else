@@ -136,7 +136,7 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
-    pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionSubmit>,
+    pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionForm>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
     pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
     pub(super) expanded_drafts: HashSet<Uuid>,

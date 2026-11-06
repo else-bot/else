@@ -2,7 +2,7 @@
 //! conversation.
 //!
 //! Three kinds share one lifecycle. A `choice` asks the owner to pick one
-//! of up to four options. A `destructive` or `external` question asks the
+//! or several of up to five options. A `destructive` or `external` question asks the
 //! owner to approve one action: either a computer tool call, bound to its
 //! exact arguments by `action_hash` and consumed by exactly one later call
 //! with the same arguments, or a host action the bot described with
@@ -33,8 +33,8 @@ use super::turns::{self, AskingCaller as Caller};
 
 use crate::app::providers::Origin;
 use crate::app::questions::{
-    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, Choice, DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN,
-    Outcome, Spec, Standing, Status, approval_choices,
+    APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, Answer, Choice, DESTRUCTIVE_SCOPE, Kind,
+    MAX_PER_TURN, Outcome, Spec, Standing, Status, approval_choices,
 };
 
 /// A question as shown to the owner and recorded in events.
@@ -47,9 +47,10 @@ pub struct QuestionInfo {
     pub title: String,
     pub context: Option<String>,
     pub choices: Vec<Choice>,
+    pub multiple: bool,
     pub action: Option<crate::app::questions::Action>,
     pub status: Status,
-    pub answer: Option<String>,
+    pub answer: Option<Answer>,
     pub created_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
 }
@@ -62,14 +63,22 @@ impl QuestionInfo {
     pub fn approved(&self) -> bool {
         self.status == Status::Answered
             && matches!(
-                self.answer.as_deref(),
+                self.answer.as_ref().and_then(Answer::single),
                 Some(APPROVE) | Some(APPROVE_FOREVER) | Some(APPROVE_ROUTINE)
             )
     }
 
     pub fn chosen(&self) -> Option<&Choice> {
-        let answer = self.answer.as_deref()?;
+        let answer = self.answer.as_ref()?.single()?;
         self.choices.iter().find(|c| c.id == answer)
+    }
+
+    pub fn selected(&self) -> Vec<Choice> {
+        self.choices
+            .iter()
+            .filter(|choice| self.answer.as_ref().is_some_and(|a| a.contains(&choice.id)))
+            .cloned()
+            .collect()
     }
 }
 
@@ -86,10 +95,11 @@ type Row = (
     Option<String>,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
+    bool,
 );
 
 const COLUMNS: &str = "id, bot_id, turn_id, kind, title, context, choices, action, status, answer, \
-                       created_at, settled_at";
+                       created_at, settled_at, multiple";
 
 fn info(
     (
@@ -105,9 +115,21 @@ fn info(
         answer,
         created_at,
         settled_at,
+        multiple,
     ): Row,
-) -> QuestionInfo {
-    QuestionInfo {
+) -> Result<QuestionInfo, sqlx::Error> {
+    let answer = answer
+        .map(|answer| {
+            if multiple {
+                serde_json::from_str(&answer)
+                    .map(Answer::Multiple)
+                    .map_err(|err| sqlx::Error::Decode(Box::new(err)))
+            } else {
+                Ok(Answer::Single(answer))
+            }
+        })
+        .transpose()?;
+    Ok(QuestionInfo {
         id,
         bot_id,
         turn_id,
@@ -115,12 +137,13 @@ fn info(
         title,
         context,
         choices: choices.0,
+        multiple,
         action: action.map(|a| a.0),
         status,
         answer,
         created_at,
         settled_at,
-    }
+    })
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -174,7 +197,7 @@ async fn find_same(
             .await?
         }
     };
-    Ok(row.map(info))
+    row.map(info).transpose()
 }
 
 async fn insert(
@@ -199,8 +222,8 @@ async fn insert(
     let id = Uuid::new_v4();
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, context, choices,
-             action, action_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING {COLUMNS}"
+             action, action_hash, multiple)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING {COLUMNS}"
     )))
     .bind(id)
     .bind(caller.bot_id)
@@ -212,10 +235,11 @@ async fn insert(
     .bind(Json(&spec.choices))
     .bind(spec.approval.as_ref().map(|a| Json(&a.action)))
     .bind(spec.approval.as_ref().map(|a| a.hash.as_slice()))
+    .bind(spec.multiple)
     .fetch_one(&mut *conn)
     .await?;
     events::turn_changed(conn, caller.bot_id, turn_id).await?;
-    Ok(info(row))
+    Ok(info(row)?)
 }
 
 /// Record a question from the provider attempt of `turn_id`. Asking the
@@ -231,7 +255,10 @@ pub async fn create(
         .await?
         .ok_or(RequestError::NotRunning)?;
     if let Some(found) = find_same(&mut tx, turn_id, spec).await? {
-        if found.kind != spec.kind || found.choices != spec.choices || found.context != spec.context
+        if found.kind != spec.kind
+            || found.choices != spec.choices
+            || found.context != spec.context
+            || found.multiple != spec.multiple
         {
             return Err(RequestError::Conflict);
         }
@@ -377,7 +404,7 @@ pub async fn for_turns(
     .await?;
     let mut by_turn: HashMap<Uuid, Vec<QuestionInfo>> = HashMap::new();
     for row in rows {
-        let question = info(row);
+        let question = info(row)?;
         by_turn.entry(question.turn_id).or_default().push(question);
     }
     Ok(by_turn)
@@ -421,10 +448,10 @@ async fn load(
     .bind(bot_id)
     .fetch_optional(&mut *conn)
     .await?;
-    row.map(info).ok_or(SettleError::NotFound)
+    Ok(info(row.ok_or(SettleError::NotFound)?)?)
 }
 
-/// The owner picks `choice` for a pending question and its turn continues
+/// The owner submits an answer for a pending question and its turn continues
 /// once nothing else holds it, atomically. A retry of the same answer
 /// changes nothing; any other answer to a settled question is refused, so
 /// a stale card can never answer for a newer state.
@@ -432,15 +459,36 @@ pub async fn answer(
     pool: &SqlitePool,
     bot_id: Uuid,
     question_id: Uuid,
-    choice: &str,
+    answer: &Answer,
 ) -> Result<Settled, SettleError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let question = load(&mut tx, bot_id, question_id).await?;
-    if !question.choices.iter().any(|c| c.id == choice) {
-        return Err(SettleError::InvalidChoice);
-    }
+    let answer = match (question.multiple, answer) {
+        (false, Answer::Single(id)) if question.choices.iter().any(|c| c.id == *id) => {
+            Answer::Single(id.clone())
+        }
+        (true, Answer::Multiple(ids))
+            if !ids.is_empty()
+                && ids.len() <= question.choices.len()
+                && ids
+                    .iter()
+                    .all(|id| question.choices.iter().any(|c| c.id == *id)) =>
+        {
+            let ordered: Vec<String> = question
+                .choices
+                .iter()
+                .filter(|c| ids.contains(&c.id))
+                .map(|c| c.id.clone())
+                .collect();
+            if ordered.len() != ids.len() {
+                return Err(SettleError::InvalidChoice);
+            }
+            Answer::Multiple(ordered)
+        }
+        _ => return Err(SettleError::InvalidChoice),
+    };
     if question.status != Status::Pending {
-        if question.status == Status::Answered && question.answer.as_deref() == Some(choice) {
+        if question.status == Status::Answered && question.answer.as_ref() == Some(&answer) {
             return Ok(Settled {
                 question,
                 changed: false,
@@ -449,12 +497,13 @@ pub async fn answer(
         }
         return Err(SettleError::Settled(question.status));
     }
+    let choice = answer.single();
     if question.kind == Kind::Destructive {
         match (choice, scope(&mut tx, question.turn_id).await?) {
-            (APPROVE_ROUTINE, Scope::Routine { current: true, .. }) => {}
-            (APPROVE_ROUTINE, _) => return Err(SettleError::RoutineChanged),
-            (APPROVE_FOREVER, Scope::Bot) => {}
-            (APPROVE_FOREVER, _) => return Err(SettleError::InvalidChoice),
+            (Some(APPROVE_ROUTINE), Scope::Routine { current: true, .. }) => {}
+            (Some(APPROVE_ROUTINE), _) => return Err(SettleError::RoutineChanged),
+            (Some(APPROVE_FOREVER), Scope::Bot) => {}
+            (Some(APPROVE_FOREVER), _) => return Err(SettleError::InvalidChoice),
             _ => {}
         }
     }
@@ -464,10 +513,15 @@ pub async fn answer(
          WHERE id = ?1 RETURNING {COLUMNS}"
     )))
     .bind(question.id)
-    .bind(choice)
+    .bind(match &answer {
+        Answer::Single(id) => id.clone(),
+        Answer::Multiple(ids) => {
+            serde_json::to_string(ids).map_err(|err| sqlx::Error::Encode(Box::new(err)))?
+        }
+    })
     .fetch_one(&mut *tx)
     .await?;
-    if question.kind == Kind::Destructive && choice == APPROVE_FOREVER {
+    if question.kind == Kind::Destructive && choice == Some(APPROVE_FOREVER) {
         sqlx::query(
             "INSERT INTO bot_permissions (bot_id, scope, question_id) VALUES (?1, ?2, ?3)
              ON CONFLICT (bot_id, scope) DO NOTHING",
@@ -478,7 +532,7 @@ pub async fn answer(
         .execute(&mut *tx)
         .await?;
     }
-    if question.kind == Kind::Destructive && choice == APPROVE_ROUTINE {
+    if question.kind == Kind::Destructive && choice == Some(APPROVE_ROUTINE) {
         sqlx::query(
             "INSERT INTO routine_grants (routine_id, prompt_revision, question_id)
              SELECT r.id, r.prompt_revision, ?2
@@ -498,7 +552,7 @@ pub async fn answer(
     events::turn_changed(&mut tx, bot_id, question.turn_id).await?;
     tx.commit().await?;
     Ok(Settled {
-        question: info(row),
+        question: info(row)?,
         changed: true,
         requeued,
     })
@@ -517,18 +571,19 @@ pub async fn undelivered(
     .bind(turn_id)
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(info)
-        .map(|q| Outcome {
-            id: q.id,
-            kind: q.kind,
-            title: q.title.clone(),
-            action: q.action.clone(),
-            status: q.status,
-            answer: q.chosen().cloned(),
+    rows.into_iter()
+        .map(|row| {
+            let q = info(row)?;
+            Ok(Outcome {
+                answers: q.selected(),
+                id: q.id,
+                kind: q.kind,
+                title: q.title,
+                action: q.action,
+                status: q.status,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Record that `attempt` received these answers.

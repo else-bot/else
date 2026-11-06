@@ -135,6 +135,29 @@ pub struct QuestionChoice {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum QuestionAnswer {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl QuestionAnswer {
+    pub fn single(&self) -> Option<&str> {
+        match self {
+            Self::Single(id) => Some(id),
+            Self::Multiple(_) => None,
+        }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            Self::Single(chosen) => chosen == id,
+            Self::Multiple(chosen) => chosen.iter().any(|chosen| chosen == id),
+        }
+    }
+}
+
 /// A bot's question to the owner: a choice between options, or approval of
 /// one destructive or external action. Answered by choosing on its card.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -146,11 +169,13 @@ pub struct Question {
     #[serde(default)]
     pub context: Option<String>,
     pub choices: Vec<QuestionChoice>,
+    #[serde(default)]
+    pub multiple: bool,
     /// `pending`, `answered`, `skipped`, or `cancelled`.
     pub status: String,
-    /// The chosen option's id once answered.
+    /// The selected option id or ids once answered.
     #[serde(default)]
-    pub answer: Option<String>,
+    pub answer: Option<QuestionAnswer>,
     #[serde(default)]
     pub settled_at: Option<DateTime<Utc>>,
 }
@@ -166,7 +191,7 @@ impl Question {
     }
 
     pub fn chosen(&self) -> Option<&QuestionChoice> {
-        let answer = self.answer.as_deref()?;
+        let answer = self.answer.as_ref()?.single()?;
         self.choices.iter().find(|c| c.id == answer)
     }
 }
@@ -1103,5 +1128,46 @@ mod tests {
         .unwrap();
         assert_eq!(c.question(question).unwrap().status, "skipped");
         assert_eq!(c.question(question).unwrap().chosen(), None);
+    }
+
+    #[test]
+    fn multiple_question_answers_survive_events_and_snapshot_reload() {
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        let question = Uuid::from_u128(79);
+        let turn = |status: &str, answer: serde_json::Value| {
+            json!({
+                "id": Uuid::from_u128(9), "request_id": Uuid::from_u128(8), "turn_no": 1,
+                "provider_id": "synthetic", "status": "waiting", "error": null,
+                "effect_uncertain": false,
+                "questions": [{ "id": question, "kind": "choice", "title": "Which tasks?",
+                    "choices": [{"id": "a", "label": "Archive"}, {"id": "b", "label": "Summarize"}],
+                    "multiple": true, "status": status, "answer": answer }],
+            })
+        };
+        c.apply(&frame(
+            2,
+            "turn.updated",
+            json!({"turn": turn("pending", serde_json::Value::Null)}),
+        ))
+        .unwrap();
+        assert!(c.question(question).unwrap().multiple);
+        let answered = turn("answered", json!(["a", "b"]));
+        c.apply(&frame(3, "turn.updated", json!({"turn": answered})))
+            .unwrap();
+        let answer = c.question(question).unwrap().answer.as_ref().unwrap();
+        assert!(answer.contains("a") && answer.contains("b"));
+        assert!(answer.single().is_none());
+        let mut snap = snapshot(3, vec![], None);
+        snap.turns = serde_json::from_value(json!([answered])).unwrap();
+        let reloaded = Conversation::from_snapshot(snap).unwrap();
+        assert_eq!(reloaded.question(question), c.question(question));
+        c.apply(&frame(
+            4,
+            "turn.updated",
+            json!({"turn": turn("skipped", serde_json::Value::Null)}),
+        ))
+        .unwrap();
+        assert!(!c.question(question).unwrap().is_pending());
+        assert!(c.question(question).unwrap().answer.is_none());
     }
 }
