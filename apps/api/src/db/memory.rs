@@ -221,7 +221,7 @@ pub async fn append(
 pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), sqlx::Error> {
     let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>, String)> = sqlx::query_as(
         "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind
-         FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = ?1",
+         FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = ?1 AND NOT i.hidden",
     )
     .bind(item_id)
     .fetch_optional(&mut *conn)

@@ -418,6 +418,13 @@ impl Conversation {
         self.turns.get(&id)
     }
 
+    pub fn latest_unshown_turn(&self) -> Option<&Turn> {
+        self.turns
+            .values()
+            .max_by_key(|turn| turn.turn_no)
+            .filter(|turn| !self.items().any(|item| item.turn_id == turn.id))
+    }
+
     /// Where `id` sits in its run of same-kind items from one turn, such as
     /// the agent messages of one reply.
     pub fn run(&self, id: Uuid) -> Run {
@@ -585,6 +592,26 @@ mod tests {
             "item.delta",
             json!({ "item_id": Uuid::from_u128(id), "offset_utf8": offset, "text": text }),
         )
+    }
+
+    #[test]
+    fn hidden_turn_status_is_available_until_its_first_visible_item() {
+        let mut c = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        assert!(c.latest_unshown_turn().is_none());
+        for (seq, status) in [(2, "running"), (3, "failed"), (4, "interrupted")] {
+            let turn = json!({"id": Uuid::from_u128(901), "request_id": Uuid::from_u128(501), "turn_no": 1,
+                "provider_id": "codex", "status": status, "error": null, "effect_uncertain": false});
+            c.apply(&frame(seq, "turn.updated", json!({"turn":turn})))
+                .unwrap();
+            assert_eq!(c.latest_unshown_turn().unwrap().status, status);
+        }
+        c.apply(&frame(
+            5,
+            "item.upsert",
+            json!({"item":item(1, 1, "assistant", "What is this inbox for?")}),
+        ))
+        .unwrap();
+        assert!(c.latest_unshown_turn().is_none());
     }
 
     #[test]

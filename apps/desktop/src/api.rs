@@ -19,6 +19,8 @@ use uuid::Uuid;
 mod attachments;
 mod backups;
 pub use backups::*;
+mod email;
+pub use email::*;
 mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;

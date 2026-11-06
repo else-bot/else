@@ -408,7 +408,13 @@ impl ElseApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
+        let unshown_status = self
+            .view
+            .as_ref()
+            .and_then(|view| view.conversation.as_ref())
+            .and_then(|conversation| conversation.latest_unshown_turn())
+            .and_then(|turn| self.render_turn_status(turn, bot.id, cx));
         let activity = self
             .view
             .as_ref()
@@ -419,6 +425,18 @@ impl ElseApp {
         let stopping = self.stopping.contains(&bot.id)
             || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
         let mut actions = h_flex().flex_none().gap_1().items_center();
+        actions = actions.child(
+            Button::new("connect-email")
+                .focus_ring(false)
+                .cursor_pointer()
+                .icon(IconName::Mail)
+                .small()
+                .ghost()
+                .accessibility_label("Connect email")
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::connection::OpenEmailSettings), cx)
+                }),
+        );
         if busy || stopping {
             actions = actions.child(
                 Button::new("stop-work")
@@ -478,6 +496,7 @@ impl ElseApp {
                             .child(subtitle(bot, main)),
                     ),
             )
+            .children(unshown_status)
             .child(actions)
     }
 

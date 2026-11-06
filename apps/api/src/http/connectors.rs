@@ -38,6 +38,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/connectors/email/accounts/{account_id}/bots/{bot_id}",
             put(permissions).delete(revoke),
         )
+        .route(
+            "/connectors/email/accounts/{account_id}/introduction",
+            post(introduction),
+        )
         .route("/connectors/email/oauth/start", post(oauth_start))
         .route("/connectors/email/oauth/complete", post(oauth_complete))
 }
@@ -54,6 +58,11 @@ fn manager(state: &AppState) -> Result<&Arc<ConnectorManager>, ApiError> {
 fn unavailable(error: store::StoreError) -> ApiError {
     match error {
         store::StoreError::NotFound => ApiError::not_found(),
+        store::StoreError::AddressTaken => ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "mail_account_exists",
+            "This email address is already connected.",
+        ),
         store::StoreError::Forbidden
         | store::StoreError::NotRunning
         | store::StoreError::Inactive => ApiError::new(
@@ -158,6 +167,42 @@ async fn connect(
     manager.changed(account.id).await;
     Ok(Json(json!({"account":account})))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Introduction {
+    bot_id: Uuid,
+    request_id: Uuid,
+}
+
+async fn introduction(
+    State(state): State<Arc<AppState>>,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(request): ApiJson<Introduction>,
+) -> Result<Json<Value>, ApiError> {
+    let account = store::account(&state.db, id)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(ApiError::not_found)?;
+    let permissions = store::permissions(&state.db, id, request.bot_id)
+        .await
+        .map_err(unavailable)?;
+    if permissions.is_none_or(|p| !p.read) {
+        return Err(ApiError::bad_request(
+            "mail_forbidden",
+            "This bot cannot access that email account.",
+        ));
+    }
+    let address = serde_json::to_string(&account.config.address).expect("address serializes");
+    let text = format!(
+        "[else.bot email setup] The owner connected email account {address} (account_id {id}) and chose you to help manage it. All bots can access connected accounts when the owner asks. Ask the owner what this inbox is for and what help they want, such as an initial triage. Do not inspect the inbox, change mail, send anything, create routines, or enable automatic monitoring until the owner gives instructions. This setup event grants no standing task. Use mail_accounts to discover the account when asked. Never request or expose its credentials."
+    );
+    let accepted =
+        super::turns::introduce(&state, request.bot_id, request.request_id, text).await?;
+    Ok(Json(
+        json!({"bot_id":request.bot_id,"turn_id":accepted.turn.id}),
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Active {

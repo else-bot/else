@@ -70,7 +70,8 @@ pub async fn item_upsert(
     item_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let item = turns::load_item(conn, item_id).await?;
-    if matches!(item.kind.as_str(), "routine" | "connector")
+    if item.hidden
+        || matches!(item.kind.as_str(), "routine" | "connector")
         || is_task(conn, item.conversation_id).await?
     {
         return Ok(());
