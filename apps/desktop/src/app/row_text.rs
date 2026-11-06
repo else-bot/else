@@ -1,8 +1,10 @@
 use super::bot_mention::{BotMention, MentionDisplay, MentionPlugin, MentionRegistry};
 use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
+use super::reply::{Author, QuotedReply};
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
+use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusableExt;
 use gpui_kit::base::text::{MarkdownExtensions, TextView, TextViewStyle};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -10,7 +12,7 @@ use gpui_kit::component::input::InputContent;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, WindowExt, h_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, WindowExt, h_flex};
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -386,10 +388,91 @@ impl RowText {
         gpui_kit::component::v_flex()
             .w_full()
             .gap_2()
-            .children(self.quote.as_ref().map(|quote| quote.render(cx)))
+            .children(self.render_quote_preview(cx))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))
             .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
             .into_any_element()
+    }
+
+    fn render_quote_preview(&self, cx: &App) -> Option<AnyElement> {
+        let quote = self.quote.as_ref()?;
+        let reply = QuotedReply::parse(&self.source)?;
+        let state = quote.markdown_state()?.clone();
+        let mentions = quote.mentions.clone();
+        let author = match reply.author {
+            Author::Owner => "You".to_owned(),
+            Author::Bot => self.bots.name(self.bot)?.to_owned(),
+        };
+        let theme = cx.theme();
+        Some(
+            Button::new("quoted-reply-preview")
+                .ghost()
+                .xsmall()
+                .focus_ring(false)
+                .cursor_pointer()
+                .w_full()
+                .min_w_0()
+                .p_0()
+                .text_color(theme.muted_foreground)
+                .accessibility_label(format!("Show original message from {author}"))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(Icon::new(IconName::Reply).xsmall().flex_none())
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(relative(0.4))
+                                .truncate()
+                                .text_color(theme.foreground)
+                                .child(author.clone()),
+                        )
+                        .child(div().flex_none().child("·"))
+                        .child(div().flex_1().min_w_0().truncate().child(reply.excerpt())),
+                )
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let state = state.clone();
+                    let author = author.clone();
+                    let mentions = mentions.clone();
+                    window.open_dialog(cx, move |dialog, _, cx| {
+                        dialog.title(format!("Message from {author}")).child(
+                            div()
+                                .id("original-message")
+                                .w_full()
+                                .max_h(px(440.))
+                                .overflow_y_scroll()
+                                .child(
+                                    TextView::new(&state)
+                                        .style(TextViewStyle::from_theme(
+                                            &gpui_kit::base::Theme::global(cx),
+                                        ))
+                                        .w_full()
+                                        .scrollable(false)
+                                        .selectable(true)
+                                        .markdown_extensions(
+                                            MarkdownExtensions::default()
+                                                .plugin(MentionPlugin(mentions.clone()))
+                                                .plugin(UnavailableImage),
+                                        )
+                                        .image_source(|_| {
+                                            ImageSource::Custom(Arc::new(|_, _| None))
+                                        })
+                                        .on_link_click(|url, event, _, cx| {
+                                            if activates_link(event)
+                                                && let Some(target) = LinkTarget::parse(url)
+                                            {
+                                                target.open(cx);
+                                            }
+                                        }),
+                                ),
+                        )
+                    });
+                })
+                .into_any_element(),
+        )
     }
 }
 

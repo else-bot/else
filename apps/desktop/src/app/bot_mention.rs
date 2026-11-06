@@ -23,6 +23,13 @@ struct MentionBot {
 pub(super) struct MentionRegistry(Vec<MentionBot>);
 
 impl MentionRegistry {
+    pub(super) fn name(&self, id: Uuid) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|bot| bot.id == id)
+            .map(|bot| bot.name.as_str())
+    }
+
     pub(super) fn new(bots: &[Bot]) -> Self {
         let mut entries: Vec<_> = bots
             .iter()

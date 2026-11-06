@@ -86,18 +86,19 @@ impl Draft {
 }
 
 pub(super) struct QuotedReply<'a> {
+    pub author: Author,
     pub quote: &'a str,
     pub body: &'a str,
 }
 
 impl<'a> QuotedReply<'a> {
     pub(super) fn parse(message: &'a str) -> Option<Self> {
-        let rest = [
-            "Replying to my earlier message:\n",
-            "Replying to your earlier message:\n",
+        let (author, rest) = [
+            (Author::Owner, "Replying to my earlier message:\n"),
+            (Author::Bot, "Replying to your earlier message:\n"),
         ]
         .into_iter()
-        .find_map(|prefix| message.strip_prefix(prefix))?;
+        .find_map(|(author, prefix)| message.strip_prefix(prefix).map(|rest| (author, rest)))?;
         let (quote, body) = rest.split_once("\n\n")?;
         (!quote.is_empty()
             && !body.trim().is_empty()
@@ -105,9 +106,20 @@ impl<'a> QuotedReply<'a> {
                 .lines()
                 .all(|line| line == ">" || line.starts_with("> ")))
         .then_some(Self {
+            author,
             quote: &message[..message.len() - body.len() - 2],
             body,
         })
+    }
+
+    pub(super) fn excerpt(&self) -> String {
+        self.quote
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.strip_prefix('>'))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -213,6 +225,25 @@ mod tests {
             .unwrap();
         assert!(own.starts_with("Replying to my earlier message:\n> Use tabs.\n\n"));
         assert!(bots.starts_with("Replying to your earlier message:\n> Use tabs.\n\n"));
+    }
+
+    #[test]
+    fn a_reply_preview_names_the_author_and_flattens_multiline_quotes() {
+        for author in [Author::Owner, Author::Bot] {
+            let message = draft(
+                "Done",
+                Some(reference(
+                    author,
+                    " HTTPS is enabled.\n\nRéglé.\n> Earlier quote.",
+                )),
+            )
+            .message()
+            .unwrap();
+            let reply = QuotedReply::parse(&message).unwrap();
+            assert_eq!(reply.author, author);
+            assert_eq!(reply.excerpt(), "HTTPS is enabled. Réglé. > Earlier quote.");
+            assert_eq!(reply.body, "Done");
+        }
     }
 
     #[test]
