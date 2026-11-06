@@ -68,11 +68,34 @@ impl ElseApp {
         };
         let column = super::view::reading_column();
         let Some(group) = row.routine else {
-            let body = if row.task.is_some() {
+            let body = if let Some(task) = row.task.as_ref() {
                 gpui_kit::component::v_flex()
                     .w_full()
                     .pr(px(60.))
-                    .gap_1()
+                    .gap_2()
+                    .children(
+                        self.view
+                            .as_ref()
+                            .and_then(|view| view.conversation.as_ref())
+                            .and_then(|conversation| conversation.turn(task.turn))
+                            .and_then(|turn| turn.routine.as_ref())
+                            .map(|run| {
+                                h_flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(Icon::new(IconName::Clock).xsmall().flex_none())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(format!("Scheduled routine · {}", run.name)),
+                                    )
+                                    .child(stamp(run.due_at))
+                            }),
+                    )
                     .child(body)
                     .children(row.footer_stamp.map(|at| {
                         div()
@@ -99,6 +122,10 @@ impl ElseApp {
         let Some(turn) = conversation.turn(group.turn) else {
             return div().into_any_element();
         };
+        let follows_task = ix
+            .checked_sub(1)
+            .and_then(|ix| view.rows.get(ix))
+            .is_some_and(|row| row.key == RowKey::Task(group.turn));
         let theme = cx.theme().clone();
         let frame = gpui_kit::component::v_flex()
             .w_full()
@@ -115,7 +142,7 @@ impl ElseApp {
             .children(
                 turn.routine
                     .as_ref()
-                    .filter(|_| group.first)
+                    .filter(|_| group.first && !follows_task)
                     .map(|run| routine_banner(run, cx)),
             )
             .child(div().w_full().px_1().pt_1().child(body))

@@ -81,10 +81,6 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
     let turns: Vec<_> = rows
         .iter()
         .map(|key| match *key {
-            RowKey::Task(id) => conversation
-                .and_then(|c| c.turn(id))
-                .filter(|turn| turn.routine.is_some())
-                .map(|turn| turn.id),
             RowKey::Item(id) => conversation
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
                 .filter(|turn| turn.routine.is_some())
@@ -93,7 +89,7 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             | RowKey::SecretRequest(_)
             | RowKey::Draft(_)
             | RowKey::SocialSetup(_) => turns.get(key).copied(),
-            RowKey::Pending(_) => None,
+            RowKey::Task(_) | RowKey::Pending(_) => None,
         })
         .collect();
     turns
@@ -904,6 +900,32 @@ mod tests {
                     turn: Uuid::from_u128(10),
                     first: false,
                     last: true
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn task_bubbles_separate_the_surrounding_routine_request_cards() {
+        let c = routine_conversation();
+        let rows = [
+            RowKey::Question(Uuid::from_u128(210)),
+            RowKey::Task(Uuid::from_u128(10)),
+            RowKey::SecretRequest(Uuid::from_u128(310)),
+        ];
+        assert_eq!(
+            routine_rows(&rows, Some(&c)),
+            [
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: true,
+                    last: true,
+                }),
+                None,
+                Some(RoutineRow {
+                    turn: Uuid::from_u128(10),
+                    first: true,
+                    last: true,
                 }),
             ]
         );
