@@ -349,13 +349,13 @@ impl Session {
         }
         let discovery = pending.discovery.clone();
         let previous = std::mem::replace(&mut self.state, State::Required(discovery));
-        let State::Authorizing(pending) = previous else {
+        let State::Authorizing(mut pending) = previous else {
             unreachable!()
         };
+        if let Some(previous) = pending.previous.take() {
+            self.state = State::Authorized(previous);
+        }
         if callback.error.is_some() {
-            self.state = pending
-                .previous
-                .map_or(State::Required(pending.discovery), State::Authorized);
             return Err(Error::Invalid("MCP sign-in was denied or cancelled."));
         }
         let code = callback

@@ -127,3 +127,53 @@ async fn a_failed_credential_write_does_not_publish_refreshed_tokens() {
     assert!(current.expires_at.unwrap() < now());
     server.abort();
 }
+
+#[tokio::test]
+async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use serde_json::json;
+    for reject_exchange in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = if reject_exchange {
+            dir.path().join("fixture")
+        } else {
+            dir.path().join("blocked")
+        };
+        if reject_exchange {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, "not a directory").unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut flow = pending(Some(credential()));
+        flow.discovery.token_endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        flow.discovery.scopes = vec!["new:scope".into()];
+        let request = flow.id;
+        let router = Router::new().route("/token", post(move || async move {
+            if reject_exchange { StatusCode::SERVICE_UNAVAILABLE.into_response() }
+            else { Json(json!({"access_token":"new-access-token","token_type":"bearer","expires_in":3600})).into_response() }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut session = Session {
+            store: Store::new(path, Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
+            state: State::Authorizing(flow),
+            connection: None,
+        };
+        let mut response = callback(request, "expected-state");
+        response.error = None;
+        response.code = Some("authorization-code".into());
+        assert!(session.complete(response).await.is_err());
+        let status = session.status();
+        assert_eq!(status.status, "connected");
+        assert_eq!(status.scopes, ["read:issues"]);
+        assert!(
+            session
+                .complete(callback(request, "expected-state"))
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+}
