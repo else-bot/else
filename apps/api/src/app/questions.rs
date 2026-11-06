@@ -10,8 +10,31 @@ pub struct Choice {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Answer {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl Answer {
+    pub fn single(&self) -> Option<&str> {
+        match self {
+            Self::Single(id) => Some(id),
+            Self::Multiple(_) => None,
+        }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            Self::Single(chosen) => chosen == id,
+            Self::Multiple(chosen) => chosen.iter().any(|chosen| chosen == id),
+        }
+    }
+}
+
 /// The owner's answer to a question or approval request: which question
-/// (its kind, title, and bound action) and the choice the owner made, or
+/// (its kind, title, and bound action) and the choices the owner made, or
 /// that it ended unanswered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -23,14 +46,14 @@ pub struct Outcome {
     pub action: Option<Action>,
     /// `answered`, `skipped`, or `cancelled`.
     pub status: Status,
-    pub answer: Option<Choice>,
+    pub answers: Vec<Choice>,
 }
 
 /// Questions per owner request (turn).
 pub const MAX_PER_TURN: i64 = 8;
 pub const MAX_TITLE: usize = 500;
 pub const MAX_CONTEXT: usize = 4000;
-pub const MAX_CHOICES: usize = 4;
+pub const MAX_CHOICES: usize = 5;
 pub const MIN_CHOICES: usize = 2;
 pub const MAX_CHOICE_LABEL: usize = 120;
 
@@ -150,6 +173,7 @@ pub struct Spec {
     pub title: String,
     pub context: Option<String>,
     pub choices: Vec<Choice>,
+    pub multiple: bool,
     pub approval: Option<Approval>,
 }
 
@@ -189,8 +213,13 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
 impl Spec {
     /// Omit choices for a question answered through the chat composer.
     pub fn choice(args: &Value) -> Result<Self, &'static str> {
-        only_keys(args, &["question", "choices", "context"])
-            .map_err(|_| "use question, choices, and optionally context")?;
+        only_keys(args, &["question", "choices", "context", "multiple"])
+            .map_err(|_| "use question, choices, and optionally context and multiple")?;
+        let multiple = match args.get("multiple") {
+            None => false,
+            Some(Value::Bool(multiple)) => *multiple,
+            _ => return Err("multiple must be true or false"),
+        };
         let title = text_arg(args, "question", MAX_TITLE)
             .ok()
             .flatten()
@@ -204,8 +233,11 @@ impl Spec {
             {
                 list.as_slice()
             }
-            _ => return Err("choices lists 2 to 4 short labels, or omit it for a chat answer"),
+            _ => return Err("choices lists 2 to 5 short labels, or omit it for a chat answer"),
         };
+        if multiple && list.is_empty() {
+            return Err("multiple requires 2 to 5 choices");
+        }
         let mut choices = Vec::new();
         for (index, label) in list.iter().enumerate() {
             let label = label
@@ -226,6 +258,7 @@ impl Spec {
             title: title.to_owned(),
             context: context.map(str::to_owned),
             choices,
+            multiple,
             approval: None,
         })
     }
@@ -257,6 +290,7 @@ impl Spec {
             title,
             context: Some(action.to_owned()),
             choices: approval_choices(kind, Some(Standing::Bot)),
+            multiple: false,
             approval: Some(Approval {
                 action: Action::Host {
                     host: action.to_owned(),
@@ -283,6 +317,7 @@ impl Spec {
             title,
             context: Some(context),
             choices: approval_choices(kind, Some(Standing::Bot)),
+            multiple: false,
             approval: Some(Approval {
                 action: Action::Tool {
                     tool: tool.to_owned(),
@@ -312,10 +347,20 @@ mod tests {
         let ids: Vec<&str> = spec.choices.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "c"]);
         assert_eq!(spec.approval, None);
+        assert!(!spec.multiple);
+        let multiple = Spec::choice(&json!({
+            "question": "Which tasks?", "choices": ["one", "two", "three", "four", "five"],
+            "multiple": true,
+        }))
+        .unwrap();
+        assert!(multiple.multiple);
+        assert_eq!(multiple.choices.last().unwrap().id, "e");
         for bad in [
             json!({ "question": "q", "choices": ["only one"] }),
             json!({ "question": "q", "choices": ["a", "a"] }),
-            json!({ "question": "q", "choices": ["a", "b", "c", "d", "e"] }),
+            json!({ "question": "q", "choices": ["a", "b", "c", "d", "e", "f"] }),
+            json!({ "question": "q", "multiple": true }),
+            json!({ "question": "q", "choices": ["a", "b"], "multiple": "yes" }),
             json!({ "question": " ", "choices": ["a", "b"] }),
             json!({ "question": "q", "choices": ["a", "b"], "value": "x" }),
             json!({ "question": "q", "choices": [1, 2] }),

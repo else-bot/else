@@ -37,10 +37,11 @@ pub(super) fn secret_schema() -> Value {
 pub(super) fn choice_schema() -> Value {
     json!({
         "name": "ask_owner",
-        "description": "Ask the owner a question in a native card. Offer 2 to 4 options \
+        "description": "Ask the owner a question in a native card. Offer 2 to 5 options \
             when a pick settles it, or omit choices for an open question answered in chat. The owner \
             sees a card with the question, the optional context (for example a draft), and \
-            the choices, and picks one in the app. Returns status pending at once: tell the \
+            the choices, and picks one in the app. Set multiple to true to let them select \
+            several actions and confirm with Done. Returns status pending at once: tell the \
             owner briefly what you are asking, end this attempt, and you continue \
             automatically with their choice. A new owner message instead skips the card. \
             At most one per attempt.",
@@ -54,7 +55,9 @@ pub(super) fn choice_schema() -> Value {
                              "maxItems": crate::app::questions::MAX_CHOICES, "uniqueItems": true,
                              "items": { "type": "string", "minLength": 1,
                                         "maxLength": crate::app::questions::MAX_CHOICE_LABEL },
-                             "description": "2 to 4 short labels, in the order shown. Omit or leave empty for a chat answer." },
+                             "description": "2 to 5 short labels, in the order shown. Omit or leave empty for a chat answer." },
+                "multiple": { "type": "boolean", "default": false,
+                              "description": "Allow multiple selections, confirmed with Done. Requires choices. This never approves destructive or external actions." },
                 "context": { "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
                              "description": "Optional: what the choice is about, such as a draft." },
             },
@@ -183,6 +186,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
                 "status": question.status,
                 "question_id": question.id,
                 "answer": question.chosen(),
+                "answers": question.selected(),
                 "next": match question.status {
                     Status::Answered => "The owner already chose; continue with that choice.",
                     _ => "The owner did not answer this; a newer message of theirs governs. Do not treat it as a choice.",
@@ -198,6 +202,7 @@ pub(super) async fn ask_owner(state: &AppState, grant: &Grant, args: &Value) -> 
                 "parked": true,
                 "question_id": question.id,
                 "choices": question.choices,
+                "multiple": question.multiple,
                 "next": "Tell the owner briefly what you are asking and end this attempt now. \
                          Do not wait, poll, or call more tools; their choice arrives in a \
                          continuation.",

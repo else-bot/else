@@ -245,6 +245,113 @@ async fn a_choice_parks_the_turn_and_the_answer_continues_it() {
     assert_eq!(question_row(&app, question).await.1, Some("b".into()));
 }
 
+fn multiple_args() -> Value {
+    json!({
+        "question": "Which inbox tasks should I take care of?",
+        "choices": ["Archive cold recruiter emails", "Unsubscribe from newsletters",
+                    "Label receipts and invoices", "Draft replies to starred emails",
+                    "Summarize unread threads"],
+        "multiple": true,
+    })
+}
+
+async fn select(app: &TestApp, bot: &str, question: Uuid, choices: Value) -> common::Reply {
+    app.owner(
+        "POST",
+        &format!("/v1/bots/{bot}/questions/{question}/answer"),
+        Some(json!({ "choices": choices })),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multiple_choices_wait_for_done_and_deliver_only_selected_actions() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool_text(&tool(&app, &token, "ask_owner", multiple_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(pending["multiple"], true);
+    assert_eq!(pending["choices"].as_array().unwrap().len(), 5);
+    wait(&app, turn, "waiting").await;
+    let shown = shown_turn(&app, &main, turn).await;
+    assert_eq!(shown["questions"][0]["multiple"], true);
+    assert_eq!(shown["questions"][0]["answer"], Value::Null);
+    assert_eq!(journaled(&app, &main, question).await["multiple"], true);
+
+    for invalid in [
+        json!([]),
+        json!(["a", "a"]),
+        json!(["f"]),
+        json!(["a", "b", "c", "d", "e", "f"]),
+    ] {
+        let refused = select(&app, &main, question, invalid).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+    }
+    assert_eq!(
+        answer(&app, &main, question, "a").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(status(&app, turn).await, "waiting");
+    let chosen = select(&app, &main, question, json!(["e", "c"])).await;
+    assert_eq!(chosen.status, StatusCode::OK, "{}", chosen.body);
+    assert_eq!(chosen.body["question"]["answer"], json!(["c", "e"]));
+    assert_eq!(chosen.body["requeued"], true);
+    wait(&app, turn, "completed").await;
+    let card = &shown_turn(&app, &main, turn).await["questions"][0];
+    assert_eq!(card["status"], "answered");
+    assert_eq!(card["answer"], json!(["c", "e"]));
+    assert_eq!(
+        journaled(&app, &main, question).await["answer"],
+        json!(["c", "e"])
+    );
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(packet.contains("Label receipts and invoices"), "{packet}");
+    assert!(packet.contains("Summarize unread threads"), "{packet}");
+    assert!(
+        !packet.contains("Archive cold recruiter emails"),
+        "{packet}"
+    );
+    assert!(!packet.contains("Unsubscribe from newsletters"), "{packet}");
+    assert!(
+        !packet.contains("Draft replies to starred emails"),
+        "{packet}"
+    );
+    assert_eq!(permissions(&app, &main).await, 0);
+    let again = select(&app, &main, question, json!(["e", "c"])).await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.body["requeued"], false);
+    let stale = select(&app, &main, question, json!(["a"])).await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(stale.body["error"]["code"], "question_settled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_closes_a_multiple_choice_card_without_selecting_actions() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool_text(&tool(&app, &token, "ask_owner", multiple_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, turn, "waiting").await;
+    let sent = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Only summarize unread threads.",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED);
+    let stale = select(&app, &main, question, json!(["a", "b"])).await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+    assert_eq!(stale.body["error"]["code"], "question_settled");
+    let shown = shown_turn(&app, &main, turn).await;
+    assert_eq!(shown["questions"][0]["status"], "skipped");
+    assert_eq!(shown["questions"][0]["answer"], Value::Null);
+    assert_eq!(permissions(&app, &main).await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
     let Harness { app, .. } = harness().await;
@@ -272,6 +379,11 @@ async fn asking_the_same_question_again_returns_it_and_other_shapes_conflict() {
     let again = tool_text(&tool(&app, &token, "ask_owner", choice_args()).await);
     assert_eq!(again["question_id"], first["question_id"]);
     assert_eq!(again["status"], "pending");
+    let mut multiple = choice_args();
+    multiple["multiple"] = json!(true);
+    let token = grant(&app, turn, owner_tools()).await;
+    let conflict = tool(&app, &token, "ask_owner", multiple).await;
+    assert!(is_error(&conflict), "{}", conflict.body);
     let token = grant(&app, turn, owner_tools()).await;
     let mut other = choice_args();
     other["choices"] = json!(["Plain text", "Both"]);
@@ -408,6 +520,10 @@ async fn destructive_file_writes_wait_for_owner_approval() {
     assert_eq!(card["kind"], "destructive");
     assert_eq!(card["title"], "Replace important.txt");
     assert_eq!(card["context"], "Write 11 bytes to important.txt");
+    let question: Uuid = card["id"].as_str().unwrap().parse().unwrap();
+    let invalid = select(&app, &main, question, json!(["approve", "approve_forever"])).await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(permissions(&app, &main).await, 0);
     assert_eq!(
         sidebar_status(&app, &main).await,
         json!({ "kind": "needs_approval", "preview": "Replace important.txt" })

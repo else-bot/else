@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
 use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
+use else_api::app::questions::Answer;
 use else_api::app::routines::{RoutineName, RoutinePrompt};
 use else_api::db::routines::{self, By, Patch};
 use serde_json::{Value, json};
@@ -469,15 +470,25 @@ async fn upgrading_removes_the_bot_grant_option_from_pending_routine_cards() {
             .collect::<Vec<_>>(),
         ["approve", "deny"]
     );
-    let refused =
-        else_api::db::owner_questions::answer(&db.pool, bot, question, "approve_forever").await;
+    let refused = else_api::db::owner_questions::answer(
+        &db.pool,
+        bot,
+        question,
+        &Answer::Single("approve_forever".into()),
+    )
+    .await;
     assert!(matches!(
         refused,
         Err(else_api::db::owner_questions::SettleError::InvalidChoice)
     ));
-    let approved = else_api::db::owner_questions::answer(&db.pool, bot, question, "approve")
-        .await
-        .unwrap();
+    let approved = else_api::db::owner_questions::answer(
+        &db.pool,
+        bot,
+        question,
+        &Answer::Single("approve".into()),
+    )
+    .await
+    .unwrap();
     assert!(approved.question.approved());
     assert!(
         else_api::db::owner_questions::permissions(&db.pool, bot)

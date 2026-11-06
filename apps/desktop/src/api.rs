@@ -570,16 +570,20 @@ impl Client {
             .map(|_| ())
     }
 
-    /// Answer a bot's question by one of its choice ids. A stale card gets
+    /// Answer a bot's question by its selected choice ids. A stale card gets
     /// 409 `question_settled` from the server and never changes anything.
     pub async fn answer_question(
         self: Arc<Self>,
         bot: Uuid,
         question: Uuid,
-        choice: String,
+        answer: crate::model::QuestionAnswer,
     ) -> Result<(), ClientError> {
         let path = format!("/v1/bots/{bot}/questions/{question}/answer");
-        self.call::<serde_json::Value>(Method::POST, path, Some(json!({ "choice": choice })))
+        let body = match answer {
+            crate::model::QuestionAnswer::Single(choice) => json!({ "choice": choice }),
+            crate::model::QuestionAnswer::Multiple(choices) => json!({ "choices": choices }),
+        };
+        self.call::<serde_json::Value>(Method::POST, path, Some(body))
             .await
             .map(|_| ())
     }

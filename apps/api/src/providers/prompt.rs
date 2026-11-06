@@ -279,8 +279,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          the only way chat text approves anything, and only that exact draft; when unsure, \
          revise or ask instead.\n\n\
          Whenever you need an answer from the owner, call ask_owner with the question and \
-         optional context such as a draft. Offer two to four short choices when they fit: \
-         the owner picks one on a native card and you continue with their choice. For an \
+         optional context such as a draft. Offer two to five short choices when they fit: \
+         the owner picks one on a native card and you continue with their choice. When \
+         several actions can be selected independently, set multiple to true. The owner \
+         selects the actions and clicks Done; do only the selected actions. For an \
          open question omit choices; the owner answers in chat, which skips the old card \
          and continues with their new instruction. Never use ordinary choice labels to \
          authorize destructive or external actions; use the permission tools for those.\n\n\
@@ -419,18 +421,34 @@ fn questions_block(input: &TurnInput) -> String {
          anything else still needs its own card.\n",
     );
     for question in &input.questions {
-        let answer = question
-            .answer
-            .as_ref()
-            .map(|c| c.id.as_str())
-            .unwrap_or(question.status.as_str());
+        let answer = if question.answers.is_empty() {
+            question.status.as_str().to_owned()
+        } else {
+            question
+                .answers
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         let (tag, body, next) = match (&question.action, question.kind.as_str()) {
             (None, _) => (
                 "question",
                 question.title.clone(),
-                match &question.answer {
-                    Some(choice) => format!("The owner chose: {}", choice.label),
-                    None => "The owner did not choose; their newer message governs.".to_owned(),
+                match question.answers.as_slice() {
+                    [] => "The owner did not choose; their newer message governs.".to_owned(),
+                    [choice] => format!(
+                        "The owner chose: {}\nNo other options were selected.",
+                        choice.label
+                    ),
+                    choices => format!(
+                        "The owner selected only these actions:\n{}\nDo not do the unselected actions.",
+                        choices
+                            .iter()
+                            .map(|c| format!("- {}", c.label))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
                 },
             ),
             (Some(action), kind) => {
@@ -440,7 +458,7 @@ fn questions_block(input: &TurnInput) -> String {
                     }
                     Action::Host { host } => format!("{}\nHost action: {host}", question.title),
                 };
-                let standing = match answer {
+                let standing = match answer.as_str() {
                     APPROVE_FOREVER => {
                         " The owner also allowed destructive actions of this bot from now on, \
                          outside routine runs."
@@ -452,7 +470,7 @@ fn questions_block(input: &TurnInput) -> String {
                     }
                     _ => "",
                 };
-                let next = match (answer, action) {
+                let next = match (answer.as_str(), action) {
                     (APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE, Action::Tool { tool, .. }) => {
                         format!(
                             "Approved: call {tool} again with the original tool call arguments, \

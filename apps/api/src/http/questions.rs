@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::AppState;
 use super::error::{ApiError, ApiJson, ApiPath};
 use super::turns::active_bot;
+use crate::app::questions::Answer;
 use crate::db::owner_questions::{self, SettleError};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -34,9 +35,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AnswerBody {
-    choice: String,
+#[serde(untagged, deny_unknown_fields)]
+enum AnswerBody {
+    Single { choice: String },
+    Multiple { choices: Vec<String> },
 }
 
 fn settle_error(err: SettleError) -> ApiError {
@@ -47,9 +49,10 @@ fn settle_error(err: SettleError) -> ApiError {
             "question_settled",
             format!("This question was already {}.", status.as_str()),
         ),
-        SettleError::InvalidChoice => {
-            ApiError::bad_request("invalid_choice", "Choose one of this question's options.")
-        }
+        SettleError::InvalidChoice => ApiError::bad_request(
+            "invalid_choice",
+            "Choose valid options for this question's selection mode.",
+        ),
         SettleError::RoutineChanged => ApiError::new(
             StatusCode::CONFLICT,
             "routine_changed",
@@ -59,14 +62,18 @@ fn settle_error(err: SettleError) -> ApiError {
     }
 }
 
-/// The owner picks one option. A retry of the same answer succeeds without
+/// The owner submits a selection. A retry of the same answer succeeds without
 /// changing anything; a stale card answering a settled question gets 409.
 async fn answer(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, question_id)): ApiPath<(Uuid, Uuid)>,
     ApiJson(body): ApiJson<AnswerBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let settled = owner_questions::answer(&state.db, bot_id, question_id, &body.choice)
+    let answer = match body {
+        AnswerBody::Single { choice } => Answer::Single(choice),
+        AnswerBody::Multiple { choices } => Answer::Multiple(choices),
+    };
+    let settled = owner_questions::answer(&state.db, bot_id, question_id, &answer)
         .await
         .map_err(settle_error)?;
     if settled.requeued {

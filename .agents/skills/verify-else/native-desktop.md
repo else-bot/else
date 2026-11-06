@@ -41,6 +41,9 @@ The generated server address and key are already loaded in the local card.
 Codex adapter. Its private auth file contains only `{}`. No provider account
 or network request is involved. It streams `Fixture reply ✓ from the desktop
 composer.`. Send `[ui:hang]` for a turn that waits until Stop work. The fixture
+also accepts `[ui:question]` for an A/B card and `[ui:multiple]` for five
+checkbox choices. Select choices and click **Done** to submit the checklist.
+Reply in chat to close a pending card without a button selection. The fixture
 proves the application's protocol, streaming, and cancellation behavior. It
 does not establish provider authentication, tools, or model quality.
 

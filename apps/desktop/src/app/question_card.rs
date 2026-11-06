@@ -15,24 +15,27 @@ use uuid::Uuid;
 
 use super::{Connection, ElseApp, RowKey};
 use crate::api::ClientError;
-use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question};
+use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question, QuestionAnswer};
+
+mod choice;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct QuestionSubmit {
-    pub(super) choice: String,
+pub(super) struct QuestionForm {
+    pub(super) answer: QuestionAnswer,
     pub(super) state: SubmitState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SubmitState {
+    Choosing,
     Sending,
     Recorded,
     Failed(String),
 }
 
-impl QuestionSubmit {
+impl QuestionForm {
     fn locks(&self) -> bool {
-        !matches!(self.state, SubmitState::Failed(_))
+        matches!(self.state, SubmitState::Sending | SubmitState::Recorded)
     }
 }
 
@@ -46,7 +49,7 @@ fn heading(question: &Question, bot_name: &str) -> String {
 
 fn outcome(question: &Question, bot_name: &str) -> String {
     match question.status.as_str() {
-        "answered" => match (question.is_approval(), question.answer.as_deref()) {
+        "answered" => match (question.is_approval(), question.answer.as_ref().and_then(QuestionAnswer::single)) {
             (true, Some(APPROVE)) => "Approved once.".into(),
             (true, Some(APPROVE_FOREVER)) => {
                 format!("Approved, and destructive actions are always allowed for {bot_name}.")
@@ -90,7 +93,7 @@ impl ElseApp {
     fn answer_question(
         &mut self,
         question: Uuid,
-        choice: String,
+        answer: QuestionAnswer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -108,19 +111,19 @@ impl ElseApp {
             || view
                 .question_submits
                 .get(&question)
-                .is_some_and(QuestionSubmit::locks)
+                .is_some_and(QuestionForm::locks)
         {
             return;
         }
         view.question_submits.insert(
             question,
-            QuestionSubmit {
-                choice: choice.clone(),
+            QuestionForm {
+                answer: answer.clone(),
                 state: SubmitState::Sending,
             },
         );
         let task = cx.spawn_in(window, async move |this, cx| {
-            let result = client.answer_question(bot, question, choice).await;
+            let result = client.answer_question(bot, question, answer).await;
             let _ = this.update_in(cx, |app, _window, cx| {
                 app.question_answered(bot, question, result, cx)
             });
@@ -165,6 +168,10 @@ impl ElseApp {
         let Some(question) = view.conversation.as_ref().and_then(|c| c.question(id)) else {
             return div().into_any_element();
         };
+        let submit = view.question_submits.get(&id);
+        if !question.is_approval() {
+            return self.render_choice_card(question, submit, cx);
+        }
         let theme = cx.theme().clone();
         let bot_name = self
             .bots
@@ -178,12 +185,10 @@ impl ElseApp {
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
-        let submit = view.question_submits.get(&id);
         let pending = question.is_pending();
         let locked = !pending
-            || submit.is_some_and(QuestionSubmit::locks)
+            || submit.is_some_and(QuestionForm::locks)
             || self.connection != Connection::Connected;
-        let approval = question.is_approval();
         let mut card = v_flex()
             .w_full()
             .gap_2()
@@ -207,38 +212,32 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        if approval {
-            card = card.child(note(match question.kind.as_str() {
-                "external" => "Approval covers exactly this action, once. Sending, posting, or \
+        card = card.child(note(match question.kind.as_str() {
+            "external" => "Approval covers exactly this action, once. Sending, posting, or \
                                paying is never allowed in advance."
-                    .to_owned(),
-                _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => {
-                    "Always allow for this routine remembers destructive \
+                .to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => {
+                "Always allow for this routine remembers destructive \
                     approval for its saved task on future runs. Other routines and chat requests \
                     still need approval. Changing the task clears this permission."
-                        .to_owned()
-                }
-                _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => {
-                    "Approve once covers exactly this action. Always allow lets this bot take \
+                    .to_owned()
+            }
+            _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => {
+                "Approve once covers exactly this action. Always allow lets this bot take \
                       destructive actions without asking."
-                        .to_owned()
-                }
-                _ => "Approval covers exactly this action, once.".to_owned(),
-            }));
-        }
-        let mut buttons = if approval {
-            h_flex().w_full().flex_wrap().justify_end().gap_2()
-        } else {
-            v_flex().w_full().gap_1p5()
-        };
+                    .to_owned()
+            }
+            _ => "Approval covers exactly this action, once.".to_owned(),
+        }));
+        let mut buttons = h_flex().w_full().flex_wrap().justify_end().gap_2();
         for choice in &question.choices {
-            let chosen = question.answer.as_deref() == Some(choice.id.as_str())
-                || submit.is_some_and(|s| s.choice == choice.id);
-            let label = match submit.filter(|s| s.choice == choice.id).map(|s| &s.state) {
+            let label = match submit
+                .filter(|s| s.answer.contains(&choice.id))
+                .map(|s| &s.state)
+            {
                 Some(SubmitState::Sending) => "Sending…".to_owned(),
                 Some(SubmitState::Recorded) => "Recorded".to_owned(),
-                _ if approval => choice.label.clone(),
-                _ => format!("{}   {}", letter(&choice.id), choice.label),
+                _ => choice.label.clone(),
             };
             let choice_id = choice.id.clone();
             let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
@@ -248,30 +247,16 @@ impl ElseApp {
                 .small()
                 .disabled(locked)
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    app.answer_question(id, choice_id.clone(), window, cx)
+                    app.answer_question(id, QuestionAnswer::Single(choice_id.clone()), window, cx)
                 }));
-            let button = match (approval, choice.id.as_str(), chosen) {
-                (true, APPROVE, _) => button.primary(),
-                (true, DENY, _) => button.ghost(),
-                (true, _, _) => button.ghost(),
-                (false, _, true) => button.primary(),
-                (false, _, false) => button.ghost(),
-            };
-            let button = if approval {
-                button
+            let button = if choice.id == APPROVE {
+                button.primary()
             } else {
-                button.w_full().justify_start()
+                button.ghost()
             };
             buttons = buttons.child(button);
         }
         card = card.child(buttons);
-        if pending && !approval {
-            card = card.child(note(if question.choices.is_empty() {
-                "Reply in chat to answer this question.".into()
-            } else {
-                "You can also reply in chat to give different instructions.".into()
-            }));
-        }
         if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
             card = card.child(
                 div()
@@ -290,7 +275,7 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{heading, letter, outcome};
-    use crate::model::{APPROVE, DENY, Question, QuestionChoice};
+    use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice};
     use uuid::Uuid;
 
     fn question(kind: &str, status: &str, answer: Option<&str>) -> Question {
@@ -323,8 +308,9 @@ mod tests {
             title: "t".into(),
             context: None,
             choices,
+            multiple: false,
             status: status.into(),
-            answer: answer.map(str::to_owned),
+            answer: answer.map(|id| QuestionAnswer::Single(id.to_owned())),
             settled_at: None,
         }
     }
