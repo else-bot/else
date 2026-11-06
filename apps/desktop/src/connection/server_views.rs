@@ -237,7 +237,17 @@ impl Shell {
                     h_flex()
                         .gap_1p5()
                         .text_color(color)
-                        .child(div().size_1p5().rounded_full().bg(color))
+                        .child(
+                            if observation.is_none_or(|entry| entry.health == Health::Checking) {
+                                updates::checking_icon(
+                                    SharedString::from(format!("server-health-{id}")),
+                                    px(12.),
+                                    color,
+                                )
+                            } else {
+                                div().size_1p5().rounded_full().bg(color).into_any_element()
+                            },
+                        )
                         .child(status),
                 )
                 .child(
@@ -247,7 +257,15 @@ impl Shell {
                 );
             if online {
                 facts = facts.child(
-                    div()
+                    h_flex()
+                        .gap_1p5()
+                        .when(release == ReleaseStatus::Checking, |row| {
+                            row.child(updates::checking_icon(
+                                SharedString::from(format!("server-release-{id}")),
+                                px(12.),
+                                theme.muted_foreground,
+                            ))
+                        })
                         .text_color(if update_available {
                             theme.warning
                         } else {

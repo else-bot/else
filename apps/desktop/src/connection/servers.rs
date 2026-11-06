@@ -269,15 +269,53 @@ impl Shell {
         if observed.health != Health::Online {
             return ReleaseStatus::NotChecked;
         }
-        let latest = match &self.updates.snapshot.check {
-            crate::updates::Check::Available { latest }
-            | crate::updates::Check::Current { latest } => Some(latest.as_str()),
-            _ => None,
+        let view = if self
+            .registry
+            .find(id)
+            .is_some_and(|saved| self.managed_server(&saved.profile))
+        {
+            Some(&self.server_updates)
+        } else {
+            self.remote_updates.get(&id)
         };
+        if view.is_some_and(|view| matches!(view.snapshot.check, crate::updates::Check::Checking)) {
+            return ReleaseStatus::Checking;
+        }
+        let latest = view.and_then(|view| view.snapshot.latest.as_deref());
         ReleaseStatus::compare(observed.version.as_deref(), latest)
     }
 
+    pub(super) fn sync_server_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remote_updates.retain(|id, view| {
+            self.registry
+                .find(*id)
+                .is_some_and(|saved| view.remote_profile.as_ref() == Some(&saved.profile))
+        });
+        for saved in &self.registry.servers {
+            if self.managed_server(&saved.profile) || self.remote_updates.contains_key(&saved.id) {
+                continue;
+            }
+            match updates::View::new_remote(
+                saved.id,
+                saved.profile.clone(),
+                &self.runtime,
+                window,
+                cx,
+            ) {
+                Ok(view) => {
+                    self.remote_updates.insert(saved.id, view);
+                }
+                Err(error) => self.connection_error = Some(error),
+            }
+        }
+    }
+
     pub(super) fn refresh_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_server_updates(window, cx);
+        self.server_updates.refresh();
+        for view in self.remote_updates.values() {
+            view.refresh();
+        }
         self.servers
             .refresh(&self.registry, &self.runtime, window, cx);
         cx.notify();
@@ -597,33 +635,17 @@ impl Shell {
         let Some(saved) = self.registry.find(id) else {
             return;
         };
-        if self.managed_server(&saved.profile) {
-            self.remote_updates.remove(&id);
-        } else if !self
-            .remote_updates
-            .get(&id)
-            .is_some_and(|view| view.remote_profile.as_ref() == Some(&saved.profile))
-        {
-            match updates::View::new_remote(id, saved.profile.clone(), &self.runtime, window, cx) {
-                Ok(view) => {
-                    self.remote_updates.insert(id, view);
-                }
-                Err(error) => {
-                    self.connection_error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            }
+        let managed = self.managed_server(&saved.profile);
+        self.sync_server_updates(window, cx);
+        if !managed && !self.remote_updates.contains_key(&id) {
+            cx.notify();
+            return;
         }
         self.server_update_target = Some(id);
-        let commands = self
-            .remote_updates
+        self.remote_updates
             .get(&id)
             .unwrap_or(&self.server_updates)
-            .commands
-            .clone();
-        commands.check().ok();
-        commands.refresh_work().ok();
+            .refresh();
         cx.notify();
     }
 

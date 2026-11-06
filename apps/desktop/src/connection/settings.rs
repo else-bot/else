@@ -105,6 +105,7 @@ impl Shell {
             self.open_remote(Some(&profile), window, cx);
         }
         self.setup.as_mut().unwrap().presentation = Presentation::Settings(SettingsSection::Server);
+        self.refresh_servers(window, cx);
         self.settings_focus.focus(window, cx);
         let shell = cx.weak_entity();
         let shell_close = shell.clone();
@@ -191,9 +192,12 @@ impl Shell {
         if section == SettingsSection::Email && self.email.is_none() {
             self.open_email(None, window, cx);
         }
+        if section == SettingsSection::Server {
+            self.refresh_servers(window, cx);
+        }
         if section == SettingsSection::Updates {
             self.server_update_target = None;
-            self.update_action(super::updates::Action::RefreshWork, cx);
+            self.updates.refresh();
         }
     }
 
