@@ -20,6 +20,7 @@ import release_binaries as binaries
 
 import release
 import guest_release
+ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.0.2"
 
 FAKE_GH = '''#!/usr/bin/env python3
@@ -257,6 +258,9 @@ class Archives(unittest.TestCase):
                         info = plistlib.loads(tar.extractfile("else.bot.app/Contents/Info.plist").read())
                         self.assertEqual(info["CFBundleShortVersionString"], VERSION)
                         self.assertEqual(info["CFBundleExecutable"], binary)
+                        self.assertEqual(info["CFBundleIconFile"], "else-bot.icns")
+                        self.assertEqual(tar.extractfile("else.bot.app/Contents/Resources/else-bot.icns").read(),
+                                         (ROOT / "media/branding/icons/else-bot.icns").read_bytes())
                         self.assertNotIn("else.bot.app/Contents/Resources/installation.json", tar.getnames())
             for line in assets[-1].read_text().splitlines():
                 digest, name = line.split("  ")

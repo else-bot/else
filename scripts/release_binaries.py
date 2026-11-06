@@ -40,6 +40,7 @@ def package(version, platform, binaries, output):
                     info = tarfile.TarInfo("else.bot.app/Contents/Info.plist")
                     info.size, info.mode = len(plist), 0o644
                     tar.addfile(info, io.BytesIO(plist))
+                    tar.add(macos_app.ICON, arcname=f"else.bot.app/Contents/Resources/{macos_app.ICON.name}")
                     member = "else.bot.app/Contents/MacOS/else-desktop"
                 info = tar.gettarinfo(binaries / binary, arcname=member)
                 info.mode = 0o755
