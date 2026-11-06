@@ -963,7 +963,7 @@ async fn only_the_owner_answers_and_only_for_the_asking_bot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_tasks_cannot_ask_and_cannot_act_destructively() {
+async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_not_open_questions() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
@@ -991,20 +991,14 @@ async fn delegated_tasks_cannot_ask_and_cannot_act_destructively() {
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    app.wait_turn_for(&child.to_string(), &["running"], Duration::from_secs(30))
-        .await;
+    wait(&app, child, "running").await;
     let child_token = grant(&app, child, owner_tools()).await;
     for (name, args) in [
         ("ask_owner", choice_args()),
         (
-            "ask_permission",
-            json!({ "kind": "external", "action": "mail x" }),
-        ),
-        (
             "confirm_permission",
             json!({ "target": { "scope": "bot" }, "authorization": "Always allow destructive actions" }),
         ),
-        ("computer_run", delete_args()),
     ] {
         let refused = tool(&app, &child_token, name, args).await;
         assert!(is_error(&refused), "{name}: {}", refused.body);
@@ -1017,20 +1011,45 @@ async fn delegated_tasks_cannot_ask_and_cannot_act_destructively() {
             refused.body
         );
     }
-    let local = tool(
-        &app,
-        &child_token,
-        "computer_run",
-        json!({ "command": "ls", "effect": "local" }),
-    )
-    .await;
+    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an approval card: {pending}"))
+        .parse()
+        .unwrap();
+    wait(&app, child, "waiting").await;
+    let shown = shown_turn(&app, &leaf, child).await;
+    let choices: Vec<&str> = shown["questions"][0]["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        choices,
+        ["approve", "deny"],
+        "no standing grant from delegated work"
+    );
+    assert_eq!(
+        shown["questions"][0]["id"],
+        question.to_string(),
+        "the card shows in the target bot's chat: {shown}"
+    );
+    assert_eq!(
+        answer(&app, &leaf, question, "approve").await.status,
+        StatusCode::OK
+    );
+    wait(&app, child, "running").await;
+    let resumed = grant(&app, child, owner_tools()).await;
+    let ran = tool(&app, &resumed, "computer_run", delete_args()).await;
     assert!(
-        tool_text(&local)
+        tool_text(&ran)
             .as_str()
             .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
-        "a local call is not gated: {}",
-        local.body
+        "the approved call runs: {}",
+        ran.body
     );
+    assert_eq!(question_row(&app, question).await.0, "answered");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1081,4 +1100,57 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
         .await
         .unwrap();
     assert_eq!(attempts, 2, "the same turn continued after the restart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_delegating_request_closes_a_delegated_card() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Ops").await;
+    let warm = app
+        .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
+        .await;
+    app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let (turn, _) = running(&app, &main).await;
+    let parent = grant(&app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let delegated = tool(
+        &app,
+        &parent,
+        "delegate",
+        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
+    )
+    .await;
+    let task: Uuid = tool_text(&delegated)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait(&app, child, "running").await;
+    let child_token = grant(&app, child, owner_tools()).await;
+    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, child, "waiting").await;
+    wait(&app, turn, "waiting").await;
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    wait(&app, child, "interrupted").await;
+    assert_eq!(question_row(&app, question).await.0, "cancelled");
+    assert_eq!(
+        answer(&app, &leaf, question, "approve").await.status,
+        StatusCode::CONFLICT,
+        "a stopped request cannot be resumed through its card"
+    );
+    assert_eq!(status(&app, child).await, "interrupted");
 }

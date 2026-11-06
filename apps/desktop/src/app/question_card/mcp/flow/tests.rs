@@ -121,16 +121,36 @@ async fn disconnected_cards_cancel_the_pending_flow_before_denial() {
     assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
 }
 #[tokio::test]
-async fn unknown_or_changed_connection_state_cannot_settle_a_card() {
+async fn unknown_connection_state_cannot_settle_a_card() {
+    let mut server = server(json!({"status":"unknown"}), 0).await;
+    assert!(server.flow.recover().await.is_err());
+    assert!(server.flow.cancel().await.is_err());
+    assert!(server.answers.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn another_shared_account_cannot_approve_the_card_but_can_decline_it() {
     for current in [
-        json!({"status":"unknown"}),
         json!({"status":"connected","provider":"https://other.test","scopes":["read"]}),
+        json!({"status":"connected","provider":"https://issuer.test","scopes":[]}),
     ] {
         let mut server = server(current, 0).await;
         assert!(server.flow.recover().await.is_err());
-        assert!(server.flow.cancel().await.is_err());
         assert!(server.answers.try_recv().is_err());
+        assert_eq!(server.flow.cancel().await.unwrap(), Resolution::Recorded);
+        assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
     }
+}
+
+#[tokio::test]
+async fn a_broader_shared_account_approves_the_card() {
+    let mut server = server(
+        json!({"status":"connected","provider":"https://issuer.test","scopes":["read","write"]}),
+        0,
+    )
+    .await;
+    assert_eq!(server.flow.recover().await.unwrap(), Resolution::Recorded);
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], APPROVE);
 }
 
 #[tokio::test]

@@ -311,7 +311,31 @@ async fn delegated_work_cannot_inherit_a_saved_tool_permission() {
         create("external", "Delegated"),
     )
     .await;
-    assert_eq!(blocked.code(), "NOT_ALLOWED", "{}", blocked.body);
+    assert_eq!(
+        blocked.result["status"], "pending",
+        "the saved permission does not cover it; the owner gets a card: {}",
+        blocked.body
+    );
+    let question: uuid::Uuid = blocked.result["question_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let choices: String = sqlx::query_scalar("SELECT choices FROM owner_questions WHERE id = ?1")
+        .bind(question)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    let ids: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(&choices)
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        ["approve", "deny"],
+        "no standing grant from delegated work"
+    );
     for turn in [turn, worker_turn, child] {
         h.release(turn).await;
     }
