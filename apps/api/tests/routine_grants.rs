@@ -83,6 +83,7 @@ async fn next_grant(h: &Harness, turn: Uuid, old: &str) -> String {
     for _ in 0..400 {
         let token = h.grant(turn).await;
         if token != old {
+            wait(&h.app, turn, "running").await;
             return token;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
