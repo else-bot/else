@@ -71,6 +71,7 @@ impl ElseApp {
             let body = if row.task.is_some() {
                 gpui_kit::component::v_flex()
                     .w_full()
+                    .pr(px(60.))
                     .gap_1()
                     .child(body)
                     .children(row.footer_stamp.map(|at| {
