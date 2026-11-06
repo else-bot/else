@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -81,6 +83,37 @@ def package_all(source, output):
     with contextlib.redirect_stdout(io.StringIO()):
         for platform in binaries.PLATFORMS:
             binaries.package(VERSION, platform, source, output)
+
+
+class RustSetup(unittest.TestCase):
+    def test_preinstalled_rust_without_shell_environment_file(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release-tag.yml"
+        step = workflow.read_text().split("      - name: Install stable Rust\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+        script = script.replace("${{ matrix.target }}", "aarch64-apple-darwin")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / ".cargo/bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "rustup").write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$RUSTUP_LOG"\n')
+            (bin_dir / "rustc").write_text('#!/bin/sh\necho "rustc 1.91.0 (fixture)"\n')
+            for binary in bin_dir.iterdir():
+                binary.chmod(0o755)
+            (bin_dir / "cut").symlink_to(shutil.which("cut"))
+            log = root / "rustup.log"
+            output = root / "output"
+            github_path = root / "path"
+            result = subprocess.run(
+                [shutil.which("bash"), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                env={"HOME": str(root), "PATH": str(bin_dir), "RUSTUP_LOG": str(log),
+                     "GITHUB_OUTPUT": str(output), "GITHUB_PATH": str(github_path)},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("toolchain install stable", log.read_text())
+            self.assertIn("default stable", log.read_text())
+            self.assertIn("target add aarch64-apple-darwin", log.read_text())
+            self.assertEqual(output.read_text(), "version=1.91.0\n")
+            self.assertEqual(github_path.read_text(), f"{bin_dir}\n")
 
 
 class ReleasePreflight(unittest.TestCase):
