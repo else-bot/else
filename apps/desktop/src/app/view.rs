@@ -425,18 +425,6 @@ impl ElseApp {
         let stopping = self.stopping.contains(&bot.id)
             || activity.as_ref().is_some_and(|a| a.phase == "cancelling");
         let mut actions = h_flex().flex_none().gap_1().items_center();
-        actions = actions.child(
-            Button::new("connect-email")
-                .focus_ring(false)
-                .cursor_pointer()
-                .icon(IconName::Mail)
-                .small()
-                .ghost()
-                .accessibility_label("Connect email")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(crate::connection::OpenEmailSettings), cx)
-                }),
-        );
         if busy || stopping {
             actions = actions.child(
                 Button::new("stop-work")
