@@ -28,6 +28,7 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+ICON = ROOT / "media/branding/icons/else-bot.icns"
 SCRIPT = Path(__file__).resolve()
 MARKER = ".else-dev-session"
 NAME = re.compile(r"(?!runs$)[A-Za-z0-9_-]{1,64}")
@@ -99,12 +100,15 @@ def publish_app(binary, root, identifier, name):
     try:
         (contents / "MacOS").mkdir(parents=True)
         shutil.copy2(binary, contents / "MacOS/else-desktop")
+        (contents / "Resources").mkdir()
+        shutil.copy2(ICON, contents / "Resources" / ICON.name)
         (contents / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundleIdentifier": identifier, "CFBundleName": name, "CFBundleDisplayName": name,
             "CFBundleExecutable": "else-desktop", "CFBundlePackageType": "APPL",
+            "CFBundleIconFile": ICON.name,
             "NSHighResolutionCapable": True}))
         digest = hashlib.sha256()
-        for part in ("MacOS/else-desktop", "Info.plist"):
+        for part in ("MacOS/else-desktop", "Info.plist", f"Resources/{ICON.name}"):
             with (contents / part).open("rb") as source:
                 digest.update(hashlib.file_digest(source, "sha256").digest())
         final = root / digest.hexdigest()[:16]

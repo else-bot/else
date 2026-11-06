@@ -173,6 +173,13 @@ fn main() {
             .detach();
             let options = WindowOptions {
                 app_id: Some("else-bot".into()),
+                icon: Some(std::sync::Arc::new(
+                    image::load_from_memory(include_bytes!(
+                        "../../../media/branding/icons/else-bot-256.png"
+                    ))
+                    .expect("decode the bundled application icon")
+                    .into_rgba8(),
+                )),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
                     size(px(1100.), px(720.)),

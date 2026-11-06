@@ -623,10 +623,13 @@ install_commands() {
 	case ":$PATH:" in *":$LINK_PREFIX/bin:"*) ;; *) next "add $LINK_PREFIX/bin to your PATH to use the elsebot command" ;; esac
 	if [ "$DISTRO" != macos ] && want_app; then
 		mkdir -p "$LINK_PREFIX/share/applications"
+		mkdir -p "$LINK_PREFIX/share/icons/hicolor/scalable/apps"
+		install -m 644 "$SRC/media/branding/else-bot.svg" "$LINK_PREFIX/share/icons/hicolor/scalable/apps/else-bot.svg"
 		cat >"$LINK_PREFIX/share/applications/else-bot.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=else.bot
+Icon=else-bot
 Comment=Your personal AI assistant
 Exec=$BIN/elsebot desktop
 Terminal=false

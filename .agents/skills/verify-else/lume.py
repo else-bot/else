@@ -298,6 +298,7 @@ def stage_payload(run, api, desktop, age):
     with os.fdopen(fd, "w") as token:
         token.write(secrets.token_urlsafe(32))
     files = {"scripts/dev.py": ROOT / "scripts/dev.py",
+             "media/branding/icons/else-bot.icns": ROOT / "media/branding/icons/else-bot.icns",
              ".agents/skills/verify-else/verify.py": SKILL / "verify.py",
              ".agents/skills/verify-else/fake-codex.py": SKILL / "fake-codex.py",
              "bin/else-api": api, "bin/else-desktop": desktop}

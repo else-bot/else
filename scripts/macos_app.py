@@ -26,6 +26,7 @@ import uuid
 IDENTIFIER = "bot.else.desktop"
 NAME = "else.bot"
 EXECUTABLE = "else-desktop"
+ICON = Path(__file__).resolve().parents[1] / "media/branding/icons/else-bot.icns"
 FOREIGN = 3
 
 
@@ -37,6 +38,7 @@ def info(version):
     return plistlib.dumps({
         "CFBundleIdentifier": IDENTIFIER, "CFBundleName": NAME, "CFBundleDisplayName": NAME,
         "CFBundleExecutable": EXECUTABLE, "CFBundlePackageType": "APPL",
+        "CFBundleIconFile": ICON.name,
         "CFBundleShortVersionString": version, "CFBundleVersion": version,
         "NSHighResolutionCapable": True})
 
@@ -58,6 +60,7 @@ def current(app, binary, version, home):
     try:
         return (filecmp.cmp(binary, parts / "MacOS" / EXECUTABLE, shallow=False)
                 and (parts / "Info.plist").read_bytes() == info(version)
+                and filecmp.cmp(ICON, parts / "Resources" / ICON.name, shallow=False)
                 and (parts / "Resources/installation.json").read_bytes() == marker(home))
     except OSError:
         return False
@@ -101,6 +104,7 @@ def publish_locked(binary, app, home, version):
         parts = contents(staged)
         (parts / "Resources").mkdir(parents=True)
         (parts / "Resources/installation.json").write_bytes(marker(home))
+        shutil.copy2(ICON, parts / "Resources" / ICON.name)
         (parts / "MacOS").mkdir()
         shutil.copy2(binary, parts / "MacOS" / EXECUTABLE)
         (parts / "Info.plist").write_bytes(info(version))

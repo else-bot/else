@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -67,6 +68,7 @@ class Downloads(unittest.TestCase):
         (self.repo / "scripts").mkdir()
         for name in ("elsebot", "macos_app.py"):
             shutil.copy2(ROOT / "scripts" / name, self.repo / "scripts" / name)
+        shutil.copytree(ROOT / "media", self.repo / "media")
         (self.repo / "install.sh").write_text(TAGGED_INSTALLER)
         for version in VERSIONS:
             (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
@@ -167,8 +169,19 @@ class Downloads(unittest.TestCase):
         self.run_installer("--yes", "--app-only", "--version", "0.0.2", TEST_DISTRO="macos", TEST_ARCH="aarch64")
         app = self.installation / "Applications/else.bot.app/Contents"
         self.assertTrue((app / "MacOS/else-desktop").is_file())
+        info = plistlib.loads((app / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleIconFile"], "else-bot.icns")
+        self.assertEqual((app / "Resources/else-bot.icns").read_bytes(),
+                         (ROOT / "media/branding/icons/else-bot.icns").read_bytes())
         self.assertEqual(json.loads((app / "Resources/installation.json").read_text())["home"], str(self.installation))
         self.assertFalse((self.installation / "toolchain").exists())
+
+    def test_linux_launcher_has_icon(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        share = self.home / ".local/share"
+        self.assertIn("Icon=else-bot\n", (share / "applications/else-bot.desktop").read_text())
+        self.assertEqual((share / "icons/hicolor/scalable/apps/else-bot.svg").read_bytes(),
+                         (ROOT / "media/branding/else-bot.svg").read_bytes())
 
     def test_update_keeps_previous_version(self):
         self.run_installer("--yes", "--app-only", "--version", "0.0.1")
