@@ -18,6 +18,7 @@ use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question, QuestionAnswer};
 
 mod choice;
+mod mcp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
@@ -44,9 +45,6 @@ impl QuestionForm {
 }
 
 fn heading(question: &Question, bot_name: &str) -> String {
-    if question.mcp_id().is_some() {
-        return format!("{bot_name} needs an account connection");
-    }
     match question.kind.as_str() {
         "destructive" => format!("{bot_name} wants to do something that is hard to undo"),
         "external" => format!("{bot_name} wants to reach outside: send, post, or pay"),
@@ -55,13 +53,6 @@ fn heading(question: &Question, bot_name: &str) -> String {
 }
 
 fn outcome(question: &Question, bot_name: &str) -> String {
-    if question.mcp_id().is_some() && question.status == "answered" {
-        return if question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE) {
-            "Account connected for this bot.".into()
-        } else {
-            "Connection cancelled.".into()
-        };
-    }
     match question.status.as_str() {
         "answered" => match (question.is_approval(), question.answer.as_ref().and_then(QuestionAnswer::single)) {
             (true, Some(APPROVE)) => "Approved once.".into(),
@@ -107,103 +98,6 @@ impl ElseApp {
                 .and_then(|c| c.question(*id))
                 .is_some_and(Question::is_pending)
         });
-    }
-
-    fn connect_mcp(
-        &mut self,
-        question: Uuid,
-        id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let client = self.client.clone();
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        let bot = view.bot_id;
-        if view
-            .question_submits
-            .get(&question)
-            .is_some_and(QuestionForm::locks)
-        {
-            return;
-        }
-        let expected = view
-            .conversation
-            .as_ref()
-            .and_then(|c| c.question(question))
-            .and_then(|q| q.action.as_ref())
-            .map(|a| a["args"].clone())
-            .unwrap_or_default();
-        view.question_submits.insert(
-            question,
-            QuestionForm {
-                answer: QuestionAnswer::Single(APPROVE.into()),
-                state: SubmitState::Authorizing,
-            },
-        );
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let result = async {
-                let mut signin =
-                    crate::mcp_oauth::SignIn::start(client.clone(), bot, id, expected).await?;
-                let opened = this
-                    .update(cx, |app, cx| {
-                        let pending = app
-                            .view
-                            .as_ref()
-                            .filter(|v| v.bot_id == bot)
-                            .and_then(|v| v.conversation.as_ref())
-                            .and_then(|c| c.question(question))
-                            .is_some_and(Question::is_pending);
-                        if pending {
-                            cx.open_url(&signin.authorization.authorization_url);
-                        }
-                        pending
-                    })
-                    .unwrap_or(false);
-                if !opened {
-                    return Err(ClientError::Protocol(
-                        "The connection request was withdrawn.".into(),
-                    ));
-                }
-                let callback = signin.wait().await?;
-                let pending = this
-                    .update(cx, |app, cx| {
-                        let Some(view) = app.view.as_mut().filter(|v| v.bot_id == bot) else {
-                            return false;
-                        };
-                        if !view
-                            .conversation
-                            .as_ref()
-                            .and_then(|c| c.question(question))
-                            .is_some_and(Question::is_pending)
-                        {
-                            return false;
-                        }
-                        if let Some(submit) = view.question_submits.get_mut(&question) {
-                            submit.state = SubmitState::Sending;
-                        }
-                        app.remeasure_row(RowKey::Question(question), cx);
-                        true
-                    })
-                    .unwrap_or(false);
-                if !pending {
-                    return Err(ClientError::Protocol(
-                        "The connection request was withdrawn.".into(),
-                    ));
-                }
-                signin.finish(callback).await?;
-                client
-                    .answer_question(bot, question, QuestionAnswer::Single(APPROVE.into()))
-                    .await
-            }
-            .await;
-            let _ = this.update_in(cx, |app, _, cx| {
-                app.question_answered(bot, question, result, cx)
-            });
-        });
-        view.mcp_signins.insert(question, task);
-        self.remeasure_row(RowKey::Question(question), cx);
     }
 
     fn answer_question(
@@ -284,8 +178,10 @@ impl ElseApp {
         let Some(question) = view.conversation.as_ref().and_then(|c| c.question(id)) else {
             return div().into_any_element();
         };
-        let mcp_id = question.mcp_id().map(str::to_owned);
         let submit = view.question_submits.get(&id);
+        if let Some(connection) = question.mcp_connection() {
+            return self.render_mcp_card(question, connection, submit, cx);
+        }
         if !question.is_approval() {
             return self.render_choice_card(question, submit, cx);
         }
@@ -329,26 +225,11 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        card = card.child(note(if mcp_id.is_some() {
-            "Sign in using your browser. Only this bot may use the connected account.".into()
-        } else {
-            match question.kind.as_str() {
-                "external" => "Approval covers exactly this action, once. Sending, posting, or \
-                               paying is never allowed in advance."
-                    .to_owned(),
-                _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => {
-                    "Always allow for this routine remembers destructive \
-                    approval for its saved task on future runs. Other routines and chat requests \
-                    still need approval. Changing the task clears this permission."
-                        .to_owned()
-                }
-                _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => {
-                    "Approve once covers exactly this action. Always allow lets this bot take \
-                      destructive actions without asking."
-                        .to_owned()
-                }
-                _ => "Approval covers exactly this action, once.".to_owned(),
-            }
+        card = card.child(note(match question.kind.as_str() {
+            "external" => "Approval covers exactly this action, once. Sending, posting, or paying is never allowed in advance.".to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task on future runs. Other routines and chat requests still need approval. Changing the task clears this permission.".to_owned(),
+            _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Approve once covers exactly this action. Always allow lets this bot take destructive actions without asking.".to_owned(),
+            _ => "Approval covers exactly this action, once.".to_owned(),
         }));
         let mut buttons = h_flex().w_full().flex_wrap().justify_end().gap_2();
         for choice in &question.choices {
@@ -356,41 +237,20 @@ impl ElseApp {
                 .filter(|s| s.answer.contains(&choice.id))
                 .map(|s| &s.state)
             {
-                Some(SubmitState::Authorizing) => "Waiting for sign-in…".to_owned(),
-                Some(SubmitState::Sending) if mcp_id.is_some() => "Connecting…".to_owned(),
+                Some(SubmitState::Authorizing) => "Sending…".to_owned(),
                 Some(SubmitState::Sending) => "Sending…".to_owned(),
                 Some(SubmitState::Recorded) => "Recorded".to_owned(),
-                _ if mcp_id.is_some() && choice.id == APPROVE => "Connect in browser".into(),
-                _ if mcp_id.is_some() && choice.id == DENY => "Cancel".into(),
+
                 _ => choice.label.clone(),
             };
             let choice_id = choice.id.clone();
-            let connection_id = mcp_id.clone();
             let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
                 .focus_ring(false)
                 .cursor_pointer()
                 .label(label)
                 .small()
-                .disabled(if mcp_id.is_some() && choice.id == DENY {
-                    !pending
-                        || self.connection != Connection::Connected
-                        || submit.is_some_and(|s| {
-                            matches!(s.state, SubmitState::Sending | SubmitState::Recorded)
-                        })
-                } else {
-                    locked
-                })
+                .disabled(locked)
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    if let Some(mcp_id) = &connection_id {
-                        if choice_id == APPROVE {
-                            app.connect_mcp(id, mcp_id.clone(), window, cx);
-                            return;
-                        }
-                        if let Some(view) = app.view.as_mut() {
-                            view.mcp_signins.remove(&id);
-                            view.question_submits.remove(&id);
-                        }
-                    }
                     app.answer_question(id, QuestionAnswer::Single(choice_id.clone()), window, cx)
                 }));
             let button = if choice.id == APPROVE {

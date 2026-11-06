@@ -113,10 +113,7 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
 
     match name {
         "mcp_install" => json!({"id":args["id"],"name":args["name"]}),
-        "mcp_connect" => {
-            json!({"id":args["id"],"provider":args["provider"],"scopes":args["scopes"]})
-        }
-        "mcp_connection_status" => json!({"id":args["id"]}),
+        "mcp_connect" | "mcp_connection_status" => json!({"id":args["id"]}),
         "mcp_request" => {
             json!({"id":args["id"],"method":args["method"],"tool":args["params"]["name"],"effect":args["effect"]})
         }

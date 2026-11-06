@@ -154,9 +154,18 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Action {
+    McpConnection { mcp_connection: McpConnection },
     Tool { tool: String, args: Value },
     Host { host: String },
     Permission { permission: PermissionTarget },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpConnection {
+    pub id: crate::mcp::PackageId,
+    pub provider: Option<String>,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +240,23 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
 }
 
 impl Spec {
+    pub fn mcp_connection(connection: McpConnection, title: String, context: String) -> Self {
+        let encoded = serde_json::to_vec(&connection).expect("MCP consent serialization");
+        Self {
+            kind: Kind::External,
+            title,
+            context: Some(context),
+            choices: approval_choices(Kind::External, None),
+            multiple: false,
+            approval: Some(Approval {
+                hash: hash(&[b"mcp_connection", &encoded]),
+                action: Action::McpConnection {
+                    mcp_connection: connection,
+                },
+            }),
+        }
+    }
+
     pub fn standing_permission(target: PermissionTarget, authorization: &str) -> Self {
         let standing = target.standing();
         let permission_hash = match &target {

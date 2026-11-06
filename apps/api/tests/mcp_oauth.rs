@@ -266,10 +266,13 @@ async fn owner_consent_resumes_a_parked_read_and_credentials_survive_restart_per
         .find(|value| value["id"] == question)
         .unwrap()
         .clone();
-    assert_eq!(card["action"]["tool"], "mcp_connect");
-    assert_eq!(card["action"]["args"]["id"], "oauth-fixture");
-    assert_eq!(card["action"]["args"]["provider"], fixture.base);
-    assert_eq!(card["action"]["args"]["scopes"], json!(["fixture.read"]));
+    assert!(card["action"].get("tool").is_none());
+    assert_eq!(card["action"]["mcp_connection"]["id"], "oauth-fixture");
+    assert_eq!(card["action"]["mcp_connection"]["provider"], fixture.base);
+    assert_eq!(
+        card["action"]["mcp_connection"]["scopes"],
+        json!(["fixture.read"])
+    );
     assert!(card["context"].as_str().unwrap().contains("fixture.read"));
     assert!(!card["context"].as_str().unwrap().contains("fixture.write"));
     connect(&app, &fixture, &bot).await;

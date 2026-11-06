@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::api::{Client, ClientError, McpAuthorization};
+use crate::api::{Client, ClientError, McpAuthorization, McpConsent};
 use crate::oauth_callback::{self, Callback, WaitError};
 
 pub struct SignIn {
@@ -27,17 +27,17 @@ impl SignIn {
     pub async fn start(
         client: Arc<Client>,
         bot: Uuid,
-        id: String,
-        expected: Value,
+        expected: McpConsent,
     ) -> Result<Self, ClientError> {
         let this = client.clone();
+        let id = expected.id.clone();
         client.run(async move {
             let (listener, callback) = oauth_callback::Listener::bind().await
                 .map_err(|_| ClientError::Protocol("Cannot open the local sign-in callback.".into()))?;
             let redirect = format!("http://127.0.0.1:{}/mcp/{}", listener.port(), Uuid::new_v4().simple());
             let authorization = this.clone().authorize_mcp(bot, id.clone(), redirect.clone()).await?;
             let signin = Self { authorization, callback, client: this, bot, id };
-            if json!(signin.authorization.provider) != expected["provider"] || json!(signin.authorization.scopes) != expected["scopes"] {
+            if signin.authorization.provider != expected.provider || signin.authorization.scopes != expected.scopes {
                 return Err(ClientError::Protocol("The provider or requested permissions changed. Cancel this card and ask the bot to connect again.".into()));
             }
             let state = authorization_state(&signin.authorization.authorization_url, &redirect)
@@ -104,6 +104,7 @@ mod tests {
         Router,
         http::{HeaderMap, StatusCode},
     };
+    use serde_json::Value;
     use tokio::{net::TcpListener, sync::mpsc};
 
     #[tokio::test]
@@ -150,8 +151,12 @@ mod tests {
         let owner = OwnerToken::parse(&"T".repeat(43)).unwrap();
         let client =
             Arc::new(Client::new(origin, &owner, tokio::runtime::Handle::current()).unwrap());
-        let expected = json!({"provider":"https://issuer.test","scopes":["read"]});
-        let mut signin = SignIn::start(client.clone(), bot, "fixture".into(), expected.clone())
+        let expected = McpConsent {
+            id: "fixture".into(),
+            provider: Some("https://issuer.test".into()),
+            scopes: vec!["read".into()],
+        };
+        let mut signin = SignIn::start(client.clone(), bot, expected.clone())
             .await
             .unwrap();
         let callback_url = received.recv().await.unwrap();
@@ -172,11 +177,7 @@ mod tests {
             .unwrap()
             .unwrap();
         changed.store(true, Ordering::SeqCst);
-        assert!(
-            SignIn::start(client, bot, "fixture".into(), expected)
-                .await
-                .is_err()
-        );
+        assert!(SignIn::start(client, bot, expected).await.is_err());
         tokio::time::timeout(Duration::from_secs(2), cancellations.recv())
             .await
             .unwrap()

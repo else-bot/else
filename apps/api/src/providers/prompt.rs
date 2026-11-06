@@ -498,21 +498,13 @@ fn questions_block(input: &TurnInput) -> String {
                     ),
                 },
             ),
-            (Some(Action::Tool { tool, args }), _) if tool == "mcp_connect" => (
-                "mcp_connection",
-                format!("{}\nMCP: {}", question.title, args["id"]),
-                if answer == APPROVE {
-                    "Account sign-in completed. Retry the original read using mcp_request. \
-                     Do not repeat tools/call automatically; check its outcome first. \
-                     Connection metadata on the card is not tool input."
-                        .to_owned()
-                } else {
-                    "Account sign-in was not completed. Continue without this connection."
-                        .to_owned()
-                },
-            ),
             (Some(action), kind) => {
                 let body = match action {
+                    Action::McpConnection { mcp_connection } => format!(
+                        "{}\nMCP: {}",
+                        question.title,
+                        String::from(mcp_connection.id.clone())
+                    ),
                     Action::Tool { tool, args } => {
                         format!("{}\nTool: {tool}\nArguments: {args}", question.title)
                     }
@@ -534,6 +526,11 @@ fn questions_block(input: &TurnInput) -> String {
                     _ => "",
                 };
                 let next = match (answer.as_str(), action) {
+                    (APPROVE, Action::McpConnection { .. }) => {
+                        "Account sign-in completed. Retry the original read using mcp_request. \
+                         Do not repeat tools/call automatically; check its outcome first."
+                            .to_owned()
+                    }
                     (APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE, Action::Tool { tool, .. }) => {
                         format!(
                             "Approved: call {tool} again with the original tool call arguments, \
@@ -556,7 +553,12 @@ fn questions_block(input: &TurnInput) -> String {
                     ),
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),
                 };
-                ("approval", body, next)
+                let tag = if matches!(action, Action::McpConnection { .. }) {
+                    "mcp_connection"
+                } else {
+                    "approval"
+                };
+                (tag, body, next)
             }
         };
         text.push_str(&format!(

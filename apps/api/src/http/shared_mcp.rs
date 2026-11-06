@@ -269,7 +269,7 @@ async fn auth_required(
     connection: crate::mcp::oauth::ConnectionStatus,
     status: &str,
 ) -> Outcome {
-    use crate::app::questions::{Kind, Spec};
+    use crate::app::questions::{McpConnection, Spec};
     use crate::db::owner_questions::{self, Gate};
     let package = match library(state).read(id).await {
         Ok(package) => package,
@@ -286,10 +286,12 @@ async fn auth_required(
             .unwrap_or_else(|| "MCP provider".into()),
         connection.scopes.join(", ")
     );
-    let spec = Spec::tool_approval(
-        Kind::External,
-        "mcp_connect",
-        &json!({"id":id,"provider":connection.provider,"scopes":connection.scopes}),
+    let spec = Spec::mcp_connection(
+        McpConnection {
+            id: id.clone(),
+            provider: connection.provider.clone(),
+            scopes: connection.scopes.clone(),
+        },
         format!("Connect {}", package.manifest.name),
         context,
     );
