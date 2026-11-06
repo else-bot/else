@@ -289,6 +289,37 @@ impl ElseApp {
             .child(self.sidebar_handle(SidebarEdge::Left, cx))
     }
 
+    fn render_bot_identity_avatar(&self, id: impl Into<ElementId>, bot: &Bot) -> impl IntoElement {
+        let mut avatar = bot_avatar(id, bot.avatar, px(30.));
+        if !bot.is_active() {
+            avatar = avatar.still();
+        }
+        div()
+            .relative()
+            .flex_none()
+            .size(px(30.))
+            .child(avatar)
+            .when(self.default_bot_id == Some(bot.id), |avatar| {
+                avatar.child(
+                    div()
+                        .id("main-bot-badge")
+                        .role(Role::Image)
+                        .aria_label("Main bot")
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(12.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgb(0xf59e0b))
+                        .text_color(white())
+                        .child(Icon::new(IconName::Star).with_size(px(8.))),
+                )
+            })
+    }
+
     fn render_bot_row(&self, bot: &Bot, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let id = bot.id;
@@ -341,10 +372,6 @@ impl ElseApp {
                 ))
             })
             .child(div().flex_1().min_w_0().truncate().child(subtitle.text));
-        let mut avatar = bot_avatar("avatar", bot.avatar, px(30.));
-        if pending {
-            avatar = avatar.still();
-        }
         let mut row = h_flex()
             .id(SharedString::from(format!("bot-{id}")))
             .min_h(px(46.))
@@ -353,7 +380,7 @@ impl ElseApp {
             .px_2()
             .py_1()
             .rounded(theme.radius)
-            .child(avatar)
+            .child(self.render_bot_identity_avatar("avatar", bot))
             .child(
                 v_flex()
                     .flex_1()
@@ -461,10 +488,9 @@ impl ElseApp {
             .px_5()
             .gap_3()
             .items_center()
-            .child(bot_avatar(
+            .child(self.render_bot_identity_avatar(
                 ElementId::Name(format!("header-avatar-{}", bot.id).into()),
-                bot.avatar,
-                px(30.),
+                bot,
             ))
             .child(
                 v_flex()

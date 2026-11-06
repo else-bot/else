@@ -75,6 +75,7 @@ gpui_kit::assets::icon_assets!(
         Download,
         Terminal,
         ShieldCheck,
+        Star,
         RotateCw
     ]
 );
