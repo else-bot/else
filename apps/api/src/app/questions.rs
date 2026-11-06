@@ -156,6 +156,26 @@ pub fn approval_choices(kind: Kind, offer: Option<Standing>) -> Vec<Choice> {
 pub enum Action {
     Tool { tool: String, args: Value },
     Host { host: String },
+    Permission { permission: PermissionTarget },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "lowercase", deny_unknown_fields)]
+pub enum PermissionTarget {
+    Bot,
+    Routine {
+        routine_id: Uuid,
+        prompt_revision: i64,
+    },
+}
+
+impl PermissionTarget {
+    pub fn standing(&self) -> Standing {
+        match self {
+            Self::Bot => Standing::Bot,
+            Self::Routine { .. } => Standing::Routine,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +231,30 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
 }
 
 impl Spec {
+    pub fn standing_permission(target: PermissionTarget, authorization: &str) -> Self {
+        let standing = target.standing();
+        let permission_hash = match &target {
+            PermissionTarget::Bot => hash(&[b"standing_permission", b"bot"]),
+            PermissionTarget::Routine { routine_id, .. } => {
+                hash(&[b"standing_permission", b"routine", routine_id.as_bytes()])
+            }
+        };
+        Self {
+            kind: Kind::Destructive,
+            title: match standing {
+                Standing::Bot => "Allow destructive actions for this bot".into(),
+                Standing::Routine => "Allow destructive actions for this routine".into(),
+            },
+            context: Some(authorization.into()),
+            choices: approval_choices(Kind::Destructive, Some(standing)),
+            multiple: false,
+            approval: Some(Approval {
+                action: Action::Permission { permission: target },
+                hash: permission_hash,
+            }),
+        }
+    }
+
     /// Omit choices for a question answered through the chat composer.
     pub fn choice(args: &Value) -> Result<Self, &'static str> {
         only_keys(args, &["question", "choices", "context", "multiple"])

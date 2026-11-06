@@ -96,6 +96,7 @@ pub struct Routine {
     pub bot_id: Uuid,
     pub name: String,
     pub prompt: String,
+    pub prompt_revision: i64,
     pub cron: String,
     pub timezone: String,
     pub enabled: bool,
@@ -112,6 +113,7 @@ struct Row {
     bot_id: Uuid,
     name: String,
     prompt: String,
+    prompt_revision: i64,
     cron: String,
     timezone: String,
     enabled: bool,
@@ -151,6 +153,7 @@ impl From<Row> for Routine {
             bot_id: row.bot_id,
             name: row.name,
             prompt: row.prompt,
+            prompt_revision: row.prompt_revision,
             cron: row.cron,
             timezone: row.timezone,
             enabled: row.enabled,
@@ -163,7 +166,8 @@ impl From<Row> for Routine {
     }
 }
 
-const SELECT: &str = "SELECT r.id, r.bot_id, r.name, r.prompt, r.cron, r.timezone, r.enabled,
+const SELECT: &str =
+    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone, r.enabled,
         r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at

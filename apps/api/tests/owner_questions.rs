@@ -1000,6 +1000,10 @@ async fn delegated_tasks_cannot_ask_and_cannot_act_destructively() {
             "ask_permission",
             json!({ "kind": "external", "action": "mail x" }),
         ),
+        (
+            "confirm_permission",
+            json!({ "target": { "scope": "bot" }, "authorization": "Always allow destructive actions" }),
+        ),
         ("computer_run", delete_args()),
     ] {
         let refused = tool(&app, &child_token, name, args).await;
