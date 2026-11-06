@@ -93,7 +93,7 @@ pub struct ItemRecord {
     pub bot_task: Option<Json<BotTask>>,
     pub bot_reply: Option<Json<BotReply>>,
     pub routine_update: Option<Json<RoutineUpdate>>,
-    /// An owner message's ordered text and file parts; `None` for plain text.
+    /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
 }
 
@@ -113,7 +113,7 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
     CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
-    END AS bot_reply, i.parts, i.routine_update";
+    END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -665,7 +665,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     .await?;
     let history: Vec<HistoryEntry> =
         sqlx::query_as::<_, (i64, String, String, String, Json<Vec<MessagePart>>)>(
-            "SELECT t.turn_no, i.kind, i.text, t.status, coalesce(i.parts, '[]')
+            "SELECT t.turn_no, i.kind, i.text, t.status, coalesce(i.parts, i.assistant_parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')

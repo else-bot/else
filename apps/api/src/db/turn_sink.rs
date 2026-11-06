@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ struct SinkState {
     bot_id: Uuid,
     execution_conversation_id: Uuid,
     provider_id: String,
+    project: Option<PathBuf>,
     assistant_item: Option<Uuid>,
     pending: String,
     flush_wanted: Arc<tokio::sync::Notify>,
@@ -43,7 +45,12 @@ pub struct SqliteSink {
 }
 
 impl SqliteSink {
-    pub fn new(pool: SqlitePool, input: &TurnInput, provider_id: &str) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        input: &TurnInput,
+        provider_id: &str,
+        project: Option<PathBuf>,
+    ) -> Self {
         let flush_wanted = Arc::new(tokio::sync::Notify::new());
         Self {
             state: Actor::new(SinkState {
@@ -52,6 +59,7 @@ impl SqliteSink {
                 bot_id: input.bot_id,
                 execution_conversation_id: input.conversation_id,
                 provider_id: provider_id.to_owned(),
+                project,
                 assistant_item: None,
                 pending: String::new(),
                 flush_wanted: flush_wanted.clone(),
@@ -87,6 +95,65 @@ impl SqliteSink {
 }
 
 impl SinkState {
+    async fn prepare_images(
+        &self,
+    ) -> Result<Option<crate::providers::output_images::ImageReply>, sqlx::Error> {
+        let Some(project) = self.project.clone() else {
+            return Ok(None);
+        };
+        let mut text = match self.assistant_item {
+            Some(id) => {
+                sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+            None => String::new(),
+        };
+        text.push_str(&self.pending);
+        Ok(tokio::task::spawn_blocking(move || {
+            crate::providers::output_images::prepare(&project, &text)
+        })
+        .await
+        .ok()
+        .flatten())
+    }
+
+    async fn write_images(
+        &self,
+        tx: &mut SqliteConnection,
+        item: Uuid,
+        reply: &crate::providers::output_images::ImageReply,
+        allowed: &str,
+    ) -> Result<(), sqlx::Error> {
+        if self.guard(tx, allowed).await?.is_none() {
+            return Ok(());
+        }
+        for image in &reply.images {
+            let file = &image.file;
+            super::attachments::store_in(
+                tx,
+                self.bot_id,
+                file.id,
+                &file.name,
+                &file.media_type,
+                &image.data,
+            )
+            .await
+            .map_err(|error| match error {
+                super::attachments::StoreError::Db(error) => error,
+                error => sqlx::Error::Protocol(error.to_string()),
+            })?;
+        }
+        sqlx::query("UPDATE items SET text = ?2, assistant_parts = ?3 WHERE id = ?1")
+            .bind(item)
+            .bind(&reply.text)
+            .bind(Json(&reply.parts))
+            .execute(&mut *tx)
+            .await?;
+        crate::db::events::item_upsert(tx, self.bot_id, item).await
+    }
+
     fn fence(&mut self) -> Fenced {
         self.fenced = true;
         Fenced
@@ -271,6 +338,11 @@ impl SinkState {
     /// deleted; visible history is not appended in that case. On error
     /// nothing is lost and the call can be retried.
     pub async fn finish(&mut self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
+        let images = if matches!(outcome, TurnOutcome::Completed) && !self.fenced {
+            self.prepare_images().await?
+        } else {
+            None
+        };
         let (status, code, message, uncertain) = match outcome {
             TurnOutcome::Completed => ("completed", None, None, false),
             TurnOutcome::Interrupted => ("interrupted", None, None, false),
@@ -298,6 +370,10 @@ impl SinkState {
             sqlx::query("SELECT 1 FROM bots WHERE id = ?1")
                 .bind(self.bot_id)
                 .execute(&mut *tx)
+                .await?;
+        }
+        if let (Some(item), Some(reply)) = (wrote_item.or(self.assistant_item), images.as_ref()) {
+            self.write_images(&mut tx, item, reply, ACTIVE_STATUSES)
                 .await?;
         }
         crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
@@ -613,6 +689,21 @@ impl SinkState {
     async fn end_message(&mut self) -> Result<(), Fenced> {
         self.flush().await?;
         if self.pending.is_empty() {
+            let result: Result<(), sqlx::Error> = async {
+                if let (Some(item), Some(reply)) =
+                    (self.assistant_item, self.prepare_images().await?)
+                {
+                    let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                    self.write_images(&mut tx, item, &reply, "('sending', 'running')")
+                        .await?;
+                    tx.commit().await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(turn = %self.turn_id, error = %error, "attaching assistant images failed");
+            }
             self.assistant_item = None;
         } else {
             self.pending.push_str("\n\n");

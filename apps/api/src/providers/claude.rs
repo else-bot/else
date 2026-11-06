@@ -433,6 +433,10 @@ pub fn validate(profile: &Profile) -> Result<(), String> {
 
 #[async_trait]
 impl Provider for Claude {
+    fn project_dir(&self, bot_id: Uuid) -> Option<std::path::PathBuf> {
+        self.host.as_ref().map(|host| host.project_path(bot_id))
+    }
+
     fn id(&self) -> &'static str {
         ID
     }

@@ -212,7 +212,14 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          owner's machine (the host), as the owner's user.\n\n\
          Your project directory is {project} on the host. You start there, and the same \
          directory is ~/work in your computer: files written in one are in the other. Keep \
-         your own work in it. By default, do the work in your computer: run code, scripts, \
+         your own work in it. To send an image in the conversation, save the generated or \
+         downloaded image in your project and include Markdown image syntax in your reply, \
+         for example ![Chart](charts/result.png). Use the actual project-relative path, \
+         or its ~/work/ path in your computer. PNG, JPEG, GIF and WebP images up to 10 MiB \
+         become saved attachments when the message finishes, with at most eight images per \
+         message. Download web images into your project first; remote image URLs are not \
+         attached. Never reference credentials or files outside your project as images. \
+         By default, do the work in your computer: run code, scripts, \
          background jobs, and browsing there. Use the host tools on \
          your project directory when that is simpler (reading or editing files you keep \
          there). Act on the owner's machine outside your project directory only when the \

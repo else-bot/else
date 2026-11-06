@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const MAX_TEXT_BYTES: usize = 32 * 1024;
-/// Largest file the owner may attach.
+/// Largest file a conversation message may attach.
 pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 /// Files one message may carry.
 pub const MAX_MESSAGE_FILES: usize = 8;
@@ -25,8 +25,7 @@ pub enum InvalidMessage {
     TooManyFiles,
 }
 
-/// A file the owner uploaded for one bot. Its bytes are stored by the API
-/// and never named by a client path.
+/// A stored file scoped to one bot. Messages reference its ID, never a client path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachment {
@@ -36,7 +35,7 @@ pub struct Attachment {
     pub size: u64,
 }
 
-/// One piece of an owner message, in the order the owner wrote it.
+/// Ordered text or a stored file in a conversation message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessagePart {
