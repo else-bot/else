@@ -75,8 +75,41 @@ async fn an_update_is_refused_while_bots_work_and_holds_new_work_once_idle() {
         .await;
     assert!(accepted.status.is_success(), "{}", accepted.body);
 
-    for method in ["GET", "POST"] {
-        let anonymous = app.call(method, "/v1/maintenance/update", None, None).await;
-        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED, "{method}");
+    for path in [
+        "/v1/maintenance/update",
+        "/v1/maintenance/update/installation",
+    ] {
+        for method in ["GET", "POST"] {
+            let anonymous = app.call(method, path, None, None).await;
+            assert_eq!(
+                anonymous.status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
     }
+}
+
+#[tokio::test]
+async fn servers_outside_the_installer_report_why_remote_updates_are_unavailable() {
+    let app = TestApp::installed().await;
+    let report = app
+        .owner("GET", "/v1/maintenance/update/installation", None)
+        .await;
+    assert_eq!(report.status, StatusCode::OK);
+    assert!(
+        report.body["unavailable"]
+            .as_str()
+            .unwrap()
+            .contains("deployment")
+    );
+    let refused = app
+        .owner(
+            "POST",
+            "/v1/maintenance/update/installation",
+            Some(serde_json::json!({"request_id": Uuid::new_v4(), "version": "999.0.0"})),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(refused.body["error"]["code"], "update_unavailable");
 }

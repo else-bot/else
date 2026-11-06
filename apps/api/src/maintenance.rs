@@ -91,6 +91,9 @@ pub fn allowed(method: &axum::http::Method, path: &str) -> bool {
     if path.ends_with("/maintenance/update") {
         return matches!(*method, Method::GET | Method::POST | Method::DELETE);
     }
+    if path.ends_with("/maintenance/update/installation") {
+        return matches!(*method, Method::GET | Method::POST);
+    }
     if matches!(*method, Method::GET | Method::HEAD) {
         return !path.ends_with("/desktop");
     }

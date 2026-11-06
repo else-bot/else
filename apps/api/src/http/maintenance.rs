@@ -32,10 +32,49 @@ use super::error::ApiError;
 const ADMITTED_GRACE: Duration = Duration::from_secs(10);
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route(
-        "/maintenance/update",
-        get(report).post(prepare).delete(reopen),
-    )
+    Router::new()
+        .route(
+            "/maintenance/update",
+            get(report).post(prepare).delete(reopen),
+        )
+        .route(
+            "/maintenance/update/installation",
+            get(installation).post(install),
+        )
+}
+
+async fn installation(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::server_updates::Snapshot>, ApiError> {
+    state
+        .server_updates
+        .call(|updates| updates.snapshot().map(Json))
+        .await
+}
+
+async fn install(
+    State(state): State<Arc<AppState>>,
+    request: Result<Json<crate::server_updates::Request>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<crate::server_updates::Snapshot>, ApiError> {
+    let Json(request) = request?;
+    let owner = state.clone();
+    state
+        .server_updates
+        .call_async(move |updates| {
+            Box::pin(async move { updates.start(request, &owner).await.map(Json) })
+        })
+        .await
+}
+
+pub(crate) async fn ensure_idle(state: &AppState) -> Result<(), ApiError> {
+    let work = work(state).await?;
+    if work.turns > 0 || work.commands > 0 {
+        return Err(busy(format!(
+            "Bots are working ({} active turns, {} running commands). Update once they have finished.",
+            work.turns, work.commands
+        )));
+    }
+    Ok(())
 }
 
 async fn report(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
