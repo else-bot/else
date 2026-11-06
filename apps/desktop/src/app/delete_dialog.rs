@@ -1,7 +1,7 @@
 use super::ElseApp;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use std::rc::Rc;
@@ -199,8 +199,6 @@ impl ElseApp {
             let confirm_ok = confirm.clone();
             let app_click = app.clone();
             let delete_click = delete.clone();
-            let danger = theme.danger;
-            let on_danger = theme.danger_foreground;
             dialog
                 .w(px(488.))
                 .p_6()
@@ -265,14 +263,7 @@ impl ElseApp {
                                 .focus_ring(false)
                                 .cursor_pointer()
                                 .label(format!("Delete {kind}"))
-                                .custom(
-                                    ButtonCustomVariant::new(cx)
-                                        .color(danger)
-                                        .foreground(on_danger)
-                                        .hover(danger.opacity(0.85))
-                                        .active(danger.opacity(0.75)),
-                                )
-                                .bg(danger)
+                                .danger()
                                 .track_focus(&confirm)
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);

@@ -220,8 +220,29 @@ impl Palette {
     fn config(&self, name: &str, style: Style) -> ThemeConfig {
         let p = self;
         let dark = p.mode.is_dark();
-        let hover = |base: Rgb| base.mix(p.foreground, if dark { 0.08 } else { 0.05 });
+        let highlight = |base: Rgb| base.mix(p.foreground, if dark { 0.15 } else { 0.10 });
+        let hover = highlight(p.raised);
+        let active = highlight(hover);
         let on = |fill: Rgb| text_on(fill, p.background, p.foreground);
+        let button_state = |fill: Rgb, text: Rgb, amount| {
+            fill.mix(
+                if fill.luminance() > text.luminance() {
+                    WHITE
+                } else {
+                    BLACK
+                },
+                amount,
+            )
+        };
+        let readable = |text: Rgb| {
+            // Leave a margin for the component library's color conversions.
+            (0..=20)
+                .map(|step| text.mix(p.foreground, step as f32 / 20.))
+                .find(|color| hover.contrast(*color) >= 4.6)
+                .unwrap_or_else(|| on(hover))
+        };
+        let danger = readable(p.red);
+        let on_danger = on(danger);
         let popover = if dark { p.raised } else { p.background };
         let border = p.background.mix(p.border, style.border_strength);
         let roles = [
@@ -231,19 +252,26 @@ impl Palette {
             ("input.border", border),
             ("window.border", border),
             ("muted.background", p.raised),
-            ("muted.foreground", p.muted_foreground),
+            ("muted.foreground", readable(p.muted_foreground)),
             ("secondary.background", p.raised),
             ("secondary.foreground", p.foreground),
-            ("secondary.hover.background", hover(p.raised)),
-            ("secondary.active.background", hover(hover(p.raised))),
-            ("accent.background", hover(p.background)),
+            ("secondary.hover.background", hover),
+            ("secondary.active.background", active),
+            ("button.background", p.raised),
+            ("button.foreground", p.foreground),
+            ("button.hover.background", hover),
+            ("button.active.background", active),
+            ("accent.background", hover),
             ("accent.foreground", p.foreground),
             ("primary.background", p.accent),
             ("primary.foreground", p.on_accent),
-            ("primary.hover.background", p.accent.mix(p.background, 0.12)),
+            (
+                "primary.hover.background",
+                button_state(p.accent, p.on_accent, 0.12),
+            ),
             (
                 "primary.active.background",
-                p.accent.mix(p.foreground, 0.12),
+                button_state(p.accent, p.on_accent, 0.20),
             ),
             ("ring", p.accent),
             ("caret", p.accent),
@@ -251,7 +279,7 @@ impl Palette {
             ("link.hover", p.accent.mix(p.foreground, 0.2)),
             ("selection.background", p.accent),
             ("list.background", p.background),
-            ("list.hover.background", hover(p.surface)),
+            ("list.hover.background", hover),
             ("list.active.background", p.selection),
             ("list.active.border", p.accent),
             ("popover.background", popover),
@@ -259,7 +287,7 @@ impl Palette {
             ("sidebar.background", p.surface),
             ("sidebar.foreground", p.foreground),
             ("sidebar.border", border),
-            ("sidebar.accent.background", hover(p.surface)),
+            ("sidebar.accent.background", hover),
             ("sidebar.accent.foreground", p.foreground),
             ("sidebar.primary.background", p.accent),
             ("sidebar.primary.foreground", p.on_accent),
@@ -272,8 +300,18 @@ impl Palette {
             ("switch.background", p.border),
             ("switch.thumb.background", p.background),
             ("tab_bar.background", p.surface),
-            ("danger.background", p.red),
-            ("danger.foreground", on(p.red)),
+            ("danger.background", danger),
+            ("danger.foreground", on_danger),
+            ("button.danger.background", danger),
+            ("button.danger.foreground", on_danger),
+            (
+                "button.danger.hover.background",
+                button_state(danger, on_danger, 0.12),
+            ),
+            (
+                "button.danger.active.background",
+                button_state(danger, on_danger, 0.20),
+            ),
             ("warning.background", p.yellow),
             ("warning.foreground", on(p.yellow)),
             ("success.background", p.green),
@@ -393,7 +431,6 @@ mod tests {
         assert_eq!(colors.primary.as_deref(), Some("#69a9ff"));
         assert_eq!(colors.sidebar.as_deref(), Some("#28282b"));
         assert_eq!(colors.list_active.as_deref(), Some("#35445a"));
-        assert_eq!(colors.danger.as_deref(), Some("#ff9b9b"));
     }
 
     #[test]
@@ -453,6 +490,11 @@ mod tests {
             check(
                 "destructive menu text",
                 paint(theme.danger).contrast(paint(theme.accent)),
+                4.5,
+            );
+            check(
+                "secondary hover text",
+                paint(theme.muted_foreground).contrast(paint(theme.accent)),
                 4.5,
             );
             for background in [palette.background, palette.surface, palette.raised] {

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::actions::Cancel;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Selectable as _, Sizable as _,
@@ -550,12 +550,7 @@ impl Render for ProfilePicker {
             Button::new("pick-model")
                 .focus_ring(false)
                 .cursor_pointer()
-                .custom(
-                    ButtonCustomVariant::new(cx)
-                        .color(theme.muted.opacity(0.3))
-                        .hover(theme.muted.opacity(0.5))
-                        .active(theme.muted.opacity(0.6)),
-                )
+                .secondary()
                 .w_full()
                 .h_auto()
                 .p_3()
