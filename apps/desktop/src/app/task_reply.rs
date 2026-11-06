@@ -281,7 +281,7 @@ impl ElseApp {
             .group("message-bubble")
             .w_full()
             .min_w_0()
-            .child(div().w_full().pr(px(64.)).child(text.render()))
+            .child(div().w_full().pr(px(64.)).child(text.render(cx)))
             .context_menu(move |menu, window, cx| {
                 Self::message_menu(owner.clone(), bot, id, Author::Bot, menu, window, cx)
             });
