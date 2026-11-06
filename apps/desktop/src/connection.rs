@@ -242,6 +242,7 @@ impl Shell {
             socials: None,
             email: None,
         };
+        shell.sync_server_updates(window, cx);
         match selected {
             Some(profile)
                 if shell
@@ -695,8 +696,7 @@ impl Shell {
                 .update(cx, |app, cx| app.dismiss_notifications(cx));
         }
         self.registry = registry;
-        self.servers
-            .refresh(&self.registry, &self.runtime, window, cx);
+        self.refresh_servers(window, cx);
         self.server_editor = None;
         if activate {
             if settings_open {

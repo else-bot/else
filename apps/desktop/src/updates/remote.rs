@@ -89,7 +89,6 @@ impl Remote {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Check) => self.check().await,
-                    Some(Command::RefreshWork) => self.work().await,
                     Some(Command::Install) => {
                         self.install().await;
                         self.pending.store(false, Ordering::Release);
@@ -135,6 +134,9 @@ impl Remote {
             ),
             self.status(),
         );
+        self.state.send_modify(|state| {
+            state.latest = latest.as_ref().ok().map(ToString::to_string);
+        });
         match latest {
             Ok(latest) => self.latest = Some(latest),
             Err(error) => {
@@ -322,7 +324,7 @@ mod tests {
         offline: Arc<AtomicBool>,
         lose_response: Arc<AtomicBool>,
         gateway: Arc<AtomicBool>,
-        supported: bool,
+        supported: Arc<AtomicBool>,
     }
 
     struct Fixture {
@@ -335,7 +337,7 @@ mod tests {
 
     async fn status(State(server): State<Server>, headers: HeaderMap) -> Response {
         assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
-        if !server.supported {
+        if !server.supported.load(Ordering::Relaxed) {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error":{"code":"not_found","message":"Not found."}})),
@@ -384,7 +386,7 @@ mod tests {
                 offline: Arc::default(),
                 lose_response: Arc::default(),
                 gateway: Arc::default(),
-                supported,
+                supported: Arc::new(AtomicBool::new(supported)),
             };
             let router = Router::new().route(ENDPOINT, get(status).post(install))
                 .route("/v1/maintenance/update", get(|State(server): State<Server>| async move {
@@ -454,6 +456,53 @@ mod tests {
             matches!(state.check, Check::Available { .. }) && state.work == Work::Idle
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn remote_checks_refresh_in_the_background_and_on_request() {
+        let mut fixture = Fixture::new(true).await;
+        fixture.settings.check_every = Duration::from_millis(100);
+        let (commands, mut states) = fixture.start();
+        available(&mut states).await;
+        std::fs::write(
+            &fixture.settings.git,
+            "#!/bin/sh\nprintf 'abc\trefs/tags/v0.0.21\n'\n",
+        )
+        .unwrap();
+        until(&mut states, |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.21".into(),
+                }
+        })
+        .await;
+        assert_eq!(fixture.server.posts.load(Ordering::Relaxed), 0);
+        drop(commands);
+        drop(states);
+
+        fixture.settings.check_every = Duration::from_secs(60 * 60);
+        let (commands, mut states) = fixture.start();
+        until(&mut states, |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.21".into(),
+                }
+        })
+        .await;
+        std::fs::write(
+            &fixture.settings.git,
+            "#!/bin/sh\nprintf 'abc\trefs/tags/v0.0.22\n'\n",
+        )
+        .unwrap();
+        commands.check().unwrap();
+        until(&mut states, |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.22".into(),
+                }
+        })
+        .await;
+        assert_eq!(fixture.server.posts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -590,6 +639,11 @@ mod tests {
                 .contains("elsebot update --server-only")
         );
         assert!(commands.install().is_err());
+        assert_eq!(states.borrow().latest.as_deref(), Some("v0.0.20"));
+        fixture.server.supported.store(true, Ordering::Relaxed);
+        commands.check().unwrap();
+        available(&mut states).await;
+        assert!(states.borrow().unavailable.is_none());
         assert_eq!(fixture.server.posts.load(Ordering::Relaxed), 0);
     }
 }

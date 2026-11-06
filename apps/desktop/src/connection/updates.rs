@@ -29,7 +29,6 @@ pub(super) struct View {
 #[derive(Clone, Copy)]
 pub(super) enum Action {
     Check,
-    RefreshWork,
     Install,
     Restart,
     ConfirmRestart,
@@ -41,6 +40,10 @@ pub(super) enum Action {
 }
 
 impl View {
+    pub(super) fn refresh(&self) {
+        self.commands.check().ok();
+    }
+
     pub(super) fn dismiss(&mut self) {
         self.confirm_restart = false;
         self.feedback = None;
@@ -249,14 +252,11 @@ impl Shell {
             None if target.is_some() => &mut self.server_updates,
             None => &mut self.updates,
         };
-        if matches!(action, Action::Install) && !view.can_install()
-            || matches!(action, Action::RefreshWork) && view.snapshot.unavailable.is_some()
-        {
+        if matches!(action, Action::Install) && !view.can_install() {
             return;
         }
         let outcome = match action {
             Action::Check => view.commands.check(),
-            Action::RefreshWork => view.commands.refresh_work(),
             Action::Install => {
                 view.show_output = true;
                 view.commands.install()
@@ -359,7 +359,7 @@ impl Shell {
             Operation::Idle => match &snapshot.check {
                 UpdateCheck::Checking => (
                     "Checking for updates",
-                    "Looking for the latest stable git tag.".to_owned(),
+                    "Looking for the latest stable release.".to_owned(),
                     IconName::RefreshCw,
                     theme.muted_foreground,
                 ),
@@ -389,6 +389,7 @@ impl Shell {
                 ),
             },
         };
+        let loading = view.busy() || matches!(snapshot.check, UpdateCheck::Checking);
         let last_check = snapshot.checked_at.map(|at| {
             let at: chrono::DateTime<chrono::Local> = at.into();
             format!("Stable releases · Checked {}", at.format("%H:%M"))
@@ -428,7 +429,11 @@ impl Shell {
                             .justify_center()
                             .rounded(theme.radius)
                             .bg(theme.secondary.opacity(0.45))
-                            .child(Icon::new(icon).size_5().text_color(tone)),
+                            .child(if loading {
+                                checking_icon("update-status-loading", px(20.), tone)
+                            } else {
+                                Icon::new(icon).size_5().text_color(tone).into_any_element()
+                            }),
                     )
                     .child(
                         v_flex()
@@ -575,7 +580,7 @@ impl Shell {
                                 if snapshot.unavailable.is_some() {
                                     "Available for installed copies of else.bot."
                                 } else {
-                                    "On launch and every 4 hours. Installation always waits for you."
+                                    "On launch, every 4 hours, and when you open these settings. You choose when to install."
                                 },
                             )),
                     )
@@ -584,7 +589,7 @@ impl Shell {
                         "Check again",
                         Action::Check,
                         false,
-                        view.busy() || snapshot.unavailable.is_some() || matches!(snapshot.check, UpdateCheck::Checking),
+                        view.busy() || (snapshot.unavailable.is_some() && view.remote_profile.is_none()) || matches!(snapshot.check, UpdateCheck::Checking),
                         cx,
                     )),
             )
@@ -838,4 +843,18 @@ fn update_notice(
                         .child(detail),
                 ),
         )
+}
+
+pub(super) fn checking_icon(id: impl Into<ElementId>, size: Pixels, color: Hsla) -> AnyElement {
+    let icon = Icon::new(IconName::LoaderCircle)
+        .size(size)
+        .text_color(color);
+    icon.with_animation(
+        id,
+        Animation::new(std::time::Duration::from_millis(900))
+            .repeat()
+            .with_max_fps(60.),
+        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+    )
+    .into_any_element()
 }

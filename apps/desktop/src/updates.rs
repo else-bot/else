@@ -92,6 +92,7 @@ pub enum Operation {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub check: Check,
+    pub latest: Option<String>,
     pub work: Work,
     pub operation: Operation,
     /// The installer's output, without terminal escapes, capped to its end.
@@ -105,6 +106,7 @@ impl Snapshot {
     pub fn initial() -> Self {
         Self {
             check: Check::Checking,
+            latest: None,
             work: Work::Checking,
             operation: Operation::Idle,
             output: String::new(),
@@ -191,7 +193,6 @@ fn busy(turns: u64, commands: u64) -> String {
 enum Command {
     Check,
     Install,
-    RefreshWork,
     Restart,
 }
 
@@ -209,13 +210,20 @@ impl Commands {
     pub fn check(&self) -> Result<(), String> {
         let refusal = {
             let state = self.state.borrow();
-            state.unavailable.clone().or_else(|| {
-                matches!(
-                    state.operation,
-                    Operation::Preparing | Operation::Installing
-                )
-                .then(|| "An update is already running.".into())
-            })
+            if matches!(state.check, Check::Checking) {
+                return Ok(());
+            }
+            state
+                .unavailable
+                .clone()
+                .filter(|_| self.tx.is_closed())
+                .or_else(|| {
+                    matches!(
+                        state.operation,
+                        Operation::Preparing | Operation::Installing
+                    )
+                    .then(|| "An update is already running.".into())
+                })
         };
         self.send(refusal, Command::Check)
     }
@@ -223,11 +231,6 @@ impl Commands {
     pub fn install(&self) -> Result<(), String> {
         let refusal = self.state.borrow().install_refusal();
         self.send_once(refusal, Command::Install)
-    }
-
-    pub fn refresh_work(&self) -> Result<(), String> {
-        let refusal = self.state.borrow().unavailable.clone();
-        self.send(refusal, Command::RefreshWork)
     }
 
     pub fn restart(&self) -> Result<(), String> {
@@ -456,9 +459,9 @@ impl Actor {
                     Operation::Preparing | Operation::Installing
                 ) {
                     self.check();
+                    self.count_work();
                 }
             }
-            Command::RefreshWork => self.count_work(),
             Command::Install => self.install(),
             Command::Restart => self.restart(),
         }
@@ -482,6 +485,7 @@ impl Actor {
                 if let Some(installed) = awaiting_restart {
                     self.ready = Some(installed);
                 }
+                let latest = result.as_ref().ok().map(|(latest, _)| latest.to_string());
                 let check = match result {
                     Ok((latest, installed)) if latest > installed => Check::Available {
                         latest: latest.to_string(),
@@ -497,6 +501,7 @@ impl Actor {
                         state.checked_at = Some(SystemTime::now());
                     }
                     state.check = check;
+                    state.latest = latest;
                     if let Some(installed) = awaiting_restart {
                         state.operation = Operation::Ready {
                             version: installed.to_string(),
@@ -1115,6 +1120,57 @@ mod tests {
     const SWITCH: &str = "case \"$*\" in *--server-only*) pointer=server-current ;; *) pointer=app-current ;; esac; ln -sfn versions/0.0.20 \"$ELSE_HOME/$pointer\"";
 
     #[tokio::test]
+    async fn app_checks_refresh_in_the_background_and_on_request() {
+        let home = Home::new("exit 0");
+        let mut settings = home.settings();
+        settings.check_every = Duration::from_millis(100);
+        let installation = Installation::for_tests(home.home(), None);
+        let (commands, mut states) = start_with(
+            Ok(installation),
+            Component::App,
+            settings,
+            &tokio::runtime::Handle::current(),
+        );
+        until(&mut states, "initial release", available).await;
+        git(Path::new(&home.repo), &["tag", "v0.0.22"]);
+        until(&mut states, "periodic release refresh", |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.22".into(),
+                }
+        })
+        .await;
+        drop(commands);
+        drop(states);
+
+        let mut settings = home.settings();
+        settings.check_every = Duration::from_secs(60 * 60);
+        let (commands, mut states) = start_with(
+            Ok(Installation::for_tests(home.home(), None)),
+            Component::App,
+            settings,
+            &tokio::runtime::Handle::current(),
+        );
+        until(&mut states, "reopened release", |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.22".into(),
+                }
+        })
+        .await;
+        git(Path::new(&home.repo), &["tag", "v0.0.23"]);
+        commands.check().unwrap();
+        until(&mut states, "release refresh on request", |state| {
+            state.check
+                == Check::Available {
+                    latest: "v0.0.23".into(),
+                }
+        })
+        .await;
+        assert!(home.calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_relaunch_waits_for_the_original_app_to_exit() {
         let mut home = Home::new("exec sleep 5");
         relaunch(&home.home(), home.settings().relaunch, home.parent.id())
@@ -1434,12 +1490,7 @@ mod tests {
             state.borrow().unavailable.as_deref(),
             Some("a development session")
         );
-        for result in [
-            commands.check(),
-            commands.install(),
-            commands.restart(),
-            commands.refresh_work(),
-        ] {
+        for result in [commands.check(), commands.install(), commands.restart()] {
             assert_eq!(result, Err("a development session".into()));
         }
     }
