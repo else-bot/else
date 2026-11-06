@@ -1,4 +1,5 @@
 mod attachments;
+mod bot_activity;
 mod bot_mention;
 mod bot_menu;
 mod categories;
