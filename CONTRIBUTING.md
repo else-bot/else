@@ -201,7 +201,9 @@ Review the version and image pin, wait for `cargo-test` and `release-ready`, the
 
 After the merge, `release-tag` builds the desktop and API on native runners for Linux AMD64, Linux ARM64, and macOS ARM64. Linux builds use Debian 12 containers to support Debian 12+, Ubuntu 24.04+, and Arch Linux. macOS builds use the `macos-15` Apple silicon runner with Xcode and Metal. Windows is unsupported.
 
-`scripts/release.py` coordinates native publication, `scripts/release_binaries.py` owns archive creation, and `scripts/guest_release.py` owns guest-image pins and verification. Native publication edits do not invalidate the guest-image build fingerprint.
+`scripts/release.py` coordinates native publication, `scripts/release_binaries.py` owns archive creation, and `scripts/guest_release.py` owns guest-image pins and verification. The guest-image fingerprint covers the guest files, base pin, and build recipe. Version bumps, release helper edits, and CI runner changes reuse the image. When a helper or workflow changes how the image is built, update the recipe in `scripts/guest_release.py` to invalidate the fingerprint.
+
+Images published before release orchestration was excluded from the fingerprint need one rebuild to adopt the new fingerprint. Later releases reuse that image until its build inputs change.
 
 All three builds must pass their binary version checks before the workflow verifies the guest image and tags the release commit. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
 
