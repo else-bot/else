@@ -30,6 +30,7 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let expanded = view.expanded_tasks.contains(&task.turn);
         let working = task.state == ReplyState::Working;
+        let complete = task.state == ReplyState::Complete;
         let (status, error) = super::message_row::turn_label(turn);
         let title = bot.map_or_else(|| "Task".to_owned(), |bot| bot.name.clone());
         let summary = match task.state {
@@ -45,7 +46,7 @@ impl ElseApp {
             theme.danger
         } else if working {
             theme.primary
-        } else if task.state == ReplyState::Complete {
+        } else if complete {
             theme.success
         } else {
             theme.muted_foreground
@@ -57,74 +58,114 @@ impl ElseApp {
             history.push(id);
         }
         let expandable = !history.is_empty();
-        let header = h_flex()
-            .w_full()
-            .min_w_0()
-            .items_center()
-            .gap_3()
-            .children(bot.map(|bot| {
-                bot_avatar(
-                    SharedString::from(format!("task-avatar-{}", task.turn)),
-                    bot.avatar,
-                    px(34.),
+        let header_padding = if complete { px(10.) } else { px(4.) };
+        let header = if complete {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_1p5()
+                .text_xs()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(color)
+                        .child(Icon::new(IconName::Check).xsmall().flex_none())
+                        .child(summary.clone()),
                 )
-                .when(working, |avatar| avatar.working())
-            }))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .text_left()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate()
-                            .child(title.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(color)
-                            .children(
-                                (task.state == ReplyState::Complete)
-                                    .then(|| Icon::new(IconName::Check).xsmall().flex_none()),
-                            )
-                            .child(div().truncate().child(if error {
-                                "Needs attention".to_owned()
+                .children(elapsed.map(|elapsed| {
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("· {elapsed}"))
+                }))
+                .child(div().flex_1())
+                .children(expandable.then(|| {
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} {}",
+                            history.len(),
+                            if history.len() == 1 {
+                                "update"
                             } else {
-                                summary.clone()
-                            })),
-                    ),
-            )
-            .children(elapsed.map(|elapsed| {
-                div()
+                                "updates"
+                            }
+                        ))
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .xsmall()
+                            .flex_none(),
+                        )
+                }))
+        } else {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_3()
+                .children(bot.map(|bot| {
+                    bot_avatar(
+                        SharedString::from(format!("task-avatar-{}", task.turn)),
+                        bot.avatar,
+                        px(34.),
+                    )
+                    .when(working, |avatar| avatar.working())
+                }))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .text_left()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .child(title.clone()),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(color)
+                                .child(div().truncate().child(if error {
+                                    "Needs attention".to_owned()
+                                } else {
+                                    summary.clone()
+                                })),
+                        ),
+                )
+                .children(elapsed.map(|elapsed| {
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(elapsed)
+                }))
+                .children(expandable.then(|| {
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .xsmall()
                     .flex_none()
-                    .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(elapsed)
-            }))
-            .children(expandable.then(|| {
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .xsmall()
-                .flex_none()
-                .text_color(theme.muted_foreground)
-            }));
-        let mut bubble = v_flex()
+                }))
+        };
+        let mut activity = v_flex()
             .w_full()
             .min_w_0()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(theme.sidebar.opacity(0.6))
             .child(if expandable {
                 let id = task.turn;
                 Button::new(SharedString::from(format!("task-history-{id}")))
@@ -135,7 +176,7 @@ impl ElseApp {
                     .with_size(Size::Size(px(16.)))
                     .w_full()
                     .px_3p5()
-                    .py_1()
+                    .py(header_padding)
                     .rounded(theme.radius_lg)
                     .accessibility_label(format!(
                         "{} activity for {title}. {summary}",
@@ -152,7 +193,7 @@ impl ElseApp {
                     }))
                     .into_any_element()
             } else {
-                header.px_3p5().py_1().into_any_element()
+                header.px_3p5().py(header_padding).into_any_element()
             })
             .children(error.then(|| {
                 div()
@@ -164,9 +205,9 @@ impl ElseApp {
                     .child(summary)
             }));
         if expanded && expandable {
-            let mut activity = v_flex().w_full().min_w_0().gap_3().px_3p5().pb_3();
+            let mut updates = v_flex().w_full().min_w_0().gap_3().px_3p5().pb_3();
             for id in history {
-                activity = activity.child(
+                updates = updates.child(
                     v_flex()
                         .w_full()
                         .min_w_0()
@@ -182,31 +223,81 @@ impl ElseApp {
                         .children(self.task_message(id, conversation.reaction_for(id), cx)),
                 );
             }
-            bubble = bubble.child(activity);
+            activity = activity.child(updates);
         }
-        let mut card = v_flex().relative().w_full().min_w_0().gap_2().child(bubble);
-        if show_reply {
+        let reply = if show_reply {
             if let Some(id) = task.latest {
-                card = card.child(
+                Some(
                     div()
                         .w_full()
                         .px_3p5()
                         .py_2()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(theme.border.opacity(0.6))
-                        .bg(theme.sidebar.opacity(0.6))
+                        .when(!complete, |reply| {
+                            reply
+                                .rounded(theme.radius_lg)
+                                .border_1()
+                                .border_color(theme.border.opacity(0.6))
+                                .bg(theme.sidebar.opacity(0.6))
+                        })
                         .children(self.task_message(id, conversation.reaction_for(id), cx)),
-                );
-            } else if task.state == ReplyState::Complete {
-                card = card.child(
+                )
+            } else if complete {
+                Some(
                     div()
+                        .px_3p5()
+                        .py_2()
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child("Finished without a text reply."),
-                );
+                )
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
+        let bubble = v_flex()
+            .w_full()
+            .min_w_0()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(theme.sidebar.opacity(0.6));
+        let mut card = v_flex().relative().w_full().min_w_0().gap_2();
+        card = if complete {
+            card.child(
+                bubble
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3p5()
+                            .pt_3()
+                            .pb_1()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .children(bot.map(|bot| {
+                                bot_avatar(
+                                    SharedString::from(format!("task-avatar-{}", task.turn)),
+                                    bot.avatar,
+                                    px(24.),
+                                )
+                            }))
+                            .child(div().flex_1().min_w_0().truncate().child(title)),
+                    )
+                    .children(reply)
+                    .child(
+                        div()
+                            .w_full()
+                            .mt_2()
+                            .border_t_1()
+                            .border_color(theme.border.opacity(0.6))
+                            .child(activity),
+                    ),
+            )
+        } else {
+            card.child(bubble.child(activity)).children(reply)
+        };
         for &id in &task.kept {
             card = card.child(
                 v_flex()
