@@ -414,6 +414,33 @@ pub async fn update(
     .await?
     .rows_affected();
     if changed > 0 {
+        if let By::Turn(caller) = by {
+            let (conversation, seq): (Uuid, i64) = sqlx::query_as(
+                "UPDATE conversations SET last_item_seq = last_item_seq + 1
+                 WHERE bot_id = ?1 AND kind = 'owner' RETURNING id, last_item_seq",
+            )
+            .bind(caller.bot_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let item_id = Uuid::new_v4();
+            let update = super::turns::RoutineUpdate {
+                routine_id: id,
+                name: new_name.clone(),
+            };
+            sqlx::query(
+                "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, routine_update)
+                 VALUES (?1, ?2, ?3, ?4, 'status', ?5, ?6)",
+            )
+            .bind(item_id)
+            .bind(conversation)
+            .bind(seq)
+            .bind(caller.turn_id)
+            .bind(format!("Updated routine: {new_name}"))
+            .bind(sqlx::types::Json(update))
+            .execute(&mut *tx)
+            .await?;
+            events::item_upsert(&mut tx, caller.bot_id, item_id).await?;
+        }
         events::bot_updated(&mut tx, by.bot_id()).await?;
     }
     let routine = load(&mut tx, id).await?;

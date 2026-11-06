@@ -128,7 +128,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     .iter()
                     .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }));
             reply.anchor = Some(item.id);
-        } else if reply.latest.is_none() {
+        } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
     }
@@ -206,6 +206,27 @@ mod tests {
         assert_eq!(reply.history, [id(2), id(3)]);
         assert_eq!(reply.state, ReplyState::Complete);
         assert_eq!(c.items().count(), 4);
+    }
+
+    #[test]
+    fn a_routine_edit_does_not_move_the_task_capsule_from_its_receipt() {
+        let mut c = conversation(vec![item(1, 10, "status")], vec![turn(10, "running")]);
+        let before = task_replies(&c);
+        let mut notice = item(2, 10, "status");
+        notice["routine_update"] = json!({ "routine_id": id(20), "name": "Daily digest" });
+        c.apply(&Frame {
+            id: Some("test:1".into()),
+            event: "item.upsert".into(),
+            data: json!({ "item": notice.clone() }).to_string(),
+        })
+        .unwrap();
+        assert_eq!(task_replies(&c), before);
+        assert_eq!(before[&id(10)].anchor, Some(id(1)));
+        let reloaded = conversation(
+            vec![item(1, 10, "status"), notice],
+            vec![turn(10, "running")],
+        );
+        assert_eq!(task_replies(&reloaded), before);
     }
 
     #[test]

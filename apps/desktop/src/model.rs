@@ -43,6 +43,14 @@ pub struct Item {
     pub bot_task: Option<BotTask>,
     #[serde(default)]
     pub bot_reply: Option<BotReply>,
+    #[serde(default)]
+    pub routine_update: Option<RoutineUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RoutineUpdate {
+    pub routine_id: Uuid,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -666,6 +674,30 @@ mod tests {
         assert_eq!(reply.status, BotReplyStatus::Completed);
         assert_eq!(live.items().count(), 2);
         assert_eq!(live.latest_reply().unwrap().id, Uuid::from_u128(1));
+    }
+
+    #[test]
+    fn routine_update_notices_survive_live_replays_reload_and_paging() {
+        let mut notice = item(2, 2, "status", "Updated routine: Daily digest");
+        notice["routine_update"] = json!({
+            "routine_id": Uuid::from_u128(71), "name": "Daily digest"
+        });
+        let initial = snapshot(1, vec![notice.clone()], None);
+        let reloaded = Conversation::from_snapshot(initial.clone()).unwrap();
+        let mut live = Conversation::from_snapshot(snapshot(0, vec![], None)).unwrap();
+        let event = frame(1, "item.upsert", json!({ "item": notice }));
+        live.apply(&event).unwrap();
+        assert_eq!(live.apply(&event), Ok(Applied::Duplicate));
+        assert_eq!(live.items().count(), 1);
+        let mut paged = Conversation::from_snapshot(snapshot(2, vec![], Some(3))).unwrap();
+        paged.merge_older(initial);
+        let expected = reloaded.items().next().unwrap();
+        assert_eq!(
+            expected.routine_update.as_ref().unwrap().name,
+            "Daily digest"
+        );
+        assert_eq!(live.items().next(), Some(expected));
+        assert_eq!(paged.items().next(), Some(expected));
     }
 
     #[test]
