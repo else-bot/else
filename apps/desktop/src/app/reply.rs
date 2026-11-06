@@ -97,8 +97,9 @@ impl ReactionKind {
         let request = match self {
             ReactionKind::ThumbsUp => {
                 "I reacted 👍 to this message. Work out what made it work, and remember that \
-                 behavior so you keep doing it in similar situations. Reply with one short \
-                 acknowledgement, such as \"Thanks, noted.\" Don't explain what you remembered."
+                 behavior so you keep doing it in similar situations. Do not send an \
+                 acknowledgement or explain what you remembered. Only reply if there is \
+                 something actionable to tell me or a question that needs my answer."
             }
             ReactionKind::ThumbsDown => {
                 "I reacted 👎 to this message. Don't assume a cause. Reply with one short \
@@ -196,7 +197,8 @@ mod tests {
         );
         assert!(message.contains("what made it work"));
         assert!(message.contains("remember"));
-        assert!(message.contains("one short acknowledgement"));
+        assert!(message.contains("Do not send an acknowledgement"));
+        assert!(message.contains("Only reply if"));
     }
 
     #[test]

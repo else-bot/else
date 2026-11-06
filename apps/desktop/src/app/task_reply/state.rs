@@ -1,6 +1,6 @@
 use crate::model::Conversation;
 use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,7 @@ pub(in crate::app) struct TaskReply {
     pub summary: Option<String>,
     pub history: Vec<Uuid>,
     pub kept: Vec<Uuid>,
+    pub reactions: Vec<(Uuid, crate::model::ReactionKind)>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
 }
@@ -63,9 +64,12 @@ pub(super) fn format_elapsed(seconds: i64) -> String {
 }
 
 pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid, TaskReply> {
-    let reacted: HashSet<_> = conversation
+    let reactions: HashMap<_, _> = conversation
         .items()
-        .filter_map(|item| item.reaction.map(|reaction| reaction.item_id))
+        .filter_map(|item| {
+            item.reaction
+                .map(|reaction| (reaction.item_id, reaction.kind))
+        })
         .collect();
     let greeting = conversation
         .items()
@@ -75,6 +79,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
     let mut replies: HashMap<_, _> = conversation
         .turns_in_order()
         .into_iter()
+        .filter(|turn| conversation.reaction_in(turn.id).is_none())
         .filter(|turn| {
             !(Some(turn.id) == greeting
                 && turn.turn_no == 1
@@ -104,6 +109,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     summary: None,
                     history: Vec::new(),
                     kept: Vec::new(),
+                    reactions: Vec::new(),
                     started_at: turn.started_at,
                     finished_at: turn.finished_at,
                 },
@@ -115,6 +121,10 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             continue;
         };
         if item.kind == "assistant" {
+            let reaction = reactions.get(&item.id).copied();
+            if let Some(kind) = reaction {
+                reply.reactions.push((item.id, kind));
+            }
             if let Some(previous) = reply.latest.replace(item.id) {
                 if reply.latest_kept {
                     reply.kept.push(previous)
@@ -122,7 +132,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     reply.history.push(previous)
                 }
             }
-            reply.latest_kept = reacted.contains(&item.id)
+            reply.latest_kept = reaction.is_some()
                 || item
                     .parts
                     .iter()
@@ -312,13 +322,47 @@ mod tests {
                     vec![turn(10, "completed"), turn(11, status)],
                 );
                 let replies = task_replies(&c);
-                assert!(replies.contains_key(&id(10)), "the original task stays rich");
+                assert!(
+                    replies.contains_key(&id(10)),
+                    "the original task stays rich"
+                );
                 assert!(
                     !replies.contains_key(&id(11)),
                     "{kind} feedback in {status} must not become a task capsule"
                 );
             }
         }
+    }
+
+    #[test]
+    fn feedback_stays_plain_when_its_owner_item_is_on_an_older_page() {
+        let mut feedback = turn(11, "completed");
+        feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
+        let mut ack = item(4, 11, "assistant");
+        ack["text"] = json!("Thanks, noted.");
+        let c = conversation(vec![ack], vec![feedback]);
+        assert!(task_replies(&c).is_empty());
+        assert!(c.is_feedback_acknowledgement(c.latest_reply().unwrap()));
+    }
+
+    #[test]
+    fn reacting_to_a_file_changes_the_task_layout_even_when_already_kept() {
+        let mut file = item(2, 10, "assistant");
+        file["parts"] = json!([{"type": "file", "file": {
+            "id": id(50), "name": "report.txt", "media_type": "text/plain", "size": 12
+        }}]);
+        let mut c = conversation(vec![item(1, 10, "user"), file], vec![turn(10, "completed")]);
+        let before = task_replies(&c);
+        assert!(before[&id(10)].latest_kept);
+        let mut feedback = item(3, 11, "user");
+        feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
+        c.apply(&Frame {
+            id: Some("test:1".into()),
+            event: "item.upsert".into(),
+            data: json!({"item": feedback}).to_string(),
+        })
+        .unwrap();
+        assert_ne!(task_replies(&c)[&id(10)], before[&id(10)]);
     }
 
     #[test]

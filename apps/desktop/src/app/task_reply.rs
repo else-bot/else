@@ -122,7 +122,7 @@ impl ElseApp {
                         .pt_3()
                         .border_t_1()
                         .border_color(theme.border.opacity(0.5))
-                        .children(self.task_message(id, cx)),
+                        .children(self.task_message(id, None, cx)),
                 );
             } else if task.state == ReplyState::Complete {
                 card = card.child(
@@ -147,7 +147,7 @@ impl ElseApp {
                             .text_color(theme.muted_foreground)
                             .child("Kept from this task"),
                     )
-                    .children(self.task_message(id, cx)),
+                    .children(self.task_message(id, conversation.reaction_for(id), cx)),
             );
         }
         let mut history = task.history.clone();
@@ -229,7 +229,7 @@ impl ElseApp {
                                     .child(super::message_row::stamp(at))
                             },
                         ))
-                        .children(self.task_message(id, cx)),
+                        .children(self.task_message(id, conversation.reaction_for(id), cx)),
                 );
             }
         }
@@ -238,24 +238,37 @@ impl ElseApp {
                 .reply_transitions
                 .get(&task.turn)
                 .is_some_and(|at| at.elapsed() < Duration::from_millis(320));
-        if animate {
-            Some(
-                card.with_animation(
-                    SharedString::from(format!("task-settled-{}", task.turn)),
-                    Animation::new(Duration::from_millis(280)).with_max_fps(60.),
-                    |card, t| {
-                        let ease = 1. - (1. - t).powi(3);
-                        card.opacity(0.3 + 0.7 * ease).top(px(5. * (1. - ease)))
-                    },
-                )
-                .into_any_element(),
+        let card = if animate {
+            card.with_animation(
+                SharedString::from(format!("task-settled-{}", task.turn)),
+                Animation::new(Duration::from_millis(280)).with_max_fps(60.),
+                |card, t| {
+                    let ease = 1. - (1. - t).powi(3);
+                    card.opacity(0.3 + 0.7 * ease).top(px(5. * (1. - ease)))
+                },
             )
+            .into_any_element()
         } else {
-            Some(card.into_any_element())
-        }
+            card.into_any_element()
+        };
+        Some(
+            match task
+                .latest
+                .filter(|_| show_reply)
+                .and_then(|id| conversation.reaction_for(id))
+            {
+                Some(kind) => super::message_row::with_reaction(card, kind, cx),
+                None => card,
+            },
+        )
     }
 
-    fn task_message(&self, id: Uuid, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn task_message(
+        &self,
+        id: Uuid,
+        reaction: Option<crate::model::ReactionKind>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let view = self.view.as_ref()?;
         let conversation = view.conversation.as_ref()?;
         let item = conversation.item(id)?;
@@ -299,9 +312,9 @@ impl ElseApp {
                 .group_hover("message-bubble", |this| this.visible())
                 .child(self.message_actions(bot, id, Author::Bot, cx)),
         );
-        if let Some(reaction) = conversation.reaction_for(id) {
-            body = body.child(div().pt_1().text_sm().child(reaction.mark()));
-        }
-        Some(body.into_any_element())
+        Some(match reaction {
+            Some(kind) => super::message_row::with_reaction(body.into_any_element(), kind, cx),
+            None => body.into_any_element(),
+        })
     }
 }
