@@ -617,14 +617,44 @@ async fn serve(
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
     let app = http::router(config, state.clone());
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let port = config.bind.port();
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(serve_listener(listener, app.clone(), stop_rx.clone()));
     let mut server = tokio::spawn(async move {
-        let mut stop_rx = stop_rx;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = stop_rx.wait_for(|stop| *stop).await;
-            })
-            .await
+        let mut listening = std::collections::HashSet::new();
+        let mut discovery = tokio::time::interval(std::time::Duration::from_secs(15));
+        loop {
+            tokio::select! {
+                result = servers.join_next() => {
+                    result.context("no HTTP listeners")?.context("HTTP listener task")??;
+                    break;
+                }
+                _ = async { let _ = stop_rx.wait_for(|stop| *stop).await; } => break,
+                _ = discovery.tick() => {
+                    if let Ok(tailnet) = else_tailnet::Status::read().await {
+                        for ip in tailnet.local_ips() {
+                            if listening.contains(&ip) { continue; }
+                            let addr = std::net::SocketAddr::new(ip, port);
+                            match TcpListener::bind(addr).await {
+                                Ok(listener) => {
+                                    tracing::info!(%addr, "Tailscale API listening");
+                                    servers.spawn(serve_listener(listener, app.clone(), stop_rx.clone()));
+                                    listening.insert(ip);
+                                }
+                                Err(err) => {
+                                    tracing::warn!(%addr, %err, "could not listen on Tailscale");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while let Some(result) = servers.join_next().await {
+            result.context("HTTP listener task")??;
+        }
+        Ok::<_, anyhow::Error>(())
     });
 
     tokio::select! {
@@ -655,6 +685,21 @@ async fn serve(
         }
     }
     Ok(())
+}
+
+async fn serve_listener(
+    listener: TcpListener,
+    app: axum::Router,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let app = app.layer(axum::Extension(http::auth::ListenerIp(
+        listener.local_addr()?.ip(),
+    )));
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = stop.wait_for(|stop| *stop).await;
+        })
+        .await
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {

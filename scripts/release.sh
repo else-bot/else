@@ -93,7 +93,7 @@ import sys
 current, version = sys.argv[1:]
 lock = Path("Cargo.lock")
 contents = lock.read_text()
-for name in ("else-api", "else-desktop"):
+for name in ("else-api", "else-desktop", "else-tailnet"):
     contents, count = re.subn(
         rf'(?m)^(name = "{name}"\nversion = )"{re.escape(current)}"$',
         lambda match: match[1] + f'"{version}"', contents)

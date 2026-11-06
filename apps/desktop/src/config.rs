@@ -18,7 +18,8 @@ const MAX_REGISTRY_BYTES: u64 = 256 * 1024;
 const REGISTRY_SCHEMA: u32 = 1;
 
 /// A validated API origin: `https://` for any host, `http://` only for
-/// loopback, without credentials, path, query, or fragment.
+/// loopback or a Tailscale IP, without credentials, path, query, or fragment.
+/// Tailscale membership is checked by the transport before sending credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
     serialized: String,
@@ -27,7 +28,7 @@ pub struct Origin {
 
 impl Origin {
     /// A bare address (`127.0.0.1:7878`, `else.example.com`) gets `http://`
-    /// for loopback and `https://` for anything else.
+    /// for loopback and Tailscale IPs, and `https://` for anything else.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -41,7 +42,7 @@ impl Origin {
             Url::parse(raw).map_err(invalid)?
         } else {
             let plain = Url::parse(&format!("http://{raw}")).map_err(invalid)?;
-            if is_loopback(&plain) {
+            if is_loopback(&plain) || tailscale_ip(&plain).is_some() {
                 plain
             } else {
                 Url::parse(&format!("https://{raw}")).map_err(invalid)?
@@ -65,9 +66,9 @@ impl Origin {
         if url.host().is_none() {
             return Err("The server address has no host.".into());
         }
-        if !secure && !is_loopback(&url) {
+        if !secure && !is_loopback(&url) && tailscale_ip(&url).is_none() {
             return Err(
-                "http:// is only for this machine: the owner token is not sent unencrypted \
+                "HTTP requires a local address or a verified Tailscale IP. The owner token is not sent unencrypted \
                  across the network. Use https:// through a reverse proxy, or an SSH tunnel \
                  such as ssh -L 7878:127.0.0.1:7878 <server> and http://127.0.0.1:7878."
                     .into(),
@@ -88,6 +89,13 @@ impl Origin {
         Url::parse(&self.serialized).is_ok_and(|url| is_loopback(&url))
     }
 
+    pub fn tailscale_ip(&self) -> Option<std::net::IpAddr> {
+        if self.secure {
+            return None;
+        }
+        tailscale_ip(&Url::parse(&self.serialized).expect("validated origin"))
+    }
+
     /// The WebSocket endpoint: `wss://` for an `https://` origin.
     pub fn ws_url(&self) -> String {
         let (_, rest) = self
@@ -97,6 +105,15 @@ impl Origin {
         let scheme = if self.secure { "wss" } else { "ws" };
         format!("{scheme}://{rest}/v1/ws")
     }
+}
+
+fn tailscale_ip(url: &Url) -> Option<std::net::IpAddr> {
+    let ip = match url.host()? {
+        Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+        Host::Ipv6(ip) => std::net::IpAddr::V6(ip),
+        Host::Domain(_) => return None,
+    };
+    else_tailnet::is_tailscale_ip(ip).then_some(ip)
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -575,6 +592,38 @@ mod tests {
                 .iter()
                 .find(|(k, _)| *k == name)
                 .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn tailscale_ips_use_http_without_becoming_local_servers() {
+        for (raw, expected) in [
+            ("100.102.228.67:7878", "http://100.102.228.67:7878"),
+            ("http://100.102.228.67:7878", "http://100.102.228.67:7878"),
+            (
+                "[fd7a:115c:a1e0::2]:7878",
+                "http://[fd7a:115c:a1e0::2]:7878",
+            ),
+        ] {
+            let origin = Origin::parse(raw).unwrap();
+            assert_eq!(origin.as_str(), expected);
+            assert!(!origin.is_loopback());
+            assert!(origin.tailscale_ip().is_some());
+            assert!(origin.ws_url().starts_with("ws://"));
+        }
+        assert!(
+            Origin::parse("https://100.102.228.67:7878")
+                .unwrap()
+                .tailscale_ip()
+                .is_none()
+        );
+        for raw in [
+            "http://100.63.255.255",
+            "http://100.128.0.0",
+            "http://fake.ts.net",
+            "http://[fd7a:115c:a1e1::1]",
+        ] {
+            assert!(Origin::parse(raw).is_err(), "{raw}");
         }
     }
 

@@ -71,7 +71,10 @@ impl FailureLimiter {
     }
 }
 
-/// Reject browser-originated requests and Host names that are not loopback.
+#[derive(Clone, Copy)]
+pub struct ListenerIp(pub std::net::IpAddr);
+
+/// Reject browser-originated requests and hosts outside the listener's addresses.
 /// The native desktop sends no `Origin`; DNS-rebinding pages would. The port
 /// is not checked so an SSH tunnel's local port works.
 pub async fn check_origin(request: Request, next: Next) -> Response {
@@ -88,17 +91,18 @@ pub async fn check_origin(request: Request, next: Next) -> Response {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .or_else(|| request.uri().authority().map(|a| a.as_str()));
-    if !host.is_some_and(is_loopback_host) {
+    let listener = request.extensions().get::<ListenerIp>().map(|ip| ip.0);
+    if !host.is_some_and(|host| is_allowed_host(host, listener)) {
         return ApiError::bad_request(
             "invalid_host",
-            "The Host header must name a loopback address.",
+            "The Host header must name a loopback address or this listener's Tailscale IP.",
         )
         .into_response();
     }
     next.run(request).await
 }
 
-fn is_loopback_host(host: &str) -> bool {
+fn is_allowed_host(host: &str, listener: Option<std::net::IpAddr>) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
         match rest.split_once(']') {
             Some((addr, tail)) if tail.is_empty() || is_port(tail) => addr,
@@ -114,8 +118,9 @@ fn is_loopback_host(host: &str) -> bool {
     if name.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    name.parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    name.parse::<std::net::IpAddr>().is_ok_and(|ip| {
+        ip.is_loopback() || Some(ip) == listener && else_tailnet::is_tailscale_ip(ip)
+    })
 }
 
 fn is_port(tail: &str) -> bool {
@@ -203,7 +208,7 @@ mod tests {
             "[::1]",
             "127.0.0.2:80",
         ] {
-            assert!(is_loopback_host(ok), "{ok}");
+            assert!(is_allowed_host(ok, None), "{ok}");
         }
         for bad in [
             "example.com",
@@ -214,7 +219,7 @@ mod tests {
             "127.0.0.1:99999",
             "",
         ] {
-            assert!(!is_loopback_host(bad), "{bad}");
+            assert!(!is_allowed_host(bad, None), "{bad}");
         }
     }
 

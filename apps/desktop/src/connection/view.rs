@@ -355,7 +355,7 @@ impl Shell {
                     .focus_ring(false)
                     .aria_label("Server address")
                     .into_any_element(),
-                "Use an HTTPS address, or a local SSH tunnel.",
+                "Use HTTPS, a Tailscale IP, or a local SSH tunnel.",
             ))
             .child(field(
                 "Owner key",
