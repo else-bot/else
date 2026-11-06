@@ -83,7 +83,11 @@ impl ElseApp {
             } else {
                 body
             };
-            return column.py_1p5().child(body).into_any_element();
+            return column
+                .py_1p5()
+                .children(row.unread_start.then(|| unread_divider(cx)))
+                .child(body)
+                .into_any_element();
         };
         let Some(view) = self.view.as_ref() else {
             return div().into_any_element();
@@ -118,6 +122,7 @@ impl ElseApp {
         column
             .when(group.first, |column| column.pt_1p5())
             .when(group.last, |column| column.pb_1p5())
+            .children(row.unread_start.then(|| unread_divider(cx)))
             .child(frame)
             .into_any_element()
     }
@@ -608,6 +613,22 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
 fn beside(user: bool, note: Div) -> Div {
     let row = h_flex().w_full().child(note);
     if user { row.justify_end() } else { row }
+}
+
+fn unread_divider(cx: &App) -> Div {
+    let color = cx.theme().primary;
+    let line = || div().flex_1().h(px(1.)).bg(color.opacity(0.3));
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .pt_2()
+        .pb_4()
+        .text_xs()
+        .text_color(color)
+        .child(line())
+        .child(div().flex_none().child("NEW"))
+        .child(line())
 }
 
 pub(super) fn stamp(at: DateTime<Utc>) -> String {

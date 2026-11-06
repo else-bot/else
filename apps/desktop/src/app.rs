@@ -269,8 +269,12 @@ impl ElseApp {
                 _ => {}
             },
         );
-        let activation =
-            cx.observe_window_activation(window, |app, window, cx| app.check_reading(window, cx));
+        let activation = cx.observe_window_activation(window, |app, window, cx| {
+            if window.is_window_active() && app.view.is_some() {
+                app.select(app.selected, window, cx);
+            }
+            app.check_reading(window, cx);
+        });
         let composer_observer = cx.observe_in(&composer, window, |app, _, window, cx| {
             app.sync_mentions(window, cx);
         });
@@ -481,7 +485,19 @@ impl ElseApp {
     }
 
     fn select(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
-        if id == self.selected && self.view.is_some() {
+        let unread_since = id.and_then(|id| {
+            self.bots
+                .iter()
+                .find(|bot| bot.id == id && self.inbox.is_unread(bot))
+                .map(|bot| self.inbox.seen_through(bot))
+        });
+        if id == self.selected
+            && let Some(view) = self.view.as_mut()
+        {
+            if view.unread_since.is_none() && unread_since.is_some() {
+                view.unread_since = unread_since;
+                self.sync_rows(window, cx);
+            }
             return;
         }
         self.image_viewer = None;
@@ -510,7 +526,11 @@ impl ElseApp {
         }
         self.clear_secret_forms(window, cx);
         self.clear_social_forms(window, cx);
-        self.view = id.map(ConversationView::new);
+        self.view = id.map(|id| {
+            let mut view = ConversationView::new(id);
+            view.unread_since = unread_since;
+            view
+        });
         if let Some(view) = &self.view {
             let this = cx.entity().downgrade();
             view.list.set_scroll_handler(move |_, window, cx| {

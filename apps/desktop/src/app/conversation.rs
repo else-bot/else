@@ -2,7 +2,7 @@ use super::ElseApp;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
 use super::task_reply::state::{TaskReply, task_replies};
-use crate::api::{ClientError, LiveCommand, StreamMessage};
+use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 use gpui_kit::*;
@@ -24,12 +24,33 @@ pub(super) enum RowKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
+    pub(super) unread_start: bool,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
     pub(super) routine: Option<RoutineRow>,
     pub(super) task: Option<TaskReply>,
     routine_status: Option<(String, bool)>,
     reaction: Option<crate::model::ReactionKind>,
     state: Option<String>,
+}
+
+fn first_unread_row(
+    rows: &[RowKey],
+    conversation: &Conversation,
+    read_through: ReplyPosition,
+) -> Option<RowKey> {
+    let unread: HashSet<_> = conversation
+        .items()
+        .filter(|item| {
+            item.kind == "assistant"
+                && !conversation.is_feedback_acknowledgement(item)
+                && ReplyPosition {
+                    item_seq: item.seq,
+                    text_bytes: item.text.len() as i64,
+                } > read_through
+        })
+        .flat_map(|item| [RowKey::Item(item.id), RowKey::Task(item.turn_id)])
+        .collect();
+    rows.iter().copied().find(|key| unread.contains(key))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +143,7 @@ pub(super) struct ReplyLayout {
 
 pub(super) struct ConversationView {
     pub(super) bot_id: Uuid,
+    pub(super) unread_since: Option<ReplyPosition>,
     pub(super) conversation: Option<Conversation>,
     pub(super) stream_problem: Option<String>,
     pub(super) loading_older: bool,
@@ -164,6 +186,7 @@ impl ConversationView {
         list.set_follow_mode(FollowMode::Tail);
         Self {
             bot_id,
+            unread_since: None,
             conversation: None,
             stream_problem: None,
             loading_older: false,
@@ -488,7 +511,19 @@ impl ElseApp {
                 | RowKey::SocialSetup(_) => (None, None),
             })
             .collect();
-        let routines = routine_rows(&rows, conversation);
+        let unread_start =
+            conversation.and_then(|c| first_unread_row(&rows, c, view.unread_since?));
+        let mut routines = routine_rows(&rows, conversation);
+        if let Some(ix) = rows.iter().position(|key| Some(*key) == unread_start) {
+            if let Some(group) = routines[ix].as_mut() {
+                group.first = true;
+            }
+            if ix > 0
+                && let Some(group) = routines[ix - 1].as_mut()
+            {
+                group.last = true;
+            }
+        }
         let rows: Vec<TranscriptRow> = rows
             .into_iter()
             .zip(burst_tail_stamps(&senders, &Local))
@@ -515,6 +550,7 @@ impl ElseApp {
                 });
                 TranscriptRow {
                     key,
+                    unread_start: Some(key) == unread_start,
                     footer_stamp: footer_stamp.filter(|_| routine.is_none()),
                     routine,
                     routine_status,
@@ -675,8 +711,10 @@ impl ElseApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversationView, RoutineRow, RowKey, TranscriptRow, burst_tail_stamps, routine_rows,
+        ConversationView, RoutineRow, RowKey, TranscriptRow, burst_tail_stamps, first_unread_row,
+        routine_rows,
     };
+    use crate::api::ReplyPosition;
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
 
@@ -721,6 +759,38 @@ mod tests {
     }
 
     #[test]
+    fn unread_divider_precedes_the_first_unread_reply_and_includes_appended_text() {
+        let c = routine_conversation();
+        let rows = [item(1), item(2), item(3), item(4), item(5)];
+        let read = |item_seq, text_bytes| ReplyPosition {
+            item_seq,
+            text_bytes,
+        };
+        assert_eq!(first_unread_row(&rows, &c, read(0, 0)), Some(item(1)));
+        assert_eq!(first_unread_row(&rows, &c, read(2, 5)), Some(item(3)));
+        assert_eq!(first_unread_row(&rows, &c, read(2, 3)), Some(item(2)));
+        assert_eq!(first_unread_row(&rows, &c, read(5, 5)), None);
+    }
+
+    #[test]
+    fn unread_divider_marks_the_visible_task_when_unread_replies_are_folded() {
+        let c = routine_conversation();
+        let task = RowKey::Task(Uuid::from_u128(10));
+        let rows = [task, item(3), item(4)];
+        assert_eq!(
+            first_unread_row(
+                &rows,
+                &c,
+                ReplyPosition {
+                    item_seq: 2,
+                    text_bytes: 5,
+                },
+            ),
+            Some(task)
+        );
+    }
+
+    #[test]
     fn folded_text_remeasures_its_capsule_and_plain_rows_keep_their_own_slot() {
         let mut view = ConversationView::new(Uuid::from_u128(80));
         view.conversation = Some(routine_conversation());
@@ -731,6 +801,7 @@ mod tests {
         .into_iter()
         .map(|key| TranscriptRow {
             key,
+            unread_start: false,
             footer_stamp: None,
             routine: None,
             task: None,
