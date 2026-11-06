@@ -35,11 +35,18 @@ pub(super) struct Form {
     redirect_uri: Entity<InputState>,
     callback: Entity<InputState>,
     bot: Entity<SelectState<Vec<BotChoice>>>,
-    authorization: Option<EmailAuthorization>,
+    authorization: Option<Authorization>,
     _inputs: Vec<Subscription>,
 }
 
+enum Authorization {
+    Manual(EmailAuthorization),
+    Google(String),
+    CompletingGoogle,
+}
+
 pub(super) enum Request {
+    Google,
     Password(EmailConfig, String),
     Authorize {
         provider: EmailProvider,
@@ -56,6 +63,7 @@ pub(super) enum Request {
 }
 
 pub(super) enum Connected {
+    Google(super::google::SignIn),
     Account(Box<EmailAccount>),
     Authorization(EmailAuthorization),
 }
@@ -63,6 +71,9 @@ pub(super) enum Connected {
 impl Request {
     pub(super) async fn send(self, client: Arc<Client>) -> Result<Connected, ClientError> {
         match self {
+            Self::Google => super::google::SignIn::start(client)
+                .await
+                .map(Connected::Google),
             Self::Password(config, password) => client
                 .connect_email(config, password)
                 .await
@@ -190,14 +201,26 @@ impl Form {
         cx: &mut App,
     ) {
         self.clear_secrets(window, cx);
-        self.authorization = Some(auth);
+        self.authorization = Some(Authorization::Manual(auth));
         self.callback
             .update(cx, |state, cx| state.focus(window, cx));
     }
 
+    pub(super) fn google_authorized(&mut self, url: String) {
+        self.authorization = Some(Authorization::Google(url));
+    }
+
+    pub(super) fn google_completing(&mut self) {
+        self.authorization = Some(Authorization::CompletingGoogle);
+    }
+
+    pub(super) fn cancel_authorization(&mut self) {
+        self.authorization = None;
+    }
+
     pub(super) fn request(&self, presets: &[EmailPreset], cx: &App) -> Result<Request, String> {
         let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        if let Some(auth) = &self.authorization {
+        if let Some(Authorization::Manual(auth)) = &self.authorization {
             let callback = url::Url::parse(&value(&self.callback))
                 .map_err(|_| "Paste the complete redirect URL from your browser.")?;
             let param = |name| {
@@ -215,6 +238,9 @@ impl Form {
                 state,
                 code,
             });
+        }
+        if self.provider == EmailProvider::Gmail {
+            return Ok(Request::Google);
         }
         let address = value(&self.address);
         if !address.contains('@') {
@@ -312,7 +338,38 @@ impl Form {
             .gap_4()
             .w_full()
             .child(div().font_semibold().child("Add email account"));
-        if let Some(auth) = &self.authorization {
+        if matches!(
+            &self.authorization,
+            Some(Authorization::Google(_) | Authorization::CompletingGoogle)
+        ) {
+            let waiting = matches!(&self.authorization, Some(Authorization::Google(_)));
+            form = form.child(note(if waiting {
+                "Finish signing in with Google in your browser. This page will update automatically."
+            } else { "Connecting your Gmail account…" }));
+            if let Some(Authorization::Google(url)) = &self.authorization {
+                let url = url.clone();
+                form = form.child(
+                    Button::new("email-open-google")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label("Open Google sign-in")
+                        .ghost()
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                );
+            }
+            return form
+                .child(
+                    Button::new("email-cancel-google")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label("Cancel")
+                        .ghost()
+                        .disabled(!waiting)
+                        .on_click(cx.listener(|view, _, _, cx| view.cancel_google(cx))),
+                )
+                .into_any_element();
+        }
+        if let Some(Authorization::Manual(auth)) = &self.authorization {
             let url = auth.authorization_url.clone();
             form = form.child(note("Finish signing in with your provider, then paste the full redirect URL here. The page may say it cannot connect to localhost; copy its address anyway."))
                 .child(Button::new("email-open-signin").focus_ring(false).cursor_pointer().label("Open sign-in page").ghost().disabled(busy)
@@ -345,10 +402,17 @@ impl Form {
                         })),
                 );
             }
-            form = form
-                .child(providers)
-                .child(field("Email address", &self.address));
-            if self.provider.oauth() {
+            form = form.child(providers);
+            if self.provider != EmailProvider::Gmail {
+                form = form.child(field("Email address", &self.address));
+            }
+            if self.provider == EmailProvider::Gmail {
+                form = form.child(note(if super::google::configured() {
+                    "Choose your Google account and allow Gmail access in your browser."
+                } else {
+                    "This build does not include Gmail sign-in. Use an official else.bot release."
+                }));
+            } else if self.provider.oauth() {
                 form = form.child(note("Sign in securely with your provider. This server needs your OAuth app's client ID and registered redirect URI."))
                     .child(field("Client ID", &self.client_id))
                     .child(field("Client secret, if required", &self.client_secret))
@@ -393,9 +457,14 @@ impl Form {
                         .focus_ring(false)
                         .cursor_pointer()
                         .primary()
-                        .disabled(busy)
+                        .disabled(
+                            busy || (self.provider == EmailProvider::Gmail
+                                && !super::google::configured()),
+                        )
                         .label(if busy {
                             "Connecting…"
+                        } else if self.provider == EmailProvider::Gmail {
+                            "Connect Gmail"
                         } else if self.provider.oauth() && self.authorization.is_none() {
                             "Sign in"
                         } else {

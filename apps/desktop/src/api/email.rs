@@ -72,6 +72,19 @@ pub struct EmailAuthorization {
 }
 
 impl Client {
+    pub fn cancel_email_authorization(self: Arc<Self>, request_id: Uuid) {
+        let runtime = self.runtime.clone();
+        runtime.spawn(async move {
+            let _ = self
+                .call::<Value>(
+                    Method::DELETE,
+                    format!("/v1/connectors/email/oauth/{request_id}"),
+                    None,
+                )
+                .await;
+        });
+    }
+
     pub async fn email_accounts(self: Arc<Self>) -> Result<Vec<EmailAccount>, ClientError> {
         #[derive(Deserialize)]
         struct Accounts {
@@ -142,13 +155,17 @@ impl Client {
         struct Connected {
             account: EmailAccount,
         }
-        self.call::<Connected>(
-            Method::POST,
-            "/v1/connectors/email/oauth/complete".into(),
-            Some(json!({"request_id":request_id,"state":state,"code":code})),
-        )
+        let this = self.clone();
+        self.run(async move {
+            let request = this
+                .request(Method::POST, "/v1/connectors/email/oauth/complete")
+                .timeout(std::time::Duration::from_secs(60))
+                .json(&json!({"request_id":request_id,"state":state,"code":code}));
+            this.send_json::<Connected>(request)
+                .await
+                .map(|(_, body)| body.account)
+        })
         .await
-        .map(|(_, body)| body.account)
     }
 
     pub async fn introduce_email(

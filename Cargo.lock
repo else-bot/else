@@ -2122,6 +2122,7 @@ name = "else-desktop"
 version = "0.0.23"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "chrono-tz",

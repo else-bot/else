@@ -36,6 +36,16 @@ For real provider replies, install Codex or Claude Code and sign in as your deve
 
 ## Run a development session
 
+To include Gmail sign-in in a desktop build, set `ELSE_GOOGLE_OAUTH_CONFIG` to the absolute path of your downloaded Google **Desktop app** client JSON before running Cargo or the development launcher:
+
+```sh
+export ELSE_GOOGLE_OAUTH_CONFIG=/absolute/path/to/client_secret_desktop.json
+```
+
+Keep this file outside the repository. You can set the variable in your checkout's ignored `.cargo/config.toml` under `[env]` instead. Cargo regenerates the embedded configuration when the path or file changes. The API needs no build credentials. Builds without this variable still work, with Gmail sign-in disabled. Tests use fixture registrations and require no Google credentials. Fork maintainers register their own Google Desktop client.
+
+Official release builds read the complete downloaded JSON from the `GOOGLE_OAUTH_CLIENT_JSON` GitHub Actions repository secret. The release workflow writes it to a private temporary file, builds the binaries, and removes the input file. A missing or invalid registration fails the release build. The registration is extractable from released binaries and does not authenticate the app as a confidential client. Keep it out of Git, and keep mailbox tokens encrypted on each API.
+
 From the repository root, run these in separate terminals:
 
 ```sh

@@ -51,6 +51,14 @@ Use Ctrl on Linux and Command on macOS for these shortcuts:
 | Ctrl/Command+Shift+M | Move a bot to a category |
 | Ctrl/Command+, | Open app settings |
 
+## Connect Gmail
+
+Open app settings, select Email, and click **Connect Gmail**. Choose your Google account in your browser and allow Gmail access. The app receives the sign-in response automatically, including when it connects to a remote API. Keep the app open until it confirms the connection.
+
+The selected API stores account tokens encrypted and refreshes access directly with Google. No else.bot authentication server is involved. Official releases include the Google Desktop registration, supplied privately during the build. The configuration can be extracted from the app; mailbox tokens stay private to your API.
+
+The Google project must allow your account while its consent screen is in Testing. Public distribution requires Google's approval for the requested mailbox permissions. This connector supports mail operations through IMAP and SMTP. Gmail filters need a separate Gmail API implementation.
+
 ## Connect Telegram or Discord
 
 Ask your assistant to connect Telegram or Discord and say what you want it to do. For example, "Connect Telegram so you can summarize messages that mention you and draft replies." The assistant opens a private connection card in the conversation.

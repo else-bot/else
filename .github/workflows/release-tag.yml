@@ -104,8 +104,28 @@ jobs:
           key: release-${{ matrix.platform }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             release-${{ matrix.platform }}-${{ steps.rust.outputs.version }}-
+      - name: Prepare Google desktop registration
+        env:
+          GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          value = os.environ.get("GOOGLE_OAUTH_CLIENT_JSON", "")
+          if not value.strip():
+              raise SystemExit("Set the GOOGLE_OAUTH_CLIENT_JSON repository secret before building a release.")
+          path = Path(os.environ["RUNNER_TEMP"]) / "else-google-desktop.json"
+          with open(path, "w", opener=lambda name, flags: os.open(name, flags, 0o600)) as config:
+              config.write(value)
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              environment.write(f"ELSE_GOOGLE_OAUTH_CONFIG={path}\n")
+          PY
       - name: Build the desktop and API
         run: cargo build --release --locked --workspace --bins --target '${{ matrix.target }}'
+      - name: Remove Google desktop registration
+        if: always()
+        run: rm -f "$RUNNER_TEMP/else-google-desktop.json"
       - name: Save Cargo build cache
         if: steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::State,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,6 +44,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/connectors/email/oauth/start", post(oauth_start))
         .route("/connectors/email/oauth/complete", post(oauth_complete))
+        .route("/connectors/email/oauth/{request_id}", delete(oauth_cancel))
 }
 
 fn manager(state: &AppState) -> Result<&Arc<ConnectorManager>, ApiError> {
@@ -82,6 +83,12 @@ fn unavailable(error: store::StoreError) -> ApiError {
 }
 impl From<MailError> for ApiError {
     fn from(error: MailError) -> Self {
+        if error.code == "oauth_mail_access_required" {
+            return ApiError::bad_request(
+                error.code,
+                "Allow Gmail access when signing in with Google, then try again.",
+            );
+        }
         if matches!(
             error.code,
             "mail_unavailable"
@@ -321,6 +328,14 @@ async fn oauth_complete(
         .map_err(unavailable)?;
     manager.changed(account.id).await;
     Ok(Json(json!({"account":account})))
+}
+
+async fn oauth_cancel(
+    State(state): State<Arc<AppState>>,
+    ApiPath(request_id): ApiPath<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    manager(&state)?.oauth.cancel(request_id).await;
+    Ok(Json(json!({"cancelled":true})))
 }
 
 pub fn tool_list() -> Vec<Value> {
