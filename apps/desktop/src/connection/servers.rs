@@ -321,6 +321,50 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn server_update_view(&self, id: Uuid) -> Option<&updates::View> {
+        self.registry.find(id).and_then(|saved| {
+            if self.managed_server(&saved.profile) {
+                Some(&self.server_updates)
+            } else {
+                self.remote_updates.get(&id)
+            }
+        })
+    }
+
+    pub(super) fn can_update_server(&self, id: Uuid) -> bool {
+        self.servers
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.health == Health::Online)
+            && self.server_update_view(id).is_some_and(|view| {
+                view.can_install()
+                    && (self.remote_updates.contains_key(&id)
+                        || !(self.updates.busy() || self.server_updates.busy()))
+            })
+    }
+
+    pub(super) fn update_all_servers(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<_> = self
+            .registry
+            .servers
+            .iter()
+            .filter(|saved| self.can_update_server(saved.id))
+            .map(|saved| (saved.id, saved.name.clone()))
+            .collect();
+        let mut errors = Vec::new();
+        for (id, name) in targets {
+            let view = self
+                .remote_updates
+                .get_mut(&id)
+                .unwrap_or(&mut self.server_updates);
+            if let Err(error) = view.install() {
+                errors.push(format!("{name}: {error}"));
+            }
+        }
+        self.connection_error = (!errors.is_empty()).then(|| errors.join("\n"));
+        cx.notify();
+    }
+
     pub(super) fn open_server_editor(
         &mut self,
         editor: Editor,
