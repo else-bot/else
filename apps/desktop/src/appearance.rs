@@ -346,6 +346,40 @@ mod tests {
     }
 
     #[test]
+    fn input_selection_is_distinct_and_keeps_text_readable() {
+        let cursor = Palette {
+            background: Rgb(0x141414),
+            surface: Rgb(0x0f0f0f),
+            raised: Rgb(0x242424),
+            foreground: Rgb(0xd4d4d4),
+            accent: Rgb(0x81a1c1),
+            selection: Rgb(0x2c2c2c),
+            ..QUIET_DARK
+        };
+        for (name, palette) in [
+            ("Quiet Light", QUIET_LIGHT),
+            ("Quiet Dark", QUIET_DARK),
+            ("Cursor Dark", cursor),
+        ] {
+            let mut theme = Theme::default();
+            theme.apply_config(&Rc::new(palette.config(name, Style::SYSTEM)));
+            for background in [palette.background, palette.surface, palette.raised] {
+                let selected = gpui_kit::rgb(background.0).blend(theme.selection.into());
+                let selected = Rgb(u32::from(selected) >> 8);
+                let contrast = background.contrast(selected);
+                assert!(
+                    contrast >= 1.5,
+                    "{name}: selected input contrast {contrast:.2}"
+                );
+                assert!(
+                    palette.foreground.contrast(selected) >= 4.5,
+                    "{name}: selected text must stay readable"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_palette_projects_its_mode_style_and_roles() {
         let config = QUIET_DARK.config("Quiet Dark", Style::SYSTEM);
         assert_eq!(config.mode, ThemeMode::Dark);
