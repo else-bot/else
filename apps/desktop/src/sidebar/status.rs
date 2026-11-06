@@ -151,6 +151,41 @@ mod tests {
     }
 
     #[test]
+    fn reply_previews_show_plain_text_without_changing_the_reply() {
+        for (source, expected) in [
+            (
+                "Created **Github**, your specialist.",
+                "Created Github, your specialist.",
+            ),
+            (
+                "**Ready** _now_ with `cargo test`",
+                "Ready now with cargo test",
+            ),
+            ("## [Report](https://example.com) ~~old~~", "Report old"),
+            ("  **Résumé**\nwith   details  ", "Résumé with details"),
+            ("`a_b * c` + **bold**", "a_b * c + bold"),
+            ("2 * 3 = 6 and foo_bar", "2 * 3 = 6 and foo_bar"),
+            ("\\*literal\\* &amp; café", "*literal* & café"),
+            ("---", "No text in last reply"),
+        ] {
+            let bot = bot(json!({"read_state": {
+                "latest": {
+                    "turn_id": uuid::Uuid::nil(),
+                    "item_id": uuid::Uuid::nil(),
+                    "position": {"item_seq": 1, "text_bytes": source.len()},
+                    "preview": source
+                },
+                "read_through": {"item_seq": 0, "text_bytes": 0},
+                "marked_unread": false
+            }}));
+            let subtitle = Subtitle::new(&bot, true, false);
+            assert_eq!(subtitle.kind, Kind::Message);
+            assert_eq!(subtitle.text, expected, "{source}");
+            assert_eq!(bot.read_state.unwrap().latest.unwrap().preview, source);
+        }
+    }
+
+    #[test]
     fn activity_and_owner_requests_replace_the_reply() {
         for (phase, queued, kind, text) in [
             ("working", 0, Kind::Working, "Working"),
