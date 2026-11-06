@@ -16,6 +16,7 @@ use crate::actor::Actor;
 #[serde(deny_unknown_fields)]
 pub struct Start {
     pub provider: Provider,
+    #[serde(default)]
     pub address: String,
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -61,14 +62,24 @@ fn nonce() -> String {
 }
 
 impl OAuth {
+    pub async fn cancel(&self, request_id: Uuid) {
+        self.pending
+            .call(move |map| {
+                map.remove(&request_id);
+            })
+            .await;
+    }
+
     pub async fn start(&self, request: Start) -> Result<Started, MailError> {
         if !matches!(request.provider, Provider::Gmail | Provider::Microsoft) {
             return Err(MailError::new("oauth_wizard_unavailable"));
         }
-        request
-            .provider
-            .config(request.address.clone())?
-            .validate()?;
+        if request.provider != Provider::Gmail || !request.address.is_empty() {
+            request
+                .provider
+                .config(request.address.clone())?
+                .validate()?;
+        }
         let redirect = reqwest::Url::parse(&request.redirect_uri)
             .map_err(|_| MailError::new("invalid_redirect"))?;
         let loopback = matches!(
@@ -104,8 +115,11 @@ impl OAuth {
             ("code_challenge_method", "S256"),
             ("access_type", "offline"),
             ("prompt", "consent"),
-            ("login_hint", request.address.as_str()),
         ]);
+        if !request.address.is_empty() {
+            url.query_pairs_mut()
+                .append_pair("login_hint", &request.address);
+        }
         let pending = Pending {
             request,
             state_hash: Sha256::digest(state.as_bytes()).into(),
@@ -161,6 +175,24 @@ impl OAuth {
             value.zeroize();
         }
         let token = result?;
+        if pending.request.provider == Provider::Gmail
+            && token.scope.as_deref().is_some_and(|scope| {
+                !scope
+                    .split_whitespace()
+                    .any(|s| s == "https://mail.google.com/")
+            })
+        {
+            return Err(MailError::new("oauth_mail_access_required"));
+        }
+        let address = if pending.request.provider == Provider::Gmail {
+            gmail_address(
+                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                &token.access_token,
+            )
+            .await?
+        } else {
+            pending.request.address.clone()
+        };
         let refresh_token = token
             .refresh_token
             .ok_or_else(|| MailError::new("oauth_refresh_token_required"))?;
@@ -171,18 +203,54 @@ impl OAuth {
             access_token: Some(token.access_token),
             expires_at: Some(chrono::Utc::now().timestamp() + token.expires_in.clamp(60, 86_400)),
         };
-        Ok((
-            pending.request.provider,
-            pending.request.address.clone(),
-            credential,
-        ))
+        Ok((pending.request.provider, address, credential))
     }
+}
+
+async fn gmail_address(endpoint: &str, access_token: &str) -> Result<String, MailError> {
+    #[derive(Deserialize)]
+    struct Profile {
+        #[serde(rename = "emailAddress")]
+        address: String,
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| MailError::new("oauth_unavailable"))?;
+    let mut response = client
+        .get(endpoint)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| MailError::new("oauth_unavailable"))?;
+    if !response.status().is_success() {
+        return Err(MailError::new("oauth_reauthentication_required"));
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| MailError::new("oauth_unavailable"))?
+    {
+        if bytes.len() + chunk.len() > 16_384 {
+            return Err(MailError::new("oauth_response_too_large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let profile: Profile =
+        serde_json::from_slice(&bytes).map_err(|_| MailError::new("invalid_oauth_response"))?;
+    Provider::Gmail
+        .config(profile.address.clone())?
+        .validate()?;
+    Ok(profile.address)
 }
 
 #[derive(Deserialize)]
 struct Token {
     access_token: String,
     refresh_token: Option<String>,
+    scope: Option<String>,
     #[serde(default = "hour")]
     expires_in: i64,
 }
@@ -350,5 +418,59 @@ mod tests {
             oauth.start(request()).await.unwrap_err().code,
             "oauth_setup_limit"
         );
+    }
+
+    #[tokio::test]
+    async fn gmail_can_choose_its_account_and_cancel_without_exhausting_setups() {
+        let oauth = OAuth::default();
+        let mut start = request();
+        start.address.clear();
+        let started = oauth.start(start).await.unwrap();
+        let url = reqwest::Url::parse(&started.authorization_url).unwrap();
+        assert!(!url.query_pairs().any(|(key, _)| key == "login_hint"));
+        oauth.cancel(started.request_id).await;
+        oauth.cancel(started.request_id).await;
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        assert_eq!(
+            oauth
+                .complete(Complete {
+                    request_id: started.request_id,
+                    state,
+                    code: "unused".into()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "oauth_setup_expired"
+        );
+        for _ in 0..40 {
+            let started = oauth.start(request()).await.unwrap();
+            oauth.cancel(started.request_id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn gmail_address_comes_from_the_authorized_mailbox() {
+        use axum::{Json, Router, http::HeaderMap, routing::get};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/profile", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/profile", get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer test-mailbox-token");
+                Json(serde_json::json!({"emailAddress":"chosen@example.com","messagesTotal":42}))
+            }))).await.unwrap();
+        });
+        assert_eq!(
+            gmail_address(&endpoint, "test-mailbox-token")
+                .await
+                .unwrap(),
+            "chosen@example.com"
+        );
+        server.abort();
     }
 }

@@ -1,4 +1,5 @@
 mod form;
+mod oauth;
 
 use std::sync::Arc;
 
@@ -111,30 +112,11 @@ impl EmailSettings {
             let _ = this.update_in(cx, |view, window, cx| {
                 view.busy = false;
                 match result {
-                    Ok(form::Connected::Authorization(auth)) => {
-                        cx.open_url(&auth.authorization_url);
-                        if let Some(form) = &mut view.form {
-                            form.authorized(auth, window, cx);
-                        }
+                    Ok(form::Connected::Authorization(signin)) => {
+                        view.wait_for_signin(signin, bot, window, cx);
                     }
                     Ok(form::Connected::Account(account)) => {
-                        view.feedback = Some(format!(
-                            "{} is connected. Every bot can use it when you ask.",
-                            account.config.address
-                        ));
-                        if let Some(form) = &mut view.form {
-                            form.clear_secrets(window, cx);
-                        }
-                        view.form = None;
-                        view.introduction = bot.map(|bot| Introduction {
-                            account: account.id,
-                            bot,
-                            request: Uuid::new_v4(),
-                        });
-                        view.accounts.push(*account);
-                        if view.introduction.is_some() {
-                            view.introduce(window, cx);
-                        }
+                        view.connected(*account, bot, window, cx);
                     }
                     Err(err) => view.error = Some(err.to_string()),
                 }
@@ -142,6 +124,89 @@ impl EmailSettings {
             });
         }));
         cx.notify();
+    }
+
+    fn wait_for_signin(
+        &mut self,
+        mut signin: oauth::SignIn,
+        bot: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.open_url(&signin.authorization.authorization_url);
+        if let Some(form) = &mut self.form {
+            form.authorized(signin.authorization.authorization_url.clone());
+        }
+        self.busy = true;
+        let client = self.client.clone();
+        self._request = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                let callback = signin.wait().await?;
+                this.update(cx, |view, cx| {
+                    if let Some(form) = &mut view.form {
+                        form.completing();
+                    }
+                    cx.notify();
+                })
+                .map_err(|_| "Email settings closed.".to_owned())?;
+                client
+                    .complete_email(
+                        signin.authorization.request_id,
+                        callback.state,
+                        callback.code,
+                    )
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            .await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.busy = false;
+                if let Some(form) = &mut view.form {
+                    form.cancel_authorization();
+                }
+                match result {
+                    Ok(account) => view.connected(account, bot, window, cx),
+                    Err(error) => view.error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn cancel_signin(&mut self, cx: &mut Context<Self>) {
+        self._request = None;
+        if let Some(form) = &mut self.form {
+            form.cancel_authorization();
+        }
+        self.busy = false;
+        self.error = None;
+        cx.notify();
+    }
+
+    fn connected(
+        &mut self,
+        account: EmailAccount,
+        bot: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.feedback = Some(format!(
+            "{} is connected. Every bot can use it when you ask.",
+            account.config.address
+        ));
+        if let Some(form) = &mut self.form {
+            form.clear_secrets(window, cx);
+        }
+        self.form = None;
+        self.introduction = bot.map(|bot| Introduction {
+            account: account.id,
+            bot,
+            request: Uuid::new_v4(),
+        });
+        self.accounts.push(account);
+        if self.introduction.is_some() {
+            self.introduce(window, cx);
+        }
     }
 
     fn introduce(&mut self, window: &mut Window, cx: &mut Context<Self>) {

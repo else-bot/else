@@ -60,6 +60,92 @@ fn permissions() -> Permissions {
 }
 
 #[tokio::test]
+async fn microsoft_desktop_sign_in_uses_public_client_pkce_and_outlook_scopes() {
+    let app = TestApp::installed().await;
+    let client_id = Uuid::new_v4().to_string();
+    let started = app
+        .owner(
+            "POST",
+            "/v1/connectors/email/oauth/start",
+            Some(json!({
+                "provider":"microsoft", "address":"owner@example.com", "client_id":client_id,
+                "redirect_uri":"http://localhost:12345/"
+            })),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    let url = reqwest::Url::parse(started.body["authorization_url"].as_str().unwrap()).unwrap();
+    assert_eq!(url.host_str(), Some("login.microsoftonline.com"));
+    assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
+    let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(params["client_id"], client_id);
+    assert_eq!(params["login_hint"], "owner@example.com");
+    assert_eq!(params["redirect_uri"], "http://localhost:12345/");
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert!(!params.contains_key("client_secret"));
+    let scopes: Vec<_> = params["scope"].split_whitespace().collect();
+    for scope in [
+        "offline_access",
+        "https://outlook.office.com/IMAP.AccessAsUser.All",
+        "https://outlook.office.com/SMTP.Send",
+    ] {
+        assert!(scopes.contains(&scope));
+    }
+}
+
+#[tokio::test]
+async fn desktop_oauth_can_choose_google_account_and_cancel_owner_only() {
+    let h = recorder::harness(4).await;
+    let bot = h.app.main_bot().await;
+    let (_, task_token) = h.running(&bot, GATE).await;
+    let start = h.app.owner("POST", "/v1/connectors/email/oauth/start", Some(json!({
+        "provider":"gmail", "client_id":"desktop-client", "client_secret":"desktop-client-configuration",
+        "redirect_uri":"http://127.0.0.1:45678/google/callback"
+    }))).await;
+    assert_eq!(start.status, StatusCode::OK, "{}", start.body);
+    assert!(
+        !start
+            .body
+            .to_string()
+            .contains("desktop-client-configuration")
+    );
+    let path = format!(
+        "/v1/connectors/email/oauth/{}",
+        start.body["request_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        h.app
+            .call("DELETE", &path, None, Some(&task_token))
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            h.app.owner("DELETE", &path, None).await.status,
+            StatusCode::OK
+        );
+    }
+    let url = reqwest::Url::parse(start.body["authorization_url"].as_str().unwrap()).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let complete = h
+        .app
+        .owner(
+            "POST",
+            "/v1/connectors/email/oauth/complete",
+            Some(json!({"request_id":start.body["request_id"],"state":state,"code":"unused"})),
+        )
+        .await;
+    assert_eq!(complete.status, StatusCode::BAD_REQUEST);
+    assert_eq!(complete.body["error"]["code"], "oauth_setup_expired");
+}
+
+#[tokio::test]
 async fn owner_can_connect_pause_replace_credentials_and_disconnect_privately() {
     let app = TestApp::installed().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

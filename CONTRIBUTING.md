@@ -36,6 +36,20 @@ For real provider replies, install Codex or Claude Code and sign in as your deve
 
 ## Run a development session
 
+To include Gmail sign-in in a desktop build, set `ELSE_GOOGLE_OAUTH_CONFIG` to the absolute path of your downloaded Google **Desktop app** client JSON before running Cargo or the development launcher:
+
+```sh
+export ELSE_GOOGLE_OAUTH_CONFIG=/absolute/path/to/client_secret_desktop.json
+```
+
+Keep this file outside the repository. You can set the variable in your checkout's ignored `.cargo/config.toml` under `[env]` instead. Cargo regenerates the embedded configuration when the path or file changes. The API needs no build credentials. Builds without this variable still work, with Gmail sign-in disabled. Tests use fixture registrations and require no Google credentials. Fork maintainers register their own Google Desktop client.
+
+Official release builds read the complete downloaded JSON from the `GOOGLE_OAUTH_CLIENT_JSON` GitHub Actions repository secret. The release workflow writes it to a private temporary file, builds the binaries, and removes the input file. A missing or invalid registration fails the release build. The registration is extractable from released binaries and does not authenticate the app as a confidential client. Keep it out of Git, and keep mailbox tokens encrypted on each API.
+
+For Microsoft 365, set `ELSE_MICROSOFT_CLIENT_ID` to your app registration's Application client ID at build time. Official releases read it from the `MICROSOFT_CLIENT_ID` Actions repository secret. No client secret is needed. Configure the registration for **Mobile and desktop applications** with `http://localhost` as its redirect URI and the supported account types you intend to serve. For organizational and personal accounts, select the multitenant option that includes personal Microsoft accounts. The directory tenant ID identifies the registration's home tenant; it is not a restriction on accounts connecting through the app. Authorization uses Microsoft's `common` endpoint.
+
+Add the Microsoft Graph delegated permissions `IMAP.AccessAsUser.All`, `SMTP.Send`, and `offline_access`. Runtime mail scopes use the Outlook resource URLs. Builds without a Microsoft client ID disable Microsoft sign-in. Tests use fixture IDs.
+
 From the repository root, run these in separate terminals:
 
 ```sh
