@@ -1,21 +1,7 @@
-//! Updating this installation from the app.
-//!
-//! One actor owns the state and publishes it as a [`Snapshot`]; the window
-//! sends it bounded [`Commands`]. It checks the release tags at launch and
-//! every few hours, asks the local server whether bots are working, runs
-//! the installation's own `bin/elsebot update`, and relaunches the app
-//! through the installation once that succeeded.
-//!
-//! The installer is the authority on whether an update may stop the server:
-//! it closes the API's maintenance gate and refuses while bots work. The app
-//! reads the same counts beforehand (`GET /v1/maintenance/update`) and
-//! refuses to start when work is busy or unknown. The installer closes
-//! the race between that read and stopping the server.
-//!
-//! The installer runs in its own session with its output in
-//! `logs/desktop-update.log`, which the actor follows. Quitting the app
-//! never interrupts it halfway: it finishes on its own, and its result is
-//! in that log and in `elsebot status`.
+//! Component updates owned by bounded actors. App updates activate and relaunch
+//! the desktop only. Server updates recheck the trusted local server's work,
+//! then let the installer close its maintenance gate, update and restart it.
+//! Installers detach from the desktop and keep their per-component logs.
 
 mod output;
 mod release;
@@ -42,6 +28,35 @@ use release::Version;
 const OUTPUT_CAP: usize = 64 * 1024;
 const UPDATE_LOG: &str = "logs/desktop-update.log";
 const DESKTOP_LOG: &str = "logs/desktop.log";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Component {
+    App,
+    Server,
+}
+
+impl Component {
+    pub(crate) fn pointer(self) -> &'static str {
+        match self {
+            Self::App => "app-current",
+            Self::Server => "server-current",
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::App => "--app-only",
+            Self::Server => "--server-only",
+        }
+    }
+
+    fn log(self) -> &'static str {
+        match self {
+            Self::App => UPDATE_LOG,
+            Self::Server => "logs/server-update.log",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Check {
@@ -182,6 +197,7 @@ pub struct Commands {
     tx: mpsc::Sender<Command>,
     state: watch::Receiver<Snapshot>,
     pending: Arc<AtomicBool>,
+    component: Component,
 }
 
 impl Commands {
@@ -210,6 +226,9 @@ impl Commands {
     }
 
     pub fn restart(&self) -> Result<(), String> {
+        if self.component == Component::Server {
+            return Err("Server updates restart the server automatically.".into());
+        }
         let refusal = self.state.borrow().restart_refusal();
         self.send_once(refusal, Command::Restart)
     }
@@ -244,7 +263,27 @@ pub fn start(
     launch: &Launch,
     runtime: &tokio::runtime::Handle,
 ) -> (Commands, watch::Receiver<Snapshot>) {
-    start_with(launch.updates.clone(), Settings::default(), runtime)
+    start_component(launch, Component::App, runtime)
+}
+
+pub fn start_server(
+    launch: &Launch,
+    runtime: &tokio::runtime::Handle,
+) -> (Commands, watch::Receiver<Snapshot>) {
+    start_component(launch, Component::Server, runtime)
+}
+
+pub fn start_component(
+    launch: &Launch,
+    component: Component,
+    runtime: &tokio::runtime::Handle,
+) -> (Commands, watch::Receiver<Snapshot>) {
+    start_with(
+        launch.updates.clone(),
+        component,
+        Settings::default(),
+        runtime,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -286,10 +325,18 @@ impl Default for Settings {
 
 fn start_with(
     installation: Result<Installation, String>,
+    component: Component,
     settings: Settings,
     runtime: &tokio::runtime::Handle,
 ) -> (Commands, watch::Receiver<Snapshot>) {
     let (tx, commands) = mpsc::channel(4);
+    let installation = installation.and_then(|installation| {
+        if component == Component::Server && installation.server().is_none() {
+            Err("This installation has no trusted local server to update.".into())
+        } else {
+            Ok(installation)
+        }
+    });
     let installation = match installation {
         Ok(installation) => installation,
         Err(why) => {
@@ -300,17 +347,23 @@ fn start_with(
                     tx,
                     state: state.clone(),
                     pending,
+                    component,
                 },
                 state,
             );
         }
     };
-    let (state_tx, state) = watch::channel(Snapshot::initial());
+    let mut initial = Snapshot::initial();
+    if component == Component::App {
+        initial.work = Work::Idle;
+    }
+    let (state_tx, state) = watch::channel(initial);
     let (events_tx, events) = mpsc::channel(16);
     let pending = Arc::new(AtomicBool::new(false));
     let actor = Actor {
         pending: pending.clone(),
         installation,
+        component,
         settings,
         state: state_tx,
         events: events_tx,
@@ -326,6 +379,7 @@ fn start_with(
             tx,
             state: state.clone(),
             pending,
+            component,
         },
         state,
     )
@@ -344,6 +398,7 @@ enum Event {
 struct Actor {
     pending: Arc<AtomicBool>,
     installation: Installation,
+    component: Component,
     settings: Settings,
     state: watch::Sender<Snapshot>,
     events: mpsc::Sender<Event>,
@@ -416,6 +471,7 @@ impl Actor {
                     .as_ref()
                     .ok()
                     .map(|(_, installed)| *installed)
+                    .filter(|_| self.component == Component::App)
                     .filter(|installed| running.is_some_and(|running| *installed > running))
                     .filter(|_| matches!(self.state.borrow().operation, Operation::Idle));
                 if let Some(installed) = awaiting_restart {
@@ -467,12 +523,17 @@ impl Actor {
                 });
             }
             Event::Installed(result) => {
-                self.ready = result.as_ref().ok().copied();
+                self.ready = result
+                    .as_ref()
+                    .ok()
+                    .copied()
+                    .filter(|_| self.component == Component::App);
                 self.log.finish();
                 let text = self.log.text().to_owned();
                 self.state.send_modify(|state| {
                     state.output = text;
                     state.operation = match result {
+                        Ok(_) if self.component == Component::Server => Operation::Idle,
                         Ok(version) => Operation::Ready {
                             version: version.to_string(),
                         },
@@ -490,14 +551,15 @@ impl Actor {
         }
         self.state
             .send_modify(|state| state.check = Check::Checking);
-        let (home, settings, events) = (
+        let (home, component, settings, events) = (
             self.installation.home().to_owned(),
+            self.component,
             self.settings.clone(),
             self.events.clone(),
         );
         tokio::spawn(async move {
             let result = async {
-                let installed = release::installed(&home)?;
+                let installed = release::installed(&home, component)?;
                 let env = service_env(std::env::vars_os(), &home);
                 let latest =
                     release::latest(&settings.git, &settings.repo, env, settings.check_limit)
@@ -510,6 +572,9 @@ impl Actor {
     }
 
     fn count_work(&mut self) {
+        if self.component == Component::App {
+            return;
+        }
         if std::mem::replace(&mut self.counting, true) {
             return;
         }
@@ -520,6 +585,9 @@ impl Actor {
     }
 
     fn counter(&mut self) -> Counter {
+        if self.component == Component::App {
+            return Counter::AppOnly;
+        }
         let Some(server) = self.installation.server() else {
             return Counter::AppOnly;
         };
@@ -563,6 +631,7 @@ impl Actor {
         });
         let (counter, events) = (self.counter(), self.events.clone());
         let home = self.installation.home().to_owned();
+        let component = self.component;
         tokio::spawn(async move {
             let work = counter.count().await;
             let idle = work == Work::Idle;
@@ -573,12 +642,15 @@ impl Actor {
                 let _ = events.send(Event::Operation(Operation::Idle)).await;
                 return;
             }
-            let result = run_installer(&home, target, &events).await;
+            let result = run_installer(&home, component, target, &events).await;
             let _ = events.send(Event::Installed(result)).await;
         });
     }
 
     fn restart(&mut self) {
+        if self.component == Component::Server {
+            return;
+        }
         let ready = self.state.borrow().restart_refusal().is_none();
         let Some(version) = self.ready.filter(|_| ready) else {
             return;
@@ -592,7 +664,7 @@ impl Actor {
         );
         tokio::spawn(async move {
             let result = async {
-                let installed = release::installed(&home)?;
+                let installed = release::installed(&home, Component::App)?;
                 if installed != version {
                     return Err(format!(
                         "{installed} is installed now, not {version}; check for updates again."
@@ -637,7 +709,7 @@ impl Counter {
             },
             Ok(Err(ClientError::Unreachable { .. })) | Err(_) => Work::Unavailable(format!(
                 "The server at {origin} is not answering, so the app cannot tell whether bots \
-                 are working. Start it (elsebot start), or update in a terminal: elsebot update"
+                 are working. Start it (elsebot start), or update in a terminal: elsebot update --server-only"
             )),
             Ok(Err(ClientError::Unauthorized)) => Work::Unavailable(format!(
                 "The server at {origin} rejected this installation's owner key, so the app \
@@ -648,7 +720,7 @@ impl Counter {
             {
                 Work::Unavailable(
                     "The running server is too old to say whether bots are working. Update \
-                     once in a terminal: elsebot update"
+                     once in a terminal: elsebot update --server-only"
                         .into(),
                 )
             }
@@ -715,15 +787,22 @@ fn detached(
 
 async fn run_installer(
     home: &Path,
+    component: Component,
     target: Version,
     events: &mpsc::Sender<Event>,
 ) -> Result<Version, String> {
-    let (path, log) = private_log(home, UPDATE_LOG, true)?;
+    let (path, log) = private_log(home, component.log(), true)?;
     let program = home.join("bin/elsebot");
     let mut child = detached(&program, home, &log)
         .and_then(|mut command| {
             command
-                .args(["update", "--yes", "--version", &target.plain()])
+                .args([
+                    "update",
+                    "--yes",
+                    component.flag(),
+                    "--version",
+                    &target.plain(),
+                ])
                 .spawn()
         })
         .map_err(|err| format!("Cannot run {}: {err}.", program.display()))?;
@@ -758,9 +837,9 @@ async fn run_installer(
         }
     };
     if !status.success() {
-        return Err(failure(&path, &status.to_string()));
+        return Err(failure(&path, &status.to_string(), component));
     }
-    match release::installed(home) {
+    match release::installed(home, component) {
         Ok(installed) if installed == target => Ok(target),
         Ok(installed) => Err(format!(
             "The installer finished, but {installed} is installed instead of {target}. The log is {}.",
@@ -770,7 +849,7 @@ async fn run_installer(
     }
 }
 
-fn failure(log: &Path, status: &str) -> String {
+fn failure(log: &Path, status: &str, component: Component) -> String {
     let mut tail = Vec::new();
     if let Ok(mut file) = std::fs::File::open(log) {
         let length = file.metadata().map_or(0, |metadata| metadata.len());
@@ -801,12 +880,13 @@ fn failure(log: &Path, status: &str) -> String {
         .map(str::trim)
         .unwrap_or("it printed nothing");
     let advice = if reason.contains("sudo") {
-        "It needs your password for system packages: run elsebot update in a terminal."
+        "It needs your password for system packages."
     } else {
-        "Nothing was switched if it stopped before \"Switch\"; see the log, or run elsebot update in a terminal."
+        "See the log for what changed."
     };
     format!(
-        "The update failed ({status}): {reason}. {advice} The log is {}.",
+        "The update failed ({status}): {reason}. {advice} Run elsebot update {} in a terminal. The log is {}.",
+        component.flag(),
         log.display()
     )
 }
@@ -853,7 +933,7 @@ async fn open_bundle(home: &Path) -> Result<(), String> {
     };
     if app.is_empty() || !Path::new(&app).join("Contents/Info.plist").is_file() {
         return Err(format!(
-            "This installation names no app to open ({}). Publish it again with: elsebot update",
+            "This installation names no app to open ({}). Publish it again with: elsebot update --app-only",
             marker.display()
         ));
     }
@@ -928,7 +1008,9 @@ mod tests {
             let repo = releases(dir.path());
             let home = dir.path().join("home");
             std::fs::create_dir_all(home.join("versions/0.0.9/bin")).unwrap();
-            std::os::unix::fs::symlink("versions/0.0.9", home.join("current")).unwrap();
+            for pointer in ["current", "app-current", "server-current"] {
+                std::os::unix::fs::symlink("versions/0.0.9", home.join(pointer)).unwrap();
+            }
             let program = home.join("bin/elsebot");
             std::fs::create_dir_all(program.parent().unwrap()).unwrap();
             std::fs::write(
@@ -968,11 +1050,27 @@ mod tests {
         }
 
         fn start(&self, server: Option<&Origin>) -> (Commands, watch::Receiver<Snapshot>) {
+            self.start_component(
+                if server.is_some() {
+                    Component::Server
+                } else {
+                    Component::App
+                },
+                server,
+            )
+        }
+
+        fn start_component(
+            &self,
+            component: Component,
+            server: Option<&Origin>,
+        ) -> (Commands, watch::Receiver<Snapshot>) {
             let token = OwnerToken::parse(TOKEN).unwrap();
             let installation =
                 Installation::for_tests(self.home(), server.map(|origin| (origin.clone(), token)));
             start_with(
                 Ok(installation),
+                component,
                 self.settings(),
                 &tokio::runtime::Handle::current(),
             )
@@ -1002,7 +1100,7 @@ mod tests {
             && snapshot.work == Work::Idle
     }
 
-    const SWITCH: &str = "ln -sfn versions/0.0.20 \"$ELSE_HOME/current\"";
+    const SWITCH: &str = "case \"$*\" in *--server-only*) pointer=server-current ;; *) pointer=app-current ;; esac; ln -sfn versions/0.0.20 \"$ELSE_HOME/$pointer\"";
 
     #[tokio::test]
     async fn an_update_installed_elsewhere_still_offers_restart() {
@@ -1018,8 +1116,8 @@ mod tests {
         let target = PathBuf::from("versions").join(version);
         git(Path::new(&home.repo), &["tag", &tag]);
         std::fs::create_dir_all(home.home().join(&target).join("bin")).unwrap();
-        std::fs::remove_file(home.home().join("current")).unwrap();
-        std::os::unix::fs::symlink(target, home.home().join("current")).unwrap();
+        std::fs::remove_file(home.home().join("app-current")).unwrap();
+        std::os::unix::fs::symlink(target, home.home().join("app-current")).unwrap();
         let (commands, mut state) = home.start(None);
         let ready = until(&mut state, "external update detected", |snapshot| {
             matches!(snapshot.operation, Operation::Ready { .. })
@@ -1086,7 +1184,7 @@ mod tests {
             calls,
             [
                 format!(
-                    "update --yes --version 0.0.20 cwd=/ home={} stdin=1 leader=yes",
+                    "update --yes --app-only --version 0.0.20 cwd=/ home={} stdin=1 leader=yes",
                     home_dir.display()
                 ),
                 format!(
@@ -1100,6 +1198,67 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0, "the update log is private");
+    }
+
+    #[tokio::test]
+    async fn an_app_update_ignores_busy_local_server_and_leaves_its_release_alone() {
+        let home = Home::new(SWITCH);
+        let answer = Arc::new(AtomicU16::new(2));
+        let origin = server(answer).await;
+        let (commands, mut state) = home.start_component(Component::App, Some(&origin));
+        until(&mut state, "offered despite busy server", available).await;
+        commands.install().unwrap();
+        let installed = until(&mut state, "app installed", |s| {
+            matches!(s.operation, Operation::Ready { .. })
+        })
+        .await;
+        assert_eq!(installed.work, Work::Idle);
+        assert_eq!(
+            release::installed(&home.home(), Component::App)
+                .unwrap()
+                .plain(),
+            "0.0.20"
+        );
+        assert_eq!(
+            release::installed(&home.home(), Component::Server)
+                .unwrap()
+                .plain(),
+            "0.0.9"
+        );
+        assert!(home.calls()[0].contains("--app-only"));
+    }
+
+    #[tokio::test]
+    async fn a_server_updater_requires_a_trusted_local_server() {
+        let home = Home::new(SWITCH);
+        let (commands, state) = home.start_component(Component::Server, None);
+        assert!(
+            state
+                .borrow()
+                .unavailable
+                .as_ref()
+                .unwrap()
+                .contains("no trusted local server")
+        );
+        assert!(commands.install().is_err());
+        assert!(commands.restart().is_err());
+        assert!(home.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_server_updater_never_offers_desktop_restart_for_a_newer_server() {
+        let home = Home::new(SWITCH);
+        std::fs::remove_file(home.home().join("server-current")).unwrap();
+        std::os::unix::fs::symlink("versions/999.0.0", home.home().join("server-current")).unwrap();
+        let origin = server(Arc::new(AtomicU16::new(0))).await;
+        let (commands, mut state) = home.start(Some(&origin));
+        until(&mut state, "server checked", |s| {
+            matches!(s.check, Check::Current { .. })
+        })
+        .await;
+        assert_eq!(state.borrow().operation, Operation::Idle);
+        assert!(commands.restart().is_err());
+        assert!(home.calls().is_empty());
     }
 
     #[tokio::test]
@@ -1120,7 +1279,8 @@ mod tests {
             unreachable!()
         };
         assert!(
-            why.contains("sudo was refused") && why.contains("elsebot update in a terminal"),
+            why.contains("sudo was refused")
+                && why.contains("elsebot update --app-only in a terminal"),
             "{why}"
         );
         assert_eq!(
@@ -1194,6 +1354,7 @@ mod tests {
     async fn sessions_without_an_installation_never_update() {
         let (commands, state) = start_with(
             Err("a development session".into()),
+            Component::App,
             Settings::default(),
             &tokio::runtime::Handle::current(),
         );
@@ -1271,10 +1432,24 @@ mod tests {
         until(&mut state, "idle once work ends", available).await;
         commands.install().unwrap();
         until(&mut state, "installed", |s| {
-            matches!(s.operation, Operation::Ready { .. })
+            s.operation == Operation::Idle && matches!(s.check, Check::Current { .. })
         })
         .await;
         assert_eq!(home.calls().len(), 1);
+        assert!(home.calls()[0].contains("--server-only"));
+        assert!(commands.restart().is_err());
+        assert_eq!(
+            release::installed(&home.home(), Component::App)
+                .unwrap()
+                .plain(),
+            "0.0.9"
+        );
+        assert_eq!(
+            release::installed(&home.home(), Component::Server)
+                .unwrap()
+                .plain(),
+            "0.0.20"
+        );
     }
 
     #[tokio::test]
@@ -1331,6 +1506,7 @@ mod tests {
         let installation = Installation::for_tests(home.home(), None);
         let (commands, mut state) = start_with(
             Ok(installation),
+            Component::App,
             settings,
             &tokio::runtime::Handle::current(),
         );
