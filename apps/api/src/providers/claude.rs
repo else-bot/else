@@ -60,7 +60,7 @@ use crate::app::providers::{
 };
 
 pub const ID: &str = "claude";
-const PROMPT_VERSION: &str = "else-claude-v14";
+const PROMPT_VERSION: &str = "else-claude-v15";
 /// Explicit model IDs only: an alias would follow the CLI's floating default.
 pub const MODELS: &[&str] = &[
     "claude-opus-5-5",

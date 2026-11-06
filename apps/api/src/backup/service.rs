@@ -237,10 +237,12 @@ impl Backups {
         let database_bytes = (pages?.max(0) as u64).saturating_mul(page_size?.max(0) as u64);
         let projects = config.bots_dir.clone();
         let artifacts = config.computers.state_dir.join("artifacts");
+        let mcp = config.data_dir.join("mcp");
         let initial_bytes = tokio::task::spawn_blocking(move || {
             database_bytes
                 .saturating_add(size(&projects))
                 .saturating_add(size(&artifacts))
+                .saturating_add(size(&mcp))
         })
         .await
         .map_err(|_| Error::Unavailable)?;
@@ -263,7 +265,7 @@ impl Backups {
             probe_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             initial_estimate: Estimate {
                 bytes: initial_bytes,
-                basis: "Rough database, file, and project size. Computer snapshots and encryption overhead are excluded until the first complete backup.".into(),
+                basis: "Rough database, file, project and shared MCP size. Computer snapshots and encryption overhead are excluded until the first complete backup.".into(),
             },
         };
         let task = tokio::spawn(run(engine, settings, rx, local_at, remote_at, cancel));

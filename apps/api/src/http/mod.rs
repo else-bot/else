@@ -19,6 +19,7 @@ mod owner_tools;
 pub mod questions;
 pub mod routines;
 pub mod settings;
+mod shared_mcp;
 mod social_tools;
 pub mod socials;
 pub mod task_secrets;
@@ -59,6 +60,7 @@ pub struct AppState {
     /// The installation key for encrypted task and connector credentials.
     pub secret_key: Option<Arc<crate::credentials::SecretKey>>,
     pub backups: Option<crate::backup::service::Backups>,
+    pub mcps: std::sync::OnceLock<crate::mcp::Library>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub socials: Option<Arc<crate::socials::Manager>>,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
@@ -83,6 +85,7 @@ impl AppState {
             secret_key: None,
             connectors: None,
             backups: None,
+            mcps: std::sync::OnceLock::new(),
             socials: None,
             update_hold: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
@@ -128,6 +131,9 @@ impl AppState {
 }
 
 pub fn router(config: &Config, state: Arc<AppState>) -> Router {
+    state.mcps.get_or_init(|| {
+        crate::mcp::Library::new(config.data_dir.join("mcp"), state.scheduler.gate().clone())
+    });
     // Every route under /v1 requires the owner token.
     // `layer` (not `route_layer`) also covers the fallback, so unknown /v1
     // paths are authenticated before they report 404.
@@ -145,6 +151,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(socials::routes())
         .merge(settings::routes())
         .merge(backups::routes())
+        .merge(shared_mcp::routes())
         .merge(task_secrets::routes())
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())

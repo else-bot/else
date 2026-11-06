@@ -15,6 +15,7 @@ pub(super) enum SettingsSection {
     Server,
     Email,
     Socials,
+    Mcp,
     Backups,
     Updates,
 }
@@ -165,11 +166,19 @@ impl Shell {
                 SettingsSection::Server => 0,
                 SettingsSection::Email => 1,
                 SettingsSection::Socials => 2,
-                SettingsSection::Backups => 3,
-                SettingsSection::Updates => 4,
+                SettingsSection::Mcp => 3,
+                SettingsSection::Backups => 4,
+                SettingsSection::Updates => 5,
             }]
             .focus(window, cx);
             cx.notify();
+        }
+        if section == SettingsSection::Mcp {
+            if self.mcp.is_none() {
+                self.open_mcp(window, cx);
+            }
+        } else {
+            self.mcp = None;
         }
         if section == SettingsSection::Backups && self.backups.is_none() {
             self.open_backups(window, cx);
@@ -257,18 +266,25 @@ impl Shell {
                 &setup.navigation_focus[2],
             ))
             .child(nav_item(
+                "settings-mcp",
+                "MCP",
+                IconName::Plug,
+                SettingsSection::Mcp,
+                &setup.navigation_focus[3],
+            ))
+            .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[3],
+                &setup.navigation_focus[4],
             ))
             .child(nav_item(
                 "settings-updates",
                 "Updates",
                 IconName::RefreshCw,
                 SettingsSection::Updates,
-                &setup.navigation_focus[4],
+                &setup.navigation_focus[5],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
@@ -276,6 +292,7 @@ impl Shell {
                 .children(self.email.as_ref().map(|(view, _)| view.clone()))
                 .into_any_element(),
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
+            SettingsSection::Mcp => self.render_mcp(window, cx),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
@@ -342,6 +359,7 @@ impl Shell {
                                 SettingsSection::Server => "settings-server-content",
                                 SettingsSection::Email => "settings-email-content",
                                 SettingsSection::Socials => "settings-socials-content",
+                                SettingsSection::Mcp => "settings-mcp-content",
                                 SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })

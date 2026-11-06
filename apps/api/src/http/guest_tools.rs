@@ -19,7 +19,7 @@ use crate::db::memory::RESPONSE_BUDGET;
 use crate::db::task_secrets::{self, Env};
 use crate::grants::Grant;
 
-mod approval;
+pub(crate) mod approval;
 
 pub use approval::call;
 use approval::{EFFECT_DESCRIPTION, MAX_PURPOSE};

@@ -4,6 +4,7 @@
 //! started for the previous server can reach the new one.
 
 mod backups;
+mod mcp;
 mod settings;
 mod updates;
 mod view;
@@ -138,7 +139,7 @@ struct Setup {
     draft: Draft,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 5],
+    navigation_focus: [FocusHandle; 6],
     _attempt: Option<Task<()>>,
 }
 
@@ -151,6 +152,7 @@ pub struct Shell {
     settings_focus: FocusHandle,
     updates: updates::View,
     backups: Option<backups::View>,
+    mcp: Option<mcp::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
 }
@@ -194,6 +196,7 @@ impl Shell {
             settings_focus: cx.focus_handle(),
             updates,
             backups: None,
+            mcp: None,
             socials: None,
             email: None,
         };
@@ -269,6 +272,7 @@ impl Shell {
             .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
             .unwrap_or_default();
         self.backups = None;
+        self.mcp = None;
         self.email = None;
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
         let observer = cx.observe_in(&app, window, |shell, app, window, cx| {
@@ -530,6 +534,7 @@ impl Shell {
         if let Some(active) = &self.active {
             self.updates.dismiss();
             self.backups = None;
+            self.mcp = None;
             self.email = None;
             self.setup = None;
             active

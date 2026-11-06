@@ -409,7 +409,12 @@ fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
     if delegation.origin == crate::app::providers::Origin::ConnectorEvent {
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Mail];
     }
-    let mut tools = vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Computer];
+    let mut tools = vec![
+        Tool::ReadHistory,
+        Tool::ReadMemory,
+        Tool::Computer,
+        Tool::Mcp,
+    ];
     if !delegation.delegated_task {
         tools.extend([Tool::Mail, Tool::Social]);
     }
@@ -420,7 +425,7 @@ fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
         tools.push(Tool::CreateBot);
     }
     if delegation.can_manage_routines() {
-        tools.push(Tool::Routines);
+        tools.extend([Tool::Routines, Tool::ManageMcp]);
     }
     tools
 }

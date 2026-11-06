@@ -9,11 +9,12 @@
 //! raw master key nor the database-secret key encrypts anything here. The
 //! master key never enters an artifact, a log, or a command line.
 //!
-//! This task covers the database only, and its sets say so: `coverage`
-//! marks bot computers and provider state as omitted and the set as not a
-//! whole-assistant backup.
+//! Sets can also include bot computers, project directories, host artifacts,
+//! and shared MCP packages. `coverage` records which sources were captured
+//! and whether the set recovers the whole assistant.
 
 pub mod capture;
+pub mod mcp;
 pub mod projects;
 pub mod replicate;
 pub mod restore;
@@ -124,7 +125,8 @@ pub struct Completion {
 pub struct Artifact {
     /// `sqlite`, `vm` (one bot's standalone disk archive with image),
     /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`), or
-    /// `project` (a bot's project directory, `project-<bot>.tar.age`).
+    /// `project` (a bot's project directory, `project-<bot>.tar.age`), or
+    /// `mcp` (the shared MCP library, `mcp.tar.age`).
     pub kind: String,
     pub object: String,
     /// For a `vm` artifact, its bot.
@@ -243,6 +245,9 @@ pub struct Coverage {
     /// Bot project directories: `included`, `partial`, or `omitted`.
     #[serde(default = "omitted")]
     pub projects: String,
+    /// Shared MCP skills, documentation, and connection config.
+    #[serde(default = "omitted")]
+    pub mcp: String,
     pub provider_state: String,
     /// True only when every state the assistant needs is included.
     pub whole_assistant: bool,
@@ -272,10 +277,11 @@ pub fn database_only_coverage() -> Coverage {
         database: "included".into(),
         vm: "omitted".into(),
         projects: "omitted".into(),
+        mcp: "omitted".into(),
         provider_state: "omitted-reauth-required".into(),
         whole_assistant: false,
-        note: "Database only: bot computers (files, browser profiles, running jobs) and native \
-               provider sessions are not included. Restoring this set does not recover the \
+        note: "Database only: bot computers (files, browser profiles, running jobs), the shared \
+               MCP library and native provider sessions are not included. Restoring this set does not recover the \
                whole assistant."
             .into(),
     }
