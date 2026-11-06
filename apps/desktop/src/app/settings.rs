@@ -249,11 +249,13 @@ impl ElseApp {
             let client = self.client.clone();
             let computer =
                 cx.new(|cx| super::computer::ComputerView::new(client, &bot, window, cx));
-            self._computer_layout = Some(
-                cx.subscribe(&computer, |_, _, _: &super::computer::LayoutChanged, cx| {
-                    cx.notify()
-                }),
-            );
+            self._computer_layout = Some(cx.subscribe_in(
+                &computer,
+                window,
+                |app, _, _: &super::computer::LayoutChanged, window, cx| {
+                    app.check_reading(window, cx)
+                },
+            ));
             self.computer = Some(computer);
         }
         if self.settings.contains_key(&bot.id) {

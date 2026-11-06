@@ -17,15 +17,48 @@ use uuid::Uuid;
 const ALERT_DELAY: Duration = Duration::from_millis(1500);
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const READ_SPACING: Duration = Duration::from_millis(400);
+const UNREAD_DIVIDER_DELAY: Duration = Duration::from_secs(5);
 
 impl ElseApp {
     pub(super) fn check_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_mut() {
+            view._unread_dismissal = None;
             view.reply_layout = None;
             view.latest_seen = false;
             window.refresh();
             cx.notify();
         }
+    }
+
+    fn dismiss_unread_after_viewing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let attending = self.viewing_transcript(window, cx);
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        if !attending || !view.latest_seen {
+            view._unread_dismissal = None;
+            return;
+        }
+        if view.unread_since.is_none() || view._unread_dismissal.is_some() {
+            return;
+        }
+        let bot = view.bot_id;
+        view._unread_dismissal = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(UNREAD_DIVIDER_DELAY).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if !app.viewing_transcript(window, cx) {
+                    return;
+                }
+                let Some(view) = app.view.as_mut().filter(|view| view.bot_id == bot) else {
+                    return;
+                };
+                if view.latest_seen {
+                    view.unread_since = None;
+                    view._unread_dismissal = None;
+                    app.sync_rows(window, cx);
+                }
+            });
+        }));
     }
 
     fn latest_loaded(&self) -> Option<ReplyPosition> {
@@ -58,6 +91,15 @@ impl ElseApp {
 
     fn attending(&self, window: &Window) -> bool {
         !self.hidden && self.welcome.is_none() && window.is_window_active() && window.is_visible()
+    }
+
+    fn viewing_transcript(&self, window: &Window, cx: &App) -> bool {
+        self.attending(window)
+            && self.image_viewer.is_none()
+            && self
+                .computer
+                .as_ref()
+                .is_none_or(|computer| !computer.read(cx).expanded)
     }
 
     fn acknowledge_visible(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -96,6 +138,7 @@ impl ElseApp {
             self.settle_alerts(cx);
             cx.notify();
         }
+        self.dismiss_unread_after_viewing(window, cx);
     }
 
     pub(super) fn unseen_below(&self) -> bool {
