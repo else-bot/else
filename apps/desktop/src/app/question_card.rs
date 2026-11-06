@@ -5,11 +5,13 @@
 //! a newer owner message (skipped), or the turn ending (withdrawn) disables
 //! it here too. A click on a card the server already settled is refused.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -45,8 +47,8 @@ impl QuestionForm {
 
 fn heading(question: &Question, bot_name: &str) -> String {
     match question.kind.as_str() {
-        "destructive" => format!("{bot_name} wants to do something that is hard to undo"),
-        "external" => format!("{bot_name} wants to take a sensitive action"),
+        "destructive" => format!("{bot_name} · Hard to undo"),
+        "external" => format!("{bot_name} · Approval needed"),
         _ => format!("{bot_name} has a question"),
     }
 }
@@ -63,7 +65,10 @@ fn outcome(question: &Question, bot_name: &str) -> String {
                     .into()
             }
             (true, Some(APPROVE_TOOL)) => {
-                "Approved. This tool and action type are allowed in future chat requests.".into()
+                question.mcp_tool_scope().map_or_else(
+                    || "Approved. This tool and action type are allowed in future chat requests.".into(),
+                    |(integration, tool)| format!("Always allowed for this bot: {integration} · {tool} for this action type."),
+                )
             }
             (true, Some(APPROVE_TASK)) => question.task_scope().map_or_else(
                 || "Approved. This task and action type are allowed in future chats with this bot.".into(),
@@ -89,6 +94,15 @@ fn letter(choice_id: &str) -> String {
 }
 
 impl ElseApp {
+    fn toggle_question_details(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_mut()
+            && !view.expanded_questions.remove(&id)
+        {
+            view.expanded_questions.insert(id);
+        }
+        self.remeasure_row(RowKey::Question(id), cx);
+    }
+
     pub(super) fn sync_question_submits(&mut self) {
         let Some(view) = self.view.as_mut() else {
             return;
@@ -126,6 +140,7 @@ impl ElseApp {
         {
             return;
         }
+        view.expanded_questions.remove(&question);
         view.question_submits.insert(
             question,
             QuestionForm {
@@ -196,6 +211,8 @@ impl ElseApp {
         let note = |text: String| {
             div()
                 .text_xs()
+                .text_left()
+                .whitespace_normal()
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
@@ -203,69 +220,211 @@ impl ElseApp {
         let locked = !pending
             || submit.is_some_and(QuestionForm::locks)
             || self.connection != Connection::Connected;
+        let expanded = view.expanded_questions.contains(&id);
+        let chevron = if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
         let mut card = v_flex()
             .w_full()
-            .gap_2()
-            .p_3()
+            .gap_3()
+            .p_4()
             .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
-            .child(note(heading(question, &bot_name)))
-            .child(div().font_semibold().child(question.title.clone()));
-        if let Some(context) = &question.context {
+            .bg(theme.secondary);
+        if pending {
+            let mut buttons = h_flex()
+                .flex_shrink_0()
+                .max_w(relative(0.5))
+                .flex_wrap()
+                .justify_end()
+                .gap_2();
+            let mut choices: Vec<_> = question.choices.iter().collect();
+            choices.sort_by_key(|choice| choice.id == APPROVE);
+            for choice in choices {
+                let label = match submit
+                    .filter(|s| s.answer.contains(&choice.id))
+                    .map(|s| &s.state)
+                {
+                    Some(SubmitState::Sending) => "Sending…".to_owned(),
+                    Some(SubmitState::Recorded) => "Recorded".to_owned(),
+                    _ if choice.id == APPROVE_FOREVER => "Always allow for this bot".to_owned(),
+                    _ => choice.label.clone(),
+                };
+                let choice_id = choice.id.clone();
+                let button =
+                    Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
+                        .focus_ring(false)
+                        .when(!locked, |button| button.cursor_pointer())
+                        .accessibility_label(label.clone())
+                        .label(label)
+                        .small()
+                        .disabled(locked)
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.answer_question(
+                                id,
+                                QuestionAnswer::Single(choice_id.clone()),
+                                window,
+                                cx,
+                            )
+                        }));
+                let button = if choice.id == APPROVE {
+                    button.primary()
+                } else {
+                    button.ghost()
+                };
+                buttons = buttons.child(button);
+            }
+            let mut title = v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .font_semibold()
+                        .whitespace_normal()
+                        .child(question.title.clone()),
+                )
+                .child(note(heading(question, &bot_name)));
+            if let Some(scope) = question.task_scope() {
+                title = title.child(note(format!("{} · {}", scope.task, scope.target)));
+            } else if let Some((integration, tool)) = question.mcp_tool_scope() {
+                title = title.child(note(format!("{integration} · {tool}")));
+            }
             card = card.child(
-                div()
+                h_flex()
                     .w_full()
-                    .px_2p5()
-                    .py_2()
-                    .rounded(theme.radius)
-                    .bg(theme.background)
-                    .text_sm()
-                    .whitespace_normal()
-                    .child(context.clone()),
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        Icon::new(IconName::Terminal)
+                            .size_4()
+                            .mt_1()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(title)
+                    .child(buttons),
+            );
+            if question.context.is_some() {
+                card = card.child(
+                    div()
+                        .w_full()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .pt_2()
+                        .child(
+                            Button::new(SharedString::from(format!("question-details-{id}")))
+                                .focus_ring(false)
+                                .ghost()
+                                .small()
+                                .justify_start()
+                                .px_0()
+                                .cursor_pointer()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .gap_2()
+                                        .child(Icon::new(chevron).size_3())
+                                        .child(div().text_left().child("Command & explanation")),
+                                )
+                                .accessibility_label(if expanded {
+                                    "Hide command and explanation"
+                                } else {
+                                    "Show command and explanation"
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.toggle_question_details(id, cx);
+                                })),
+                        ),
+                );
+            }
+        } else {
+            let approved = question.status == "answered"
+                && question
+                    .answer
+                    .as_ref()
+                    .and_then(QuestionAnswer::single)
+                    .is_some_and(|answer| answer != DENY);
+            card = card.child(
+                Button::new(SharedString::from(format!("question-receipt-{id}")))
+                    .focus_ring(false)
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .h_auto()
+                    .p_0()
+                    .cursor_pointer()
+                    .accessibility_label(format!(
+                        "{} {}",
+                        question.title,
+                        outcome(question, &bot_name)
+                    ))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                Icon::new(if approved {
+                                    IconName::Check
+                                } else {
+                                    IconName::CircleOff
+                                })
+                                .size_4()
+                                .text_color(if approved {
+                                    theme.success
+                                } else {
+                                    theme.muted_foreground
+                                }),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_medium()
+                                            .text_left()
+                                            .whitespace_normal()
+                                            .child(question.title.clone()),
+                                    )
+                                    .child(note(outcome(question, &bot_name))),
+                            )
+                            .child(
+                                Icon::new(chevron)
+                                    .size_3()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.toggle_question_details(id, cx);
+                    })),
             );
         }
-        card = card.child(note(match question.kind.as_str() {
-            _ if question.choices.iter().any(|c| c.id == APPROVE_TASK) => question.task_scope().map_or_else(
-                || "Always allow remembers this task and action type for future chats with this bot.".to_owned(),
-                |scope| format!("Always allow remembers \"{}\" on \"{}\" for this action type in future chats with this bot. Other tasks and targets still need approval.", scope.task, scope.target),
-            ),
-            _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Approve once covers this action. Always allow remembers this integration tool and action type for this bot's chat requests. Other tools and action types still need approval.".to_owned(),
-            "external" => "Approve once covers exactly this sensitive action.".to_owned(),
-            _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task on future runs. Other routines and chat requests still need approval. Changing the task clears this permission.".to_owned(),
-            _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Approve once covers exactly this action. Always allow lets this bot take destructive actions without asking.".to_owned(),
-            _ => "Approval covers exactly this action, once.".to_owned(),
-        }));
-        let mut buttons = h_flex().w_full().flex_wrap().justify_end().gap_2();
-        for choice in &question.choices {
-            let label = match submit
-                .filter(|s| s.answer.contains(&choice.id))
-                .map(|s| &s.state)
-            {
-                Some(SubmitState::Sending) => "Sending…".to_owned(),
-                Some(SubmitState::Recorded) => "Recorded".to_owned(),
-                _ if choice.id == APPROVE_FOREVER => "Always allow for this bot".to_owned(),
-                _ => choice.label.clone(),
-            };
-            let choice_id = choice.id.clone();
-            let button = Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
-                .focus_ring(false)
-                .cursor_pointer()
-                .label(label)
-                .small()
-                .disabled(locked)
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.answer_question(id, QuestionAnswer::Single(choice_id.clone()), window, cx)
+        if expanded {
+            if let Some(context) = &question.context {
+                card = card.child(
+                    div()
+                        .w_full()
+                        .p_3()
+                        .rounded(theme.radius)
+                        .bg(theme.background)
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(context.clone()),
+                );
+            }
+            if pending {
+                card = card.child(note(match question.kind.as_str() {
+                    _ if question.choices.iter().any(|c| c.id == APPROVE_TASK) => "Always allow remembers this task, target, and action type for future chats with this bot.".to_owned(),
+                    _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Always allow remembers this integration tool and action type for this bot's chat requests.".to_owned(),
+                    _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task. Changing the task clears this permission.".to_owned(),
+                    _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Always allow lets this bot take destructive actions without asking.".to_owned(),
+                    _ => "Approval covers exactly this action, once.".to_owned(),
                 }));
-            let button = if choice.id == APPROVE {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            buttons = buttons.child(button);
+            }
         }
-        card = card.child(buttons);
         if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
             card = card.child(
                 div()
@@ -273,9 +432,6 @@ impl ElseApp {
                     .text_color(theme.danger)
                     .child(error.clone()),
             );
-        }
-        if !pending {
-            card = card.child(note(outcome(question, &bot_name)));
         }
         card.into_any_element()
     }
@@ -342,7 +498,7 @@ mod tests {
         assert!(outcome(&question("choice", "cancelled", None), "Mail").starts_with("Withdrawn"));
         assert_eq!(outcome(&question("choice", "pending", None), "Mail"), "");
         assert!(
-            heading(&question("external", "pending", None), "Mail").contains("sensitive action")
+            heading(&question("external", "pending", None), "Mail").contains("Approval needed")
         );
         assert_eq!(letter("c"), "C");
     }
@@ -362,6 +518,26 @@ mod tests {
             assert_eq!(
                 outcome(&card, "Tech Manager"),
                 "Always allowed for this bot: Manage Tailscale on SSH host omarchy-m1."
+            );
+        }
+    }
+
+    #[test]
+    fn tool_approval_keeps_its_scope_visible_without_context() {
+        let mut card = question("external", "answered", Some(crate::model::APPROVE_TOOL));
+        for action in [
+            serde_json::json!({"tool": "mcp_request", "args": {
+                "id": "tickets", "method": "tools/call", "tool": "create_ticket", "effect": "external"
+            }}),
+            serde_json::json!({"permission": {
+                "scope": "mcp_tool", "mcp_id": "tickets", "tool": "create_ticket", "kind": "external"
+            }}),
+        ] {
+            card.action = Some(serde_json::from_value(action).unwrap());
+            assert_eq!(card.mcp_tool_scope(), Some(("tickets", "create_ticket")));
+            assert_eq!(
+                outcome(&card, "Tracker"),
+                "Always allowed for this bot: tickets · create_ticket for this action type."
             );
         }
     }
