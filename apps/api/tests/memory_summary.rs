@@ -297,6 +297,7 @@ async fn work_in_another_conversation_refreshes_a_warm_session() {
         fingerprint: "same".into(),
         considered_through_turn: 1,
         memory_revision: Some(before.revision),
+        default_skills: Default::default(),
     };
     assert!(else_api::providers::prompt::memory_for(Some(&before), Some(&warm)).is_none());
 

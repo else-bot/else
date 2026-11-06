@@ -948,22 +948,24 @@ pub fn memory_for<'a>(
 /// The whole text of one turn for a session that considered history
 /// through `considered`: saved memory when the session lacks its revision,
 /// recorded delegation outcomes for a continuation, then the packet.
-pub fn turn_packet(
+pub(super) fn turn_packet(
     input: &TurnInput,
     considered: i64,
     inject: Option<&MemoryContext>,
+    skills: &super::default_skills::Update,
 ) -> (String, Selection) {
-    let (segments, selection) = turn_content(input, considered, inject);
+    let (segments, selection) = turn_content(input, considered, inject, skills);
     (segments_text(&segments), selection)
 }
 
 /// [`turn_packet`] in order, with the message's files as their own
 /// segments so an adapter can give the provider each file where the owner
 /// placed it.
-pub fn turn_content<'a>(
+pub(super) fn turn_content<'a>(
     input: &'a TurnInput,
     considered: i64,
     inject: Option<&MemoryContext>,
+    skills: &super::default_skills::Update,
 ) -> (Vec<Segment<'a>>, Selection) {
     let (mut segments, selection) = content_with_selection(input, considered);
     let outcomes = outcomes_block(input);
@@ -978,6 +980,9 @@ pub fn turn_content<'a>(
     }
     if let Some(memory) = inject {
         segments.insert(0, Segment::Text(memory.text.clone()));
+    }
+    if let Some(text) = &skills.text {
+        segments.insert(0, Segment::Text(text.clone()));
     }
     (segments, selection)
 }

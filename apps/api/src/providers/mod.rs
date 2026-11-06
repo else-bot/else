@@ -4,6 +4,7 @@ pub mod claude_home;
 pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
+mod default_skills;
 pub mod host;
 pub(crate) mod output_images;
 pub mod prompt;

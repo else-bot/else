@@ -404,7 +404,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
 }
 
 #[tokio::test]
-async fn a_warm_session_receives_memory_whenever_its_revision_changed() {
+async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
     let dir = tempfile::tempdir().unwrap();
     let (claude, received) = fake_claude(dir.path());
     let base = specialist_turn(None);
@@ -431,13 +431,26 @@ async fn a_warm_session_receives_memory_whenever_its_revision_changed() {
         fingerprint: fingerprint.clone(),
         considered_through_turn: 2,
         memory_revision,
+        default_skills: Default::default(),
     };
+    let current = super::super::default_skills::for_session(None).applied;
+    let mut up_to_date = warm(Some(7));
+    up_to_date.default_skills = current.clone();
+    let mut stale = up_to_date.clone();
+    stale
+        .default_skills
+        .insert("unslop".into(), "old-content-hash".into());
+    let mut incompatible = up_to_date.clone();
+    incompatible.fingerprint = "old-provider-fingerprint".into();
     let memory = "Owner correction: rebase branches, never merge them.";
 
-    for (session, refreshed) in [
-        (None, true),
-        (Some(warm(Some(6))), true),
-        (Some(warm(Some(7))), false),
+    for (session, refreshed, skills_changed, same_session) in [
+        (None, true, true, false),
+        (Some(warm(Some(6))), true, true, true),
+        (Some(warm(Some(7))), false, true, true),
+        (Some(stale), false, true, true),
+        (Some(up_to_date), false, false, true),
+        (Some(incompatible), true, true, false),
     ] {
         let resumed = session.as_ref().map(|s| s.native_id.clone());
         let sink = super::super::recording::Recorded::default();
@@ -447,11 +460,17 @@ async fn a_warm_session_receives_memory_whenever_its_revision_changed() {
         assert_eq!(outcome, TurnOutcome::Completed);
         let text = super::super::recording::received(&received).pop().unwrap();
         assert_eq!(text.contains(memory), refreshed, "{resumed:?}: {text}");
+        assert_eq!(text.contains("Avoid em dashes entirely."), skills_changed);
         assert!(text.ends_with("Clean up the stale branches."));
         let state = sink.last_session();
         assert_eq!(state.memory_revision, Some(7));
+        let before_send = sink.sessions.lock().unwrap().first().unwrap().clone();
+        if skills_changed {
+            assert_ne!(before_send.default_skills, current);
+        }
+        assert_eq!(state.default_skills, current);
         if let Some(native) = resumed {
-            assert_eq!(state.native_id, native, "the same native session");
+            assert_eq!(state.native_id == native, same_session);
         }
     }
 }

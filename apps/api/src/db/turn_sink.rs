@@ -587,12 +587,13 @@ impl SinkState {
                 Some(id) => {
                     sqlx::query(
                         "UPDATE provider_sessions SET considered_through_turn = ?2,
-                             memory_revision = coalesce(?3, memory_revision), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                             memory_revision = coalesce(?3, memory_revision), default_skills = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE id = ?1",
                     )
                     .bind(id)
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
+                    .bind(sqlx::types::Json(&state.default_skills))
                     .execute(&mut *tx)
                     .await?;
                     id
@@ -609,8 +610,8 @@ impl SinkState {
                     let id = Uuid::new_v4();
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
-                             native_session_id, fingerprint, considered_through_turn, memory_revision)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -620,6 +621,7 @@ impl SinkState {
                     .bind(&state.fingerprint)
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
+                    .bind(sqlx::types::Json(&state.default_skills))
                     .execute(&mut *tx)
                     .await?;
                     id

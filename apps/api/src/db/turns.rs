@@ -689,8 +689,8 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             parts,
         })
         .collect();
-    let session = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
-        "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision
+    let session = sqlx::query_as::<_, (String, String, i64, Option<i64>, Json<std::collections::BTreeMap<String, String>>)>(
+        "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills
          FROM provider_sessions s
          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
            -- A session that may hold an uncertain delivery is never resumed.
@@ -702,11 +702,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     .fetch_optional(&mut *conn)
     .await?
     .map(
-        |(native_id, fingerprint, considered_through_turn, memory_revision)| SessionState {
+        |(native_id, fingerprint, considered_through_turn, memory_revision, Json(default_skills))| SessionState {
             native_id,
             fingerprint,
             considered_through_turn,
             memory_revision,
+            default_skills,
         },
     );
     let considered = session.as_ref().map_or(0, |s| s.considered_through_turn);
