@@ -1174,7 +1174,11 @@ for line in sys.stdin:
             &format!("[ \"$1\" = --version ] && echo 'codex-cli 9.0.0' && exit\n{script}"),
             true,
         );
-        assert!(matches!(codex.availability(), Availability::Available));
+        let availability = codex.availability();
+        assert!(
+            matches!(availability, Availability::Available),
+            "{availability:?}"
+        );
         (codex, received)
     }
 

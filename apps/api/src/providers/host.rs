@@ -104,15 +104,25 @@ impl Host {
     /// Run `program args` with the passed environment plus `env` and return
     /// its stdout, or `None` if it fails.
     pub fn probe(&self, program: &Path, args: &[&str], env: &[(String, String)]) -> Option<String> {
-        let output = std::process::Command::new(program)
+        let mut command = std::process::Command::new(program);
+        command
             .args(args)
             .env_clear()
             .envs(passed_env())
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
+            .stderr(Stdio::null());
+        let mut retries = 5;
+        let output = loop {
+            match command.output() {
+                // A concurrent fork can briefly inherit a freshly written executable's writer.
+                Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) && retries > 0 => {
+                    retries -= 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => break result.ok()?,
+            }
+        };
         output
             .status
             .success()
