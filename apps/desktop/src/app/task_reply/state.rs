@@ -199,6 +199,77 @@ mod tests {
     }
 
     #[test]
+    fn a_single_completed_reply_is_a_chat_bubble() {
+        let mut answer = item(2, 10, "assistant");
+        answer["text"] = json!("Got it. I'll wait for you to kick things off.");
+        let c = conversation(
+            vec![item(1, 10, "user"), answer],
+            vec![turn(10, "completed")],
+        );
+        assert!(
+            task_replies(&c).is_empty(),
+            "a conversational reply must not become a completed task card"
+        );
+        assert_eq!(c.latest_reply().unwrap().id, id(2));
+    }
+
+    #[test]
+    fn reacting_to_a_chat_reply_does_not_turn_it_into_a_task() {
+        let mut feedback = item(3, 11, "user");
+        feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
+        let c = conversation(
+            vec![item(1, 10, "user"), item(2, 10, "assistant"), feedback],
+            vec![turn(10, "completed"), turn(11, "queued")],
+        );
+        assert!(task_replies(&c).is_empty());
+        assert!(c.reaction_for(id(2)).is_some());
+    }
+
+    #[test]
+    fn completed_tasks_keep_their_card_without_prose_progress_updates() {
+        for (field, value) in [
+            (
+                "routine",
+                json!({"routine_id": id(20), "name": "Daily digest", "due_at": "2026-11-05T10:00:00Z"}),
+            ),
+            (
+                "questions",
+                json!([{"id": id(21), "kind": "external", "title": "Send it?", "choices": [], "status": "answered"}]),
+            ),
+            (
+                "secret_requests",
+                json!([{"id": id(22), "name": "Access", "reason": "Read branches", "env": ["TOKEN"], "status": "provided"}]),
+            ),
+        ] {
+            let mut task = turn(10, "completed");
+            task[field] = value;
+            let c = conversation(
+                vec![item(1, 10, "user"), item(2, 10, "assistant")],
+                vec![task],
+            );
+            assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
+        }
+        for (field, value) in [
+            (
+                "bot_task",
+                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source"}),
+            ),
+            (
+                "bot_reply",
+                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source", "status": "completed"}),
+            ),
+        ] {
+            let mut handoff = item(1, 10, "status");
+            handoff[field] = value;
+            let c = conversation(
+                vec![handoff, item(2, 10, "assistant")],
+                vec![turn(10, "completed")],
+            );
+            assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
+        }
+    }
+
+    #[test]
     fn routine_updates_fold_into_history_and_the_last_reply_is_the_answer() {
         let c = conversation(
             vec![
