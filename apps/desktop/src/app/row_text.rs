@@ -17,12 +17,23 @@ use uuid::Uuid;
 pub(super) enum RowFormat {
     Plain,
     Markdown,
+    Quoted,
 }
 
 impl RowFormat {
+    pub(super) fn for_owner(text: &str) -> Self {
+        if super::reply::QuotedReply::parse(text).is_some() {
+            Self::Quoted
+        } else {
+            Self::Plain
+        }
+    }
+
     pub(super) fn for_item(item: &crate::model::Item) -> Self {
         if item.kind == "assistant" || item.bot_reply.is_some() {
             Self::Markdown
+        } else if item.kind == "user" && item.bot_task.is_none() {
+            Self::for_owner(&item.text)
         } else {
             Self::Plain
         }
@@ -35,12 +46,37 @@ pub(super) struct RowSource {
     pub format: RowFormat,
 }
 
+impl RowSource {
+    fn split_quote(mut self) -> (Option<Self>, Self) {
+        if self.format != RowFormat::Quoted {
+            return (None, self);
+        }
+        let reply = super::reply::QuotedReply::parse(&self.text)
+            .expect("quoted row format comes from a complete reply");
+        let prefix = &self.text[..self.text.len() - reply.body.len()];
+        if let Some(MessagePart::Text { text }) = self.parts.first_mut()
+            && let Some(body) = text.strip_prefix(prefix)
+        {
+            *text = body.to_owned();
+        }
+        let quote = Self {
+            text: reply.quote.to_owned(),
+            parts: Vec::new(),
+            format: RowFormat::Markdown,
+        };
+        self.text = reply.body.to_owned();
+        self.format = RowFormat::Plain;
+        (Some(quote), self)
+    }
+}
+
 pub(super) struct RowText {
     source: String,
     mentions: Vec<BotMention>,
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
     widget: Widget,
+    quote: Option<Box<RowText>>,
     parts: Vec<MessagePart>,
     files: HashMap<Uuid, Attachment>,
     owner: WeakEntity<ElseApp>,
@@ -72,15 +108,23 @@ impl RowText {
             parts,
             format,
         } = source;
-        let (visible, visible_parts) = without_images(&source, &parts);
+        let (quote, body) = RowSource {
+            text: source.clone(),
+            parts: parts.clone(),
+            format,
+        }
+        .split_quote();
+        let quote = quote
+            .map(|quote| Box::new(Self::new(key, quote, client.clone(), bots, bot, window, cx)));
+        let (visible, visible_parts) = without_images(&body.text, &body.parts);
         let mut mentions = match format {
-            RowFormat::Plain => BotMention::find(&visible, bots),
+            RowFormat::Plain | RowFormat::Quoted => BotMention::find(&visible, bots),
             RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
         };
         let content = plain_content(&visible, &visible_parts, &mut mentions);
         let display = MentionDisplay::new(&visible, &mentions);
         let widget = match format {
-            RowFormat::Plain => Widget::Plain(cx.new(|cx| {
+            RowFormat::Plain | RowFormat::Quoted => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
                     .context_menu(!matches!(key, RowKey::Item(_)));
@@ -95,10 +139,7 @@ impl RowText {
                     let Some(view) = app.view.as_ref() else {
                         return;
                     };
-                    let current = view.texts.get(&key).and_then(|row| match &row.widget {
-                        Widget::Markdown { state, .. } => Some(state),
-                        Widget::Plain(_) => None,
-                    });
+                    let current = view.texts.get(&key).and_then(Self::markdown_state);
                     if current != Some(&state) {
                         return;
                     }
@@ -119,6 +160,7 @@ impl RowText {
             bots: bots.clone(),
             display,
             widget,
+            quote,
             files: file_map(&parts),
             parts,
             owner: cx.entity().downgrade(),
@@ -129,9 +171,19 @@ impl RowText {
     }
 
     pub(super) fn format(&self) -> RowFormat {
+        if self.quote.is_some() {
+            return RowFormat::Quoted;
+        }
         match self.widget {
             Widget::Plain(_) => RowFormat::Plain,
             Widget::Markdown { .. } => RowFormat::Markdown,
+        }
+    }
+
+    fn markdown_state(&self) -> Option<&Entity<TextViewState>> {
+        match &self.widget {
+            Widget::Markdown { state, .. } => Some(state),
+            Widget::Plain(_) => self.quote.as_deref().and_then(Self::markdown_state),
         }
     }
 
@@ -173,20 +225,34 @@ impl RowText {
         let RowSource {
             text: source,
             parts,
-            ..
+            format,
         } = source;
         if self.source == source && self.parts == parts && Arc::ptr_eq(&self.bots, bots) {
             return false;
         }
-        let (visible, visible_parts) = without_images(&source, &parts);
+        let (quote, body) = RowSource {
+            text: source.clone(),
+            parts: parts.clone(),
+            format,
+        }
+        .split_quote();
+        let quote_changed = match (&mut self.quote, quote) {
+            (Some(view), Some(quote)) => view.sync(quote, bots, window, cx),
+            _ => false,
+        };
+        let (visible, visible_parts) = without_images(&body.text, &body.parts);
         self.images.update(cx, |images, cx| images.sync(&parts, cx));
         let mut mentions = match self.format() {
-            RowFormat::Plain => BotMention::find(&visible, bots),
+            RowFormat::Plain | RowFormat::Quoted => BotMention::find(&visible, bots),
             RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
         };
         self.bots = bots.clone();
         let content = plain_content(&visible, &visible_parts, &mut mentions);
-        if self.source == source && self.parts == parts && self.mentions == mentions {
+        if self.source == source
+            && self.parts == parts
+            && self.mentions == mentions
+            && !quote_changed
+        {
             return false;
         }
         let display = MentionDisplay::new(&visible, &mentions);
@@ -276,6 +342,7 @@ impl RowText {
         gpui_kit::component::v_flex()
             .w_full()
             .gap_2()
+            .children(self.quote.as_ref().map(|quote| quote.render()))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))
             .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
             .into_any_element()
@@ -324,7 +391,7 @@ fn activates_link(event: &ClickEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowFormat, plain_content};
+    use super::{RowFormat, RowSource, plain_content};
     use crate::api::Bot;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
     use crate::app::reply::{Author, Draft, MessageReference};
@@ -347,6 +414,7 @@ mod tests {
             "Replying to your earlier message:\n> quoted\nnot quoted\n\nAnswer.",
         ] {
             assert_eq!(RowFormat::for_item(&item("user", text)), RowFormat::Plain);
+            assert_eq!(RowFormat::for_owner(text), RowFormat::Plain);
         }
         for author in [Author::Owner, Author::Bot] {
             let draft = Draft {
@@ -358,15 +426,66 @@ mod tests {
                 ..Draft::default()
             };
             let text = draft.message().unwrap();
-            assert_eq!(
-                RowFormat::for_item(&item("user", &text)),
-                RowFormat::Markdown
-            );
+            assert_eq!(RowFormat::for_item(&item("user", &text)), RowFormat::Quoted);
+            assert_eq!(RowFormat::for_owner(&text), RowFormat::Quoted);
         }
         assert_eq!(
             RowFormat::for_item(&item("assistant", "**Done**")),
             RowFormat::Markdown
         );
+    }
+
+    #[test]
+    fn quoted_replies_keep_the_owners_literal_text_and_file_tokens() {
+        let file = Attachment {
+            id: Uuid::new_v4(),
+            name: "report.txt".into(),
+            media_type: "text/plain".into(),
+            size: 6,
+        };
+        let lead = "Keep **literal** text. ";
+        let body = format!("{lead}{}", file.fallback());
+        let message = Draft {
+            content: InputContent::new(body.clone()),
+            reply_to: Some(MessageReference {
+                item: Uuid::nil(),
+                author: Author::Bot,
+                text: "**Résumé**\n\nPreserve `main`.".into(),
+            }),
+            ..Draft::default()
+        }
+        .message()
+        .unwrap();
+        let prefix = &message[..message.len() - body.len()];
+        for coalesced in [false, true] {
+            let mut parts = vec![MessagePart::Text {
+                text: if coalesced {
+                    format!("{prefix}{lead}")
+                } else {
+                    prefix.to_owned()
+                },
+            }];
+            if !coalesced {
+                parts.push(MessagePart::Text { text: lead.into() });
+            }
+            parts.push(MessagePart::File { file: file.clone() });
+            let (quote, body_source) = RowSource {
+                text: message.clone(),
+                parts,
+                format: RowFormat::for_owner(&message),
+            }
+            .split_quote();
+            let quote = quote.unwrap();
+            assert_eq!(quote.format, RowFormat::Markdown);
+            assert_eq!(body_source.format, RowFormat::Plain);
+            assert_eq!(body_source.text, body);
+            assert_eq!(format!("{}\n\n{}", quote.text, body_source.text), message);
+            let content = plain_content(&body_source.text, &body_source.parts, &mut Vec::new());
+            assert_eq!(content.text().as_ref(), body);
+            assert_eq!(content.tokens().len(), 1);
+            assert_eq!(file_id(content.tokens()[0].token().id()), Some(file.id));
+            assert_eq!(&body[content.tokens()[0].range()], file.fallback());
+        }
     }
 
     #[test]

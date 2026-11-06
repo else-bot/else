@@ -85,6 +85,32 @@ impl Draft {
     }
 }
 
+pub(super) struct QuotedReply<'a> {
+    pub quote: &'a str,
+    pub body: &'a str,
+}
+
+impl<'a> QuotedReply<'a> {
+    pub(super) fn parse(message: &'a str) -> Option<Self> {
+        let rest = [
+            "Replying to my earlier message:\n",
+            "Replying to your earlier message:\n",
+        ]
+        .into_iter()
+        .find_map(|prefix| message.strip_prefix(prefix))?;
+        let (quote, body) = rest.split_once("\n\n")?;
+        (!quote.is_empty()
+            && !body.trim().is_empty()
+            && quote
+                .lines()
+                .all(|line| line == ">" || line.starts_with("> ")))
+        .then_some(Self {
+            quote: &message[..message.len() - body.len() - 2],
+            body,
+        })
+    }
+}
+
 impl ReactionKind {
     pub(super) fn mark(self) -> &'static str {
         match self {

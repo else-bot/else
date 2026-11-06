@@ -200,7 +200,12 @@ impl ElseApp {
         );
     }
 
-    fn copy_message(&mut self, bot: Uuid, item: Uuid, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy_message(&mut self, bot: Uuid, item: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+        if !selected.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(selected));
+            return;
+        }
         let Some(text) = self
             .view
             .as_ref()
