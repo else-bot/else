@@ -167,6 +167,8 @@ pub struct Question {
     pub kind: String,
     pub title: String,
     #[serde(default)]
+    pub action: Option<serde_json::Value>,
+    #[serde(default)]
     pub context: Option<String>,
     pub choices: Vec<QuestionChoice>,
     #[serde(default)]
@@ -181,6 +183,13 @@ pub struct Question {
 }
 
 impl Question {
+    pub fn mcp_id(&self) -> Option<&str> {
+        let action = self.action.as_ref()?;
+        (action["tool"] == "mcp_connect")
+            .then(|| action["args"]["id"].as_str())
+            .flatten()
+    }
+
     pub fn is_pending(&self) -> bool {
         self.status == "pending"
     }

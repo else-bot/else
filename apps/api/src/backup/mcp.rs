@@ -14,6 +14,17 @@ fn invalid(why: impl std::fmt::Display) -> BackupError {
     BackupError::Invalid(format!("shared MCP archive: {why}"))
 }
 
+fn credential_file(name: &str) -> bool {
+    name.strip_prefix("oauth-")
+        .and_then(|s| s.strip_suffix(".json"))
+        .and_then(|s| uuid::Uuid::parse_str(s).ok().map(|id| id.to_string() == s))
+        == Some(true)
+}
+
+fn package_file(name: &str) -> bool {
+    FILES.contains(&name) || credential_file(name)
+}
+
 fn valid_id(id: &str) -> bool {
     crate::mcp::PackageId::try_from(id.to_owned()).is_ok()
 }
@@ -91,12 +102,12 @@ pub fn archive(dir: &Path, target: &Path, limit: u64) -> Result<(), BackupError>
             if name.starts_with('.') {
                 continue;
             }
-            if !FILES.contains(&name) || !entry.file_type().map_err(invalid)?.is_file() {
+            if !package_file(name) || !entry.file_type().map_err(invalid)?.is_file() {
                 return Err(invalid(format!("unexpected entry {id}/{name}")));
             }
             found.insert(name.to_owned());
         }
-        if found.len() != FILES.len() {
+        if FILES.iter().any(|name| !found.contains(*name)) {
             return Err(invalid(format!("{id} is missing package files")));
         }
         bytes = bytes.saturating_add(512);
@@ -108,11 +119,11 @@ pub fn archive(dir: &Path, target: &Path, limit: u64) -> Result<(), BackupError>
         builder
             .append_data(&mut header, &id, std::io::empty())
             .map_err(invalid)?;
-        for name in FILES {
+        for name in &found {
             let mut file = open_at(&package_dir, name, false)?;
             let meta = file.metadata().map_err(invalid)?;
-            if !meta.is_file() {
-                return Err(invalid(format!("{id}/{name} is not a regular file")));
+            if !meta.is_file() || (credential_file(name) && meta.len() > 64 * 1024) {
+                return Err(invalid(format!("{id}/{name} is not a valid package file")));
             }
             bytes = bytes
                 .saturating_add(512)
@@ -180,11 +191,9 @@ fn unpack_into(archive: &Path, dir: &Path) -> Result<(), BackupError> {
                     .create(dir.join(id))
                     .map_err(invalid)?;
             }
-            [id, name]
-                if valid_id(id) && FILES.contains(name) && kind == tar::EntryType::Regular =>
-            {
+            [id, name] if valid_id(id) && package_file(name) && kind == tar::EntryType::Regular => {
                 let bytes = entry.size();
-                if bytes > remaining {
+                if bytes > remaining || (credential_file(name) && bytes > 64 * 1024) {
                     return Err(invalid("unpacked data exceeds the archive size"));
                 }
                 remaining -= bytes;
@@ -207,7 +216,10 @@ fn unpack_into(archive: &Path, dir: &Path) -> Result<(), BackupError> {
             _ => return Err(invalid(format!("unexpected entry {}", path.display()))),
         }
     }
-    if packages.values().any(|files| files.len() != FILES.len()) {
+    if packages
+        .values()
+        .any(|files| FILES.iter().any(|name| !files.contains(*name)))
+    {
         return Err(invalid("a package is missing files"));
     }
     Ok(())
@@ -230,6 +242,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("mcp");
         package(&src);
+        let credential = format!("oauth-{}.json", uuid::Uuid::new_v4());
+        fs::write(src.join("t3-code").join(&credential), "encrypted tokens").unwrap();
         fs::write(src.join("t3-code/.DS_Store"), "decoration").unwrap();
         fs::write(src.join("t3-code/.README.md.swp"), "editor state").unwrap();
         fs::create_dir(src.join("Stray folder")).unwrap();
@@ -252,6 +266,12 @@ mod tests {
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        let credential = target.join("t3-code").join(credential);
+        assert_eq!(fs::read_to_string(&credential).unwrap(), "encrypted tokens");
+        assert_eq!(
+            fs::metadata(&credential).unwrap().permissions().mode() & 0o777,
+            0o600
         );
         assert!(!target.join("t3-code/.DS_Store").exists());
         assert!(unpack(&archive_path, &target).is_err(), "never overwrite");

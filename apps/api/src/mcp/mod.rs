@@ -1,5 +1,6 @@
 //! Shared MCP packages. Each package actor owns its files and live connection.
 
+pub mod oauth;
 mod transport;
 pub(crate) use transport::METHODS;
 
@@ -34,6 +35,12 @@ pub enum Error {
         "The MCP connection failed. Check its setup; do not repeat a mutation whose outcome is unknown."
     )]
     Connection,
+    #[error("The owner needs to sign in to this MCP.")]
+    AuthRequired(Box<oauth::ConnectionStatus>),
+    #[error("The MCP requires OAuth authorization.")]
+    AuthChallenge(String),
+    #[error("The MCP authorization expired or was revoked. Sign in again.")]
+    OAuthRevoked,
     #[error("The MCP request timed out and may have completed. Check its outcome before retrying.")]
     Timeout,
     #[error("The MCP library is paused for a backup or update. Try again afterward.")]
@@ -237,9 +244,35 @@ pub struct Package {
 
 struct Slot {
     path: PathBuf,
-    connection: Option<transport::Connection>,
+    sessions: HashMap<Uuid, oauth::Session>,
+    oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     retired: bool,
     gate: Arc<crate::maintenance::Gate>,
+}
+
+impl Slot {
+    async fn package(&self) -> Result<Package, Error> {
+        if self.retired {
+            return Err(Error::NotFound);
+        }
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || read_package(&path))
+            .await
+            .map_err(|_| Error::Connection)?
+    }
+
+    async fn session(&mut self, bot: Uuid) -> Result<&mut oauth::Session, Error> {
+        if !self.sessions.contains_key(&bot) && self.sessions.len() >= 1024 {
+            return Err(Error::Invalid(
+                "Too many bot connections for this MCP. Restart before connecting another bot.",
+            ));
+        }
+        let session = self.sessions.entry(bot).or_default();
+        session
+            .load(&self.path, bot, self.oauth_key.as_deref())
+            .await?;
+        Ok(session)
+    }
 }
 
 #[derive(Clone)]
@@ -253,6 +286,7 @@ pub struct Library {
     root: PathBuf,
     gate: Arc<crate::maintenance::Gate>,
     slots: Actor<HashMap<String, Entry>>,
+    oauth_key: Option<Arc<crate::credentials::SecretKey>>,
 }
 
 impl Library {
@@ -261,13 +295,20 @@ impl Library {
             root,
             gate,
             slots: Actor::default(),
+            oauth_key: None,
         }
+    }
+
+    pub fn with_oauth_key(mut self, key: Option<Arc<crate::credentials::SecretKey>>) -> Self {
+        self.oauth_key = key;
+        self
     }
 
     async fn slot(&self, id: &PackageId) -> Result<Entry, Error> {
         let id = id.0.clone();
         let path = self.root.join(&id);
         let gate = self.gate.clone();
+        let oauth_key = self.oauth_key.clone();
         self.slots
             .call(move |slots| {
                 if !slots.contains_key(&id) && slots.len() >= 1024 {
@@ -281,7 +322,8 @@ impl Library {
                         epoch: Uuid::new_v4(),
                         actor: Actor::new(Slot {
                             path,
-                            connection: None,
+                            sessions: HashMap::new(),
+                            oauth_key,
                             retired: false,
                             gate,
                         }),
@@ -396,9 +438,10 @@ impl Library {
                     if slot.retired {
                         return Err(Error::NotFound);
                     }
-                    if let Some(mut connection) = slot.connection.take() {
-                        connection.shutdown().await;
-                    }
+                    futures_util::future::join_all(
+                        slot.sessions.values_mut().map(oauth::Session::close),
+                    )
+                    .await;
                     let path = slot.path.clone();
                     tokio::task::spawn_blocking(move || {
                         let parent = path.parent().expect("package parent");
@@ -434,44 +477,149 @@ impl Library {
         method: String,
         params: Value,
     ) -> Result<Value, Error> {
+        self.request_for(id, Uuid::nil(), method, params).await
+    }
+
+    pub async fn request_for(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        method: String,
+        params: Value,
+    ) -> Result<Value, Error> {
         self.installed_slot(id)
             .await?
             .actor
             .call_async(move |slot| {
                 Box::pin(async move {
                     let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    if slot.retired {
-                        return Err(Error::NotFound);
-                    }
-                    if slot.connection.is_none() {
-                        let path = slot.path.clone();
-                        let package = tokio::task::spawn_blocking(move || read_package(&path))
-                            .await
-                            .map_err(|_| Error::Connection)??;
-                        slot.connection = Some(
-                            transport::connect(
-                                &package.config,
-                                &slot.path,
-                                slot.path
-                                    .parent()
-                                    .and_then(Path::parent)
-                                    .expect("MCP data directory"),
-                            )
-                            .await?,
-                        );
-                    }
-                    let result = slot
-                        .connection
-                        .as_mut()
-                        .expect("connected MCP")
-                        .request(method, params)
-                        .await;
-                    if matches!(result, Err(Error::Connection | Error::Timeout))
-                        && let Some(mut connection) = slot.connection.take()
-                    {
-                        connection.shutdown().await;
-                    }
-                    result
+                    let package = slot.package().await?;
+                    let path = slot.path.clone();
+                    let key = slot.oauth_key.clone();
+                    let bot_id = match package.config {
+                        Transport::Stdio { .. } => Uuid::nil(),
+                        Transport::Http { .. } => bot_id,
+                    };
+                    let session = slot.session(bot_id).await?;
+                    session
+                        .request(
+                            &package.config,
+                            &path,
+                            bot_id,
+                            key.as_deref(),
+                            method,
+                            params,
+                        )
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn connection_status(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+    ) -> Result<oauth::ConnectionStatus, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let package = slot.package().await?;
+                    let bot_id = match package.config {
+                        Transport::Stdio { .. } => Uuid::nil(),
+                        Transport::Http { .. } => bot_id,
+                    };
+                    Ok(slot.session(bot_id).await?.status())
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn authorize(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        redirect_uri: String,
+    ) -> Result<oauth::Started, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    let key = slot.oauth_key.clone();
+                    let path = slot.path.clone();
+                    slot.session(bot_id)
+                        .await?
+                        .authorize(&package.config, &path, redirect_uri, key.as_deref())
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn complete_authorization(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        callback: oauth::Complete,
+    ) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    slot.package().await?;
+                    let key = slot.oauth_key.clone();
+                    let path = slot.path.clone();
+                    slot.session(bot_id)
+                        .await?
+                        .complete(&path, bot_id, key.as_deref(), callback)
+                        .await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn cancel_authorization(
+        &self,
+        id: &PackageId,
+        bot_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    slot.package().await?;
+                    slot.session(bot_id).await?.cancel(request_id);
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
+    pub async fn disconnect(&self, id: &PackageId, bot_id: Uuid) -> Result<(), Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    slot.package().await?;
+                    let path = slot.path.clone();
+                    slot.session(bot_id).await?.disconnect(&path, bot_id).await
                 })
             })
             .await

@@ -6,7 +6,8 @@ use rmcp::model::ClientRequest;
 use rmcp::service::RunningService;
 use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    AuthRequiredError, InsufficientScopeError, StreamableHttpClientTransport,
+    StreamableHttpClientTransportConfig, StreamableHttpError,
 };
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
@@ -63,7 +64,7 @@ pub(super) async fn connect(
             let service = tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport))
                 .await
                 .map_err(|_| Error::Timeout)?
-                .map_err(|_| Error::Connection)?;
+                .map_err(initialize_error)?;
             (service, None)
         }
         Transport::Stdio { command, args, env } => {
@@ -124,6 +125,9 @@ impl Connection {
                 .await
             {
                 Ok(Ok(response)) => response,
+                Ok(Err(rmcp::ServiceError::TransportSend(error))) => {
+                    return Err(transport_error(error.error.as_ref()));
+                }
                 Ok(Err(_)) => return Err(Error::Connection),
                 Err(_) => {
                     self.service.cancellation_token().cancel();
@@ -148,6 +152,55 @@ impl Connection {
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, process.child.wait()).await;
         }
         let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;
+    }
+}
+
+fn transport_error(error: &(dyn std::error::Error + 'static)) -> Error {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
+            match error {
+                StreamableHttpError::Client(http)
+                    if http.status() == Some(reqwest::StatusCode::UNAUTHORIZED) =>
+                {
+                    return Error::AuthChallenge(String::new());
+                }
+                StreamableHttpError::UnexpectedServerResponse(message)
+                    if message.starts_with("HTTP 401 Unauthorized:") =>
+                {
+                    return Error::AuthChallenge(String::new());
+                }
+                _ => {}
+            }
+        }
+        if let Some(auth) = error.downcast_ref::<AuthRequiredError>() {
+            return Error::AuthChallenge(auth.www_authenticate_header.clone());
+        }
+        if let Some(auth) = error.downcast_ref::<InsufficientScopeError>() {
+            return Error::AuthChallenge(auth.www_authenticate_header.clone());
+        }
+        if let Some(http) = error.downcast_ref::<reqwest::Error>()
+            && http.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+        {
+            return Error::AuthChallenge(String::new());
+        }
+        source = error.source();
+    }
+    Error::Connection
+}
+
+fn initialize_error(error: rmcp::service::ClientInitializeError) -> Error {
+    if let Some(challenge) = error.auth_challenge() {
+        return Error::AuthChallenge(challenge.to_owned());
+    }
+    match error {
+        rmcp::service::ClientInitializeError::TransportError { error, .. } => {
+            transport_error(error.error.as_ref())
+        }
+        rmcp::service::ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            initialize_error(*fallback)
+        }
+        _ => Error::Connection,
     }
 }
 
@@ -484,6 +537,37 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
         redirect_server.abort();
         target_server.abort();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_http_preserves_challenges_and_discovers_without_a_header() {
+        for challenge in [None, Some("Bearer scope=read:issues")] {
+            let router = axum::Router::new().route(
+                "/mcp",
+                post(move || async move {
+                    let mut response = StatusCode::UNAUTHORIZED.into_response();
+                    if let Some(challenge) = challenge {
+                        response
+                            .headers_mut()
+                            .insert("www-authenticate", challenge.parse().unwrap());
+                    }
+                    response
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let config = Transport::Http {
+                url: format!("http://{address}/mcp"),
+                headers: BTreeMap::new(),
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let result = connect(&config, dir.path(), dir.path()).await;
+            assert!(
+                matches!(result, Err(Error::AuthChallenge(ref found)) if found == challenge.unwrap_or(""))
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test]

@@ -203,7 +203,7 @@ impl Shell {
             div()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child("Skills, documentation and config are shared by all bots."),
+                .child("Skills, documentation and config are shared by all bots. OAuth accounts connect separately for each bot in its conversation."),
         );
         body = body.child(
             div().max_w(px(340.)).child(

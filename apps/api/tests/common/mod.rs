@@ -205,6 +205,7 @@ impl TestApp {
         }
         state.mcps.get_or_init(|| {
             else_api::mcp::Library::new(db._dir.path().join("mcp"), state.scheduler.gate().clone())
+                .with_oauth_key(state.secret_key.clone())
         });
         let state = Arc::new(state);
         let router = else_api::http::router(&config, state.clone());

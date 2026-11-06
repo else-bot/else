@@ -6,7 +6,9 @@ pub const SERVER_NAME: &str = "elsebot";
 pub const TOOL_NAMES: &[&str] = &[
     "mcp_list",
     "mcp_install",
+    "mcp_connection_status",
     "mcp_request",
+    "mcp_connect",
     "memory_bots",
     "memory_search",
     "memory_read",
@@ -54,6 +56,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
     "mcp_request",
+    "mcp_connect",
     "social_connect",
     "social_action",
     "delegate",
@@ -110,6 +113,10 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
 
     match name {
         "mcp_install" => json!({"id":args["id"],"name":args["name"]}),
+        "mcp_connect" => {
+            json!({"id":args["id"],"provider":args["provider"],"scopes":args["scopes"]})
+        }
+        "mcp_connection_status" => json!({"id":args["id"]}),
         "mcp_request" => {
             json!({"id":args["id"],"method":args["method"],"tool":args["params"]["name"],"effect":args["effect"]})
         }
