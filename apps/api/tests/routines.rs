@@ -87,6 +87,96 @@ async fn events(app: &TestApp, bot: &str) -> Vec<(String, Value)> {
 }
 
 #[tokio::test]
+async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
+    let h = harness().await;
+    let bot = h.app.main_bot().await;
+    let (turn, token) = h.running(&bot, GATE).await;
+    let routine = create(&h.app, &token, digest("Summarize my unread mail.")).await;
+    let patch = json!({ "routine_id": routine["id"], "name": "Daily digest", "cron": "0 8 * * *" });
+    let edited = tool(&h.app, &token, "routine_update", patch.clone()).await;
+    assert!(!edited.error, "{}", edited.body);
+    let retry = tool(&h.app, &token, "routine_update", patch).await;
+    assert!(!retry.error);
+    let rejected = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": routine["id"], "cron": "invalid" }),
+    )
+    .await;
+    assert!(rejected.error);
+    assert_eq!(
+        set_enabled(&h.app, &bot, routine["id"].as_str().unwrap(), false)
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let notices: Vec<_> = events(&h.app, &bot)
+        .await
+        .into_iter()
+        .filter(|(kind, data)| kind == "item.upsert" && data["item"]["routine_update"].is_object())
+        .map(|(_, data)| data["item"].clone())
+        .collect();
+    assert_eq!(notices.len(), 1, "only an actual bot edit leaves a notice");
+    let notice = &notices[0];
+    assert_eq!(notice["kind"], "status");
+    assert_eq!(notice["turn_id"], turn.to_string());
+    assert_eq!(
+        notice["routine_update"],
+        json!({ "routine_id": routine["id"], "name": "Daily digest" })
+    );
+    assert!(notice["created_at"].is_string());
+    assert!(notice["bot_task"].is_null());
+
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    assert_eq!(snapshot.status, StatusCode::OK);
+    let items = snapshot.body["items"].as_array().unwrap();
+    assert_eq!(items.last(), Some(notice));
+    assert!(items[items.len() - 2]["seq"].as_i64().unwrap() < notice["seq"].as_i64().unwrap());
+
+    let renamed = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": routine["id"], "name": "Weekly digest" }),
+    )
+    .await;
+    assert!(!renamed.error);
+    let before = notice["seq"].as_i64().unwrap() + 1;
+    let page = h
+        .app
+        .owner(
+            "GET",
+            &format!("/v1/bots/{bot}/conversation?limit=1&before_seq={before}"),
+            None,
+        )
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(
+        page.body["items"],
+        json!([notice]),
+        "later renames preserve history"
+    );
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let (next, _) = h.running(&bot, GATE).await;
+    let inputs = h.inputs(next).await;
+    let history = &inputs[0].history;
+    assert!(history.iter().any(|entry| entry.kind == "user"));
+    assert!(
+        history
+            .iter()
+            .all(|entry| !entry.text.starts_with("Updated routine:")),
+        "UI notices never enter rebuilt provider history as delegated tasks"
+    );
+    h.release(next).await;
+}
+
+#[tokio::test]
 async fn a_bot_manages_its_own_routines_over_mcp() {
     let h = harness().await;
     let main = h.app.main_bot().await;
@@ -337,6 +427,27 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     assert_eq!(owner.to_string(), mail, "the routine is the new bot's own");
     assert_eq!(conversation, owner_conversation(&h.app, &mail).await);
     assert_eq!(creator, child);
+    let edited = tool(
+        &h.app,
+        &child_token,
+        "routine_update",
+        json!({ "routine_id": saved["id"], "prompt": "Summarize unread mail and highlight urgent messages." }),
+    )
+    .await;
+    assert!(!edited.error, "{}", edited.body);
+    let history = h
+        .app
+        .owner("GET", &format!("/v1/bots/{mail}/conversation"), None)
+        .await;
+    let notice = history.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["routine_update"].is_object())
+        .unwrap();
+    assert_eq!(notice["routine_update"]["routine_id"], saved["id"]);
+    assert!(notice["bot_task"].is_null());
+    assert!(notice["bot_reply"].is_null());
     let foreign = tool(
         &h.app,
         &child_token,

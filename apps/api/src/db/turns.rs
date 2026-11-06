@@ -92,21 +92,28 @@ pub struct ItemRecord {
     pub reaction: Option<Json<Reaction>>,
     pub bot_task: Option<Json<BotTask>>,
     pub bot_reply: Option<Json<BotReply>>,
+    pub routine_update: Option<Json<RoutineUpdate>>,
     /// An owner message's ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RoutineUpdate {
+    pub routine_id: Uuid,
+    pub name: String,
 }
 
 pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kind, i.text,
     i.provider_id, i.created_at, i.hidden,
     CASE WHEN i.kind = 'user' THEN t.request_id END AS request_id, i.reaction,
-    CASE WHEN i.kind = 'status' AND i.conversation_id <> t.conversation_id THEN
+    CASE WHEN i.kind = 'status' AND i.routine_update IS NULL AND i.conversation_id <> t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.parent_bot_id)), 'sender_name', b.name, 'prompt', d.task)
          FROM delegations d JOIN bots b ON b.id = d.parent_bot_id WHERE d.child_turn_id = i.turn_id)
     END AS bot_task,
     CASE WHEN i.kind = 'status' AND i.conversation_id = t.conversation_id THEN
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
-    END AS bot_reply, i.parts";
+    END AS bot_reply, i.parts, i.routine_update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -662,6 +669,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
          FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')
+           AND i.routine_update IS NULL
            -- A child's reply reached this bot as its delegation outcome.
            AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
          ORDER BY t.turn_no, i.seq",
