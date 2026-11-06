@@ -67,6 +67,18 @@ impl Request {
 }
 
 impl Form {
+    pub(super) fn has_unsaved_work(&self, cx: &App) -> bool {
+        [
+            &self.address,
+            &self.password,
+            &self.username,
+            &self.imap_host,
+            &self.smtp_host,
+        ]
+        .into_iter()
+        .any(|field| !field.read(cx).value().trim().is_empty())
+            || self.authorization.is_some()
+    }
     pub(super) fn new(
         bots: Vec<Bot>,
         initial_bot: Option<Uuid>,

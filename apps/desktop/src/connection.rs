@@ -1,17 +1,20 @@
 //! The window's root: which server the desktop uses, and the setup screens
-//! that choose it. A connection is saved only after the server accepted its
-//! owner token, and saving replaces the whole messaging view, so nothing
-//! started for the previous server can reach the new one.
+//! that choose it. Saved servers own immutable clients and messaging sessions.
+//! Switching selects a session without rebinding requests or discarding drafts.
 
 mod backups;
 mod mcp;
+mod server_views;
+mod servers;
 mod settings;
 mod updates;
 mod view;
 
 use settings::Presentation;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, v_flex};
@@ -20,7 +23,7 @@ use gpui_kit::*;
 
 use crate::api::{Client, ClientError};
 use crate::app::ElseApp;
-use crate::config::{Origin, Profile};
+use crate::config::{Origin, Profile, ServerRegistry};
 use crate::launch::{
     KeyState, Launch, Limits, LocalServer, NoLocal, Phase, RemoteSeed, Step, this_machine,
 };
@@ -109,6 +112,7 @@ impl Draft {
 
 async fn verify(profile: Profile, client: Arc<Client>) -> Result<Verified, String> {
     match client.clone().capabilities().await {
+        Ok(caps) if caps.api_version.as_deref().is_some_and(|version| version != "v1") => Err("This server uses an unsupported API version. Update the desktop app before connecting.".into()),
         Ok(_) => Ok(Verified { profile, client }),
         Err(ClientError::Unauthorized) => Err("The server rejected this owner token.".into()),
         Err(err) => Err(err.to_string()),
@@ -116,6 +120,7 @@ async fn verify(profile: Profile, client: Arc<Client>) -> Result<Verified, Strin
 }
 
 struct Active {
+    id: Uuid,
     profile: Profile,
     client: Arc<Client>,
     app: Entity<ElseApp>,
@@ -134,9 +139,11 @@ enum Page {
 }
 
 struct Setup {
+    id: Uuid,
     presentation: Presentation,
     page: Page,
     draft: Draft,
+    name: Entity<InputState>,
     error: Option<String>,
     focus: FocusHandle,
     navigation_focus: [FocusHandle; 6],
@@ -148,6 +155,17 @@ pub struct Shell {
     key: Option<KeyState>,
     runtime: tokio::runtime::Handle,
     active: Option<Active>,
+    registry: ServerRegistry,
+    inactive: HashMap<Uuid, Active>,
+    servers: servers::Connections,
+    server_editor: Option<servers::Editor>,
+    server_menu: bool,
+    switch_attempt: Option<Uuid>,
+    notification_target: Option<(Uuid, Uuid, Uuid)>,
+    _switch: Option<Task<()>>,
+    connection_error: Option<String>,
+    server_updates: updates::View,
+    server_update_target: Option<Uuid>,
     setup: Option<Setup>,
     settings_focus: FocusHandle,
     updates: updates::View,
@@ -166,7 +184,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut launch = launch;
         let loaded = launch.store.clone().and_then(|store| store.load());
+        if let Err(error) = &loaded {
+            launch.store = Err(error.clone());
+        }
+        let registry = loaded.as_ref().cloned().unwrap_or_default();
+        let selected = registry
+            .selected
+            .and_then(|id| registry.find(id))
+            .map(|saved| saved.profile.clone());
         // The platform keeps one handler for the whole process.
         let this = cx.weak_entity();
         let handle = window.window_handle();
@@ -187,11 +214,24 @@ impl Shell {
             .ok()
             .map(|local| LocalServer::key_state(&local.key()));
         let updates = updates::View::new(&launch, &runtime, window, cx);
+        let server_updates = updates::View::new_server(&launch, &runtime, window, cx);
+        let servers = servers::Connections::new(&registry, &runtime, window, cx);
         let mut shell = Self {
             launch,
             key,
             runtime,
             active: None,
+            registry,
+            inactive: HashMap::new(),
+            servers,
+            server_editor: None,
+            server_menu: false,
+            switch_attempt: None,
+            notification_target: None,
+            _switch: None,
+            connection_error: loaded.err(),
+            server_updates,
+            server_update_target: None,
             setup: None,
             settings_focus: cx.focus_handle(),
             updates,
@@ -200,8 +240,8 @@ impl Shell {
             socials: None,
             email: None,
         };
-        match loaded {
-            Ok(Some(profile))
+        match selected {
+            Some(profile)
                 if shell
                     .launch
                     .local
@@ -211,7 +251,7 @@ impl Shell {
                 shell.open_setup(None, window, cx);
                 shell.start_local(window, cx);
             }
-            Ok(Some(profile)) => {
+            Some(profile) => {
                 match Client::new(
                     profile.origin.clone(),
                     &profile.token,
@@ -224,8 +264,7 @@ impl Shell {
                     }
                 }
             }
-            Ok(None) => shell.open_first(None, window, cx),
-            Err(err) => shell.open_first(Some(err), window, cx),
+            None => shell.open_first(shell.connection_error.clone(), window, cx),
         }
         shell
     }
@@ -241,9 +280,11 @@ impl Shell {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.setup = Some(Setup {
+            id: Uuid::new_v4(),
             presentation: Presentation::Onboarding,
             page: Page::Welcome,
             draft: Draft::new(),
+            name: cx.new(|cx| InputState::new(window, cx).placeholder("Server name")),
             error,
             focus,
             navigation_focus: std::array::from_fn(|_| cx.focus_handle()),
@@ -259,30 +300,64 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(saved) = self.registry.servers.iter().find(|s| s.profile == profile) else {
+            return;
+        };
+        let id = saved.id;
+        let widths = self
+            .active
+            .as_ref()
+            .map(|active| active.app.read(cx).panel_widths());
         self.clear_socials(window, cx);
+        self.backups = None;
+        self.mcp = None;
+        self.email = None;
         if let Some(previous) = self.active.take() {
-            previous
-                .app
-                .update(cx, |app, cx| app.dismiss_notifications(cx));
+            previous.app.update(cx, |app, cx| {
+                app.dismiss_notifications(cx);
+                app.set_hidden(true, window, cx);
+            });
+            self.inactive.insert(previous.id, previous);
+        }
+        if let Some(cached) = self.inactive.remove(&id).filter(|s| s.profile == profile) {
+            let hidden = self.settings_section().is_some();
+            cached.app.update(cx, |app, cx| {
+                if let Some(widths) = widths {
+                    app.set_panel_widths(widths, cx);
+                }
+                app.set_hidden(hidden, window, cx);
+            });
+            self.active = Some(cached);
+            cx.notify();
+            return;
         }
         let preferences = self
             .launch
             .store
             .as_ref()
-            .map(|store| crate::preferences::Preferences::load(store.preferences_path()))
+            .map(|store| {
+                crate::preferences::Preferences::load_for_server(
+                    store,
+                    id,
+                    self.registry.legacy_server == Some(id),
+                )
+            })
             .unwrap_or_default();
-        self.backups = None;
-        self.mcp = None;
-        self.email = None;
         let app = cx.new(|cx| ElseApp::new(client.clone(), preferences, window, cx));
-        let observer = cx.observe_in(&app, window, |shell, app, window, cx| {
-            if let Some(socials) = &shell.socials {
-                let available = app.read(cx).social_network_available();
-                socials.update(cx, |view, cx| view.set_available(available, window, cx));
+        if let Some(widths) = widths {
+            app.update(cx, |app, cx| app.set_panel_widths(widths, cx));
+        }
+        let observer = cx.observe_in(&app, window, move |shell, app, window, cx| {
+            if shell.active.as_ref().is_some_and(|active| active.id == id) {
+                if let Some(socials) = &shell.socials {
+                    let available = app.read(cx).social_network_available();
+                    socials.update(cx, |view, cx| view.set_available(available, window, cx));
+                }
+                cx.notify();
             }
-            cx.notify();
         });
         self.active = Some(Active {
+            id,
             profile,
             client,
             app,
@@ -298,6 +373,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|active| active.app.read(cx).notification_scope() != scope)
+        {
+            if let Some(id) = self
+                .inactive
+                .values()
+                .find(|session| session.app.read(cx).notification_scope() == scope)
+                .map(|session| session.id)
+            {
+                self.notification_target = Some((id, scope, bot));
+                self.select_server(id, window, cx);
+            }
+            return;
+        }
         let Some(active) = &self.active else { return };
         let app = active.app.clone();
         if !app.update(cx, |app, cx| app.open_notification(scope, bot, window, cx)) {
@@ -416,12 +507,15 @@ impl Shell {
             }
         };
         let revision = setup.draft.begin();
+        let setup_id = setup.id;
         let mut steps = local.connect(client.clone(), &self.runtime, Limits::default());
         setup._attempt = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = loop {
                 match steps.recv().await {
                     Some(Step::Phase(phase)) => {
-                        let _ = this.update(cx, |shell, cx| shell.progress(revision, phase, cx));
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.progress(setup_id, revision, phase, cx)
+                        });
                     }
                     Some(Step::Done(result)) => {
                         break result
@@ -432,7 +526,7 @@ impl Shell {
                 }
             };
             let _ = this.update_in(cx, |shell, window, cx| {
-                shell.finish(revision, outcome, window, cx)
+                shell.finish(setup_id, revision, outcome, window, cx)
             });
         }));
         cx.notify();
@@ -450,6 +544,21 @@ impl Shell {
         }
         setup.error = None;
         let (origin, token) = (form.origin.read(cx).value(), form.token.read(cx).value());
+        let token = if token.trim().is_empty() {
+            match self.server_editor {
+                Some(servers::Editor::Edit(id)) => self
+                    .registry
+                    .find(id)
+                    .filter(|saved| {
+                        Origin::parse(&origin).ok().as_ref() == Some(&saved.profile.origin)
+                    })
+                    .map(|saved| saved.profile.token.expose().to_owned())
+                    .unwrap_or_else(|| token.to_string()),
+                _ => token.to_string(),
+            }
+        } else {
+            token.to_string()
+        };
         let prepared = Profile::parse(&origin, &token).and_then(|profile| {
             let client = Client::new(profile.origin.clone(), &profile.token, self.runtime.clone())?;
             Ok((profile, Arc::new(client)))
@@ -462,27 +571,30 @@ impl Shell {
                 return;
             }
         };
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.profile == profile && active.app.read(cx).connected())
+        if self.server_editor.is_none()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.profile == profile && active.app.read(cx).connected())
         {
             self.cancel(window, cx);
             window.close_dialog(cx);
             return;
         }
         let revision = setup.draft.begin();
+        let setup_id = setup.id;
         setup._attempt = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = verify(profile, client).await;
             let _ = this.update_in(cx, |shell, window, cx| {
-                shell.finish(revision, outcome, window, cx)
+                shell.finish(setup_id, revision, outcome, window, cx)
             });
         }));
         cx.notify();
     }
 
-    fn progress(&mut self, revision: u64, phase: Phase, cx: &mut Context<Self>) {
+    fn progress(&mut self, setup_id: Uuid, revision: u64, phase: Phase, cx: &mut Context<Self>) {
         if let Some(setup) = self.setup.as_mut()
+            && setup.id == setup_id
             && setup.draft.progress(revision, phase)
         {
             cx.notify();
@@ -491,6 +603,7 @@ impl Shell {
 
     fn finish(
         &mut self,
+        setup_id: Uuid,
         revision: u64,
         outcome: Result<Verified, String>,
         window: &mut Window,
@@ -499,7 +612,7 @@ impl Shell {
         let Some(setup) = self.setup.as_mut() else {
             return;
         };
-        if !setup.draft.accepts(revision) {
+        if setup.id != setup_id || !setup.draft.accepts(revision) {
             return;
         }
         let verified = setup.draft.finish(revision, outcome);
@@ -513,26 +626,100 @@ impl Shell {
         let Some(Verified { profile, client }) = verified else {
             return;
         };
+        let editing = match self.server_editor {
+            Some(servers::Editor::Edit(id)) => Some(id),
+            _ => None,
+        };
+        let name = self
+            .setup
+            .as_ref()
+            .map(|setup| setup.name.read(cx).value().trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if matches!(self.server_editor, Some(servers::Editor::Add))
+            && self
+                .registry
+                .servers
+                .iter()
+                .any(|saved| saved.profile.origin == profile.origin)
+        {
+            self.setup.as_mut().unwrap().error = Some(
+                "This server address is already saved. Edit its existing connection instead."
+                    .into(),
+            );
+            return;
+        }
+        let mut registry = self.registry.clone();
+        let id = match registry.upsert(profile.clone(), name, editing) {
+            Ok(id) => id,
+            Err(err) => {
+                self.setup.as_mut().unwrap().error = Some(err);
+                return;
+            }
+        };
+        let previous = self
+            .active
+            .as_ref()
+            .filter(|session| session.id == id)
+            .or_else(|| self.inactive.get(&id));
+        if previous.is_some_and(|session| {
+            session.profile != profile && session.app.read(cx).has_unsaved_work(cx)
+        }) {
+            self.setup.as_mut().unwrap().error = Some("This server has unsent drafts or pending messages. Finish them before changing its address or owner token. You can still rename it.".into());
+            return;
+        }
+        let settings_open = self.settings_section().is_some();
+        let activate = !settings_open || self.active.as_ref().is_some_and(|active| active.id == id);
+        if activate {
+            registry.selected = Some(id);
+        }
         if let Err(err) = self
             .launch
             .store
-            .clone()
-            .and_then(|store| store.save(&profile))
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|store| store.save(&registry))
         {
-            setup.error = Some(err);
+            self.setup.as_mut().unwrap().error = Some(err);
             return;
         }
-        if self.settings_section().is_some() {
-            window.close_dialog(cx);
+        if self
+            .inactive
+            .get(&id)
+            .is_some_and(|session| session.profile != profile)
+            && let Some(retired) = self.inactive.remove(&id)
+        {
+            retired
+                .app
+                .update(cx, |app, cx| app.dismiss_notifications(cx));
         }
-        self.setup = None;
-        self.activate(profile, client, window, cx);
+        self.registry = registry;
+        self.servers
+            .refresh(&self.registry, &self.runtime, window, cx);
+        self.server_editor = None;
+        if activate {
+            if settings_open {
+                window.close_dialog(cx);
+            }
+            self.setup = None;
+            self.activate(profile, client, window, cx);
+            if settings_open {
+                self.open_settings(window, cx);
+            }
+        } else {
+            if let Some(setup) = &mut self.setup {
+                setup.page = Page::Welcome;
+            }
+        }
+        cx.notify();
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_socials(window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();
+            self.server_updates.dismiss();
+            self.server_editor = None;
+            self.server_menu = false;
             self.backups = None;
             self.mcp = None;
             self.email = None;
@@ -572,7 +759,7 @@ fn prefill_origin_changed(bound: Option<&Origin>, raw: &str) -> bool {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let root =
             v_flex()
                 .key_context(SHELL_CONTEXT)
@@ -620,6 +807,21 @@ impl Render for Shell {
             return root;
         };
         root.child(self.render_bar(active, cx))
+            .when_some(
+                self.connection_error
+                    .clone()
+                    .filter(|_| self.settings_section().is_none()),
+                |root, error| {
+                    root.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                },
+            )
             .child(div().flex_1().min_h_0().w_full().child(active.app.clone()))
     }
 }

@@ -4,50 +4,28 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, Theme, h_flex};
 
 impl Shell {
-    pub(super) fn render_bar(&self, active: &Active, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let app = active.app.read(cx);
-        let (connected, (status, _)) = (app.connected(), app.status_text());
-        let origin = active.profile.origin.as_str().to_owned();
-        let detail: SharedString = format!("{origin} · {status}").into();
-        let tooltip = detail.clone();
-        let label: SharedString = if connected { origin.into() } else { status };
+    pub(super) fn render_bar(&self, _active: &Active, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
         let content = h_flex()
             .flex_1()
             .min_w_0()
             .gap_2()
             .items_center()
+            .child(self.render_server_switcher("topbar-server-switcher", cx))
             .child(
-                h_flex()
-                    .id("server-status")
-                    .min_w_0()
-                    .gap_1p5()
-                    .items_center()
-                    .aria_label(detail)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size_1p5()
-                            .rounded_full()
-                            .bg(if connected {
-                                theme.success
-                            } else {
-                                theme.danger
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(label),
-                    ),
+                Button::new("topbar-add-server")
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .ghost()
+                    .xsmall()
+                    .label("+")
+                    .accessibility_label("Add server")
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.open_server_editor(servers::Editor::Add, window, cx)
+                    })),
             )
             .child(div().flex_1())
             .child(
@@ -56,7 +34,11 @@ impl Shell {
                     .track_focus(&self.settings_focus)
                     .cursor_pointer()
                     .icon(IconName::Settings)
-                    .label("Settings")
+                    .label(if cfg!(target_os = "macos") {
+                        "Settings ⌘,"
+                    } else {
+                        "Settings Ctrl+,"
+                    })
                     .xsmall()
                     .ghost()
                     .on_click(cx.listener(|shell, _, window, cx| shell.open_settings(window, cx))),

@@ -39,16 +39,29 @@ impl Shell {
         self.select_settings(SettingsSection::Email, window, cx);
     }
 
-    fn open_email(&mut self, bot: Option<uuid::Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_email(
+        &mut self,
+        bot: Option<uuid::Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = &self.active else {
             return;
         };
+        let owner = active.id;
         let client = active.client.clone();
         let view = cx.new(|cx| crate::email::EmailSettings::new(client, bot, window, cx));
         let subscription = cx.subscribe_in(
             &view,
             window,
-            |shell, _, event: &crate::email::OpenBot, window, cx| {
+            move |shell, _, event: &crate::email::OpenBot, window, cx| {
+                if !shell
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.id == owner)
+                {
+                    return;
+                }
                 let app = shell.active.as_ref().map(|active| active.app.clone());
                 window.close_dialog(cx);
                 shell.cancel(window, cx);
@@ -75,6 +88,8 @@ impl Shell {
         if self.settings_section().is_some() {
             self.cancel(window, cx);
         }
+        self.server_editor = None;
+        self.server_update_target = None;
         let Some(active) = &self.active else { return };
         let profile = active.profile.clone();
         let local = self
@@ -113,7 +128,7 @@ impl Shell {
             }) {
                 px(760.)
             } else {
-                px(560.)
+                px(660.)
             };
             dialog
                 .w((viewport.width - px(64.)).min(px(1040.)))
@@ -139,7 +154,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn select_settings(
+    pub(super) fn select_settings(
         &mut self,
         section: SettingsSection,
         window: &mut Window,
@@ -187,6 +202,7 @@ impl Shell {
             self.open_email(None, window, cx);
         }
         if section == SettingsSection::Updates {
+            self.server_update_target = None;
             self.update_action(super::updates::Action::RefreshWork, cx);
         }
     }
@@ -242,15 +258,38 @@ impl Shell {
                     .pb_2()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("WORKSPACE"),
+                    .child("THIS APP"),
             )
             .child(nav_item(
                 "settings-server",
-                "Server",
+                "Servers",
                 IconName::Server,
                 SettingsSection::Server,
                 &setup.navigation_focus[0],
             ))
+            .child(nav_item(
+                "settings-updates",
+                "App updates",
+                IconName::Download,
+                SettingsSection::Updates,
+                &setup.navigation_focus[5],
+            ))
+            .child(
+                div()
+                    .px_2()
+                    .pt_6()
+                    .pb_2()
+                    .text_xs()
+                    .text_color(theme.primary)
+                    .truncate()
+                    .child(
+                        self.active
+                            .as_ref()
+                            .and_then(|active| self.registry.find(active.id))
+                            .map(|saved| saved.name.clone())
+                            .unwrap_or_else(|| "Server settings".to_owned()),
+                    ),
+            )
             .child(nav_item(
                 "settings-email",
                 "Email",
@@ -278,13 +317,6 @@ impl Shell {
                 IconName::CloudUpload,
                 SettingsSection::Backups,
                 &setup.navigation_focus[4],
-            ))
-            .child(nav_item(
-                "settings-updates",
-                "Updates",
-                IconName::RefreshCw,
-                SettingsSection::Updates,
-                &setup.navigation_focus[5],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
@@ -306,6 +338,29 @@ impl Shell {
                 .child(div().p_8().w_full().child(body))
                 .overflow_y_scrollbar()
                 .into_any_element()
+        };
+        let body = if matches!(
+            section,
+            SettingsSection::Email
+                | SettingsSection::Socials
+                | SettingsSection::Mcp
+                | SettingsSection::Backups
+        ) {
+            v_flex()
+                .size_full()
+                .min_h_0()
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .justify_end()
+                        .px_8()
+                        .pt_5()
+                        .child(self.render_server_identity(cx)),
+                )
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element()
+        } else {
+            body
         };
         v_flex()
             .id("app-settings")
@@ -333,6 +388,7 @@ impl Shell {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Settings"),
                     )
+                    .child(self.render_server_switcher("settings-server-switcher", cx))
                     .child(
                         Button::new("app-settings-close")
                             .focus_ring(false)
@@ -340,12 +396,28 @@ impl Shell {
                             .icon(IconName::Close)
                             .ghost()
                             .small()
-                            .accessibility_label("Close settings")
+                            .label("Esc")
+                            .accessibility_label("Close settings, Escape")
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.cancel(window, cx);
                                 window.close_dialog(cx);
                             })),
                     ),
+            )
+            .when_some(
+                self.connection_error
+                    .clone()
+                    .filter(|_| section != SettingsSection::Server),
+                |panel, error| {
+                    panel.child(
+                        div()
+                            .px_5()
+                            .py_2()
+                            .text_xs()
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                },
             )
             .child(
                 h_flex()
@@ -373,6 +445,35 @@ impl Shell {
     }
 
     fn render_server_settings(
+        &self,
+        setup: &Setup,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.server_update_target.is_some() {
+            return v_flex()
+                .gap_4()
+                .child(
+                    Button::new("server-update-back")
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .ghost()
+                        .small()
+                        .label("Back to servers")
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.close_server_update(window, cx)
+                        })),
+                )
+                .child(self.render_updates(cx))
+                .into_any_element();
+        }
+        if self.server_editor.is_none() {
+            return self.render_server_list(cx);
+        }
+        self.render_connection_editor(setup, window, cx)
+    }
+
+    fn render_connection_editor(
         &self,
         setup: &Setup,
         window: &Window,
@@ -468,12 +569,36 @@ impl Shell {
                     })),
             );
         let mut content = v_flex()
-            .child(section_heading(
-                "Server",
-                "Connection settings for your workspace.",
+            .child(
+                Button::new("connection-editor-back")
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .ghost()
+                    .small()
+                    .label("Back to servers")
+                    .on_click(
+                        cx.listener(|shell, _, window, cx| shell.close_server_editor(window, cx)),
+                    ),
+            )
+            .child(div().pt_4().child(section_heading(
+                if matches!(self.server_editor, Some(servers::Editor::Edit(_))) {
+                    "Edit server"
+                } else {
+                    "Add server"
+                },
+                "Test the connection before saving it.",
                 cx,
-            ))
+            )))
             .child(div().h_6())
+            .child(settings_row(
+                "Name",
+                "A name for this connection",
+                Input::new(&setup.name)
+                    .focus_ring(false)
+                    .aria_label("Server name"),
+                stacked,
+                theme,
+            ))
             .child(settings_row(
                 "Run bots on",
                 "Choose a location",
@@ -617,7 +742,7 @@ impl Shell {
                         .label(if busy.is_some() {
                             "Connecting…"
                         } else {
-                            "Save connection"
+                            "Test and save ↵"
                         })
                         .primary()
                         .loading(busy.is_some())

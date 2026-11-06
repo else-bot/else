@@ -194,6 +194,9 @@ pub(crate) struct SocialsView {
 }
 
 impl SocialsView {
+    pub(crate) fn has_unsaved_work(&self) -> bool {
+        self.busy || self.form.is_some()
+    }
     pub(crate) fn new(
         client: Arc<Client>,
         bots: Vec<Bot>,

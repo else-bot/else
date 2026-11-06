@@ -37,6 +37,13 @@ pub struct OpenBot(pub Uuid);
 impl EventEmitter<OpenBot> for EmailSettings {}
 
 impl EmailSettings {
+    pub(crate) fn has_unsaved_work(&self, cx: &App) -> bool {
+        self.busy
+            || self
+                .form
+                .as_ref()
+                .is_some_and(|form| form.has_unsaved_work(cx))
+    }
     pub fn new(
         client: Arc<Client>,
         initial_bot: Option<Uuid>,

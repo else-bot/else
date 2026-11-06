@@ -848,10 +848,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".else/data")).unwrap();
         let saved = dir.path().join(".config/else-bot/desktop.json");
         let profile = Profile::parse("https://remote.example.com", TOKEN).unwrap();
-        ProfileStore::at(saved.clone()).save(&profile).unwrap();
+        let mut registry = crate::config::ServerRegistry::default();
+        let id = registry.upsert(profile.clone(), None, None).unwrap();
+        registry.selected = Some(id);
+        ProfileStore::at(saved.clone()).save(&registry).unwrap();
         let launch = Launch::discover(env(&[("HOME", dir.path().to_str().unwrap().into())]), None);
         assert_eq!(store_path(&launch), saved);
-        assert_eq!(launch.store.unwrap().load().unwrap(), Some(profile));
+        assert_eq!(launch.store.unwrap().load().unwrap(), registry);
     }
 
     #[test]

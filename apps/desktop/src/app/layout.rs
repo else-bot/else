@@ -121,6 +121,21 @@ impl ElseApp {
         self.save_preferences(cx);
     }
 
+    pub(crate) fn panel_widths(&self) -> (f32, f32) {
+        (
+            self.preferences.sidebar_width,
+            self.preferences.details_width,
+        )
+    }
+
+    pub(crate) fn set_panel_widths(&mut self, widths: (f32, f32), cx: &mut Context<Self>) {
+        if self.panel_widths() != widths {
+            self.preferences.sidebar_width = widths.0;
+            self.preferences.details_width = widths.1;
+            self.save_preferences(cx);
+        }
+    }
+
     fn save_preferences(&mut self, cx: &mut Context<Self>) {
         self._save_preferences = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
