@@ -182,7 +182,7 @@ impl ElseApp {
                     .py_2()
                     .rounded(theme.radius_lg)
                     .bg(theme.secondary)
-                    .child(text.render())
+                    .child(text.render(cx))
             } else {
                 card.px_3p5()
                     .py_2()
@@ -190,7 +190,7 @@ impl ElseApp {
                     .border_1()
                     .border_color(theme.border.opacity(0.6))
                     .bg(theme.sidebar.opacity(0.6))
-                    .child(text.render())
+                    .child(text.render(cx))
             }
         };
         // Wrapped text needs a definite width.
@@ -302,7 +302,7 @@ impl ElseApp {
                             if item.bot_reply.is_some() && item.text.trim().is_empty() {
                                 div().child("Finished without a reply.").into_any_element()
                             } else {
-                                text.render()
+                                text.render(cx)
                             },
                         ));
                 } else if !user && run.first && turn.and_then(|t| t.routine.as_ref()).is_none() {

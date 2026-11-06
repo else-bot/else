@@ -3,11 +3,14 @@ use super::images::{MessageImages, UnavailableImage, without_images};
 use super::link_target::LinkTarget;
 use super::{ElseApp, RowKey};
 use crate::attachments::{Attachment, MessagePart, file_id, file_size, input_content};
-use gpui_kit::base::text::{MarkdownExtensions, TextView};
+use gpui_kit::base::FocusableExt;
+use gpui_kit::base::text::{MarkdownExtensions, TextView, TextViewStyle};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputContent;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, IconName, Sizable, WindowExt, h_flex};
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -273,7 +276,7 @@ impl RowText {
         true
     }
 
-    pub(super) fn render(&self) -> AnyElement {
+    pub(super) fn render(&self, cx: &App) -> AnyElement {
         let mentions = self.mentions.clone();
         let files = self.files.clone();
         let preview_files = files.clone();
@@ -312,6 +315,47 @@ impl RowText {
                 })
                 .into_any_element(),
             Widget::Markdown { state, .. } => TextView::new(state)
+                .style(
+                    TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                        .with_code_background(cx.theme().muted)
+                        .with_link(cx.theme().link)
+                        .with_code_block(
+                            StyleRefinement::default()
+                                .rounded(cx.theme().radius)
+                                .pt(px(36.)),
+                        )
+                        .with_table(StyleRefinement::default().rounded(cx.theme().radius))
+                        .with_table_head(
+                            StyleRefinement::default()
+                                .bg(cx.theme().table_head)
+                                .text_color(cx.theme().table_head_foreground),
+                        ),
+                )
+                .code_block_actions(|block, _, cx| {
+                    let code = block.code();
+                    h_flex()
+                        .gap_2()
+                        .font_family(cx.theme().font_family.clone())
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .children(block.lang())
+                        .child(
+                            Button::new("copy-code")
+                                .ghost()
+                                .xsmall()
+                                .focus_ring(false)
+                                .cursor_pointer()
+                                .icon(IconName::Copy)
+                                .accessibility_label("Copy code")
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        code.to_string(),
+                                    ));
+                                    window.push_notification("Code copied to clipboard.", cx);
+                                }),
+                        )
+                })
                 .markdown_extensions(
                     MarkdownExtensions::default()
                         .plugin(MentionPlugin(mentions))
@@ -342,7 +386,7 @@ impl RowText {
         gpui_kit::component::v_flex()
             .w_full()
             .gap_2()
-            .children(self.quote.as_ref().map(|quote| quote.render()))
+            .children(self.quote.as_ref().map(|quote| quote.render(cx)))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))
             .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
             .into_any_element()
