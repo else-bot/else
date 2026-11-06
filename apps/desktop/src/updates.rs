@@ -8,7 +8,7 @@ mod release;
 
 use std::ffi::OsString;
 use std::io::{Read as _, Seek as _, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -82,7 +82,7 @@ pub enum Operation {
     Ready { version: String },
     Failed(String),
     Restarting,
-    Relaunched,
+    RestartScheduled,
     RestartFailed(String),
 }
 
@@ -125,7 +125,7 @@ impl Snapshot {
             Operation::Preparing
                 | Operation::Installing
                 | Operation::Restarting
-                | Operation::Relaunched
+                | Operation::RestartScheduled
         )
     }
 
@@ -142,7 +142,7 @@ impl Snapshot {
                     "{version} is installed; restart else.bot to use it."
                 ));
             }
-            Operation::Restarting | Operation::Relaunched => {
+            Operation::Restarting | Operation::RestartScheduled => {
                 return Some("else.bot is restarting.".into());
             }
             Operation::Idle | Operation::Failed(_) | Operation::RestartFailed(_) => {}
@@ -167,7 +167,9 @@ impl Snapshot {
         }
         match &self.operation {
             Operation::Ready { .. } | Operation::RestartFailed(_) => None,
-            Operation::Restarting | Operation::Relaunched => Some("else.bot is restarting.".into()),
+            Operation::Restarting | Operation::RestartScheduled => {
+                Some("else.bot is restarting.".into())
+            }
             _ => Some("Install the update before restarting.".into()),
         }
     }
@@ -295,12 +297,13 @@ struct Settings {
     check_limit: Duration,
     work_limit: Duration,
     relaunch: Relaunch,
+    parent_pid: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Relaunch {
     Bundle,
-    Launcher { grace: Duration },
+    Launcher,
 }
 
 impl Default for Settings {
@@ -312,12 +315,11 @@ impl Default for Settings {
             work_every: Duration::from_secs(10),
             check_limit: Duration::from_secs(30),
             work_limit: Duration::from_secs(10),
+            parent_pid: std::process::id(),
             relaunch: if cfg!(target_os = "macos") {
                 Relaunch::Bundle
             } else {
-                Relaunch::Launcher {
-                    grace: Duration::from_secs(2),
-                }
+                Relaunch::Launcher
             },
         }
     }
@@ -392,7 +394,7 @@ enum Event {
     Operation(Operation),
     Output(Vec<u8>),
     Installed(Result<Version, String>),
-    Relaunched(Result<(), String>),
+    RestartScheduled(Result<(), String>),
 }
 
 struct Actor {
@@ -514,10 +516,10 @@ impl Actor {
                 let text = self.log.text().to_owned();
                 self.state.send_modify(|state| state.output = text);
             }
-            Event::Relaunched(result) => {
+            Event::RestartScheduled(result) => {
                 self.state.send_modify(|state| {
                     state.operation = match result {
-                        Ok(()) => Operation::Relaunched,
+                        Ok(()) => Operation::RestartScheduled,
                         Err(why) => Operation::RestartFailed(why),
                     }
                 });
@@ -657,9 +659,10 @@ impl Actor {
         };
         self.state
             .send_modify(|state| state.operation = Operation::Restarting);
-        let (home, relaunch_target, events) = (
+        let (home, relaunch_target, parent_pid, events) = (
             self.installation.home().to_owned(),
             self.settings.relaunch,
+            self.settings.parent_pid,
             self.events.clone(),
         );
         tokio::spawn(async move {
@@ -670,10 +673,10 @@ impl Actor {
                         "{installed} is installed now, not {version}; check for updates again."
                     ));
                 }
-                relaunch(&home, relaunch_target).await
+                relaunch(&home, relaunch_target, parent_pid).await
             }
             .await;
-            let _ = events.send(Event::Relaunched(result)).await;
+            let _ = events.send(Event::RestartScheduled(result)).await;
         });
     }
 }
@@ -891,32 +894,44 @@ fn failure(log: &Path, status: &str, component: Component) -> String {
     )
 }
 
-async fn relaunch(home: &Path, target: Relaunch) -> Result<(), String> {
-    let grace = match target {
-        Relaunch::Bundle => return open_bundle(home).await,
-        Relaunch::Launcher { grace } => grace,
+async fn relaunch(home: &Path, target: Relaunch, parent_pid: u32) -> Result<(), String> {
+    let (program, argument) = match target {
+        Relaunch::Bundle => (
+            PathBuf::from("/usr/bin/open"),
+            bundle_path(home).await?.into_os_string(),
+        ),
+        Relaunch::Launcher => (home.join("bin/elsebot"), OsString::from("desktop")),
     };
-    let (path, log) = private_log(home, DESKTOP_LOG, false)?;
-    let program = home.join("bin/elsebot");
-    let mut child = detached(&program, home, &log)
-        .and_then(|mut command| command.arg("desktop").spawn())
-        .map_err(|err| format!("Cannot run {}: {err}.", program.display()))?;
-    match tokio::time::timeout(grace, child.wait()).await {
-        Err(_) => {
-            tokio::spawn(async move { child.wait().await });
-            Ok(())
-        }
-        Ok(status) => Err(format!(
-            "The updated app stopped right away ({}). The log is {}.",
-            status.map_or_else(|err| err.to_string(), |status| status.to_string()),
-            path.display()
-        )),
+    if !std::fs::metadata(&program)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    {
+        return Err(format!(
+            "Cannot run {}: it must be an executable file.",
+            program.display()
+        ));
     }
+    let (_, log) = private_log(home, DESKTOP_LOG, false)?;
+    let mut helper = detached(Path::new("/bin/sh"), home, &log)
+        .and_then(|mut command| {
+            command
+                .args([
+                    "-c",
+                    r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done
+                   shift
+                   exec "$@""#,
+                    "else-restart",
+                ])
+                .arg(parent_pid.to_string())
+                .arg(&program)
+                .arg(argument)
+                .spawn()
+        })
+        .map_err(|err| format!("Cannot schedule the app restart: {err}."))?;
+    tokio::spawn(async move { helper.wait().await });
+    Ok(())
 }
 
-/// macOS: a new instance of the bundle the installer published, through
-/// LaunchServices. `open -n`, because this instance still runs.
-async fn open_bundle(home: &Path) -> Result<(), String> {
+async fn bundle_path(home: &Path) -> Result<PathBuf, String> {
     let marker = home.join("config/elsebot.env");
     let app = tokio::process::Command::new("/bin/bash")
         .args(["-c", ". \"$1\" && printf %s \"${ELSEBOT_APP:-}\"", "-"])
@@ -937,30 +952,12 @@ async fn open_bundle(home: &Path) -> Result<(), String> {
             marker.display()
         ));
     }
-    let opened = tokio::process::Command::new("/usr/bin/open")
-        .arg("-n")
-        .arg(&app)
-        .current_dir("/")
-        .env_clear()
-        .envs(child_env(home))
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(15), opened).await {
-        Ok(Ok(out)) if out.status.success() => Ok(()),
-        Ok(Ok(out)) => Err(format!(
-            "macOS could not open {app}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Ok(Err(err)) => Err(format!("Cannot run open: {err}.")),
-        Err(_) => Err(format!("macOS did not open {app} within 15 s.")),
-    }
+    Ok(PathBuf::from(app))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::AtomicU16;
     use tokio::io::AsyncWriteExt as _;
 
@@ -1000,6 +997,7 @@ mod tests {
     struct Home {
         dir: tempfile::TempDir,
         repo: String,
+        parent: std::process::Child,
     }
 
     impl Home {
@@ -1025,7 +1023,12 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self { dir, repo }
+            let parent = std::process::Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            Self { dir, repo, parent }
         }
 
         fn home(&self) -> PathBuf {
@@ -1041,10 +1044,9 @@ mod tests {
         fn settings(&self) -> Settings {
             Settings {
                 repo: self.repo.clone(),
+                parent_pid: self.parent.id(),
                 work_every: Duration::from_millis(100),
-                relaunch: Relaunch::Launcher {
-                    grace: Duration::from_millis(300),
-                },
+                relaunch: Relaunch::Launcher,
                 ..Settings::default()
             }
         }
@@ -1077,6 +1079,13 @@ mod tests {
         }
     }
 
+    impl Drop for Home {
+        fn drop(&mut self) {
+            drop(self.parent.stdin.take());
+            self.parent.wait().unwrap();
+        }
+    }
+
     async fn until(
         state: &mut watch::Receiver<Snapshot>,
         what: &str,
@@ -1101,6 +1110,30 @@ mod tests {
     }
 
     const SWITCH: &str = "case \"$*\" in *--server-only*) pointer=server-current ;; *) pointer=app-current ;; esac; ln -sfn versions/0.0.20 \"$ELSE_HOME/$pointer\"";
+
+    #[tokio::test]
+    async fn a_relaunch_waits_for_the_original_app_to_exit() {
+        let mut home = Home::new("exec sleep 5");
+        relaunch(&home.home(), home.settings().relaunch, home.parent.id())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let launched_early = !home.calls().is_empty();
+        drop(home.parent.stdin.take());
+        home.parent.wait().unwrap();
+        assert!(
+            !launched_early,
+            "replacement started while the original app was still running"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while home.calls().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(home.calls()[0].starts_with("desktop cwd=/ "));
+    }
 
     #[tokio::test]
     async fn an_update_installed_elsewhere_still_offers_restart() {
@@ -1133,7 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_app_only_update_streams_its_output_then_restarts() {
-        let home = Home::new(&format!(
+        let mut home = Home::new(&format!(
             "case \"$1\" in\n\
              update)\n\
                printf '\\033[1m==> Build\\033[0m\\n10%%\\r100%%\\ncaf\\303'\n\
@@ -1173,11 +1206,21 @@ mod tests {
         let restarted = until(&mut state, "relaunched", |s| {
             matches!(
                 s.operation,
-                Operation::Relaunched | Operation::RestartFailed(_)
+                Operation::RestartScheduled | Operation::RestartFailed(_)
             )
         })
         .await;
-        assert_eq!(restarted.operation, Operation::Relaunched);
+        assert_eq!(restarted.operation, Operation::RestartScheduled);
+        assert_eq!(home.calls().len(), 1, "the original app is still running");
+        drop(home.parent.stdin.take());
+        home.parent.wait().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while home.calls().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         let calls = home.calls();
         let home_dir = home.home();
         assert_eq!(
@@ -1314,9 +1357,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_relaunch_that_exits_at_once_is_reported() {
+    async fn a_relaunch_with_a_nonexecutable_launcher_is_reported() {
         let home = Home::new(&format!(
-            "case \"$1\" in update) {SWITCH} ;; desktop) echo 'no display' >&2; exit 4 ;; esac"
+            "case \"$1\" in update) {SWITCH} ;; desktop) exit 0 ;; esac"
         ));
         let (commands, mut state) = home.start(None);
         until(&mut state, "offered", available).await;
@@ -1325,28 +1368,54 @@ mod tests {
             matches!(s.operation, Operation::Ready { .. })
         })
         .await;
+        let program = home.home().join("bin/elsebot");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
         commands.restart().unwrap();
         let failed = until(&mut state, "restart failed", |s| {
             matches!(s.operation, Operation::RestartFailed(_))
         })
         .await;
-        assert!(format!("{:?}", failed.operation).contains("stopped right away"));
-        let log = std::fs::read_to_string(home.home().join(DESKTOP_LOG)).unwrap();
-        assert!(log.contains("no display"), "{log}");
+        assert!(format!("{:?}", failed.operation).contains("must be an executable file"));
+        assert_eq!(home.calls().len(), 1, "a failed preflight never launches");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             commands.restart().is_ok(),
             "a failed restart can be retried"
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn a_macos_relaunch_requires_a_published_app() {
+    async fn a_relaunch_requires_its_launcher() {
         let home = Home::new("exit 0");
-        let why = relaunch(&home.home(), Settings::default().relaunch)
+        std::fs::remove_file(home.home().join("bin/elsebot")).unwrap();
+        let why = relaunch(&home.home(), Relaunch::Launcher, home.parent.id())
             .await
             .unwrap_err();
+        assert!(why.contains("must be an executable file"), "{why}");
+        assert!(home.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_relaunch_requires_a_published_app() {
+        let home = Home::new("exit 0");
+        let why = bundle_path(&home.home()).await.unwrap_err();
         assert!(why.contains("names no app to open"), "{why}");
+        assert!(home.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_relaunch_uses_the_published_path_with_spaces() {
+        let home = Home::new("exit 0");
+        let app = home.home().join("Applications/else bot.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "").unwrap();
+        std::fs::create_dir_all(home.home().join("config")).unwrap();
+        std::fs::write(
+            home.home().join("config/elsebot.env"),
+            "ELSEBOT_APP=\"$ELSE_HOME/Applications/else bot.app\"\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_path(&home.home()).await.unwrap(), app);
         assert!(home.calls().is_empty());
     }
 
