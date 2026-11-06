@@ -255,7 +255,13 @@ struct Settings {
     work_every: Duration,
     check_limit: Duration,
     work_limit: Duration,
-    relaunch_grace: Duration,
+    relaunch: Relaunch,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Relaunch {
+    Bundle,
+    Launcher { grace: Duration },
 }
 
 impl Default for Settings {
@@ -267,7 +273,13 @@ impl Default for Settings {
             work_every: Duration::from_secs(10),
             check_limit: Duration::from_secs(30),
             work_limit: Duration::from_secs(10),
-            relaunch_grace: Duration::from_secs(2),
+            relaunch: if cfg!(target_os = "macos") {
+                Relaunch::Bundle
+            } else {
+                Relaunch::Launcher {
+                    grace: Duration::from_secs(2),
+                }
+            },
         }
     }
 }
@@ -573,9 +585,9 @@ impl Actor {
         };
         self.state
             .send_modify(|state| state.operation = Operation::Restarting);
-        let (home, grace, events) = (
+        let (home, relaunch_target, events) = (
             self.installation.home().to_owned(),
-            self.settings.relaunch_grace,
+            self.settings.relaunch,
             self.events.clone(),
         );
         tokio::spawn(async move {
@@ -586,7 +598,7 @@ impl Actor {
                         "{installed} is installed now, not {version}; check for updates again."
                     ));
                 }
-                relaunch(&home, grace).await
+                relaunch(&home, relaunch_target).await
             }
             .await;
             let _ = events.send(Event::Relaunched(result)).await;
@@ -799,10 +811,11 @@ fn failure(log: &Path, status: &str) -> String {
     )
 }
 
-async fn relaunch(home: &Path, grace: Duration) -> Result<(), String> {
-    if cfg!(target_os = "macos") {
-        return open_bundle(home).await;
-    }
+async fn relaunch(home: &Path, target: Relaunch) -> Result<(), String> {
+    let grace = match target {
+        Relaunch::Bundle => return open_bundle(home).await,
+        Relaunch::Launcher { grace } => grace,
+    };
     let (path, log) = private_log(home, DESKTOP_LOG, false)?;
     let program = home.join("bin/elsebot");
     let mut child = detached(&program, home, &log)
@@ -947,7 +960,9 @@ mod tests {
             Settings {
                 repo: self.repo.clone(),
                 work_every: Duration::from_millis(100),
-                relaunch_grace: Duration::from_millis(300),
+                relaunch: Relaunch::Launcher {
+                    grace: Duration::from_millis(300),
+                },
                 ..Settings::default()
             }
         }
@@ -1162,6 +1177,17 @@ mod tests {
             commands.restart().is_ok(),
             "a failed restart can be retried"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_macos_relaunch_requires_a_published_app() {
+        let home = Home::new("exit 0");
+        let why = relaunch(&home.home(), Settings::default().relaunch)
+            .await
+            .unwrap_err();
+        assert!(why.contains("names no app to open"), "{why}");
+        assert!(home.calls().is_empty());
     }
 
     #[tokio::test]
