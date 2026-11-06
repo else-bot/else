@@ -7,10 +7,15 @@ Keep reusable artwork and its editable sources here.
 The named paths separate the shell, visor, eyes, and ribbon for future variants.
 Keep the concept image as a reference. Use the SVG or generated icons in products.
 
-`branding/icons/` contains transparent PNGs from 16 to 1024 pixels and the macOS
-ICNS with standard and Retina representations. The release, installer, and
-development bundles copy the ICNS into `Contents/Resources` and declare it in
-`Info.plist`. The desktop binary embeds the 256-pixel PNG for X11 window icons.
+`branding/else-bot-macos.svg` places the logo on an Obsidian smoked-glass tile.
+It references `else-bot.svg` so the robot artwork has one editable source.
+The generator inlines that reference as SVG before rasterization to preserve
+the robot's details at small sizes.
+
+`branding/icons/` contains transparent logo PNGs from 16 to 1024 pixels and the macOS
+ICNS with standard and Retina representations of the Obsidian tile. The release,
+installer, and development bundles copy the ICNS into `Contents/Resources` and
+declare it in `Info.plist`. The desktop binary embeds the 256-pixel PNG for X11 window icons.
 The Linux installer registers the SVG in the hicolor icon theme.
 
 ## Regenerate the icons
@@ -24,10 +29,10 @@ uv run scripts/generate-icons.py
 ```
 
 Run `uv run scripts/generate-icons.py --check` to check that the committed icons
-match the SVG without changing files. Use the same librsvg version when checking
-byte-for-byte output across machines.
+match the SVG sources without changing files. Use the same librsvg version when
+checking byte-for-byte output across machines.
 
-Commit the regenerated files with changes to the SVG. Normal builds and installs
+Commit the regenerated files with changes to either SVG. Normal builds and installs
 use the checked-in files and do not need the generation tools.
 
 To export another size, run:
