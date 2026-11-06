@@ -34,41 +34,70 @@ major) version="$((major + 1)).0.0" ;;
 esac
 tag="v$version"
 branch="release/$tag"
+title="chore(release): $tag"
+description="$(cat <<EOF
+Releases $tag from main.
+
+Bumps the workspace version from $current to $version and pins the verified guest image.
+CI builds desktop and API binaries for Linux AMD64, Linux ARM64, and macOS ARM64.
+It publishes the tag and GitHub release with archives and checksums without adding commits to main.
+EOF
+)"
 remote_tag="$(git ls-remote --tags "$remote" "refs/tags/$tag")" ||
 	die "cannot check tag $tag on $remote"
 [ -z "$remote_tag" ] || die "tag $tag already exists on $remote"
 
 ensure_pr() {
-	local url body
 	echo "Looking up the pull request for $branch..."
-	url="$(gh pr list --base main --head "$branch" --state open --json url --jq '.[0].url // empty')" ||
+	pr_url="$(gh pr list --base main --head "$branch" --state open --json url --jq '.[0].url // empty')" ||
 		die "gh cannot list pull requests; run gh auth login"
-	if [ -z "$url" ]; then
+	if [ -z "$pr_url" ]; then
 		echo "Opening the release pull request..."
-		body="$(mktemp)"
-		cat >"$body" <<EOF
-Releases $tag from main.
-
-CI pins the guest image and reports release-ready. Squash and merge as chore(release): $tag.
-CI then builds desktop and API binaries for Linux AMD64, Linux ARM64, and macOS ARM64 and verifies the pinned image.
-It publishes the tag and GitHub release with archives and checksums without adding commits to main.
-EOF
-		if ! url="$(gh pr create --base main --head "$branch" --title "chore(release): $tag" --body-file "$body")"; then
-			rm -f "$body"
+		if ! pr_url="$(gh pr create --base main --head "$branch" --title "$title" --body-file - <<<"$description")"; then
 			die "gh cannot open the pull request; the branch $branch is pushed, so run this again"
 		fi
-		rm -f "$body"
 	fi
-	echo "Release pull request: $url"
+	echo "Release pull request: $pr_url"
+}
+
+merge_pr() {
+	local snapshot head state
+	echo "Waiting for release-ready and cargo-test on $pr_url..."
+	while :; do
+		snapshot="$(gh pr view "$pr_url" --json headRefOid,statusCheckRollup --jq '
+			[.headRefOid, ((.statusCheckRollup // [])
+			| map({name: (.name // .context), state: (.conclusion // .state)})
+			| . as $checks
+			| map(select(.name == "release-ready" or .name == "cargo-test"))
+			| if any($checks[]; .state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED"
+				or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE")
+				or any(.[]; .state == "SKIPPED" or .state == "NEUTRAL" or .state == "STALE") then "failed"
+			  elif any(.[]; .name == "release-ready" and .state == "SUCCESS")
+				and any(.[]; .name == "cargo-test" and .state == "SUCCESS")
+				and all(.[]; .state == "SUCCESS") then "ready"
+			  else "pending" end)] | @tsv')" || die "cannot read CI checks for $pr_url"
+		IFS=$'\t' read -r head state <<<"$snapshot"
+		case "$state" in
+		ready) break ;;
+		failed) die "CI checks failed for $pr_url; fix them and run this again" ;;
+		pending) sleep 10 ;;
+		*) die "cannot read CI checks for $pr_url" ;;
+		esac
+	done
+	echo "Squash-merging $pr_url as $title..."
+	gh pr merge "$pr_url" --squash --match-head-commit "$head" --subject "$title" \
+		--body-file - <<<"$description" || die "cannot merge $pr_url; check the PR and run this again"
+	echo "Merged $tag. CI will publish the release binaries."
 }
 
 if git ls-remote --exit-code -q --heads "$remote" "$branch" >/dev/null; then
 	echo "$branch already exists on $remote."
 	ensure_pr
+	merge_pr
 	exit 0
 fi
 
-echo "Cut $branch ($bump, was $current) from $remote/main $(git rev-parse --short "$remote/main"), push it, and open a pull request to main."
+echo "Cut $branch ($bump, was $current) from $remote/main $(git rev-parse --short "$remote/main"), push it, open a pull request to main, wait for CI, and squash-merge it."
 if [ "$yes" = 0 ]; then
 	[ -t 0 ] || die "no terminal to confirm; pass -y"
 	printf 'Continue? [y/N] '
@@ -104,8 +133,9 @@ PY
 	[ "$(git diff --name-only | sort | tr '\n' ' ')" = "Cargo.lock Cargo.toml " ] ||
 		die "unexpected changes after the bump: $(git diff --name-only | tr '\n' ' ')"
 	echo "Committing $tag (Git hooks may run)..."
-	git commit -am "chore(release): $tag"
+	git commit -am "$title"
 	echo "Pushing $branch to $remote..."
 	git push "$remote" "HEAD:refs/heads/$branch" || die "cannot push $branch to $remote"
 )
 ensure_pr
+merge_pr

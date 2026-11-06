@@ -72,6 +72,51 @@ else:
 '''
 
 
+FAKE_PR_GH = '''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(os.environ["ELSE_TEST_PR_ROOT"])
+args = sys.argv[1:]
+body = sys.stdin.read() if "--body-file" in args else None
+with (root / "gh-calls").open("a") as log:
+    log.write(json.dumps({"args": args, "body": body}) + "\\n")
+pr = root / "pr-created"
+if args[:2] == ["pr", "list"]:
+    if pr.exists():
+        print("https://example.invalid/pull/1")
+elif args[:2] == ["pr", "create"]:
+    pr.touch()
+    print("https://example.invalid/pull/1")
+elif args[:2] == ["pr", "view"]:
+    snapshots = root / "snapshots.json"
+    if snapshots.exists():
+        remaining = json.loads(snapshots.read_text())
+        if not remaining:
+            sys.exit("no more CI snapshots")
+        snapshot = remaining.pop(0)
+        snapshots.write_text(json.dumps(remaining))
+    else:
+        head = subprocess.check_output(
+            ["git", "ls-remote", "origin", "refs/heads/release/v0.0.2"], text=True).split()[0]
+        snapshot = {"headRefOid": head, "statusCheckRollup": [
+            {"context": "release-ready", "state": "SUCCESS"},
+            {"name": "cargo-test", "conclusion": "SUCCESS", "status": "COMPLETED"}]}
+    if "error" in snapshot:
+        sys.exit(snapshot["error"])
+    subprocess.run(["jq", "-r", args[args.index("--jq") + 1]],
+                   input=json.dumps(snapshot), text=True, check=True)
+elif args[:2] == ["pr", "merge"]:
+    if os.environ.get("ELSE_TEST_MERGE_FAIL"):
+        sys.exit("head changed or merge blocked")
+else:
+    sys.exit("unexpected gh call: " + str(args))
+'''
+
+
 def make_binaries(directory):
     directory.mkdir()
     for binary in binaries.BINARIES:
@@ -205,6 +250,26 @@ class ReleasePreflight(unittest.TestCase):
         return subprocess.run(["bash", str(self.repo / "scripts/release.sh"), "patch"],
                               input="", capture_output=True, text=True)
 
+    def pr_environment(self, snapshots=None):
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        (fake_bin / "gh").write_text(FAKE_PR_GH)
+        (fake_bin / "sleep").write_text('#!/bin/sh\nexit 0\n')
+        for binary in fake_bin.iterdir():
+            binary.chmod(0o755)
+        if snapshots is not None:
+            (self.root / "snapshots.json").write_text(json.dumps(snapshots))
+        return dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                    ELSE_TEST_PR_ROOT=str(self.root), CARGO_HOME=str(self.root / "empty-cargo-home"))
+
+    def run_release(self, environment):
+        return subprocess.run(["bash", str(self.repo / "scripts/release.sh"), "-y", "patch"],
+                              env=environment, capture_output=True, text=True, timeout=15)
+
+    def gh_calls(self, command):
+        return [call for line in (self.root / "gh-calls").read_text().splitlines()
+                if (call := json.loads(line))["args"][:2] == ["pr", command]]
+
     def assert_ready_to_confirm(self, result):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Cut release/v0.0.2", result.stdout, result.stdout + result.stderr)
@@ -236,29 +301,17 @@ class ReleasePreflight(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "v0.0.2"), local_tag)
 
     def test_preparation_needs_no_cargo_or_dependency_cache(self):
+        environment = self.pr_environment()
         fake_bin = self.root / "fake-bin"
-        fake_bin.mkdir()
         (fake_bin / "cargo").write_text(
             '#!/bin/sh\necho "release preparation unexpectedly invoked Cargo" >&2\nexit 1\n')
         (fake_bin / "cargo").chmod(0o755)
-        pr = self.root / "pr-created"
-        (fake_bin / "gh").write_text(f'''#!/bin/sh
-case "$1 $2" in
-"pr list") [ ! -f "{pr}" ] || echo https://example.invalid/pull/1 ;;
-"pr create") touch "{pr}"; echo https://example.invalid/pull/1 ;;
-*) exit 1 ;;
-esac
-''')
-        (fake_bin / "gh").chmod(0o755)
-        environment = dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-                           CARGO_HOME=str(self.root / "empty-cargo-home"))
         for name in ("Cargo.toml", "Cargo.lock"):
             with (self.repo / name).open("a") as file:
                 file.write("\n# local uncommitted work\n")
         checkout = {name: (self.repo / name).read_bytes() for name in ("Cargo.toml", "Cargo.lock")}
         worktrees = self.git("worktree", "list", "--porcelain")
-        command = ["bash", str(self.repo / "scripts/release.sh"), "-y", "patch"]
-        result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=15)
+        result = self.run_release(environment)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Release pull request: https://example.invalid/pull/1", result.stdout)
         ref = "refs/heads/release/v0.0.2"
@@ -273,12 +326,85 @@ esac
             expected_lock = expected_lock.replace(f'name = "{name}"\nversion = "0.0.1"',
                                                   f'name = "{name}"\nversion = "0.0.2"')
         self.assertEqual(self.git("show", f"{head}:Cargo.lock"), expected_lock.strip())
+        self.assertEqual(self.git("show", "-s", "--format=%s", head), "chore(release): v0.0.2")
+        created, = self.gh_calls("create")
+        merged, = self.gh_calls("merge")
+        self.assertEqual(created["args"][created["args"].index("--title") + 1], "chore(release): v0.0.2")
+        self.assertEqual(merged["args"], ["pr", "merge", "https://example.invalid/pull/1", "--squash",
+                                        "--match-head-commit", head, "--subject", "chore(release): v0.0.2",
+                                        "--body-file", "-"])
+        self.assertEqual(merged["body"], created["body"])
+        self.assertTrue(merged["body"].startswith("Releases v0.0.2 from main.\n"))
+        self.assertIn("from 0.0.1 to 0.0.2", merged["body"])
         self.assertEqual({name: (self.repo / name).read_bytes() for name in checkout}, checkout)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
-        repeated = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=15)
+        repeated = self.run_release(environment)
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
         self.assertIn("already exists on origin", repeated.stdout)
         self.assertEqual(self.git("--git-dir", str(self.remote), "rev-parse", ref), head)
+        self.assertEqual(len(self.gh_calls("create")), 1)
+        self.assertEqual(len(self.gh_calls("merge")), 2)
+
+    def test_waits_for_checks_on_the_pinned_head(self):
+        snapshots = [
+            {"headRefOid": "a" * 40, "statusCheckRollup": None},
+            {"headRefOid": "a" * 40, "statusCheckRollup": [
+                {"name": "verify-release", "conclusion": "SKIPPED"},
+                {"name": "cargo-test", "conclusion": "SUCCESS"}]},
+            {"headRefOid": "b" * 40, "statusCheckRollup": [
+                {"context": "release-ready", "state": "PENDING"},
+                {"name": "cargo-test", "status": "IN_PROGRESS", "conclusion": ""}]},
+            {"headRefOid": "b" * 40, "statusCheckRollup": [
+                {"context": "release-ready", "state": "SUCCESS"},
+                {"name": "cargo-test", "conclusion": "SUCCESS"}]}]
+        result = self.run_release(self.pr_environment(snapshots))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.root / "snapshots.json").read_text()), [])
+        merged, = self.gh_calls("merge")
+        self.assertEqual(merged["args"][merged["args"].index("--match-head-commit") + 1], "b" * 40)
+
+    def test_failed_or_cancelled_checks_never_merge(self):
+        environment = self.pr_environment()
+        for state in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE",
+                      "SKIPPED", "NEUTRAL", "STALE"):
+            for check in ("release-ready", "cargo-test"):
+                with self.subTest(state=state, check=check):
+                    snapshot = {"headRefOid": "a" * 40, "statusCheckRollup": [
+                        {"context": "release-ready", "state": state if check == "release-ready" else "SUCCESS"},
+                        {"name": "cargo-test", "conclusion": state if check == "cargo-test" else "SUCCESS"}]}
+                    (self.root / "snapshots.json").write_text(json.dumps([snapshot]))
+                    result = self.run_release(environment)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("CI checks failed", result.stderr)
+                    self.assertEqual(self.gh_calls("merge"), [])
+
+    def test_guest_image_failure_never_merges_or_waits_for_missing_checks(self):
+        environment = self.pr_environment()
+        for job in ("plan", "build (amd64)", "build (arm64)", "pin"):
+            for state in ("FAILURE", "CANCELLED"):
+                with self.subTest(job=job, state=state):
+                    snapshot = {"headRefOid": "a" * 40, "statusCheckRollup": [
+                        {"name": job, "conclusion": state},
+                        {"name": "cargo-test", "conclusion": "SUCCESS"}]}
+                    (self.root / "snapshots.json").write_text(json.dumps([snapshot]))
+                    result = self.run_release(environment)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("CI checks failed", result.stderr)
+                    self.assertEqual(self.gh_calls("merge"), [])
+
+    def test_ci_lookup_failure_never_merges(self):
+        result = self.run_release(self.pr_environment([{"error": "API unavailable"}]))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot read CI checks", result.stderr)
+        self.assertEqual(self.gh_calls("merge"), [])
+
+    def test_merge_rejection_does_not_report_success(self):
+        environment = self.pr_environment()
+        environment["ELSE_TEST_MERGE_FAIL"] = "1"
+        result = self.run_release(environment)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot merge", result.stderr)
+        self.assertNotIn("Merged v0.0.2", result.stdout)
 
 
 class Archives(unittest.TestCase):
