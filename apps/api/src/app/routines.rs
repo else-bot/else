@@ -8,6 +8,8 @@ use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 
+use super::providers::Profile;
+
 pub const MAX_NAME_CHARS: usize = 80;
 pub const MAX_PROMPT_BYTES: usize = 8_000;
 const MAX_CRON_BYTES: usize = 100;
@@ -150,6 +152,64 @@ impl Schedule {
     }
 }
 
+/// A routine's own model: a provider and a complete profile its adapter
+/// validated. Stored as JSON with these four fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RoutineModel {
+    pub provider_id: String,
+    #[serde(flatten)]
+    pub profile: Profile,
+}
+
+/// Which model a routine runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelSetting {
+    /// The bot's live choice at each run. `requested` keeps a model the bot
+    /// was asked for but could not resolve, for the owner to see.
+    Inherit {
+        requested: Option<String>,
+    },
+    Own(RoutineModel),
+}
+
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The one catalog model `query` names: its exact ID, or its ID or display
+/// name ignoring case, spaces, dots, and dashes, with or without the
+/// vendor's first word ("GPT 6.1 Sol", "6.1 sol", "Opus 5.5"). `None` when
+/// nothing or more than one model matches; never a nearest guess.
+pub fn match_model(
+    query: &str,
+    catalogs: &[(&'static str, &'static [&'static str])],
+) -> Option<(&'static str, &'static str)> {
+    let query = query.trim();
+    let all = || {
+        catalogs
+            .iter()
+            .flat_map(|(provider, models)| models.iter().map(move |model| (*provider, *model)))
+    };
+    if let Some(exact) = all().find(|(_, model)| model.eq_ignore_ascii_case(query)) {
+        return Some(exact);
+    }
+    let wanted = squash(query);
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut found = all().filter(|(_, model)| {
+        squash(model) == wanted
+            || model
+                .split_once('-')
+                .is_some_and(|(_, rest)| squash(rest) == wanted)
+    });
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +335,30 @@ mod tests {
         let first = gap.next_after(at("2026-10-24T12:00:00Z")).unwrap();
         assert_eq!(first, at("2026-10-25T00:30:00Z"));
         assert_eq!(gap.next_after(first), Some(at("2026-10-26T01:30:00Z")));
+    }
+
+    #[test]
+    fn model_names_match_one_catalog_entry_or_none() {
+        let catalogs: &[(&str, &[&str])] = &[
+            ("codex", &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]),
+            ("claude", &["claude-opus-5-5", "claude-fable-5-1"]),
+        ];
+        let found = |q| match_model(q, catalogs);
+        assert_eq!(found("gpt-6.1-sol"), Some(("codex", "gpt-6.1-sol")));
+        assert_eq!(found("GPT 6.1 Sol"), Some(("codex", "gpt-6.1-sol")));
+        assert_eq!(found("6.1 sol"), Some(("codex", "gpt-6.1-sol")));
+        assert_eq!(
+            found("Claude Opus 5.5"),
+            Some(("claude", "claude-opus-5-5"))
+        );
+        assert_eq!(found("opus 5.5"), Some(("claude", "claude-opus-5-5")));
+        assert_eq!(found("Sol"), None, "ambiguous names are not guessed");
+        assert_eq!(
+            found("opus"),
+            None,
+            "a family without a version is not guessed"
+        );
+        assert_eq!(found("Gemini 3"), None);
+        assert_eq!(found("  "), None);
     }
 }

@@ -693,12 +693,14 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills
          FROM provider_sessions s
          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
+           AND lane = (SELECT session_lane FROM turns WHERE id = ?3)
            -- A session that may hold an uncertain delivery is never resumed.
            AND NOT EXISTS (SELECT 1 FROM turns u
                            WHERE u.provider_session_id = s.id AND u.status = 'uncertain')",
     )
     .bind(turn.conversation_id)
     .bind(&turn.provider_id)
+    .bind(turn_id)
     .fetch_optional(&mut *conn)
     .await?
     .map(

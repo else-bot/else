@@ -575,12 +575,14 @@ impl SinkState {
             let existing: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM provider_sessions
                  WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
-                   AND native_session_id = ?3 AND fingerprint = ?4",
+                   AND native_session_id = ?3 AND fingerprint = ?4
+                   AND lane = (SELECT session_lane FROM turns WHERE id = ?5)",
             )
             .bind(self.execution_conversation_id)
             .bind(&self.provider_id)
             .bind(&state.native_id)
             .bind(&state.fingerprint)
+            .bind(self.turn_id)
             .fetch_optional(&mut *tx)
             .await?;
             let session_id = match existing {
@@ -601,17 +603,20 @@ impl SinkState {
                 None => {
                     sqlx::query(
                         "UPDATE provider_sessions SET status = 'retired', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-                         WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'",
+                         WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
+                           AND lane = (SELECT session_lane FROM turns WHERE id = ?3)",
                     )
                     .bind(self.execution_conversation_id)
                     .bind(&self.provider_id)
+                    .bind(self.turn_id)
                     .execute(&mut *tx)
                     .await?;
                     let id = Uuid::new_v4();
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
-                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills, lane)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                             (SELECT session_lane FROM turns WHERE id = ?10))",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -622,6 +627,7 @@ impl SinkState {
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
                     .bind(sqlx::types::Json(&state.default_skills))
+                    .bind(self.turn_id)
                     .execute(&mut *tx)
                     .await?;
                     id

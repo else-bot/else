@@ -196,9 +196,12 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          zone when they named one or it is clear from context; otherwise it runs in UTC, so \
          say so. Confirm the schedule and the next run time from the result. routine_list, \
          routine_update, and routine_delete manage your routines; the owner can also switch \
-         them off in Bot settings. Each run arrives as a scheduled routine task in your \
-         conversation with the owner, not as an owner message: do the task, then report what \
-         you actually did and found.\n\n"
+         them off in Bot settings. When the owner wants a routine on a specific model, pass \
+         model (and reasoning_effort or service_tier only if they asked); otherwise omit it so \
+         each run uses your model. If the result says the model was not applied, tell the \
+         owner they can choose it in Bot details > Routines. Each run arrives as a scheduled \
+         routine task in your conversation with the owner, not as an owner message: do the \
+         task, then report what you actually did and found.\n\n"
     } else {
         ""
     };
