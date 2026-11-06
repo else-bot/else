@@ -209,18 +209,28 @@ impl Scheduler {
             tracing::warn!(orphaned, "settled turns without a running provider task");
         }
         if let Some(_admission) = self.gate.enter() {
-            let (admitted, mail, social) = tokio::join!(
+            let now = chrono::Utc::now();
+            let (admitted, woken, mail, social) = tokio::join!(
                 crate::db::routines::admit_due(
                     &self.pool,
                     &self.registry,
-                    chrono::Utc::now(),
+                    now,
                     crate::db::routines::ADMIT_BATCH,
+                ),
+                crate::db::webhooks::admit_requested(
+                    &self.pool,
+                    &self.registry,
+                    now,
+                    crate::db::webhooks::ADMIT_BATCH,
                 ),
                 crate::connectors::delivery::admit_pending(&self.pool, &self.registry, 32),
                 crate::socials::delivery::admit_pending(&self.pool, &self.registry, 32)
             );
             if let Err(err) = admitted {
                 tracing::warn!(error = %err, "admitting due routines failed");
+            }
+            if let Err(err) = woken {
+                tracing::warn!(error = %err, "admitting webhook wakes failed");
             }
             if let Err(err) = social {
                 tracing::warn!(error=%err,"admitting social deliveries failed");

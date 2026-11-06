@@ -158,9 +158,24 @@ pub struct TurnInput {
     /// The bot's active and unresolved guest jobs, given with any rebuilt
     /// or handed-off context regardless of which history was selected.
     pub jobs: Vec<JobReceipt>,
-    /// Set when this turn runs a saved routine: `text` is its prompt, not
-    /// an owner message.
-    pub routine: Option<RoutineRun>,
+    /// Set when this turn runs a saved routine or webhook wake: `text` is
+    /// its prompt, not an owner message.
+    pub run: Option<SavedRun>,
+}
+
+/// The saved task a turn runs instead of an owner message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedRun {
+    Routine(RoutineRun),
+    Webhook(WebhookRun),
+}
+
+/// The webhook wake a turn runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookRun {
+    pub webhook_id: Uuid,
+    pub name: String,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// The routine occurrence a turn runs.
@@ -216,7 +231,7 @@ pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome}
 pub enum Origin {
     /// An owner message in the bot's owner conversation.
     OwnerRequest,
-    /// A scheduled run of a saved routine.
+    /// A scheduled run of a saved routine, or a webhook wake.
     RoutineRun,
     ConnectorEvent,
     SocialEvent,

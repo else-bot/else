@@ -256,13 +256,23 @@ impl ComputerManager {
         command: &str,
         max_duration: Duration,
     ) -> Result<Started, ComputerError> {
-        self.start_job_with(bot_id, turn_id, command, max_duration, &Env::default(), &[])
-            .await
+        self.start_job_with(
+            bot_id,
+            turn_id,
+            command,
+            max_duration,
+            &Env::default(),
+            &[],
+            None,
+        )
+        .await
     }
 
     /// [`Self::start_job`] with task-secret variables, exported to
     /// the job at launch over stdin, its output filtered in the guest. The
-    /// job records which secrets it used (names), never their values.
+    /// job records which secrets it used (names), never their values. A
+    /// job linked to one of the bot's live webhooks fires it when it exits 0.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_job_with(
         &self,
         bot_id: Uuid,
@@ -271,6 +281,7 @@ impl ComputerManager {
         max_duration: Duration,
         env: &Env,
         secret_names: &[String],
+        webhook: Option<Uuid>,
     ) -> Result<Started, ComputerError> {
         let id = Uuid::new_v4();
         let duration = max_duration.min(MAX_JOB_DURATION);
@@ -323,8 +334,9 @@ impl ComputerManager {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets)
-                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)), ?6)",
+                "INSERT INTO guest_jobs (id, bot_id, turn_id, command, deadline, secrets, webhook_id)
+                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now', printf('%+f seconds', ?5)), ?6,
+                         (SELECT id FROM webhooks WHERE id = ?7 AND bot_id = ?2 AND deleted_at IS NULL))",
             )
             .bind(id)
             .bind(bot_id)
@@ -332,6 +344,7 @@ impl ComputerManager {
             .bind(command)
             .bind(duration.as_secs_f64())
             .bind(sqlx::types::Json(secret_names))
+            .bind(webhook)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;

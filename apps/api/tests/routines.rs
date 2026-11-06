@@ -821,7 +821,7 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(
         packet.contains(
-            "Routine (a saved scheduled task, not an owner message): Water the plants reminder."
+            "Routine or webhook wake (a saved task, not an owner message): Water the plants reminder."
         ),
         "{packet}"
     );

@@ -78,7 +78,7 @@ pub enum By {
 }
 
 impl By {
-    fn bot_id(&self) -> Uuid {
+    pub(crate) fn bot_id(&self) -> Uuid {
         match self {
             By::Turn(caller) => caller.bot_id,
             By::Owner { bot_id } => *bot_id,
@@ -204,7 +204,7 @@ const SELECT: &str =
 
 /// The same text form SQLite's own timestamps use, so stored instants
 /// compare correctly as text.
-fn ts(at: DateTime<Utc>) -> String {
+pub(crate) fn ts(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
@@ -227,7 +227,7 @@ async fn load(conn: &mut SqliteConnection, id: Uuid) -> Result<Routine, sqlx::Er
     Ok(row.into())
 }
 
-async fn authorized_owner_conversation(
+pub(crate) async fn authorized_owner_conversation(
     conn: &mut SqliteConnection,
     caller: Caller,
 ) -> Result<Uuid, RoutineError> {
@@ -255,7 +255,7 @@ async fn authorized_owner_conversation(
     Ok(owner_conversation)
 }
 
-async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {
+pub(crate) async fn authorize_by(conn: &mut SqliteConnection, by: By) -> Result<(), RoutineError> {
     match by {
         By::Turn(caller) => authorized_owner_conversation(conn, caller).await.map(drop),
         By::Owner { bot_id } => {
@@ -594,15 +594,16 @@ pub async fn admit_due(
     Ok(queued)
 }
 
+/// Why a due run queued no turn.
 #[derive(Debug, Clone, Copy)]
-enum Skip {
+pub(crate) enum Skip {
     Overlap,
     QueueFull,
     ProviderUnavailable,
 }
 
 impl Skip {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Skip::Overlap => "overlap",
             Skip::QueueFull => "queue_full",
@@ -622,8 +623,6 @@ struct Due {
     timezone: String,
     model: Option<Json<RoutineModel>>,
     due_at: String,
-    last_turn_no: i64,
-    last_item_seq: i64,
 }
 
 struct Chosen {
@@ -647,6 +646,108 @@ fn own_model(registry: &Registry, own: &RoutineModel, routine_id: Uuid) -> Optio
     })
 }
 
+/// Where a saved task's turn runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RunOn<'a> {
+    /// The bot's selected provider and profile.
+    Bot,
+    /// A routine's own model, in that routine's session lane.
+    Own(&'a RoutineModel, Uuid),
+}
+
+/// Queue a turn in `conversation_id` whose source is a hidden `routine`
+/// item holding `prompt`: a saved task the bot runs, never an owner
+/// message. `request_id` names the run; `tag` separates run kinds in the
+/// turn's request hash. Skips when the bot's queue is full or no provider
+/// can run it. The caller holds an immediate transaction, records its run,
+/// then emits `turn_accepted` (its snapshot includes the run).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn queue_saved_task(
+    conn: &mut SqliteConnection,
+    registry: &Registry,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    request_id: Uuid,
+    tag: &[u8],
+    prompt: &str,
+    run_on: RunOn<'_>,
+) -> Result<Result<Uuid, Skip>, sqlx::Error> {
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
+            .bind(bot_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if queued >= MAX_QUEUED_TURNS {
+        return Ok(Err(Skip::QueueFull));
+    }
+    let chosen = match run_on {
+        RunOn::Own(own, routine_id) => own_model(registry, own, routine_id),
+        RunOn::Bot => bot_profiles::for_admission(&mut *conn, registry, bot_id)
+            .await?
+            .map(|chosen| Chosen {
+                provider_id: chosen.provider_id,
+                profile: chosen.profile,
+                lane: String::new(),
+            }),
+    };
+    let Some(Chosen {
+        provider_id,
+        profile,
+        lane,
+    }) = chosen
+    else {
+        return Ok(Err(Skip::ProviderUnavailable));
+    };
+    let (last_turn_no, last_item_seq): (i64, i64) =
+        sqlx::query_as("SELECT last_turn_no, last_item_seq FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let turn_id = Uuid::new_v4();
+    let item_id = Uuid::new_v4();
+    let turn_no = last_turn_no + 1;
+    let seq = last_item_seq + 1;
+    let mut hasher = Sha256::new();
+    hasher.update(tag);
+    hasher.update(request_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id, profile_revision, profile, session_lane)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )
+    .bind(turn_id)
+    .bind(bot_id)
+    .bind(conversation_id)
+    .bind(request_id)
+    .bind(hasher.finalize().to_vec())
+    .bind(turn_no)
+    .bind(item_id)
+    .bind(provider_id)
+    .bind(profile.as_ref().map(|(revision, _)| *revision))
+    .bind(profile.as_ref().map(|(_, profile)| profile))
+    .bind(&lane)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, ?3, ?4, 'routine', ?5)",
+    )
+    .bind(item_id)
+    .bind(conversation_id)
+    .bind(seq)
+    .bind(turn_id)
+    .bind(prompt)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
+        .bind(conversation_id)
+        .bind(turn_no)
+        .bind(seq)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Ok(turn_id))
+}
+
 async fn admit(
     pool: &SqlitePool,
     registry: &Registry,
@@ -656,9 +757,8 @@ async fn admit(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
         "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
-                r.model, r.next_due_at AS due_at, c.last_turn_no, c.last_item_seq
+                r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
-         JOIN conversations c ON c.id = r.conversation_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
            AND b.status = 'active' AND NOT b.cancel_pending",
     )
@@ -676,8 +776,6 @@ async fn admit(
         timezone,
         model,
         due_at,
-        last_turn_no,
-        last_item_seq,
     }) = row
     else {
         return Ok(false);
@@ -709,34 +807,28 @@ async fn admit(
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
-    let queued: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM turns WHERE bot_id = ?1 AND status = 'queued'")
-            .bind(bot_id)
-            .fetch_one(&mut *tx)
-            .await?;
     let run_id = Uuid::new_v4();
-    let chosen = if unfinished {
+    let queued = if unfinished {
         Err(Skip::Overlap)
-    } else if queued >= MAX_QUEUED_TURNS {
-        Err(Skip::QueueFull)
-    } else if let Some(Json(own)) = &model {
-        own_model(registry, own, id).ok_or(Skip::ProviderUnavailable)
     } else {
-        bot_profiles::for_admission(&mut tx, registry, bot_id)
-            .await?
-            .map(|chosen| Chosen {
-                provider_id: chosen.provider_id,
-                profile: chosen.profile,
-                lane: String::new(),
-            })
-            .ok_or(Skip::ProviderUnavailable)
+        let run_on = match &model {
+            Some(Json(own)) => RunOn::Own(own, id),
+            None => RunOn::Bot,
+        };
+        queue_saved_task(
+            &mut tx,
+            registry,
+            bot_id,
+            conversation_id,
+            run_id,
+            b"routine-run\0",
+            &prompt,
+            run_on,
+        )
+        .await?
     };
-    let Chosen {
-        provider_id,
-        profile,
-        lane,
-    } = match chosen {
-        Ok(chosen) => chosen,
+    let turn_id = match queued {
+        Ok(turn_id) => turn_id,
         Err(skip) => {
             sqlx::query(
                 "INSERT INTO routine_runs (id, routine_id, due_at, name, skip_reason)
@@ -754,48 +846,6 @@ async fn admit(
             return Ok(false);
         }
     };
-    let turn_id = Uuid::new_v4();
-    let item_id = Uuid::new_v4();
-    let turn_no = last_turn_no + 1;
-    let seq = last_item_seq + 1;
-    let mut hasher = Sha256::new();
-    hasher.update(b"routine-run\0");
-    hasher.update(run_id.as_bytes());
-    sqlx::query(
-        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
-             owner_item_id, provider_id, profile_revision, profile, session_lane)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-    )
-    .bind(turn_id)
-    .bind(bot_id)
-    .bind(conversation_id)
-    .bind(run_id)
-    .bind(hasher.finalize().to_vec())
-    .bind(turn_no)
-    .bind(item_id)
-    .bind(provider_id)
-    .bind(profile.as_ref().map(|(revision, _)| *revision))
-    .bind(profile.as_ref().map(|(_, profile)| profile))
-    .bind(&lane)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'routine', ?5)",
-    )
-    .bind(item_id)
-    .bind(conversation_id)
-    .bind(seq)
-    .bind(turn_id)
-    .bind(&prompt)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE conversations SET last_turn_no = ?2, last_item_seq = ?3 WHERE id = ?1")
-        .bind(conversation_id)
-        .bind(turn_no)
-        .bind(seq)
-        .execute(&mut *tx)
-        .await?;
     sqlx::query(
         "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

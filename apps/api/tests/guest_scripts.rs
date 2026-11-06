@@ -307,6 +307,7 @@ async fn a_jobs_output_file_never_holds_a_secret() {
             Duration::from_secs(60),
             &secrets,
             &["api".to_owned()],
+            None,
         )
         .await
         .unwrap()

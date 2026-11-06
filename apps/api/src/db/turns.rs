@@ -737,7 +737,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
-        routine: crate::db::routines::run_of(&mut conn, turn_id).await?,
+        run: match crate::db::routines::run_of(&mut conn, turn_id).await? {
+            Some(run) => Some(crate::app::providers::SavedRun::Routine(run)),
+            None => crate::db::webhooks::run_of(&mut conn, turn_id)
+                .await?
+                .map(crate::app::providers::SavedRun::Webhook),
+        },
     };
     drop(conn);
     let (memory, permissions) = tokio::join!(

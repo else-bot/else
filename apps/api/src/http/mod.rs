@@ -25,6 +25,7 @@ pub mod socials;
 pub mod task_secrets;
 pub mod tools;
 pub mod turns;
+pub mod webhooks;
 pub mod ws;
 
 use std::sync::Arc;
@@ -193,6 +194,12 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
                     state.clone(),
                     auth::require_task_grant,
                 )),
+        )
+        .nest(
+            "/webhooks/v1",
+            webhooks::trigger_routes()
+                .fallback(|| async { ApiError::not_found() })
+                .layer(middleware::from_fn_with_state(state.clone(), tools_gate)),
         )
         // Paths such as `/v1/` that the nested router does not match are
         // still authenticated before reporting 404.

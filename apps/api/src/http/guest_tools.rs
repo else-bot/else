@@ -103,11 +103,15 @@ pub fn tool_list() -> Vec<Value> {
             "description": "Start a long command in the background in your computer and return its \
                 job_id at once. The job keeps running after this turn; check it with computer_job, \
                 stop it with computer_job_cancel. At most 4 at once; max_minutes default 60. \
-                Declare its effect: destructive or sensitive external jobs need approval unless a saved permission applies.",
+                Declare its effect: destructive or sensitive external jobs need approval unless a saved permission applies. \
+                Pass webhook_id to fire one of your webhooks when the job exits 0, for a watcher \
+                that exits once its event happens.",
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
                 "secrets": secrets,
+                "webhook_id": { "type": "string", "format": "uuid",
+                                "description": "One of your webhooks, fired when this job exits 0." },
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
                 "approved_draft": approved_draft.clone() },
@@ -674,6 +678,26 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("command is required."), None);
             };
             let minutes = args["max_minutes"].as_u64().unwrap_or(60).clamp(1, 360);
+            let webhook = match &args["webhook_id"] {
+                Value::Null => None,
+                id => match id.as_str().and_then(|s| s.parse::<Uuid>().ok()) {
+                    None => return (tool_error("webhook_id must be a webhook ID."), None),
+                    Some(id) => {
+                        match crate::db::webhooks::is_live(&state.db, grant.bot_id, id).await {
+                            Ok(true) => Some(id),
+                            Ok(false) => {
+                                return (
+                                    tool_error(
+                                        "NOT_FOUND: no such webhook; see webhook_list. No job was started.",
+                                    ),
+                                    None,
+                                );
+                            }
+                            Err(err) => return failure(err.into()),
+                        }
+                    }
+                },
+            };
             let (env, names) = match secrets_for(state, grant, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
@@ -686,6 +710,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     Duration::from_secs(minutes * 60),
                     &env,
                     &names,
+                    webhook,
                 )
                 .await
             {
