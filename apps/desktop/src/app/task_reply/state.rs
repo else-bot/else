@@ -1,6 +1,6 @@
 use crate::model::Conversation;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,21 +71,11 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 .map(|reaction| (reaction.item_id, reaction.kind))
         })
         .collect();
-    let greeting = conversation
-        .items()
-        .next()
-        .filter(|item| item.seq == 1 && item.kind == "assistant")
-        .map(|item| item.turn_id);
+    let mut task_turns = HashSet::new();
     let mut replies: HashMap<_, _> = conversation
         .turns_in_order()
         .into_iter()
         .filter(|turn| conversation.reaction_in(turn.id).is_none())
-        .filter(|turn| {
-            !(Some(turn.id) == greeting
-                && turn.turn_no == 1
-                && turn.started_at.is_none()
-                && turn.status == "completed")
-        })
         .filter_map(|turn| {
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
@@ -98,6 +88,14 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                 "uncertain" => ReplyState::Uncertain,
                 _ => return None,
             };
+            if turn.routine.is_some()
+                || !turn.questions.is_empty()
+                || !turn.secret_requests.is_empty()
+                || !turn.outgoing_drafts.is_empty()
+                || !turn.social_setups.is_empty()
+            {
+                task_turns.insert(turn.id);
+            }
             Some((
                 turn.id,
                 TaskReply {
@@ -116,11 +114,28 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             ))
         })
         .collect();
+    let mut seen_turns = HashSet::new();
     for item in conversation.items() {
         let Some(reply) = replies.get_mut(&item.turn_id) else {
             continue;
         };
+        if conversation.older_before_seq.is_some()
+            && seen_turns.insert(item.turn_id)
+            && item.kind != "user"
+        {
+            task_turns.insert(item.turn_id);
+        }
+        if item.bot_task.is_some() || item.bot_reply.is_some() {
+            task_turns.insert(item.turn_id);
+        }
         if item.kind == "assistant" {
+            let has_file = item
+                .parts
+                .iter()
+                .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }));
+            if has_file {
+                task_turns.insert(item.turn_id);
+            }
             let reaction = reactions.get(&item.id).copied();
             if let Some(kind) = reaction {
                 reply.reactions.push((item.id, kind));
@@ -132,16 +147,19 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
                     reply.history.push(previous)
                 }
             }
-            reply.latest_kept = reaction.is_some()
-                || item
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, crate::attachments::MessagePart::File { .. }));
+            reply.latest_kept = reaction.is_some() || has_file;
             reply.anchor = Some(item.id);
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
     }
+    replies.retain(|turn, reply| {
+        reply.state != ReplyState::Complete
+            || reply.latest.is_none()
+            || !reply.history.is_empty()
+            || !reply.kept.is_empty()
+            || task_turns.contains(turn)
+    });
     for reply in replies
         .values_mut()
         .filter(|reply| reply.state == ReplyState::Working)
@@ -196,6 +214,131 @@ mod tests {
         }))
         .unwrap();
         Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    #[test]
+    fn a_single_completed_reply_is_a_chat_bubble() {
+        let mut answer = item(2, 10, "assistant");
+        answer["text"] = json!("Got it. I'll wait for you to kick things off.");
+        let c = conversation(
+            vec![item(1, 10, "user"), answer],
+            vec![turn(10, "completed")],
+        );
+        assert!(
+            task_replies(&c).is_empty(),
+            "a conversational reply must not become a completed task card"
+        );
+        assert_eq!(c.latest_reply().unwrap().id, id(2));
+    }
+
+    #[test]
+    fn a_chat_reply_settles_to_the_same_bubble_after_streaming_or_reload() {
+        let items = vec![item(1, 10, "user"), item(2, 10, "assistant")];
+        let mut live = conversation(items.clone(), vec![turn(10, "running")]);
+        assert_eq!(task_replies(&live)[&id(10)].state, ReplyState::Working);
+        live.apply(&Frame {
+            id: Some("test:1".into()),
+            event: "turn.updated".into(),
+            data: json!({"turn": turn(10, "completed")}).to_string(),
+        })
+        .unwrap();
+        let reloaded = conversation(items, vec![turn(10, "completed")]);
+        assert!(task_replies(&live).is_empty());
+        assert_eq!(task_replies(&live), task_replies(&reloaded));
+        assert_eq!(live.latest_reply(), reloaded.latest_reply());
+    }
+
+    #[test]
+    fn reacting_to_a_chat_reply_does_not_turn_it_into_a_task() {
+        let mut feedback = item(3, 11, "user");
+        feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});
+        let c = conversation(
+            vec![item(1, 10, "user"), item(2, 10, "assistant"), feedback],
+            vec![turn(10, "completed"), turn(11, "queued")],
+        );
+        assert!(task_replies(&c).is_empty());
+        assert!(c.reaction_for(id(2)).is_some());
+    }
+
+    #[test]
+    fn a_task_split_across_history_pages_keeps_its_card() {
+        let mut c = conversation(vec![item(3, 10, "assistant")], vec![turn(10, "completed")]);
+        c.older_before_seq = Some(3);
+        assert!(task_replies(&c).contains_key(&id(10)));
+        c.merge_older(
+            serde_json::from_value(json!({
+                "event_cursor": "test:0",
+                "items": [item(1, 10, "user"), item(2, 10, "assistant")],
+                "turns": [turn(10, "completed")],
+                "activity": {"phase": "idle", "queued_count": 0}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(task_replies(&c)[&id(10)].history, [id(2)]);
+
+        let mut chat = conversation(
+            vec![item(4, 11, "user"), item(5, 11, "assistant")],
+            vec![turn(11, "completed")],
+        );
+        chat.older_before_seq = Some(4);
+        assert!(task_replies(&chat).is_empty());
+
+        let mut interleaved = conversation(
+            vec![
+                item(2, 11, "user"),
+                item(3, 10, "assistant"),
+                item(4, 11, "assistant"),
+            ],
+            vec![turn(10, "completed"), turn(11, "completed")],
+        );
+        interleaved.older_before_seq = Some(2);
+        let replies = task_replies(&interleaved);
+        assert!(replies.contains_key(&id(10)));
+        assert!(!replies.contains_key(&id(11)));
+    }
+
+    #[test]
+    fn completed_tasks_keep_their_card_without_prose_progress_updates() {
+        for (field, value) in [
+            (
+                "routine",
+                json!({"routine_id": id(20), "name": "Daily digest", "due_at": "2026-11-05T10:00:00Z"}),
+            ),
+            (
+                "questions",
+                json!([{"id": id(21), "kind": "external", "title": "Send it?", "choices": [], "status": "answered"}]),
+            ),
+            (
+                "secret_requests",
+                json!([{"id": id(22), "name": "Access", "reason": "Read branches", "env": ["TOKEN"], "status": "provided"}]),
+            ),
+        ] {
+            let mut task = turn(10, "completed");
+            task[field] = value;
+            let c = conversation(
+                vec![item(1, 10, "user"), item(2, 10, "assistant")],
+                vec![task],
+            );
+            assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
+        }
+        for (field, value) in [
+            (
+                "bot_task",
+                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source"}),
+            ),
+            (
+                "bot_reply",
+                json!({"sender_bot_id": id(20), "sender_name": "Researcher", "prompt": "Find a source", "status": "completed"}),
+            ),
+        ] {
+            let mut handoff = item(1, 10, "status");
+            handoff[field] = value;
+            let c = conversation(
+                vec![handoff, item(2, 10, "assistant")],
+                vec![turn(10, "completed")],
+            );
+            assert!(task_replies(&c).contains_key(&id(10)), "{field} stays rich");
+        }
     }
 
     #[test]
@@ -310,14 +453,15 @@ mod tests {
     fn reaction_feedback_uses_chat_bubbles_instead_of_task_capsules() {
         for status in ["queued", "running", "completed", "failed"] {
             for kind in ["thumbs_up", "thumbs_down"] {
-                let mut feedback = item(3, 11, "user");
+                let mut feedback = item(4, 11, "user");
                 feedback["reaction"] = json!({"item_id": id(2), "kind": kind});
                 let c = conversation(
                     vec![
                         item(1, 10, "user"),
                         item(2, 10, "assistant"),
+                        item(3, 10, "assistant"),
                         feedback,
-                        item(4, 11, "assistant"),
+                        item(5, 11, "assistant"),
                     ],
                     vec![turn(10, "completed"), turn(11, status)],
                 );
