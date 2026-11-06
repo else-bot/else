@@ -39,6 +39,7 @@ async fn send_retry_and_conflict_create_one_message() {
     assert_eq!(first.body["item"]["text"], "Hello there");
     assert_eq!(first.body["item"]["request_id"], request.to_string());
     assert_eq!(first.body["turn"]["status"], "queued");
+    assert!(first.body["turn"]["started_at"].is_null());
     assert_eq!(first.body["turn"]["provider_id"], "synthetic");
 
     let retry = app
@@ -76,6 +77,20 @@ async fn send_retry_and_conflict_create_one_message() {
 
     let turn = first.body["turn"]["id"].as_str().unwrap();
     assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    let settled = snapshot.body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn)
+        .unwrap();
+    let started: chrono::DateTime<chrono::Utc> =
+        settled["started_at"].as_str().unwrap().parse().unwrap();
+    let finished: chrono::DateTime<chrono::Utc> =
+        settled["finished_at"].as_str().unwrap().parse().unwrap();
+    assert!(finished >= started);
     let history = items(&app, &bot).await;
     assert_eq!(
         history.len(),

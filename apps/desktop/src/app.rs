@@ -20,6 +20,7 @@ mod row_text;
 mod secret_card;
 mod settings;
 mod social_card;
+mod task_reply;
 mod view;
 
 use categories::CategoryFormHolder;

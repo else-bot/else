@@ -1,6 +1,7 @@
 use super::ElseApp;
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
+use super::task_reply::state::{TaskReply, task_replies};
 use crate::api::{ClientError, LiveCommand, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
@@ -12,6 +13,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum RowKey {
     Item(Uuid),
+    Task(Uuid),
     Pending(Uuid),
     SecretRequest(Uuid),
     Question(Uuid),
@@ -24,6 +26,7 @@ pub(super) struct TranscriptRow {
     pub(super) key: RowKey,
     pub(super) footer_stamp: Option<DateTime<Utc>>,
     pub(super) routine: Option<RoutineRow>,
+    pub(super) task: Option<TaskReply>,
     routine_status: Option<(String, bool)>,
     state: Option<String>,
 }
@@ -57,6 +60,10 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
     let turns: Vec<_> = rows
         .iter()
         .map(|key| match *key {
+            RowKey::Task(id) => conversation
+                .and_then(|c| c.turn(id))
+                .filter(|turn| turn.routine.is_some())
+                .map(|turn| turn.id),
             RowKey::Item(id) => conversation
                 .and_then(|c| c.item(id).and_then(|item| c.turn(item.turn_id)))
                 .filter(|turn| turn.routine.is_some())
@@ -133,6 +140,9 @@ pub(super) struct ConversationView {
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
     pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
     pub(super) expanded_drafts: HashSet<Uuid>,
+    pub(super) expanded_tasks: HashSet<Uuid>,
+    pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
+    pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
     pub(super) _load: Option<Task<()>>,
@@ -140,6 +150,21 @@ pub(super) struct ConversationView {
 }
 
 impl ConversationView {
+    pub(super) fn row_index(&self, key: RowKey) -> Option<usize> {
+        let task = match key {
+            RowKey::Item(id) => self
+                .conversation
+                .as_ref()
+                .and_then(|c| c.item(id))
+                .map(|i| RowKey::Task(i.turn_id)),
+            _ => None,
+        };
+        self.rows
+            .iter()
+            .position(|row| row.key == key)
+            .or_else(|| task.and_then(|task| self.rows.iter().position(|row| row.key == task)))
+    }
+
     pub(super) fn new(bot_id: Uuid) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(400.));
         list.set_follow_mode(FollowMode::Tail);
@@ -157,6 +182,9 @@ impl ConversationView {
             draft_forms: HashMap::new(),
             social_forms: HashMap::new(),
             expanded_drafts: HashSet::new(),
+            expanded_tasks: HashSet::new(),
+            reply_transitions: HashMap::new(),
+            _reply_clock: None,
             latest_seen: false,
             reply_layout: None,
             _load: None,
@@ -168,7 +196,7 @@ impl ConversationView {
 impl ElseApp {
     pub(super) fn remeasure_row(&self, key: RowKey, cx: &mut Context<Self>) {
         if let Some(view) = self.view.as_ref()
-            && let Some(ix) = view.rows.iter().position(|row| row.key == key)
+            && let Some(ix) = view.row_index(key)
         {
             view.list.remeasure_items(ix..ix + 1);
         }
@@ -318,6 +346,7 @@ impl ElseApp {
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));
         }
+        let tasks = conversation.map(task_replies).unwrap_or_default();
         let mut rows = Vec::new();
         let mut texts = Vec::new();
         let mut requests: Vec<(RowKey, Option<Uuid>)> = conversation
@@ -360,7 +389,9 @@ impl ElseApp {
             .collect();
         let items: Vec<_> = conversation.into_iter().flat_map(|c| c.items()).collect();
         for item in &items {
-            rows.push(RowKey::Item(item.id));
+            if item.kind != "assistant" || !tasks.contains_key(&item.turn_id) {
+                rows.push(RowKey::Item(item.id));
+            }
             let format = if item.kind == "assistant" || item.bot_reply.is_some() {
                 RowFormat::Markdown
             } else {
@@ -374,6 +405,12 @@ impl ElseApp {
                 format,
                 item.parts.clone(),
             ));
+            if tasks
+                .get(&item.turn_id)
+                .is_some_and(|reply| reply.anchor == Some(item.id))
+            {
+                rows.push(RowKey::Task(item.turn_id));
+            }
             requests.retain(|(key, anchor)| {
                 let here = *anchor == Some(item.id);
                 if here {
@@ -381,6 +418,14 @@ impl ElseApp {
                 }
                 !here
             });
+        }
+        for turn in conversation.into_iter().flat_map(|c| c.turns_in_order()) {
+            if tasks
+                .get(&turn.id)
+                .is_some_and(|reply| reply.anchor.is_none())
+            {
+                rows.push(RowKey::Task(turn.id));
+            }
         }
         rows.extend(requests.into_iter().map(|(key, _)| key));
         for pending in self.pending.get(&bot).into_iter().flatten() {
@@ -409,6 +454,12 @@ impl ElseApp {
                             (author, item.created_at)
                         })
                 }
+                RowKey::Task(id) => (
+                    Some(Author::Bot),
+                    conversation
+                        .and_then(|c| c.turn(id))
+                        .and_then(|t| t.finished_at),
+                ),
                 RowKey::Pending(request) => pending
                     .and_then(|list| list.iter().find(|p| p.request_id == request))
                     .map_or((None, None), |p| {
@@ -452,6 +503,7 @@ impl ElseApp {
                         .item(id)
                         .and_then(|i| c.turn(i.turn_id))
                         .map(|t| t.status.clone()),
+                    RowKey::Task(id) => c.turn(id).map(|t| t.status.clone()),
                     RowKey::Pending(_) => None,
                 });
                 TranscriptRow {
@@ -459,11 +511,29 @@ impl ElseApp {
                     footer_stamp,
                     routine,
                     routine_status,
+                    task: match key {
+                        RowKey::Task(id) => tasks.get(&id).cloned(),
+                        _ => None,
+                    },
                     state,
                 }
             })
             .collect();
         let old = std::mem::take(&mut view.rows);
+        view.reply_transitions
+            .retain(|_, at| at.elapsed() < Duration::from_millis(320));
+        for task in tasks.values() {
+            if task.state.terminal()
+                && old.iter().any(|row| {
+                    row.task
+                        .as_ref()
+                        .is_some_and(|prior| prior.turn == task.turn && !prior.state.terminal())
+                })
+            {
+                view.reply_transitions
+                    .insert(task.turn, std::time::Instant::now());
+            }
+        }
         let same = |a: &TranscriptRow, b: &TranscriptRow| a.key == b.key;
         let prefix = old
             .iter()
@@ -490,6 +560,7 @@ impl ElseApp {
         }
         let mut changed = Vec::new();
         let mut created = false;
+        let text_keys: HashSet<_> = texts.iter().map(|(key, ..)| *key).collect();
         for (key, text, format, parts) in texts {
             match view.texts.get_mut(&key) {
                 Some(row) if row.format() == format => {
@@ -514,8 +585,7 @@ impl ElseApp {
                 }
             }
         }
-        view.texts
-            .retain(|key, _| rows.iter().any(|row| row.key == *key));
+        view.texts.retain(|key, _| text_keys.contains(key));
         if created {
             // New text views learn their wrapped height during their first
             // layout; measure the rows again once that has happened.
@@ -529,11 +599,46 @@ impl ElseApp {
             });
         }
         for key in changed {
+            let key = match key {
+                RowKey::Item(id) => conversation
+                    .and_then(|c| c.item(id))
+                    .filter(|item| item.kind == "assistant" && tasks.contains_key(&item.turn_id))
+                    .map_or(key, |item| RowKey::Task(item.turn_id)),
+                _ => key,
+            };
             if let Some(ix) = rows.iter().position(|r| r.key == key) {
                 view.list.remeasure_items(ix..ix + 1);
             }
         }
         view.rows = rows;
+        let ticking = tasks.values().any(|reply| reply.state.ticking());
+        if !ticking {
+            view._reply_clock = None;
+        } else if view._reply_clock.is_none() {
+            view._reply_clock = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let keep = this.update(cx, |app, cx| {
+                        let ticking = app
+                            .view
+                            .as_ref()
+                            .filter(|view| view.bot_id == bot)
+                            .is_some_and(|view| {
+                                view.rows.iter().any(|row| {
+                                    row.task.as_ref().is_some_and(|task| task.state.ticking())
+                                })
+                            });
+                        if ticking {
+                            cx.notify();
+                        }
+                        ticking
+                    });
+                    if !matches!(keep, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
         self.sync_draft_forms(window, cx);
@@ -545,7 +650,9 @@ impl ElseApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{RoutineRow, RowKey, burst_tail_stamps, routine_rows};
+    use super::{
+        ConversationView, RoutineRow, RowKey, TranscriptRow, burst_tail_stamps, routine_rows,
+    };
     use crate::app::reply::Author::{self, Bot, Owner};
     use chrono::{DateTime, FixedOffset, Utc};
 
@@ -587,6 +694,30 @@ mod tests {
 
     fn item(id: u128) -> RowKey {
         RowKey::Item(Uuid::from_u128(id))
+    }
+
+    #[test]
+    fn folded_text_remeasures_its_capsule_and_plain_rows_keep_their_own_slot() {
+        let mut view = ConversationView::new(Uuid::from_u128(80));
+        view.conversation = Some(routine_conversation());
+        view.rows = [
+            RowKey::Item(Uuid::from_u128(3)),
+            RowKey::Task(Uuid::from_u128(10)),
+        ]
+        .into_iter()
+        .map(|key| TranscriptRow {
+            key,
+            footer_stamp: None,
+            routine: None,
+            task: None,
+            routine_status: None,
+            state: None,
+        })
+        .collect();
+        assert_eq!(view.row_index(item(3)), Some(0));
+        assert_eq!(view.row_index(item(1)), Some(1));
+        assert_eq!(view.row_index(item(2)), Some(1));
+        assert_eq!(view.row_index(item(999)), None);
     }
 
     #[test]

@@ -12,7 +12,6 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::time::Duration;
 
 impl ElseApp {
     pub(super) fn render_row(
@@ -29,11 +28,31 @@ impl ElseApp {
         else {
             return div().into_any_element();
         };
-        let Some(body) = self.render_row_content(&row, cx) else {
+        let body = if let Some(task) = row.task.as_ref() {
+            self.render_task_reply(task, cx)
+        } else {
+            self.render_row_content(&row, cx)
+        };
+        let Some(body) = body else {
             return div().into_any_element();
         };
         let column = super::view::reading_column();
         let Some(group) = row.routine else {
+            let body = if row.task.is_some() {
+                gpui_kit::component::v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(body)
+                    .children(row.footer_stamp.map(|at| {
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(stamp(at))
+                    }))
+                    .into_any_element()
+            } else {
+                body
+            };
             return column.py_1p5().child(body).into_any_element();
         };
         let Some(view) = self.view.as_ref() else {
@@ -48,8 +67,7 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let footer = if group.tail {
             let at = row.footer_stamp.map(stamp);
-            let status = self.render_turn_status(turn, view.bot_id, cx);
-            (status.is_some() || at.is_some()).then(|| {
+            at.is_some().then(|| {
                 h_flex()
                     .w_full()
                     .items_center()
@@ -58,7 +76,6 @@ impl ElseApp {
                     .px_3p5()
                     .pt_2()
                     .pb_2p5()
-                    .children(status)
                     .child(div().flex_1())
                     .children(
                         at.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)),
@@ -127,8 +144,7 @@ impl ElseApp {
                         } else {
                             theme.muted_foreground
                         })
-                        .child(label)
-                        .children(active.then(|| working_dots(turn.id))),
+                        .child(label),
                 ),
         )
     }
@@ -223,23 +239,8 @@ impl ElseApp {
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
                 let run = conversation.run(id);
-                let status = turn
-                    .filter(|_| row.routine.is_none())
-                    .filter(|turn| {
-                        conversation
-                            .items()
-                            .rev()
-                            .find(|i| i.turn_id == turn.id)
-                            .is_some_and(|i| i.id == id)
-                    })
-                    .and_then(|turn| self.render_turn_status(turn, view.bot_id, cx));
                 if item.reaction.is_some() {
-                    return status.map(|status| {
-                        gpui_kit::component::v_flex()
-                            .w_full()
-                            .child(status)
-                            .into_any_element()
-                    });
+                    return None;
                 }
                 // Children stretch so bubbles get a definite width; notes
                 // are aligned to the bubble's side.
@@ -379,9 +380,9 @@ impl ElseApp {
                 column = column
                     .child(card)
                     .children(footer.map(|at| beside(user, note(at, false))));
-                column = column.children(status);
                 column.into_any_element()
             }
+            RowKey::Task(_) => return None,
             RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
             RowKey::Question(id) => self.render_question_card(id, cx),
             RowKey::Draft(id) => self.render_draft_card(id, cx),
@@ -565,34 +566,12 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
     }
 }
 
-fn working_dots(turn: impl std::fmt::Display) -> impl IntoElement {
-    h_flex().text_xs().children((0..3).map(move |ix| {
-        div().child(".").with_animation(
-            SharedString::from(format!("working-dot-{turn}-{ix}")),
-            Animation::new(Duration::from_millis(1200))
-                .repeat_synced()
-                .with_max_fps(30.),
-            move |dot, t| dot.opacity(dot_opacity(t, ix)),
-        )
-    }))
-}
-
-fn dot_opacity(t: f32, ix: usize) -> f32 {
-    let phase = (t - ix as f32 * 0.2).rem_euclid(1.);
-    let pulse = if phase < 0.6 {
-        (phase / 0.6 * std::f32::consts::PI).sin()
-    } else {
-        0.
-    };
-    0.25 + 0.75 * pulse
-}
-
 fn beside(user: bool, note: Div) -> Div {
     let row = h_flex().w_full().child(note);
     if user { row.justify_end() } else { row }
 }
 
-fn stamp(at: DateTime<Utc>) -> String {
+pub(super) fn stamp(at: DateTime<Utc>) -> String {
     stamp_in(at, Local::now())
 }
 
@@ -610,7 +589,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dot_opacity, stamp_in, turn_label};
+    use super::{stamp_in, turn_label};
     use chrono::{DateTime, FixedOffset, Utc};
 
     #[test]
@@ -636,17 +615,6 @@ mod tests {
             turn_label(&turn),
             ("Waiting for you to connect an account…".into(), false)
         );
-    }
-
-    #[test]
-    fn working_dots_pulse_left_to_right() {
-        assert!(dot_opacity(0.3, 0) > 0.99);
-        assert!(dot_opacity(0.3, 2) < dot_opacity(0.3, 1));
-        assert!(dot_opacity(0.55, 2) > dot_opacity(0.55, 0));
-        assert!((0..3).all(|ix| (0..100).all(|t| {
-            let o = dot_opacity(t as f32 / 100., ix);
-            (0.25..=1.).contains(&o)
-        })));
     }
 
     #[test]
