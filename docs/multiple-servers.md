@@ -16,7 +16,9 @@ Health, version, release status, and selection are separate facts. An online ser
 
 ## Update targets
 
-`updates::Component` selects App or Server. Each updater owns its snapshot and bounded commands. App updates skip server work checks and offer a desktop restart. Server updates use only the launcher's trusted local installation, recheck active work, and let the installer restart that server. An address alone never grants local installation authority. Unmanaged remote servers show a command to run on their own host.
+`updates::Component` selects App or Server. Each updater owns its snapshot and bounded commands. App updates skip server work checks and offer a desktop restart. Local server updates use the launcher's trusted installation. Remote server updates use the saved connection's owner token to call that server's installation endpoint. Each server has its own updater actor and output. Both recheck active work and let the installer close the maintenance gate and restart the server. An address alone never grants local installation authority.
+
+The remote API accepts a version and a request ID, then schedules its installer outside the API service. Private request records, output, and results survive API restarts. Repeated requests with the same ID return the existing operation. The desktop follows progress through temporary connection loss and verifies the running version after installation. Older servers need one terminal update before they expose this endpoint. Servers managed outside the installer use their deployment's update procedure.
 
 The installer separates requested components from the installed inventory. Explicit `--app-only` and `--server-only` operations affect only that component. The default command updates the installed inventory.
 

@@ -5,6 +5,9 @@
 
 mod output;
 mod release;
+mod remote;
+
+pub use remote::start as start_remote;
 
 use std::ffi::OsString;
 use std::io::{Read as _, Seek as _, SeekFrom};

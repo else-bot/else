@@ -574,6 +574,7 @@ impl Shell {
                                                 Ok(()) => {
                                                     shell.registry = registry;
                                                     shell.inactive.remove(&id);
+                                                    shell.remote_updates.remove(&id);
                                                     shell.refresh_servers(window, cx);
                                                 }
                                                 Err(err) => shell.connection_error = Some(err),
@@ -597,40 +598,33 @@ impl Shell {
             return;
         };
         if self.managed_server(&saved.profile) {
-            self.server_update_target = Some(id);
-            self.server_updates.commands.check().ok();
-            self.server_updates.commands.refresh_work().ok();
-            cx.notify();
-        } else {
-            let name = saved.name.clone();
-            let origin = saved.profile.origin.as_str().to_owned();
-            window.open_dialog(cx, move |dialog, _, _| {
-                dialog
-                    .title(format!("Update {name}"))
-                    .close_button(false)
-                    .child(
-                        v_flex().gap_3()
-                            .child(origin.clone())
-                            .child("Run this command on the server after its active work finishes. If you installed it another way, use that deployment's update procedure.")
-                            .child(div().font_family("monospace").child("elsebot update --server-only"))
-                    )
-                    .footer(
-                        h_flex().justify_end().gap_2()
-                            .child(
-                                Button::new("copy-server-update")
-                                    .focus_ring(false).cursor_pointer().ghost().label("Copy command")
-                                    .on_click(|_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string("elsebot update --server-only".to_owned()));
-                                    })
-                            )
-                            .child(
-                                Button::new("close-server-update")
-                                    .focus_ring(false).cursor_pointer().label("Done")
-                                    .on_click(|_, window, cx| window.close_dialog(cx))
-                            )
-                    )
-            });
+            self.remote_updates.remove(&id);
+        } else if !self
+            .remote_updates
+            .get(&id)
+            .is_some_and(|view| view.remote_profile.as_ref() == Some(&saved.profile))
+        {
+            match updates::View::new_remote(id, saved.profile.clone(), &self.runtime, window, cx) {
+                Ok(view) => {
+                    self.remote_updates.insert(id, view);
+                }
+                Err(error) => {
+                    self.connection_error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            }
         }
+        self.server_update_target = Some(id);
+        let commands = self
+            .remote_updates
+            .get(&id)
+            .unwrap_or(&self.server_updates)
+            .commands
+            .clone();
+        commands.check().ok();
+        commands.refresh_work().ok();
+        cx.notify();
     }
 
     pub(super) fn close_server_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

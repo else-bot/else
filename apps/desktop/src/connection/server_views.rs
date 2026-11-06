@@ -280,19 +280,27 @@ impl Shell {
                         })),
                 );
             }
+            let update_activity = self
+                .remote_updates
+                .get(&id)
+                .or_else(|| {
+                    self.managed_server(&saved.profile)
+                        .then_some(&self.server_updates)
+                })
+                .is_some_and(updates::View::has_activity);
             if (update_available && online)
                 || observation.is_some_and(|entry| entry.health == Health::Incompatible)
+                || update_activity
             {
-                let managed = self.managed_server(&saved.profile);
                 actions = actions.child(
                     Button::new(SharedString::from(format!("update-server-{id}")))
                         .focus_ring(false)
                         .cursor_pointer()
                         .xsmall()
-                        .label(if managed {
-                            "Update server"
+                        .label(if update_activity {
+                            "View update"
                         } else {
-                            "Update instructions"
+                            "Update server"
                         })
                         .on_click(cx.listener(move |shell, _, window, cx| {
                             shell.show_server_update(id, window, cx)

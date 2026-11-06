@@ -23,6 +23,7 @@ pub mod memory_worker;
 pub mod providers;
 pub mod runtime_lock;
 pub mod scheduler;
+mod server_updates;
 pub mod views;
 
 pub mod socials;

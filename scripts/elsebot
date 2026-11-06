@@ -533,6 +533,31 @@ update)
 	cp "$ELSE_HOME/src/install.sh" "$tmp"
 	ELSE_HOME="$ELSE_HOME" bash "$tmp" "$@"
 	;;
+update-background)
+	[ "$#" = 2 ] || die "update-background requires a request ID and version"
+	request_id="$1"
+	case "$request_id" in *[!0-9a-f-]* | "") die "invalid update request ID" ;; esac
+	job="$RUN/server-updates/$request_id"
+	[ -f "$job/worker.sh" ] || die "no prepared background update"
+	case "$ELSEBOT_MANAGER" in
+	systemd)
+		systemd-run --user --quiet --collect --unit="else-update-$request_id" --property=Type=exec \
+			-- /bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job"
+		;;
+	launchd)
+		launchctl submit -l "bot.else.update.$request_id" -- /bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job"
+		;;
+	process)
+		if command -v setsid >/dev/null 2>&1; then
+			nohup setsid /bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job" >/dev/null 2>&1 </dev/null &
+		else
+			nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+				/bin/bash "$job/worker.sh" "$ELSE_HOME" "$2" "$job" >/dev/null 2>&1 </dev/null &
+		fi
+		;;
+	*) die "unsupported service manager" ;;
+	esac
+	;;
 desktop)
 	[ -x "$APP_CURRENT/bin/else-desktop" ] || die "the app is not installed; add it with: elsebot update --app-only"
 	case "${1:-}" in version | --version | -V) exec "$APP_CURRENT/bin/else-desktop" "$@" ;; esac

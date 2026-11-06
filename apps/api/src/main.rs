@@ -527,7 +527,8 @@ fn run_serve() -> anyhow::Result<()> {
         );
         let events = else_api::events::EventHub::start(pool.clone(), stop_scheduler.clone());
         let mut state = http::AppState::new(owner_token, pool.clone(), scheduler, events)
-            .with_secret_key(secret_key.clone());
+            .with_secret_key(secret_key.clone())
+            .with_server_updates(&config);
         let mut computer_task = None;
         match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
             Ok(msb) => {

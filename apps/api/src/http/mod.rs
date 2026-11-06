@@ -64,6 +64,7 @@ pub struct AppState {
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub socials: Option<Arc<crate::socials::Manager>>,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
+    pub(crate) server_updates: crate::actor::Actor<crate::server_updates::Installation>,
     desktop_streams: desktop_stream::Streams,
 }
 
@@ -88,6 +89,7 @@ impl AppState {
             mcps: std::sync::OnceLock::new(),
             socials: None,
             update_hold: crate::actor::Actor::default(),
+            server_updates: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
         }
     }
@@ -126,6 +128,12 @@ impl AppState {
 
     pub fn with_computers(mut self, computers: Arc<crate::computers::ComputerManager>) -> Self {
         self.computers = Some(computers);
+        self
+    }
+
+    pub fn with_server_updates(mut self, config: &Config) -> Self {
+        self.server_updates =
+            crate::actor::Actor::new(crate::server_updates::Installation::discover(config));
         self
     }
 }
