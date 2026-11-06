@@ -137,7 +137,10 @@ impl ResetPlan {
         )?;
         clear_directory(&self.bots, &[])?;
         clear_directory(&self.home.join("logs"), &[])?;
-        clear_directory(&self.home.join("run"), &[])?;
+        clear_directory(
+            &self.home.join("run"),
+            &[self.home.join("run/install.lock")],
+        )?;
         for entry in fs::read_dir(self.home.join("config"))? {
             let entry = entry?;
             let name = entry.file_name();
