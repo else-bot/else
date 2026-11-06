@@ -224,16 +224,20 @@ fn adopt_per_bot(path: &Path, shared: Uuid, key: &SecretKey) -> Result<(), Error
         return Ok(());
     }
     if !path.join(filename(shared)).exists() {
-        per_bot.sort();
-        for (_, bot) in per_bot.iter().rev() {
-            match load(path, *bot, Some(key)) {
-                Ok(Some(credential)) => {
-                    save(path, shared, key, &credential)?;
-                    break;
+        // Restores do not keep file times, so the latest token expiry decides
+        // which sign-in is newest; the file time only breaks ties.
+        let newest = per_bot
+            .iter()
+            .filter_map(|(modified, bot)| match load(path, *bot, Some(key)) {
+                Ok(credential) => credential.map(|c| (c.expires_at, *modified, c)),
+                Err(_) => {
+                    tracing::warn!("Skipping an unreadable per-bot MCP sign-in");
+                    None
                 }
-                Ok(None) => {}
-                Err(_) => tracing::warn!("Skipping an unreadable per-bot MCP sign-in"),
-            }
+            })
+            .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        if let Some((_, _, credential)) = newest {
+            save(path, shared, key, &credential)?;
         }
     }
     for (_, bot) in per_bot {

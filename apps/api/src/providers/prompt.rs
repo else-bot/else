@@ -85,10 +85,11 @@ fn delegation_rules(input: &TurnInput) -> String {
             " This task is not rooted in an owner request, so the routine tools are refused for you."
         };
         let approvals = if delegation.origin == crate::app::providers::Origin::OwnerRequest {
-            "You cannot delegate further, ask the owner questions, or request secrets. A \
-             destructive or external tool call, or an MCP sign-in, shows the owner an approval \
-             card in your own chat and returns parked: end this attempt; you continue after \
-             the answer, then retry the exact call once if approved."
+            "You cannot delegate further, ask the owner questions, or request secrets. Unless \
+             a tool result says standing permission applies, a gated destructive or external \
+             tool call, or an MCP sign-in, shows the owner an approval card in your own chat \
+             and returns parked: end this attempt; you continue after the answer, then retry \
+             the exact call once if approved. Report other actions that need approval instead."
         } else {
             "You cannot delegate further or ask the owner anything (no secrets, questions, or \
              approvals), so you cannot get approval here: take no destructive or external \
