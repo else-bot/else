@@ -109,6 +109,44 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
         .collect()
 }
 
+fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
+    c.turns_in_order()
+        .into_iter()
+        .flat_map(|turn| {
+            turn.secret_requests
+                .iter()
+                .map(move |request| {
+                    (
+                        RowKey::SecretRequest(request.id),
+                        c.question_anchor(turn.id, None),
+                    )
+                })
+                .chain(turn.questions.iter().filter_map(move |question| {
+                    let anchor = c.question_anchor(turn.id, question.settled_at);
+                    (question.is_pending() || anchor.is_some())
+                        .then_some((RowKey::Question(question.id), anchor))
+                }))
+                .chain(turn.social_setups.iter().map(move |setup| {
+                    (
+                        RowKey::SocialSetup(setup.id),
+                        c.question_anchor(turn.id, None),
+                    )
+                }))
+                .chain(
+                    turn.outgoing_drafts
+                        .iter()
+                        .filter(|d| d.status != crate::model::DraftStatus::Superseded)
+                        .map(move |draft| {
+                            (
+                                RowKey::Draft(draft.id),
+                                c.question_anchor(turn.id, draft.settled_at),
+                            )
+                        }),
+                )
+        })
+        .collect()
+}
+
 const BURST_GAP: TimeDelta = TimeDelta::minutes(5);
 
 fn burst_tail_stamps<Tz: TimeZone>(
@@ -370,44 +408,7 @@ impl ElseApp {
         let tasks = conversation.map(task_replies).unwrap_or_default();
         let mut rows = Vec::new();
         let mut texts = Vec::new();
-        let mut requests: Vec<(RowKey, Option<Uuid>)> = conversation
-            .into_iter()
-            .flat_map(|c| {
-                c.turns_in_order().into_iter().flat_map(move |turn| {
-                    turn.secret_requests
-                        .iter()
-                        .map(move |request| {
-                            (
-                                RowKey::SecretRequest(request.id),
-                                c.question_anchor(turn.id, None),
-                            )
-                        })
-                        .chain(turn.questions.iter().map(move |question| {
-                            (
-                                RowKey::Question(question.id),
-                                c.question_anchor(turn.id, question.settled_at),
-                            )
-                        }))
-                        .chain(turn.social_setups.iter().map(move |setup| {
-                            (
-                                RowKey::SocialSetup(setup.id),
-                                c.question_anchor(turn.id, None),
-                            )
-                        }))
-                        .chain(
-                            turn.outgoing_drafts
-                                .iter()
-                                .filter(|d| d.status != crate::model::DraftStatus::Superseded)
-                                .map(move |draft| {
-                                    (
-                                        RowKey::Draft(draft.id),
-                                        c.question_anchor(turn.id, draft.settled_at),
-                                    )
-                                }),
-                        )
-                })
-            })
-            .collect();
+        let mut requests = conversation.map(request_rows).unwrap_or_default();
         requests.extend(conversation.into_iter().flat_map(|c| {
             c.turns_in_order()
                 .into_iter()
@@ -713,7 +714,7 @@ impl ElseApp {
 mod tests {
     use super::{
         ConversationView, RoutineRow, RowKey, TranscriptRow, burst_tail_stamps, first_unread_row,
-        routine_rows,
+        request_rows, routine_rows,
     };
     use crate::api::ReplyPosition;
     use crate::app::reply::Author::{self, Bot, Owner};
@@ -753,6 +754,60 @@ mod tests {
             "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
         })).unwrap();
         Conversation::from_snapshot(snapshot).unwrap()
+    }
+
+    fn question_page(status: &str, seq: i64, created_at: &str) -> Snapshot {
+        serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "older_before_seq": if seq > 1 { Some(seq) } else { None },
+            "items": [{"id": Uuid::from_u128(seq as u128), "seq":seq, "turn_id":Uuid::from_u128(10),
+                "kind":"assistant", "text":"Kaneo connection conversation", "created_at":created_at}],
+            "turns": [{
+                "id":Uuid::from_u128(10), "request_id":Uuid::from_u128(110), "turn_no":1,
+                "provider_id":"codex", "status":if status == "pending" { "waiting" } else { "completed" },
+                "effect_uncertain":false,
+                "questions":[{"id":Uuid::from_u128(210), "kind":"external", "title":"Connect Kaneo",
+                    "choices":[], "status":status,
+                    "answer":if status == "answered" { Some("approve") } else { None },
+                    "settled_at":if status == "pending" { None } else { Some("2026-11-01T00:00:01Z") },
+                    "action":{"mcp_connection":{"id":"kaneo", "provider":"https://issuer.test", "scopes":[]}}
+                }]
+            }],
+            "activity":{"phase":"idle", "active_turn_id":null, "queued_count":0}
+        })).unwrap()
+    }
+
+    #[test]
+    fn closed_questions_wait_for_their_history_page() {
+        for status in ["cancelled", "answered", "skipped"] {
+            let mut c =
+                Conversation::from_snapshot(question_page(status, 2, "2026-11-02T00:00:00Z"))
+                    .unwrap();
+            assert!(
+                request_rows(&c).is_empty(),
+                "a closed connection card must not reappear at the conversation tail"
+            );
+            c.merge_older(question_page("pending", 1, "2026-11-01T00:00:00Z"));
+            assert_eq!(
+                request_rows(&c),
+                [(
+                    RowKey::Question(Uuid::from_u128(210)),
+                    Some(Uuid::from_u128(1))
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn pending_questions_remain_visible_without_loaded_messages() {
+        let mut page = question_page("pending", 2, "2026-11-02T00:00:00Z");
+        page.items.clear();
+        let c = Conversation::from_snapshot(page).unwrap();
+        assert_eq!(
+            request_rows(&c),
+            [(RowKey::Question(Uuid::from_u128(210)), None)]
+        );
     }
 
     fn item(id: u128) -> RowKey {
