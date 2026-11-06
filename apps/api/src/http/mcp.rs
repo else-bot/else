@@ -87,6 +87,7 @@ pub async fn endpoint(
                 Some("mcp_install") => Tool::ManageMcp,
                 Some("mcp_list" | "mcp_request") => Tool::Mcp,
                 Some("create_bot") => Tool::CreateBot,
+                Some("rename_bot") => Tool::RenameBot,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_owner" | "ask_permission" | "confirm_permission" | "social_connect") => {
                     Tool::AskOwner
@@ -240,6 +241,25 @@ fn tool_list() -> Value {
                               "description": "Short display name, for example GitHub." },
                 },
                 "required": ["name"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "rename_bot",
+            "description": "Rename an existing else.bot when asked, including yourself or another bot. \
+                Available to any bot for work rooted in an owner request. Use the exact target_bot_id \
+                from your registry, task, or a create_bot result. Changes only the display name; \
+                repeating the same name changes nothing. Confirm the saved name from the result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_bot_id": { "type": "string", "format": "uuid" },
+                    "name": { "type": "string", "minLength": 1,
+                              "maxLength": crate::app::bots::MAX_NAME_CHARS },
+                },
+                "required": ["target_bot_id", "name"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
@@ -400,6 +420,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_date" => date(state, grant, args).await,
         "delegate" => delegate(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
+        "rename_bot" => rename_bot(state, grant, args).await,
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
         "social_connect" | "social_connections" | "social_action" | "social_action_status" => {
             super::social_tools::call(state, grant, name, args).await
@@ -916,7 +937,7 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Err(BotError::Refused(refusal)) => {
             let code = match refusal {
-                Refusal::NotMain => "NOT_ALLOWED",
+                Refusal::NotMain | Refusal::NotOwnerRequest => "NOT_ALLOWED",
                 Refusal::NotRunning => "NOT_RUNNING",
                 Refusal::AttemptDelegated => "ATTEMPT_PARKED",
             };
@@ -928,6 +949,60 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "UNAVAILABLE",
                 "bots cannot be created right now; try again shortly.",
             )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameBotArgs {
+    target_bot_id: Uuid,
+    name: String,
+}
+
+async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::app::bots::BotName;
+    use crate::db::bots::{self, BotError, Refusal};
+    let reject = |code: &str, message: &str| {
+        (
+            tool_error(&format!("{code}: {message}")),
+            Some(format!("rejected {code}")),
+        )
+    };
+    let Ok(parsed) = serde_json::from_value::<RenameBotArgs>(args.clone()) else {
+        return reject(
+            "INVALID_ARGUMENTS",
+            "pass a target_bot_id UUID and a name string.",
+        );
+    };
+    let name = match BotName::parse(&parsed.name) {
+        Ok(name) => name,
+        Err(err) => return reject("INVALID_BOT", &err.to_string()),
+    };
+    match bots::rename_for_turn(&state.db, grant.turn_id, parsed.target_bot_id, &name).await {
+        Ok(bot) => {
+            let log = format!("renamed {} ({})", bot.name, bot.id);
+            (
+                tool_result(json!({ "bot_id": bot.id, "name": bot.name, "status": bot.status })),
+                Some(log),
+            )
+        }
+        Err(err) => {
+            let code = match &err {
+                BotError::NotFound => "BOT_NOT_FOUND",
+                BotError::Deleted => "BOT_UNAVAILABLE",
+                BotError::Refused(Refusal::NotMain | Refusal::NotOwnerRequest) => "NOT_ALLOWED",
+                BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
+                BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
+                _ => {
+                    tracing::warn!(error = %err, "renaming a bot from a turn failed");
+                    return reject(
+                        "UNAVAILABLE",
+                        "bots cannot be renamed right now; try again shortly.",
+                    );
+                }
+            };
+            reject(code, &err.to_string())
         }
     }
 }

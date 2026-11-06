@@ -32,6 +32,8 @@ pub enum Tool {
     Delegate,
     /// Register a new bot for the owner (main bot only).
     CreateBot,
+    /// Rename a bot for work rooted in an owner request.
+    RenameBot,
     /// Use the bot's own computer (commands, jobs, files, browser).
     Computer,
     /// Ask the owner for credentials (owner conversations only).
