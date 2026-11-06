@@ -179,3 +179,78 @@ async fn grant_for_running(app: &TestApp, bot: &str, tools: Vec<Tool>) -> (Uuid,
             .await,
     )
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_connection() {
+    let app = TestApp::installed().await;
+    let tools = vec![Tool::Mcp, Tool::ManageMcp, Tool::AskOwner];
+    let maple = app.create_bot("Maple").await;
+    let (turn, token) = grant(&app, &maple, tools.clone()).await;
+    result(&tool(&app, &token, "mcp_install", installation()).await);
+    let mut moved = installation();
+    moved["config"]["env"]["MCP_TEST_SECRET"] = json!("new-secret-stays-out-of-cards");
+    let conflict = tool(&app, &token, "mcp_install", moved.clone()).await;
+    assert_eq!(conflict.body["result"]["isError"], true);
+    assert!(
+        conflict.body.to_string().contains("replace true"),
+        "{}",
+        conflict.body
+    );
+
+    moved["replace"] = json!(true);
+    let pending = result(&tool(&app, &token, "mcp_install", moved.clone()).await);
+    assert_eq!(pending["parked"], true, "{pending}");
+    assert!(app.scheduler.grants().is_parked(turn).await);
+    let (kind, title, context): (String, String, String) =
+        sqlx::query_as("SELECT kind, title, context FROM owner_questions WHERE turn_id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (kind.as_str(), title.as_str()),
+        ("destructive", "Replace the T3 Code MCP")
+    );
+    assert!(context.contains("Changes: connection"), "{context}");
+    assert!(context.contains("environment MCP_TEST_SECRET"), "{context}");
+    assert!(!context.contains("secret-stays") && !context.contains("keep-this-out"));
+    assert!(
+        !app.owner("GET", "/v1/settings/mcp", None)
+            .await
+            .body
+            .to_string()
+            .contains("new-secret"),
+        "nothing changes before approval"
+    );
+
+    let scout = app.create_bot("Scout").await;
+    let tool_grant = "mcp:t3-code:external:6563686f";
+    for scope in ["destructive", tool_grant] {
+        sqlx::query("INSERT INTO bot_permissions (bot_id, scope) VALUES (?1, ?2)")
+            .bind(scout.parse::<Uuid>().unwrap())
+            .bind(scope)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+    }
+    let (_, token) = grant(&app, &scout, tools).await;
+    let replaced = result(&tool(&app, &token, "mcp_install", moved).await);
+    assert_eq!(replaced["replaced"], true, "{replaced}");
+    assert_eq!(replaced["reconnect_required"], true);
+    assert_eq!(replaced["mcp"]["installed_by"], "Scout");
+    let scopes: Vec<String> = sqlx::query_scalar("SELECT scope FROM bot_permissions")
+        .fetch_all(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(scopes, ["destructive"]);
+    let called = result(
+        &tool(
+            &app,
+            &token,
+            "mcp_request",
+            json!({"id":"t3-code","method":"tools/list","params":{}}),
+        )
+        .await,
+    );
+    assert_eq!(called["result"]["tools"][0]["name"], "echo");
+}

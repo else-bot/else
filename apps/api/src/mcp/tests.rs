@@ -282,3 +282,84 @@ for line in sys.stdin:
     );
     library.remove(&id).await.unwrap();
 }
+
+#[tokio::test]
+async fn approved_replacement_keeps_sign_ins_only_for_the_same_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("mcp");
+    let library = Library::new(root.clone(), Arc::new(crate::maintenance::Gate::default()));
+    let original = input("github");
+    library
+        .install(original.clone(), "Maple".into())
+        .await
+        .unwrap();
+    let sign_in = root
+        .join("github")
+        .join(format!("oauth-{}.json", Uuid::new_v4()));
+    std::fs::write(&sign_in, "{}").unwrap();
+
+    let mut documented = original.clone();
+    documented.skill = "Prefer the search tool.".into();
+    let card = library
+        .read(&original.id)
+        .await
+        .unwrap()
+        .replacement(&documented);
+    assert!(card.contains("Changes: skill"), "{card}");
+    assert!(
+        card.contains("sign-ins and MCP tool permissions are kept"),
+        "{card}"
+    );
+    let replaced = library
+        .replace(documented.clone(), "Scout".into())
+        .await
+        .unwrap();
+    assert!(!replaced.reconnect);
+    assert_eq!(replaced.manifest.installed_by, "Scout");
+    assert_eq!(
+        library.read(&original.id).await.unwrap().skill,
+        documented.skill
+    );
+    assert!(sign_in.exists(), "same connection keeps saved sign-ins");
+
+    let mut moved = documented.clone();
+    moved.config = Transport::Http {
+        url: "https://example.com/mcp?token=private-query".into(),
+        headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
+    };
+    let card = library
+        .read(&original.id)
+        .await
+        .unwrap()
+        .replacement(&moved);
+    assert!(
+        card.contains("New: T3 Code, HTTP https://example.com/mcp?… with headers Authorization"),
+        "{card}"
+    );
+    assert!(
+        !card.contains("private-token") && !card.contains("private-query"),
+        "{card}"
+    );
+    let replaced = library
+        .replace(moved.clone(), "Scout".into())
+        .await
+        .unwrap();
+    assert!(replaced.reconnect);
+    assert!(!sign_in.exists(), "a new connection drops saved sign-ins");
+    assert!(
+        library
+            .read(&original.id)
+            .await
+            .unwrap()
+            .same_connection(&moved)
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers, [std::ffi::OsString::from("github")]);
+    assert!(matches!(
+        library.install(original, "Maple".into()).await,
+        Err(Error::Conflict)
+    ));
+}

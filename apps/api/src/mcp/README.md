@@ -11,7 +11,9 @@ Each package has an immutable id and four private configuration files. OAuth con
 | `README.md` | Setup documentation and API reference |
 | `config.json` | HTTP endpoint and headers, or a stdio command, arguments, and environment |
 
-`mcp_install` validates and publishes the complete package by directory rename. An identical installation returns the existing manifest. Different files under an existing id produce a conflict. The owner can remove that package in Settings before installing its replacement.
+`mcp_install` validates and publishes the complete package by directory rename. An identical installation returns the existing manifest. Different files under an existing id produce a conflict unless the call sets `replace`. A replacement shows the owner a destructive approval card that compares the current and new package. Header and environment values, URL queries, and command arguments stay off the card. After approval, the new package swaps in atomically. An unchanged connection config keeps every bot's saved sign-in and MCP tool permissions. A changed one closes the package's sessions and removes both.
+
+One package id holds one account per bot. To use a second account of the same service, such as a work and a personal GitHub account, install the server again under another id, for example `github-work`. Each id signs in, keeps tool permissions, and appears in Settings separately.
 
 The library owns one actor per package. It owns one shared stdio transport and separate HTTP OAuth sessions for each bot. Its bounded mailbox serializes installation, removal, and requests for that package. Other packages run independently. An accepted mutation or request holds a maintenance admission until the actor finishes, even if its HTTP caller disconnects.
 
@@ -22,7 +24,7 @@ The provider adapters continue to connect only to else.bot's MCP endpoint. That 
 | Tool | Behavior |
 | --- | --- |
 | `mcp_list` | List package metadata, or read a package's skill and documentation by id |
-| `mcp_install` | Save the package for all bots during an owner request |
+| `mcp_install` | Save the package for all bots during an owner request, or replace it with owner approval |
 | `mcp_connect` | Request owner sign-in for this bot through a native connection card |
 | `mcp_connection_status` | Read this bot's connection state without credentials |
 | `mcp_request` | Discover or call tools, read resources, or retrieve prompts from an installed MCP |
