@@ -1,5 +1,5 @@
 mod form;
-mod google;
+mod oauth;
 
 use std::sync::Arc;
 
@@ -112,14 +112,8 @@ impl EmailSettings {
             let _ = this.update_in(cx, |view, window, cx| {
                 view.busy = false;
                 match result {
-                    Ok(form::Connected::Google(signin)) => {
-                        view.wait_for_google(signin, bot, window, cx);
-                    }
-                    Ok(form::Connected::Authorization(auth)) => {
-                        cx.open_url(&auth.authorization_url);
-                        if let Some(form) = &mut view.form {
-                            form.authorized(auth, window, cx);
-                        }
+                    Ok(form::Connected::Authorization(signin)) => {
+                        view.wait_for_signin(signin, bot, window, cx);
                     }
                     Ok(form::Connected::Account(account)) => {
                         view.connected(*account, bot, window, cx);
@@ -132,16 +126,16 @@ impl EmailSettings {
         cx.notify();
     }
 
-    fn wait_for_google(
+    fn wait_for_signin(
         &mut self,
-        mut signin: google::SignIn,
+        mut signin: oauth::SignIn,
         bot: Option<Uuid>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         cx.open_url(&signin.authorization.authorization_url);
         if let Some(form) = &mut self.form {
-            form.google_authorized(signin.authorization.authorization_url.clone());
+            form.authorized(signin.authorization.authorization_url.clone());
         }
         self.busy = true;
         let client = self.client.clone();
@@ -150,7 +144,7 @@ impl EmailSettings {
                 let callback = signin.wait().await?;
                 this.update(cx, |view, cx| {
                     if let Some(form) = &mut view.form {
-                        form.google_completing();
+                        form.completing();
                     }
                     cx.notify();
                 })
@@ -179,7 +173,7 @@ impl EmailSettings {
         }));
     }
 
-    fn cancel_google(&mut self, cx: &mut Context<Self>) {
+    fn cancel_signin(&mut self, cx: &mut Context<Self>) {
         self._request = None;
         if let Some(form) = &mut self.form {
             form.cancel_authorization();

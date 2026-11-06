@@ -15,10 +15,64 @@ use url::Url;
 
 use crate::api::{Client, ClientError, EmailAuthorization, EmailProvider};
 
-const REGISTRATION: Option<(&str, &str)> = include!(concat!(env!("OUT_DIR"), "/google_oauth.rs"));
+const GOOGLE_REGISTRATION: Option<(&str, &str)> =
+    include!(concat!(env!("OUT_DIR"), "/google_oauth.rs"));
 
-pub(super) fn configured() -> bool {
-    REGISTRATION.is_some()
+const MICROSOFT_CLIENT_ID: Option<&str> = include!(concat!(env!("OUT_DIR"), "/microsoft_oauth.rs"));
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Provider {
+    Google,
+    Microsoft,
+}
+
+impl Provider {
+    pub fn for_email(provider: EmailProvider) -> Option<Self> {
+        match provider {
+            EmailProvider::Gmail => Some(Self::Google),
+            EmailProvider::Microsoft => Some(Self::Microsoft),
+            _ => None,
+        }
+    }
+
+    fn email(self) -> EmailProvider {
+        match self {
+            Self::Google => EmailProvider::Gmail,
+            Self::Microsoft => EmailProvider::Microsoft,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.email().label()
+    }
+
+    pub fn configured(self) -> bool {
+        self.registration().is_some()
+    }
+
+    fn registration(self) -> Option<(&'static str, Option<&'static str>)> {
+        match self {
+            Self::Google => GOOGLE_REGISTRATION.map(|(id, secret)| (id, Some(secret))),
+            Self::Microsoft => MICROSOFT_CLIENT_ID.map(|id| (id, None)),
+        }
+    }
+
+    fn callback(self, port: u16) -> (String, String) {
+        match self {
+            Self::Google => {
+                let path = format!("/google/{}", uuid::Uuid::new_v4().simple());
+                (format!("http://127.0.0.1:{port}{path}"), path)
+            }
+            Self::Microsoft => (format!("http://localhost:{port}/"), "/".into()),
+        }
+    }
+
+    fn authorize_endpoint(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Google => ("accounts.google.com", "/o/oauth2/v2/auth"),
+            Self::Microsoft => ("login.microsoftonline.com", "/common/oauth2/v2.0/authorize"),
+        }
+    }
 }
 
 pub(super) struct SignIn {
@@ -42,46 +96,57 @@ pub(super) struct Callback {
 }
 
 impl SignIn {
-    pub async fn start(client: Arc<Client>) -> Result<Self, ClientError> {
-        let registration = REGISTRATION.ok_or_else(|| {
-            ClientError::Protocol(
-                "This build does not include Gmail sign-in. Use an official else.bot release."
-                    .into(),
-            )
+    pub async fn start(
+        client: Arc<Client>,
+        provider: Provider,
+        address: String,
+    ) -> Result<Self, ClientError> {
+        let registration = provider.registration().ok_or_else(|| {
+            ClientError::Protocol(format!(
+                "This build does not include {} sign-in. Use an official else.bot release.",
+                provider.label()
+            ))
         })?;
-        Self::start_registered(client, registration).await
+        Self::start_registered(client, provider, address, registration).await
     }
 
     async fn start_registered(
         client: Arc<Client>,
-        registration: (&'static str, &'static str),
+        provider: Provider,
+        address: String,
+        registration: (&'static str, Option<&'static str>),
     ) -> Result<Self, ClientError> {
         let this = client.clone();
         client
-            .run(async move { Self::start_on_runtime(this, registration).await })
+            .run(async move { Self::start_on_runtime(this, provider, address, registration).await })
             .await
     }
 
     async fn start_on_runtime(
         client: Arc<Client>,
-        (client_id, client_secret): (&str, &str),
+        provider: Provider,
+        address: String,
+        (client_id, client_secret): (&str, Option<&str>),
     ) -> Result<Self, ClientError> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|_| {
-            ClientError::Protocol("Cannot open the local Google sign-in callback.".into())
+            ClientError::Protocol("Cannot open the local email sign-in callback.".into())
         })?;
         let port = listener
             .local_addr()
             .map_err(|e| ClientError::Protocol(e.to_string()))?
             .port();
-        let path = format!("/google/{}", uuid::Uuid::new_v4().simple());
-        let redirect_uri = format!("http://127.0.0.1:{port}{path}");
+        let (redirect_uri, path) = provider.callback(port);
+        let callback_host = Url::parse(&redirect_uri)
+            .expect("local callback URL")
+            .authority()
+            .to_owned();
         let authorization = client
             .clone()
             .authorize_email(
-                EmailProvider::Gmail,
-                String::new(),
+                provider.email(),
+                address,
                 client_id.into(),
-                Some(client_secret.into()),
+                client_secret.map(str::to_owned),
                 redirect_uri.clone(),
             )
             .await?;
@@ -94,32 +159,46 @@ impl SignIn {
             client,
         };
         let state = authorization_state(
+            provider,
             &signin.authorization.authorization_url,
             client_id,
             &redirect_uri,
         )
         .ok_or_else(|| {
-            ClientError::Protocol("The API returned an invalid Google sign-in URL.".into())
+            ClientError::Protocol("The API returned an invalid email sign-in URL.".into())
         })?;
-        tokio::spawn(serve(listener, path, state, callback_tx, cancel_rx));
+        tokio::spawn(serve(
+            listener,
+            path,
+            callback_host,
+            state,
+            callback_tx,
+            cancel_rx,
+        ));
         Ok(signin)
     }
 
     pub async fn wait(&mut self) -> Result<Callback, String> {
         (&mut self.callback)
             .await
-            .map_err(|_| "Google sign-in stopped. Try again.".to_owned())?
+            .map_err(|_| "Email sign-in stopped. Try again.".to_owned())?
     }
 }
 
-fn authorization_state(value: &str, client_id: &str, redirect_uri: &str) -> Option<String> {
+fn authorization_state(
+    provider: Provider,
+    value: &str,
+    client_id: &str,
+    redirect_uri: &str,
+) -> Option<String> {
+    let (host, path) = provider.authorize_endpoint();
     let url = Url::parse(value).ok()?;
     if url.scheme() != "https"
-        || url.host_str() != Some("accounts.google.com")
+        || url.host_str() != Some(host)
         || url.port().is_some()
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/o/oauth2/v2/auth"
+        || url.path() != path
         || url.fragment().is_some()
     {
         return None;
@@ -163,9 +242,9 @@ fn parse_callback(query: &str, expected_state: &str) -> Option<Result<Callback, 
             return None;
         }
         return Some(Err(if error == "access_denied" {
-            "Google sign-in was cancelled. You can try again."
+            "Email sign-in was cancelled. You can try again."
         } else {
-            "Google could not authorize this account. Try signing in again."
+            "Your email provider could not authorize this account. Try signing in again."
         }
         .into()));
     }
@@ -217,14 +296,11 @@ async fn receive(
 async fn serve(
     listener: TcpListener,
     path: String,
+    host: String,
     state: String,
     callback: oneshot::Sender<Result<Callback, String>>,
     cancel: oneshot::Receiver<()>,
 ) {
-    let host = listener
-        .local_addr()
-        .expect("bound callback listener")
-        .to_string();
     let (requests, mut receiver) = mpsc::channel(1);
     let router = Router::new()
         .route(&path, get(receive))
@@ -240,10 +316,10 @@ async fn serve(
     let server = std::future::IntoFuture::into_future(server);
     tokio::pin!(server);
     tokio::select! {
-        result = receiver.recv() => { let _ = callback.send(result.unwrap_or_else(|| Err("Google sign-in stopped. Try again.".into()))); }
+        result = receiver.recv() => { let _ = callback.send(result.unwrap_or_else(|| Err("Email sign-in stopped. Try again.".into()))); }
         _ = cancel => {}
-        _ = tokio::time::sleep(Duration::from_secs(600)) => { let _ = callback.send(Err("Google sign-in expired. Try again.".into())); }
-        _ = &mut server => { let _ = callback.send(Err("The local Google callback stopped. Try again.".into())); return; }
+        _ = tokio::time::sleep(Duration::from_secs(600)) => { let _ = callback.send(Err("Email sign-in expired. Try again.".into())); }
+        _ = &mut server => { let _ = callback.send(Err("The local email callback stopped. Try again.".into())); return; }
     }
     let _ = shutdown.send(());
     let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
@@ -253,8 +329,37 @@ async fn serve(
 mod tests {
     use super::*;
 
-    const FIXTURE_REGISTRATION: (&str, &str) =
-        ("fixture.apps.googleusercontent.com", "fixture-secret");
+    const FIXTURE_REGISTRATION: (&str, Option<&str>) =
+        ("fixture.apps.googleusercontent.com", Some("fixture-secret"));
+
+    #[test]
+    fn microsoft_uses_registered_localhost_callback_and_common_authority() {
+        let (redirect, path) = Provider::Microsoft.callback(12345);
+        assert_eq!(redirect, "http://localhost:12345/");
+        assert_eq!(path, "/");
+        let mut url =
+            Url::parse("https://login.microsoftonline.com/common/oauth2/v2.0/authorize").unwrap();
+        url.query_pairs_mut().extend_pairs([
+            ("client_id", "registered"),
+            ("redirect_uri", redirect.as_str()),
+            ("response_type", "code"),
+            ("code_challenge_method", "S256"),
+            ("state", "bound-state"),
+        ]);
+        assert_eq!(
+            authorization_state(Provider::Microsoft, url.as_str(), "registered", &redirect)
+                .as_deref(),
+            Some("bound-state")
+        );
+        assert!(
+            authorization_state(Provider::Google, url.as_str(), "registered", &redirect).is_none()
+        );
+        url.set_path("/untrusted-tenant/oauth2/v2.0/authorize");
+        assert!(
+            authorization_state(Provider::Microsoft, url.as_str(), "registered", &redirect)
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn abandoned_or_rejected_starts_cancel_the_api_request() {
@@ -296,7 +401,12 @@ mod tests {
             let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
             let client =
                 Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
-            let start = tokio::spawn(SignIn::start_registered(client, FIXTURE_REGISTRATION));
+            let start = tokio::spawn(SignIn::start_registered(
+                client,
+                Provider::Google,
+                String::new(),
+                FIXTURE_REGISTRATION,
+            ));
             starts.recv().await.unwrap();
             if abandon {
                 start.abort();
@@ -323,20 +433,37 @@ mod tests {
             routing::{delete, post},
         };
         use serde_json::{Value, json};
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-        let (started, mut starts) = mpsc::channel(1);
-        let (cancelled, mut cancellations) = mpsc::channel(1);
-        let router = Router::new()
+        for (provider, provider_name, endpoint, registration, address) in [
+            (
+                Provider::Google,
+                "gmail",
+                "https://accounts.google.com/o/oauth2/v2/auth",
+                FIXTURE_REGISTRATION,
+                "",
+            ),
+            (
+                Provider::Microsoft,
+                "microsoft",
+                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                ("11111111-1111-4111-8111-111111111111", None),
+                "owner@example.com",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin =
+                Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let (started, mut starts) = mpsc::channel(1);
+            let (cancelled, mut cancellations) = mpsc::channel(1);
+            let router = Router::new()
             .route("/v1/connectors/email/oauth/start", post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let started = started.clone();
                 async move {
                     assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer "));
-                    assert_eq!(body["provider"], "gmail");
-                    assert_eq!(body["address"], "");
-                    assert_eq!(body["client_id"], "fixture.apps.googleusercontent.com");
-                    assert_eq!(body["client_secret"], "fixture-secret");
-                    let mut url = Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap();
+                    assert_eq!(body["provider"], provider_name);
+                    assert_eq!(body["address"], address);
+                    assert_eq!(body["client_id"], registration.0);
+                    assert_eq!(body["client_secret"], json!(registration.1));
+                    let mut url = Url::parse(endpoint).unwrap();
                     url.query_pairs_mut().extend_pairs([
                         ("client_id", body["client_id"].as_str().unwrap()), ("redirect_uri", body["redirect_uri"].as_str().unwrap()),
                         ("state", "bound-state"), ("response_type", "code"), ("code_challenge_method", "S256"),
@@ -349,38 +476,45 @@ mod tests {
                 let cancelled = cancelled.clone();
                 async move { cancelled.send(id).await.unwrap(); Json(json!({"cancelled":true})) }
             }));
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
-        let client =
-            Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
-        let mut signin = SignIn::start_registered(client, FIXTURE_REGISTRATION)
-            .await
-            .unwrap();
-        let callback = starts.recv().await.unwrap();
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .get(format!("{callback}?state=bound-state&code=provider-code"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let result = signin.wait().await.unwrap();
-        assert_eq!(result.code, "provider-code");
-        assert_eq!(result.state, "bound-state");
-        drop(signin);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), cancellations.recv())
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
+            let client =
+                Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap());
+            let mut signin =
+                SignIn::start_registered(client, provider, address.into(), registration)
+                    .await
+                    .unwrap();
+            let callback = starts.recv().await.unwrap();
+            if provider == Provider::Microsoft {
+                let redirect = Url::parse(&callback).unwrap();
+                assert_eq!(redirect.host_str(), Some("localhost"));
+                assert_eq!(redirect.path(), "/");
+            }
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("{callback}?state=bound-state&code=provider-code"))
+                .send()
                 .await
-                .unwrap()
-                .unwrap()
-                .to_string(),
-            "11111111-1111-4111-8111-111111111111"
-        );
-        server.abort();
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let result = signin.wait().await.unwrap();
+            assert_eq!(result.code, "provider-code");
+            assert_eq!(result.state, "bound-state");
+            drop(signin);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), cancellations.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .to_string(),
+                "11111111-1111-4111-8111-111111111111"
+            );
+            server.abort();
+        }
     }
 
     async fn listener() -> (
@@ -396,6 +530,7 @@ mod tests {
         let task = tokio::spawn(serve(
             listener,
             "/callback".into(),
+            Url::parse(&url).unwrap().authority().to_owned(),
             "expected-state".into(),
             result,
             cancelled,
@@ -484,22 +619,42 @@ mod tests {
             ("state", "bound-state"),
         ]);
         assert_eq!(
-            authorization_state(url.as_str(), "registered", "http://127.0.0.1:9999/callback")
-                .as_deref(),
+            authorization_state(
+                Provider::Google,
+                url.as_str(),
+                "registered",
+                "http://127.0.0.1:9999/callback"
+            )
+            .as_deref(),
             Some("bound-state")
         );
         assert!(
-            authorization_state(url.as_str(), "different", "http://127.0.0.1:9999/callback")
-                .is_none()
+            authorization_state(
+                Provider::Google,
+                url.as_str(),
+                "different",
+                "http://127.0.0.1:9999/callback"
+            )
+            .is_none()
         );
         assert!(
-            authorization_state(url.as_str(), "registered", "http://127.0.0.1:8888/callback")
-                .is_none()
+            authorization_state(
+                Provider::Google,
+                url.as_str(),
+                "registered",
+                "http://127.0.0.1:8888/callback"
+            )
+            .is_none()
         );
         url.set_host(Some("attacker.example")).unwrap();
         assert!(
-            authorization_state(url.as_str(), "registered", "http://127.0.0.1:9999/callback")
-                .is_none()
+            authorization_state(
+                Provider::Google,
+                url.as_str(),
+                "registered",
+                "http://127.0.0.1:9999/callback"
+            )
+            .is_none()
         );
     }
 }

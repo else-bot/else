@@ -46,6 +46,10 @@ Keep this file outside the repository. You can set the variable in your checkout
 
 Official release builds read the complete downloaded JSON from the `GOOGLE_OAUTH_CLIENT_JSON` GitHub Actions repository secret. The release workflow writes it to a private temporary file, builds the binaries, and removes the input file. A missing or invalid registration fails the release build. The registration is extractable from released binaries and does not authenticate the app as a confidential client. Keep it out of Git, and keep mailbox tokens encrypted on each API.
 
+For Microsoft 365, set `ELSE_MICROSOFT_CLIENT_ID` to your app registration's Application client ID at build time. Official releases read it from the `MICROSOFT_CLIENT_ID` Actions repository secret. No client secret is needed. Configure the registration for **Mobile and desktop applications** with `http://localhost` as its redirect URI and the supported account types you intend to serve. For organizational and personal accounts, select the multitenant option that includes personal Microsoft accounts. The directory tenant ID identifies the registration's home tenant; it is not a restriction on accounts connecting through the app. Authorization uses Microsoft's `common` endpoint.
+
+Add the Microsoft Graph delegated permissions `IMAP.AccessAsUser.All`, `SMTP.Send`, and `offline_access`. Runtime mail scopes use the Outlook resource URLs. Builds without a Microsoft client ID disable Microsoft sign-in. Tests use fixture IDs.
+
 From the repository root, run these in separate terminals:
 
 ```sh

@@ -25,10 +25,6 @@ impl EmailProvider {
             Self::Imap => "Other email",
         }
     }
-
-    pub fn oauth(self) -> bool {
-        matches!(self, Self::Gmail | Self::Microsoft)
-    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

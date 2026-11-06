@@ -104,22 +104,32 @@ jobs:
           key: release-${{ matrix.platform }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             release-${{ matrix.platform }}-${{ steps.rust.outputs.version }}-
-      - name: Prepare Google desktop registration
+      - name: Prepare email sign-in configuration
         env:
           GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
+          MICROSOFT_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
         run: |
           python3 - <<'PY'
           import os
+          import uuid
           from pathlib import Path
 
           value = os.environ.get("GOOGLE_OAUTH_CLIENT_JSON", "")
           if not value.strip():
               raise SystemExit("Set the GOOGLE_OAUTH_CLIENT_JSON repository secret before building a release.")
+          microsoft = os.environ.get("MICROSOFT_CLIENT_ID", "")
+          if not microsoft:
+              raise SystemExit("Set the MICROSOFT_CLIENT_ID repository secret before building a release.")
+          try:
+              microsoft = str(uuid.UUID(microsoft))
+          except ValueError:
+              raise SystemExit("MICROSOFT_CLIENT_ID must be an application ID UUID.")
           path = Path(os.environ["RUNNER_TEMP"]) / "else-google-desktop.json"
           with open(path, "w", opener=lambda name, flags: os.open(name, flags, 0o600)) as config:
               config.write(value)
           with open(os.environ["GITHUB_ENV"], "a") as environment:
               environment.write(f"ELSE_GOOGLE_OAUTH_CONFIG={path}\n")
+              environment.write(f"ELSE_MICROSOFT_CLIENT_ID={microsoft}\n")
           PY
       - name: Build the desktop and API
         run: cargo build --release --locked --workspace --bins --target '${{ matrix.target }}'

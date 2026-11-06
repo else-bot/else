@@ -5,6 +5,7 @@ edition.workspace = true
 
 [build-dependencies]
 serde_json = "1.0.154"
+uuid = "1.29.0"
 
 [dependencies]
 anyhow = "1.0.104"

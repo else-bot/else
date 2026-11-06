@@ -4,6 +4,7 @@ use std::{env, fs, path::PathBuf};
 mod google_oauth;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=ELSE_MICROSOFT_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=ELSE_GOOGLE_OAUTH_CONFIG");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support/google_oauth.rs");
@@ -25,4 +26,11 @@ fn main() {
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     fs::write(output.join("google_oauth.rs"), source)
         .expect("Cannot write Google build configuration.");
+    let microsoft = env::var("ELSE_MICROSOFT_CLIENT_ID").ok().map(|id| {
+        uuid::Uuid::parse_str(&id)
+            .expect("ELSE_MICROSOFT_CLIENT_ID must be a UUID.")
+            .to_string()
+    });
+    fs::write(output.join("microsoft_oauth.rs"), format!("{microsoft:?}"))
+        .expect("Cannot write Microsoft build configuration.");
 }
