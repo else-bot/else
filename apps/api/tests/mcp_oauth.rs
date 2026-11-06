@@ -430,6 +430,14 @@ async fn callback_state_issuer_replay_and_owner_auth_are_enforced() {
     let callback = fixture.browser_callback(&authorization, false).await;
     let response = complete(&app, &bot, callback.clone()).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let cancellation = app
+        .owner("DELETE", oauth_path(&bot, "").trim_end_matches('/'), None)
+        .await;
+    assert_eq!(cancellation.status, StatusCode::OK, "{}", cancellation.body);
+    assert_eq!(
+        cancellation.body["status"], "connected",
+        "cancelling a pending flow cannot revoke a completed account"
+    );
     let replay = complete(&app, &bot, callback).await;
     assert_eq!(replay.status, StatusCode::BAD_REQUEST, "{}", replay.body);
     assert_eq!(
@@ -512,7 +520,11 @@ async fn cancelled_consent_never_connects_or_exchanges_a_code() {
     result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
     let abandoned = authorize(&app, &bot).await;
     let abandoned_callback = fixture.browser_callback(&abandoned, false).await;
-    cancel(&app, &bot, &abandoned).await;
+    let cleared = app
+        .owner("DELETE", oauth_path(&bot, "").trim_end_matches('/'), None)
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+    assert_eq!(cleared.body["status"], "disconnected");
     assert_eq!(
         complete(&app, &bot, abandoned_callback).await.status,
         StatusCode::BAD_REQUEST

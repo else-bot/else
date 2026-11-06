@@ -103,3 +103,49 @@ impl Client {
         });
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpState {
+    Disconnected,
+    Authorizing,
+    Connected,
+    ReauthRequired,
+}
+
+#[derive(Deserialize)]
+pub struct McpConnectionStatus {
+    pub status: McpState,
+    pub provider: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+impl Client {
+    pub async fn mcp_connection(
+        self: Arc<Self>,
+        bot: uuid::Uuid,
+        id: String,
+    ) -> Result<McpConnectionStatus, ClientError> {
+        self.call(
+            Method::GET,
+            format!("/v1/bots/{bot}/mcp/{id}/connection"),
+            None,
+        )
+        .await
+        .map(|(_, body)| body)
+    }
+
+    pub async fn cancel_pending_mcp(
+        self: Arc<Self>,
+        bot: uuid::Uuid,
+        id: String,
+    ) -> Result<McpConnectionStatus, ClientError> {
+        self.call(
+            Method::DELETE,
+            format!("/v1/bots/{bot}/mcp/{id}/oauth"),
+            None,
+        )
+        .await
+        .map(|(_, body)| body)
+    }
+}

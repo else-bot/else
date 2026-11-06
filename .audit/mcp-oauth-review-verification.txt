@@ -1,0 +1,21 @@
+PR132 thermo review verification
+
+PASS cargo test --workspace --no-fail-fast --locked -- --test-threads=1
+Runner: omabox run -b box-3 --
+884 passed; 0 failed; 12 ignored. Live-provider/VM gates remained off.
+PASS cargo clippy --workspace --all-targets --locked. Repository warnings remain; no suppressions added.
+PASS cargo fmt --all -- --check
+PASS git diff --check
+
+Focused checks passed:
+- 30 MCP/backend/backup tests, including shared stdio disconnect and failed reauthorization persistence.
+- Five fake Python MCP E2E tests, including typed consent and pending-cancel owner routes.
+- Eight focused native MCP/recovery checks, including failed confirmation retry, reopening, cancellation and removed-package404.
+- Eight shared-callback/email checks, including duplicate callback rejection and provider error privacy.
+
+The native desktop recovered and approved a card whose encrypted credentials were already saved, using the fake Python OAuth server. No second OAuth flow or manual token copying was needed.
+Reproduce inside a disposable dev box: python3 .audit/verify-mcp-recovery.py <boxed-session-state>
+Screenshot: mcp-oauth-recovered-card.png
+
+Independent reviewers: gpt-6.1-sol. All five original blockers addressed; final404 cancellation finding fixed and tested. No Claude agents used.
+Native macOS execution remains unverified on this Linux host.

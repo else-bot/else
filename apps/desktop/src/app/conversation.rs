@@ -153,7 +153,7 @@ pub(super) struct ConversationView {
     pub(super) texts: HashMap<RowKey, RowText>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
-    pub(super) mcp_signins: HashMap<Uuid, Task<()>>,
+    pub(super) mcp_connections: HashMap<Uuid, super::question_card::mcp::Form>,
     pub(super) question_submits: HashMap<Uuid, super::question_card::QuestionForm>,
     pub(super) draft_forms: HashMap<Uuid, super::draft_card::DraftForm>,
     pub(super) social_forms: HashMap<Uuid, super::social_card::SocialCard>,
@@ -199,7 +199,7 @@ impl ConversationView {
             secret_forms: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
-            mcp_signins: HashMap::new(),
+            mcp_connections: HashMap::new(),
             draft_forms: HashMap::new(),
             social_forms: HashMap::new(),
             expanded_drafts: HashSet::new(),
@@ -705,6 +705,7 @@ impl ElseApp {
         }
         self.sync_secret_forms(window, cx);
         self.sync_question_submits();
+        self.sync_mcp_connections(cx);
         self.sync_draft_forms(window, cx);
         self.sync_social_forms(window, cx);
         self.check_reading(window, cx);

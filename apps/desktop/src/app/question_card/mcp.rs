@@ -1,52 +1,171 @@
 use super::*;
-use crate::api::McpConsent;
+use flow::{Flow, Resolution};
+
+mod flow;
+
+pub(in crate::app) struct Form {
+    flow: Flow,
+    phase: Phase,
+    request: Option<Task<()>>,
+}
+
+enum Phase {
+    Checking,
+    Ready(Option<String>),
+    SigningIn,
+    Exchanging,
+    Confirming,
+    ConfirmationRequired(String),
+    CheckFailed(String),
+    Cancelling,
+    Recorded,
+}
 
 impl ElseApp {
-    fn connect_mcp(
-        &mut self,
-        question: Uuid,
-        consent: crate::api::McpConsent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let client = self.client.clone();
+    pub(in crate::app) fn sync_mcp_connections(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let bot = view.bot_id;
-        if view
-            .question_submits
-            .get(&question)
-            .is_some_and(QuestionForm::locks)
-        {
-            return;
+        let conversation = view.conversation.as_ref();
+        view.mcp_connections.retain(|id, _| {
+            conversation
+                .and_then(|c| c.question(*id))
+                .is_some_and(Question::is_pending)
+        });
+        let missing = view
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let RowKey::Question(id) = row.key else {
+                    return None;
+                };
+                let question = conversation?.question(id)?;
+                if !question.is_pending() || view.mcp_connections.contains_key(&id) {
+                    return None;
+                }
+                Some((id, question.mcp_connection()?.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (question, consent) in missing {
+            let flow = Flow {
+                client: self.client.clone(),
+                bot: view.bot_id,
+                question,
+                consent,
+            };
+            view.mcp_connections.insert(
+                question,
+                Form {
+                    flow,
+                    phase: Phase::Checking,
+                    request: None,
+                },
+            );
         }
-        let current = view
-            .conversation
-            .as_ref()
-            .and_then(|c| c.question(question))
-            .filter(|q| q.is_pending())
-            .and_then(Question::mcp_connection);
-        if current != Some(&consent) {
-            return;
+        let checking = view
+            .mcp_connections
+            .iter()
+            .filter_map(|(id, form)| {
+                (matches!(form.phase, Phase::Checking) && form.request.is_none()).then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for question in checking {
+            self.check_mcp_connection(question, cx);
         }
-        view.question_submits.insert(
-            question,
-            QuestionForm {
-                answer: QuestionAnswer::Single(APPROVE.into()),
-                state: SubmitState::Authorizing,
-            },
-        );
-        let task = cx.spawn_in(window, async move |this, cx| {
-            let result = async {
-                let mut signin =
-                    crate::mcp_oauth::SignIn::start(client.clone(), bot, consent).await?;
+    }
+
+    fn mcp_resolved(
+        &mut self,
+        flow: &Flow,
+        result: Result<Resolution, ClientError>,
+        hint: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&result, Err(ClientError::Unauthorized)) {
+            self.connection = Connection::InvalidCredentials(ClientError::Unauthorized.to_string());
+        }
+        let Some(form) = self
+            .view
+            .as_mut()
+            .filter(|v| v.bot_id == flow.bot)
+            .and_then(|v| v.mcp_connections.get_mut(&flow.question))
+        else {
+            return;
+        };
+        form.phase = match result {
+            Ok(Resolution::Disconnected) => Phase::Ready(hint),
+            Ok(Resolution::ConfirmationRequired(error)) => Phase::ConfirmationRequired(error),
+            Ok(Resolution::Recorded) => Phase::Recorded,
+            Err(error) => Phase::CheckFailed(error.to_string()),
+        };
+        self.remeasure_row(RowKey::Question(flow.question), cx);
+    }
+
+    fn check_mcp_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.mcp_connections.get_mut(&question))
+        else {
+            return;
+        };
+        form.phase = Phase::Checking;
+        let flow = form.flow.clone();
+        form.request = Some(cx.spawn(async move |this, cx| {
+            let result = flow.recover().await;
+            let _ = this.update(cx, |app, cx| app.mcp_resolved(&flow, result, None, cx));
+        }));
+        self.remeasure_row(RowKey::Question(question), cx);
+    }
+
+    fn activate_mcp_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.mcp_connections.get_mut(&question))
+        else {
+            return;
+        };
+        match form.phase {
+            Phase::Ready(_) => self.sign_in_mcp(question, cx),
+            Phase::CheckFailed(_) => self.check_mcp_connection(question, cx),
+            Phase::ConfirmationRequired(_) => {
+                form.phase = Phase::Confirming;
+                let flow = form.flow.clone();
+                form.request = Some(cx.spawn(async move |this, cx| {
+                    let result = flow.confirm().await;
+                    let _ = this.update(cx, |app, cx| app.mcp_resolved(&flow, result, None, cx));
+                }));
+                self.remeasure_row(RowKey::Question(question), cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn sign_in_mcp(&mut self, question: Uuid, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.mcp_connections.get_mut(&question))
+        else {
+            return;
+        };
+        form.phase = Phase::SigningIn;
+        let flow = form.flow.clone();
+        form.request = Some(cx.spawn(async move |this, cx| {
+            let signin = async {
+                let mut signin = crate::mcp_oauth::SignIn::start(
+                    flow.client.clone(),
+                    flow.bot,
+                    flow.consent.clone(),
+                )
+                .await?;
                 let opened = this
                     .update(cx, |app, cx| {
                         let pending = app
                             .view
                             .as_ref()
-                            .filter(|v| v.bot_id == bot)
+                            .filter(|v| v.bot_id == flow.bot)
                             .and_then(|v| v.conversation.as_ref())
                             .and_then(|c| c.question(question))
                             .is_some_and(Question::is_pending);
@@ -64,7 +183,7 @@ impl ElseApp {
                 let callback = signin.wait().await?;
                 let pending = this
                     .update(cx, |app, cx| {
-                        let Some(view) = app.view.as_mut().filter(|v| v.bot_id == bot) else {
+                        let Some(view) = app.view.as_mut().filter(|v| v.bot_id == flow.bot) else {
                             return false;
                         };
                         if !view
@@ -75,8 +194,8 @@ impl ElseApp {
                         {
                             return false;
                         }
-                        if let Some(submit) = view.question_submits.get_mut(&question) {
-                            submit.state = SubmitState::Sending;
+                        if let Some(form) = view.mcp_connections.get_mut(&question) {
+                            form.phase = Phase::Exchanging;
                         }
                         app.remeasure_row(RowKey::Question(question), cx);
                         true
@@ -87,33 +206,87 @@ impl ElseApp {
                         "The connection request was withdrawn.".into(),
                     ));
                 }
-                signin.finish(callback).await?;
-                client
-                    .answer_question(bot, question, QuestionAnswer::Single(APPROVE.into()))
-                    .await
+                signin.finish(callback).await
             }
             .await;
-            let _ = this.update_in(cx, |app, _, cx| {
-                app.question_answered(bot, question, result, cx)
-            });
-        });
-        view.mcp_signins.insert(question, task);
+            let (result, hint) = match signin {
+                Ok(()) => {
+                    let _ = this.update(cx, |app, cx| {
+                        if let Some(form) = app
+                            .view
+                            .as_mut()
+                            .filter(|v| v.bot_id == flow.bot)
+                            .and_then(|v| v.mcp_connections.get_mut(&question))
+                        {
+                            form.phase = Phase::Confirming;
+                        }
+                        app.remeasure_row(RowKey::Question(question), cx);
+                    });
+                    (flow.confirm().await, None)
+                }
+                Err(error) => (flow.recover().await, Some(error.to_string())),
+            };
+            let _ = this.update(cx, |app, cx| app.mcp_resolved(&flow, result, hint, cx));
+        }));
+        self.remeasure_row(RowKey::Question(question), cx);
+    }
+
+    fn cancel_mcp_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .view
+            .as_mut()
+            .and_then(|v| v.mcp_connections.get_mut(&question))
+        else {
+            return;
+        };
+        if !matches!(form.phase, Phase::Ready(_) | Phase::SigningIn) {
+            return;
+        }
+        form.phase = Phase::Cancelling;
+        let flow = form.flow.clone();
+        form.request = Some(cx.spawn(async move |this, cx| {
+            let result = flow.cancel().await;
+            let _ = this.update(cx, |app, cx| app.mcp_resolved(&flow, result, None, cx));
+        }));
         self.remeasure_row(RowKey::Question(question), cx);
     }
 
     pub(super) fn render_mcp_card(
         &self,
         question: &Question,
-        consent: &McpConsent,
-        submit: Option<&QuestionForm>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let id = question.id;
         let pending = question.is_pending();
-        let locked = !pending
-            || self.connection != Connection::Connected
-            || submit.is_some_and(QuestionForm::locks);
+        let phase = self
+            .view
+            .as_ref()
+            .and_then(|v| v.mcp_connections.get(&id))
+            .map(|f| &f.phase);
+        let label = match phase {
+            _ if !pending
+                && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE) =>
+            {
+                "Connected"
+            }
+            _ if !pending => "Closed",
+            Some(Phase::Ready(_)) => "Connect in browser",
+            Some(Phase::SigningIn) => "Waiting for sign-in…",
+            Some(Phase::Exchanging) => "Connecting…",
+            Some(Phase::Confirming) => "Confirming connection…",
+            Some(Phase::ConfirmationRequired(_)) => "Retry confirmation",
+            Some(Phase::CheckFailed(_)) => "Retry connection check",
+            Some(Phase::Cancelling) => "Cancelling…",
+            Some(Phase::Recorded) => "Recorded",
+            _ => "Checking connection…",
+        };
+        let locked = !pending || self.connection != Connection::Connected;
+        let can_activate = matches!(
+            phase,
+            Some(Phase::Ready(_) | Phase::ConfirmationRequired(_) | Phase::CheckFailed(_))
+        );
+        let can_cancel = matches!(phase, Some(Phase::Ready(_) | Phase::SigningIn));
         let mut card = v_flex()
             .w_full()
             .gap_2()
@@ -142,63 +315,51 @@ impl ElseApp {
                     .child(context.clone()),
             );
         }
-        card = card.child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("Sign in using your browser. Only this bot may use the connected account."),
-        );
-        let connect_label = match submit.map(|s| &s.state) {
-            Some(SubmitState::Authorizing) => "Waiting for sign-in…",
-            Some(SubmitState::Sending) => "Connecting…",
-            Some(SubmitState::Recorded) => "Recorded",
-            _ => "Connect in browser",
-        };
-        let connection = consent.clone();
-        let cancel_locked = !pending
-            || self.connection != Connection::Connected
-            || submit
-                .is_some_and(|s| matches!(s.state, SubmitState::Sending | SubmitState::Recorded));
-        card = card.child(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new(SharedString::from(format!("mcp-connect-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label(connect_label)
-                        .small()
-                        .primary()
-                        .disabled(locked)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.connect_mcp(id, connection.clone(), window, cx)
-                        })),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("mcp-cancel-{id}")))
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .label("Cancel")
-                        .small()
-                        .ghost()
-                        .disabled(cancel_locked)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            if let Some(view) = app.view.as_mut() {
-                                view.mcp_signins.remove(&id);
-                                view.question_submits.remove(&id);
-                            }
-                            app.answer_question(
-                                id,
-                                QuestionAnswer::Single(DENY.into()),
-                                window,
-                                cx,
-                            );
-                        })),
+        card = card
+            .child(
+                div().text_xs().text_color(theme.muted_foreground).child(
+                    "Sign in using your browser. Only this bot may use the connected account.",
                 ),
-        );
-        if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("mcp-connect-{id}")))
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label(label)
+                            .small()
+                            .primary()
+                            .disabled(locked || !can_activate)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.activate_mcp_connection(id, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("mcp-cancel-{id}")))
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label("Cancel")
+                            .small()
+                            .ghost()
+                            .disabled(locked || !can_cancel)
+                            .on_click(
+                                cx.listener(move |app, _, _, cx| app.cancel_mcp_connection(id, cx)),
+                            ),
+                    ),
+            );
+        let error = match phase {
+            Some(
+                Phase::Ready(Some(error))
+                | Phase::CheckFailed(error)
+                | Phase::ConfirmationRequired(error),
+            ) => Some(error),
+            _ => None,
+        };
+        if let Some(error) = error {
             card = card.child(
                 div()
                     .text_xs()
@@ -224,7 +385,6 @@ impl ElseApp {
         card.into_any_element()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::{Question, Uuid};

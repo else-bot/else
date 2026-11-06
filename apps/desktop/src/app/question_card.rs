@@ -18,7 +18,7 @@ use crate::api::ClientError;
 use crate::model::{APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, DENY, Question, QuestionAnswer};
 
 mod choice;
-mod mcp;
+pub(super) mod mcp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
@@ -29,7 +29,6 @@ pub(super) struct QuestionForm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SubmitState {
     Choosing,
-    Authorizing,
     Sending,
     Recorded,
     Failed(String),
@@ -37,10 +36,7 @@ pub(super) enum SubmitState {
 
 impl QuestionForm {
     fn locks(&self) -> bool {
-        matches!(
-            self.state,
-            SubmitState::Authorizing | SubmitState::Sending | SubmitState::Recorded
-        )
+        matches!(self.state, SubmitState::Sending | SubmitState::Recorded)
     }
 }
 
@@ -88,11 +84,6 @@ impl ElseApp {
             return;
         };
         let conversation = view.conversation.as_ref();
-        view.mcp_signins.retain(|id, _| {
-            conversation
-                .and_then(|c| c.question(*id))
-                .is_some_and(Question::is_pending)
-        });
         view.question_submits.retain(|id, _| {
             conversation
                 .and_then(|c| c.question(*id))
@@ -179,8 +170,8 @@ impl ElseApp {
             return div().into_any_element();
         };
         let submit = view.question_submits.get(&id);
-        if let Some(connection) = question.mcp_connection() {
-            return self.render_mcp_card(question, connection, submit, cx);
+        if question.mcp_connection().is_some() {
+            return self.render_mcp_card(question, cx);
         }
         if !question.is_approval() {
             return self.render_choice_card(question, submit, cx);
@@ -237,7 +228,6 @@ impl ElseApp {
                 .filter(|s| s.answer.contains(&choice.id))
                 .map(|s| &s.state)
             {
-                Some(SubmitState::Authorizing) => "Sending…".to_owned(),
                 Some(SubmitState::Sending) => "Sending…".to_owned(),
                 Some(SubmitState::Recorded) => "Recorded".to_owned(),
 

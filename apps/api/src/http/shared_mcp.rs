@@ -22,6 +22,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/bots/{bot_id}/mcp/{id}/connection",
             get(connection).delete(disconnect),
         )
+        .route(
+            "/bots/{bot_id}/mcp/{id}/oauth",
+            delete(cancel_pending_authorization),
+        )
         .route("/bots/{bot_id}/mcp/{id}/oauth/start", post(authorize))
         .route("/bots/{bot_id}/mcp/{id}/oauth/complete", post(complete))
         .route(
@@ -389,4 +393,16 @@ async fn cancel_authorization(
         .await
         .map_err(api_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cancel_pending_authorization(
+    State(state): State<Arc<AppState>>,
+    ApiPath((bot_id, id)): ApiPath<(Uuid, PackageId)>,
+) -> Result<Json<Value>, ApiError> {
+    super::turns::active_bot(&state, bot_id).await?;
+    let status = library(&state)
+        .cancel_pending_authorization(&id, bot_id)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!(status)))
 }
