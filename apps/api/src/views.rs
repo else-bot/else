@@ -96,6 +96,7 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "reaction": item.reaction.as_ref().map(|reaction| reaction.0),
         "bot_task": item.bot_task,
         "bot_reply": item.bot_reply,
+        "routine_update": item.routine_update,
         "parts": item.parts.as_ref().map_or(&[][..], |parts| &parts.0[..]),
     })
 }

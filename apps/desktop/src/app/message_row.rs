@@ -233,6 +233,22 @@ impl ElseApp {
                 let Some(item) = conversation.item(id) else {
                     return None;
                 };
+                if let Some(update) = &item.routine_update {
+                    return Some(
+                        h_flex()
+                            .w_full()
+                            .justify_center()
+                            .items_center()
+                            .gap_1p5()
+                            .py_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Updated routine")
+                            .child(Icon::new(IconName::Clock).size_3p5())
+                            .child(div().min_w_0().truncate().child(update.name.clone()))
+                            .into_any_element(),
+                    );
+                }
                 let Some(text) = view.texts.get(&key) else {
                     return None;
                 };
