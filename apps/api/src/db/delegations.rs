@@ -385,12 +385,12 @@ async fn stop_children(
     for (child, target) in children {
         let changed = sqlx::query(
             "UPDATE turns SET
-                 status = CASE WHEN status = 'queued' THEN 'interrupted' ELSE 'cancelling' END,
+                 status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
                  error_code = 'cancelled',
                  error_message = ?2,
-                 finished_at = CASE WHEN status = 'queued' THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
+                 finished_at = CASE WHEN status IN ('queued', 'waiting') THEN strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE finished_at END,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-             WHERE id = ?1 AND status IN ('queued', 'preparing', 'sending', 'running')",
+             WHERE id = ?1 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')",
         )
         .bind(child)
         .bind(message)

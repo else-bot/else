@@ -644,6 +644,12 @@ impl Library {
             .actor
             .call_async(move |slot| {
                 Box::pin(async move {
+                    // Opening the session may adopt older sign-in files, a write
+                    // that must wait for a backup or update.
+                    let _admission = match slot.session {
+                        Some(_) => None,
+                        None => Some(slot.gate.enter().ok_or(Error::Paused)?),
+                    };
                     slot.package().await?;
                     Ok(slot.session().await?.status())
                 })

@@ -1101,3 +1101,56 @@ async fn stop_and_restart_settle_or_keep_pending_cards() {
         .unwrap();
     assert_eq!(attempts, 2, "the same turn continued after the restart");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_delegating_request_closes_a_delegated_card() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Ops").await;
+    let warm = app
+        .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
+        .await;
+    app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let (turn, _) = running(&app, &main).await;
+    let parent = grant(&app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let delegated = tool(
+        &app,
+        &parent,
+        "delegate",
+        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
+    )
+    .await;
+    let task: Uuid = tool_text(&delegated)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait(&app, child, "running").await;
+    let child_token = grant(&app, child, owner_tools()).await;
+    let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, child, "waiting").await;
+    wait(&app, turn, "waiting").await;
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    wait(&app, child, "interrupted").await;
+    assert_eq!(question_row(&app, question).await.0, "cancelled");
+    assert_eq!(
+        answer(&app, &leaf, question, "approve").await.status,
+        StatusCode::CONFLICT,
+        "a stopped request cannot be resumed through its card"
+    );
+    assert_eq!(status(&app, child).await, "interrupted");
+}

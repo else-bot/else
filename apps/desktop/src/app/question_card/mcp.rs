@@ -239,7 +239,10 @@ impl ElseApp {
         else {
             return;
         };
-        if !matches!(form.phase, Phase::Ready(_) | Phase::SigningIn) {
+        if !matches!(
+            form.phase,
+            Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_)
+        ) {
             return;
         }
         form.phase = Phase::Cancelling;
@@ -286,7 +289,10 @@ impl ElseApp {
             phase,
             Some(Phase::Ready(_) | Phase::ConfirmationRequired(_) | Phase::CheckFailed(_))
         );
-        let can_cancel = matches!(phase, Some(Phase::Ready(_) | Phase::SigningIn));
+        let can_cancel = matches!(
+            phase,
+            Some(Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_))
+        );
         let mut card = v_flex()
             .w_full()
             .gap_2()
