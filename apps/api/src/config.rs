@@ -15,6 +15,7 @@ use crate::credentials::SecretKeySource;
 pub const DEFAULT_BIND: &str = "127.0.0.1:7879";
 const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
+const GITHUB_OAUTH: Option<(&str, &str)> = include!(concat!(env!("OUT_DIR"), "/github_oauth.rs"));
 
 /// SQLite connection URL. It is never
 /// printed through `Debug` or error messages.
@@ -67,6 +68,7 @@ pub struct Config {
     pub backup: crate::backup::capture::BackupConfig,
     /// Bucket replication of completed sets, when configured.
     pub s3: Option<crate::backup::s3::S3Config>,
+    pub github_oauth: Option<std::sync::Arc<crate::mcp::oauth::RegisteredClient>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,6 +148,7 @@ impl Config {
             Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
             None => None,
         };
+        let github_oauth = github_oauth(source, GITHUB_OAUTH)?;
         let backup = crate::backup::capture::BackupConfig {
             dir: match source.get("ELSE_BACKUP_DIR") {
                 Some(path) => absolute_path("ELSE_BACKUP_DIR", path)?,
@@ -265,6 +268,7 @@ impl Config {
             claude_bin,
             backup,
             s3,
+            github_oauth,
             synthetic_provider,
             bots_dir,
             max_active_turns,
@@ -277,6 +281,32 @@ impl Config {
             shutdown_grace,
         })
     }
+}
+
+fn github_oauth(
+    source: &dyn Source,
+    embedded: Option<(&str, &str)>,
+) -> Result<Option<std::sync::Arc<crate::mcp::oauth::RegisteredClient>>, ConfigError> {
+    let registration = match (
+        source.get("ELSE_GITHUB_CLIENT_ID"),
+        source.get("ELSE_GITHUB_CLIENT_SECRET"),
+    ) {
+        (None, None) => embedded.map(|(id, secret)| (id.to_owned(), secret.to_owned())),
+        (Some(id), Some(secret)) => Some((id, secret)),
+        _ => {
+            return Err(invalid(
+                "ELSE_GITHUB_CLIENT_ID",
+                "set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET together",
+            ));
+        }
+    };
+    registration
+        .map(|(id, secret)| {
+            crate::mcp::oauth::RegisteredClient::github(id, secret)
+                .map(std::sync::Arc::new)
+                .map_err(|reason| invalid("ELSE_GITHUB_CLIENT_ID", reason))
+        })
+        .transpose()
 }
 
 fn database_url(
@@ -379,6 +409,70 @@ pub mod tests {
         fn get(&self, name: &str) -> Option<String> {
             self.0.get(name).cloned()
         }
+    }
+
+    #[test]
+    fn github_oauth_requires_both_credentials_and_redacts_configuration() {
+        for pairs in [
+            vec![("ELSE_GITHUB_CLIENT_ID", "registered-id")],
+            vec![("ELSE_GITHUB_CLIENT_SECRET", "private-secret")],
+            vec![
+                ("ELSE_GITHUB_CLIENT_ID", ""),
+                ("ELSE_GITHUB_CLIENT_SECRET", "private-secret"),
+            ],
+            vec![
+                ("ELSE_GITHUB_CLIENT_ID", "registered-id"),
+                ("ELSE_GITHUB_CLIENT_SECRET", "secret\ninvalid"),
+            ],
+        ] {
+            let mut source = MapSource::new(&pairs);
+            source.0.insert("HOME".into(), "/h".into());
+            let error = Config::load(&source).unwrap_err().to_string();
+            assert!(error.contains("ELSE_GITHUB_CLIENT_ID"));
+            assert!(!error.contains("private-secret"));
+            assert!(!error.contains("secret\ninvalid"));
+        }
+        let config = Config::load(&MapSource::new(&[
+            ("HOME", "/h"),
+            ("ELSE_GITHUB_CLIENT_ID", "registered-id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "private-secret"),
+        ]))
+        .unwrap();
+        assert!(config.github_oauth.is_some());
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("private-secret"));
+        assert!(!debug.contains("registered-id"));
+        let default = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+        assert_eq!(default.github_oauth.is_some(), GITHUB_OAUTH.is_some());
+    }
+
+    #[test]
+    fn github_runtime_credentials_replace_the_complete_embedded_registration() {
+        let embedded = Some(("embedded-id", "embedded-secret"));
+        let none = MapSource::new(&[]);
+        let default = github_oauth(&none, embedded).unwrap();
+        assert!(default.is_some());
+        assert!(github_oauth(&none, None).unwrap().is_none());
+        let partial = MapSource::new(&[("ELSE_GITHUB_CLIENT_ID", "override-id")]);
+        assert!(github_oauth(&partial, embedded).is_err());
+        let partial = MapSource::new(&[("ELSE_GITHUB_CLIENT_SECRET", "override-secret")]);
+        assert!(github_oauth(&partial, embedded).is_err());
+        let override_source = MapSource::new(&[
+            ("ELSE_GITHUB_CLIENT_ID", "override-id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "override-secret"),
+        ]);
+        let invalid_embedded = Some(("invalid embedded id", "invalid embedded secret"));
+        assert!(github_oauth(&none, invalid_embedded).is_err());
+        assert!(
+            github_oauth(&override_source, invalid_embedded)
+                .unwrap()
+                .is_some()
+        );
+        let invalid_override = MapSource::new(&[
+            ("ELSE_GITHUB_CLIENT_ID", "invalid override id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "invalid override secret"),
+        ]);
+        assert!(github_oauth(&invalid_override, embedded).is_err());
     }
 
     #[test]

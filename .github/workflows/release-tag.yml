@@ -131,11 +131,33 @@ jobs:
               environment.write(f"ELSE_GOOGLE_OAUTH_CONFIG={path}\n")
               environment.write(f"ELSE_MICROSOFT_CLIENT_ID={microsoft}\n")
           PY
+      - name: Prepare GitHub MCP sign-in configuration
+        env:
+          ELSE_GITHUB_CLIENT_ID: ${{ secrets.ELSE_GITHUB_CLIENT_ID }}
+          ELSE_GITHUB_CLIENT_SECRET: ${{ secrets.ELSE_GITHUB_CLIENT_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          registration = {}
+          for field, name in (("client_id", "ELSE_GITHUB_CLIENT_ID"), ("client_secret", "ELSE_GITHUB_CLIENT_SECRET")):
+              value = os.environ.get(name, "")
+              if not value or len(value) > 2048 or any(not 0x21 <= ord(char) <= 0x7e for char in value):
+                  raise SystemExit(f"Set a valid {name} repository secret before building a release.")
+              registration[field] = value
+          path = Path(os.environ["RUNNER_TEMP"]) / "else-github-oauth.json"
+          with open(path, "w", opener=lambda name, flags: os.open(name, flags, 0o600)) as config:
+              json.dump(registration, config)
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              environment.write(f"ELSE_GITHUB_OAUTH_CONFIG={path}\n")
+          PY
       - name: Build the desktop and API
         run: cargo build --release --locked --workspace --bins --target '${{ matrix.target }}'
-      - name: Remove Google desktop registration
+      - name: Remove OAuth registrations
         if: always()
-        run: rm -f "$RUNNER_TEMP/else-google-desktop.json"
+        run: rm -f "$RUNNER_TEMP/else-google-desktop.json" "$RUNNER_TEMP/else-github-oauth.json"
       - name: Save Cargo build cache
         if: steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

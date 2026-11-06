@@ -25,6 +25,48 @@ fn callback(id: Uuid, state: &str) -> Complete {
 }
 
 #[tokio::test]
+async fn github_signin_identifies_the_missing_server_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::open(
+        Store::new(
+            dir.path().into(),
+            Uuid::new_v4(),
+            Some(std::sync::Arc::new(key())),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut github = discovery();
+    github.resource = "https://api.githubcopilot.com/mcp/".into();
+    github.issuer = "https://github.com/login/oauth".into();
+    github.authorization_endpoint = "https://github.com/login/oauth/authorize".into();
+    github.token_endpoint = "https://github.com/login/oauth/access_token".into();
+    github.registration_endpoint = None;
+    session.state = State::Required(github);
+    let error = session
+        .authorize(
+            &Transport::Http {
+                url: "https://api.githubcopilot.com/mcp/".into(),
+                headers: Default::default(),
+            },
+            "http://127.0.0.1:49177/mcp/callback".into(),
+        )
+        .await
+        .err()
+        .expect("GitHub needs a registered app");
+    assert!(
+        error.to_string().contains("ELSE_GITHUB_CLIENT_ID"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("ELSE_GITHUB_CLIENT_SECRET"),
+        "{error}"
+    );
+    assert_eq!(session.status().status, "disconnected");
+}
+
+#[tokio::test]
 async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_shot() {
     let dir = tempfile::tempdir().unwrap();
     let pending = pending(None);
@@ -35,6 +77,7 @@ async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_
         store: Store::new(dir.path().into(), bot, Some(std::sync::Arc::new(key))),
         state: State::Authorizing(pending),
         connection: None,
+        client: None,
     };
     assert!(session.complete(callback(id, "wrong-state")).await.is_err());
     assert_eq!(session.status().status, "authorizing");
@@ -70,6 +113,7 @@ fn cancellation_and_expiration_restore_an_existing_account_without_exposing_cred
         ),
         state: State::Authorizing(flow),
         connection: None,
+        client: None,
     };
     session.cancel(Uuid::new_v4());
     assert_eq!(session.status().status, "authorizing");
@@ -114,6 +158,7 @@ async fn a_failed_credential_write_does_not_publish_refreshed_tokens() {
         ),
         state: State::Authorized(previous),
         connection: None,
+        client: None,
     };
     assert!(session.refresh(true).await.is_err());
     let State::Authorized(current) = &session.state else {
@@ -160,6 +205,7 @@ async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
             store: Store::new(path, Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
             state: State::Authorizing(flow),
             connection: None,
+            client: None,
         };
         let mut response = callback(request, "expected-state");
         response.error = None;

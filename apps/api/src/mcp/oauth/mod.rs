@@ -1,7 +1,9 @@
+mod client;
 mod protocol;
 mod store;
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -12,6 +14,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{Error, Transport, transport};
+pub use client::RegisteredClient;
 use protocol::{
     Discovery, authorization_endpoint, discover, loopback, register, safe_url, token,
     validate_scopes,
@@ -68,18 +71,23 @@ enum State {
 
 pub(super) struct Session {
     store: Store,
+    client: Option<Arc<RegisteredClient>>,
     state: State,
     connection: Option<transport::Connection>,
 }
 
 impl Session {
-    pub(super) async fn open(store: Store) -> Result<Self, Error> {
+    pub(super) async fn open(
+        store: Store,
+        client: Option<Arc<RegisteredClient>>,
+    ) -> Result<Self, Error> {
         let state = store
             .load()
             .await?
             .map_or(State::Disconnected, State::Authorized);
         Ok(Self {
             store,
+            client,
             state,
             connection: None,
         })
@@ -273,7 +281,11 @@ impl Session {
                 }
             }
         };
-        let client_id = register(&discovery, &redirect_uri).await?;
+        let client_id = if let Some(client) = self.registered_client(&discovery)? {
+            client.client_id.clone()
+        } else {
+            register(&discovery, &redirect_uri).await?
+        };
         let id = Uuid::new_v4();
         let state = nonce();
         let verifier = Zeroizing::new(nonce());
@@ -372,7 +384,9 @@ impl Session {
             ("code_verifier", pending.verifier.to_string()),
             ("resource", pending.discovery.resource.clone()),
         ];
-        let result = token(&pending.discovery.token_endpoint, &fields).await;
+        let result = self
+            .exchange(&pending.discovery, &pending.client_id, &fields)
+            .await;
         for (_, value) in &mut fields {
             value.zeroize();
         }
@@ -413,7 +427,9 @@ impl Session {
             ("client_id", credential.client_id.clone()),
             ("resource", credential.discovery.resource.clone()),
         ];
-        let result = token(&credential.discovery.token_endpoint, &fields).await;
+        let result = self
+            .exchange(&credential.discovery, &credential.client_id, &fields)
+            .await;
         for (_, value) in &mut fields {
             value.zeroize();
         }
@@ -441,6 +457,41 @@ impl Session {
         self.state = State::Authorized(refreshed);
         self.close().await;
         Ok(())
+    }
+
+    fn registered_client(&self, discovery: &Discovery) -> Result<Option<&RegisteredClient>, Error> {
+        if let Some(client) = self
+            .client
+            .as_deref()
+            .filter(|client| client.applies(discovery))
+        {
+            client.validate(discovery)?;
+            return Ok(Some(client));
+        }
+        if discovery.issuer == "https://github.com/login/oauth" {
+            return Err(Error::Invalid(
+                "GitHub sign-in needs an OAuth app. Set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET on the API server, then restart it and try again.",
+            ));
+        }
+        Ok(None)
+    }
+
+    async fn exchange(
+        &self,
+        discovery: &Discovery,
+        client_id: &str,
+        fields: &[(&str, String)],
+    ) -> Result<protocol::TokenResponse, Error> {
+        let client = self.registered_client(discovery)?;
+        if client.is_some_and(|client| client.client_id != client_id) {
+            return Err(Error::OAuthRevoked);
+        }
+        token(
+            &discovery.token_endpoint,
+            fields,
+            client.map(|client| client.secret.as_str()),
+        )
+        .await
     }
 
     pub(super) async fn disconnect(&mut self) -> Result<(), Error> {

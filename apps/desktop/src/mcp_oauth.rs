@@ -34,7 +34,7 @@ impl SignIn {
         client.run(async move {
             let (listener, callback) = oauth_callback::Listener::bind().await
                 .map_err(|_| ClientError::Protocol("Cannot open the local sign-in callback.".into()))?;
-            let redirect = format!("http://127.0.0.1:{}/mcp/{}", listener.port(), Uuid::new_v4().simple());
+            let redirect = format!("http://127.0.0.1:{}/mcp/callback", listener.port());
             let authorization = this.clone().authorize_mcp(bot, id.clone(), redirect.clone()).await?;
             let signin = Self { authorization, callback, client: this, bot, id };
             if signin.authorization.provider != expected.provider || signin.authorization.scopes != expected.scopes {
@@ -160,6 +160,7 @@ mod tests {
             .await
             .unwrap();
         let callback_url = received.recv().await.unwrap();
+        assert_eq!(Url::parse(&callback_url).unwrap().path(), "/mcp/callback");
         let response = reqwest::get(format!(
             "{callback_url}?state=state&code=private-code&iss=https%3A%2F%2Fissuer.test"
         ))

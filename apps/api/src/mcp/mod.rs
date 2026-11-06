@@ -246,6 +246,7 @@ struct Slot {
     path: PathBuf,
     sessions: HashMap<Uuid, oauth::Session>,
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
+    oauth_client: Option<Arc<oauth::RegisteredClient>>,
     retired: bool,
     gate: Arc<crate::maintenance::Gate>,
 }
@@ -277,8 +278,10 @@ impl Slot {
                 ));
             }
             let store = oauth::Store::new(self.path.clone(), owner, self.oauth_key.clone());
-            self.sessions
-                .insert(owner, oauth::Session::open(store).await?);
+            self.sessions.insert(
+                owner,
+                oauth::Session::open(store, self.oauth_client.clone()).await?,
+            );
         }
         Ok(self.sessions.get_mut(&owner).expect("opened MCP session"))
     }
@@ -296,6 +299,7 @@ pub struct Library {
     gate: Arc<crate::maintenance::Gate>,
     slots: Actor<HashMap<String, Entry>>,
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
+    oauth_client: Option<Arc<oauth::RegisteredClient>>,
 }
 
 impl Library {
@@ -305,6 +309,7 @@ impl Library {
             gate,
             slots: Actor::default(),
             oauth_key: None,
+            oauth_client: None,
         }
     }
 
@@ -313,11 +318,17 @@ impl Library {
         self
     }
 
+    pub fn with_oauth_client(mut self, client: Option<Arc<oauth::RegisteredClient>>) -> Self {
+        self.oauth_client = client;
+        self
+    }
+
     async fn slot(&self, id: &PackageId) -> Result<Entry, Error> {
         let id = id.0.clone();
         let path = self.root.join(&id);
         let gate = self.gate.clone();
         let oauth_key = self.oauth_key.clone();
+        let oauth_client = self.oauth_client.clone();
         self.slots
             .call(move |slots| {
                 if !slots.contains_key(&id) && slots.len() >= 1024 {
@@ -333,6 +344,7 @@ impl Library {
                             path,
                             sessions: HashMap::new(),
                             oauth_key,
+                            oauth_client,
                             retired: false,
                             gate,
                         }),
