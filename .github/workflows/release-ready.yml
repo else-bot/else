@@ -16,7 +16,7 @@ jobs:
   verify-release:
     name: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && 'release-ready' || 'verify-release' }}
     if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'release/v')
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Mark readiness pending
         if: github.event_name == 'workflow_dispatch'
@@ -27,7 +27,7 @@ jobs:
             -f state=pending -f context=release-ready \
             -f description="Verifying the release and pinned guest image" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: useblacksmith/checkout@v1 # v7.0.1
         with:
           ref: ${{ env.VERIFIED_SHA }}
           fetch-depth: 0
