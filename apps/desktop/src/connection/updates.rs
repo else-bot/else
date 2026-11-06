@@ -154,7 +154,7 @@ impl Shell {
                 view.scroll.scroll_to_bottom();
             }
         }
-        if !server && matches!(snapshot.operation, Operation::Relaunched) {
+        if !server && matches!(snapshot.operation, Operation::RestartScheduled) {
             cx.quit();
         }
         let changed = server
@@ -272,7 +272,7 @@ impl Shell {
                 IconName::TriangleAlert,
                 theme.danger,
             ),
-            Operation::Restarting | Operation::Relaunched => (
+            Operation::Restarting | Operation::RestartScheduled => (
                 "Restarting else.bot",
                 "Reopening the installed app.".to_owned(),
                 IconName::RotateCw,
@@ -528,7 +528,7 @@ impl Shell {
         let (label, action, disabled) = match &view.snapshot.operation {
             Operation::Preparing => ("Checking work…".to_owned(), Action::Install, true),
             Operation::Installing => ("Updating…".to_owned(), Action::Install, true),
-            Operation::Restarting | Operation::Relaunched => {
+            Operation::Restarting | Operation::RestartScheduled => {
                 ("Restarting…".to_owned(), Action::Restart, true)
             }
             Operation::Ready { .. } | Operation::RestartFailed(_) => {
