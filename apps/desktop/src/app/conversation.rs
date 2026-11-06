@@ -564,7 +564,16 @@ impl ElseApp {
         for (key, text, format, parts) in texts {
             match view.texts.get_mut(&key) {
                 Some(row) if row.format() == format => {
-                    if row.sync(RowSource { text, parts }, &self.mention_bots, window, cx) {
+                    if row.sync(
+                        RowSource {
+                            text,
+                            parts,
+                            format,
+                        },
+                        &self.mention_bots,
+                        window,
+                        cx,
+                    ) {
                         changed.push(key);
                     }
                 }
@@ -573,8 +582,12 @@ impl ElseApp {
                         key,
                         RowText::new(
                             key,
-                            RowSource { text, parts },
-                            format,
+                            RowSource {
+                                text,
+                                parts,
+                                format,
+                            },
+                            self.client.clone(),
                             &self.mention_bots,
                             bot,
                             window,

@@ -29,6 +29,7 @@ gpui_kit::assets::icon_assets!(
         TriangleAlert,
         Check,
         ChevronRight,
+        ChevronLeft,
         ChevronDown,
         Reply,
         FaceSlightlySmilingPlus,

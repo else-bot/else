@@ -887,6 +887,7 @@ impl Render for ElseApp {
                 < self.preferences.sidebar_width + self.preferences.details_width + 360.;
         let theme = cx.theme();
         h_flex()
+            .relative()
             .key_context(APP_CONTEXT)
             .on_action(cx.listener(|app, _: &FocusComposer, window, cx| {
                 if app.selected.is_some() {
@@ -930,6 +931,7 @@ impl Render for ElseApp {
             .children((!crowded).then(|| self.render_sidebar(window, cx)))
             .child(self.render_main(window, cx))
             .children(settings.map(|bot| self.render_settings(&bot, width, cx)))
+            .children(self.image_viewer.clone())
             .into_any_element()
     }
 }

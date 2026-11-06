@@ -8,6 +8,7 @@ mod create_bot;
 mod delete_dialog;
 mod dialogs;
 mod draft_card;
+mod images;
 mod layout;
 mod link_target;
 mod mentions;
@@ -219,6 +220,7 @@ pub struct ElseApp {
     settings_open: bool,
     details_tab: computer::DetailsTab,
     computer: Option<Entity<computer::ComputerView>>,
+    image_viewer: Option<Entity<images::ImageViewer>>,
     _computer_layout: Option<Subscription>,
     settings: HashMap<Uuid, BotSettings>,
     sidebar_focus: FocusHandle,
@@ -312,6 +314,7 @@ impl ElseApp {
             settings_open: false,
             details_tab: Default::default(),
             computer: None,
+            image_viewer: None,
             _computer_layout: None,
             settings: HashMap::new(),
             sidebar_focus,
@@ -481,6 +484,7 @@ impl ElseApp {
         if id == self.selected && self.view.is_some() {
             return;
         }
+        self.image_viewer = None;
         if let Some(previous) = self.selected {
             self.drafts.entry(previous).or_default().content = self.composer.read(cx).content();
         }
