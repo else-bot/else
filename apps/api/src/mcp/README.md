@@ -43,7 +43,7 @@ Credentials in `config.json` are absent from discovery results and the owner lis
 
 Installation and account access are separate. An OAuth connection belongs to the installation owner and authorizes only the bot named on its connection card. Other bots need their own consent. Static credentials explicitly saved in shared configuration keep their existing shared behavior.
 
-An HTTP 401 starts protected-resource and authorization-server discovery. The client supports authorization-server metadata, OpenID Connect discovery, and public dynamic client registration. Providers must support PKCE S256 and dynamic registration. Missing registration support returns a setup error rather than asking for tokens in chat.
+An HTTP 401 starts protected-resource and authorization-server discovery. The client supports authorization-server metadata, OpenID Connect discovery, and public dynamic client registration. Providers must support PKCE S256. GitHub uses a pre-registered app configured on the API server. Other providers without dynamic registration return a setup error.
 
 `mcp_request` returns `auth_required` and `mcp_connect` returns `pending_owner_auth` when sign-in is required. Both include the MCP id, safe connection metadata, and `parked: true`. A durable native card shows the provider, requested scopes, purpose, and bot access. The desktop compares the grant metadata with the saved card before opening authorization. A changed grant requires a fresh card.
 
@@ -56,6 +56,19 @@ Connection cards recover the server's account state before enabling controls. If
 Owner-only routes are `GET` and `DELETE /v1/bots/{bot_id}/mcp/{id}/connection`, `POST /v1/bots/{bot_id}/mcp/{id}/oauth/start`, `POST /v1/bots/{bot_id}/mcp/{id}/oauth/complete`, `DELETE /v1/bots/{bot_id}/mcp/{id}/oauth` to cancel the pending flow and read the resulting connection status, and `DELETE /v1/bots/{bot_id}/mcp/{id}/oauth/{request_id}` to cancel one known flow. Start takes a loopback `redirect_uri`. Complete takes the request id and callback fields. Connection status is `disconnected`, `authorizing`, `connected`, or `reauth_required`. Disconnect removes local tokens and closes that bot's transport. It does not revoke the grant at the provider.
 
 Coordinated backups include the shared library in one encrypted `mcp.tar.age` artifact. Restore recreates its package files under the destination data directory. An empty library is captured too, so restoring a later backup preserves removals. Older backups without a library artifact remain restorable.
+
+## Set up GitHub sign-in
+
+GitHub's remote MCP server does not support dynamic client registration. It requires a registered OAuth App or GitHub App and a client secret for token exchange. See [GitHub's host integration guide](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).
+
+1. [Register a dedicated OAuth App](https://github.com/settings/applications/new) for else.bot. Set its callback URL to `http://127.0.0.1/mcp/callback`. GitHub allows the desktop to select a different loopback port for each sign-in.
+2. Generate a client secret in the app's settings.
+3. Set `ELSE_GITHUB_CLIENT_ID` and `ELSE_GITHUB_CLIENT_SECRET` in the API server's environment. For direct API runs, you can use a private `.env` file. For an installed service, configure its service environment. Keep the secret outside shared MCP package files and chat.
+4. Restart the API server. Retry **Connect in browser** in the desktop connection card.
+
+The API accepts these credentials only for `https://api.githubcopilot.com` resources with GitHub's official issuer, authorization endpoint, and token endpoint. The secret accompanies code exchange and refresh requests only. It does not appear in the browser URL, bot metadata, or saved tokens. GitHub Enterprise endpoints need a separate registration integration.
+
+The registration belongs to the API installation. Each bot still needs separate owner consent and has its own encrypted tokens. Restoring tokens to a new API host also requires configuring the same OAuth App credentials there. Changing the client ID requires signing in again. Organization policy may require approval of the OAuth App before repository access succeeds.
 
 ## Verification
 

@@ -142,6 +142,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
     state.mcps.get_or_init(|| {
         crate::mcp::Library::new(config.data_dir.join("mcp"), state.scheduler.gate().clone())
             .with_oauth_key(state.secret_key.clone())
+            .with_oauth_client(config.github_oauth.clone())
     });
     // Every route under /v1 requires the owner token.
     // `layer` (not `route_layer`) also covers the fallback, so unknown /v1

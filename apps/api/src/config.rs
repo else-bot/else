@@ -67,6 +67,7 @@ pub struct Config {
     pub backup: crate::backup::capture::BackupConfig,
     /// Bucket replication of completed sets, when configured.
     pub s3: Option<crate::backup::s3::S3Config>,
+    pub github_oauth: Option<std::sync::Arc<crate::mcp::oauth::RegisteredClient>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +146,22 @@ impl Config {
         let msb_bin = match source.get("ELSE_MSB_BIN") {
             Some(path) => Some(absolute_path("ELSE_MSB_BIN", path)?),
             None => None,
+        };
+        let github_oauth = match (
+            source.get("ELSE_GITHUB_CLIENT_ID"),
+            source.get("ELSE_GITHUB_CLIENT_SECRET"),
+        ) {
+            (None, None) => None,
+            (Some(id), Some(secret)) => Some(std::sync::Arc::new(
+                crate::mcp::oauth::RegisteredClient::github(id, secret)
+                    .map_err(|reason| invalid("ELSE_GITHUB_CLIENT_ID", reason))?,
+            )),
+            _ => {
+                return Err(invalid(
+                    "ELSE_GITHUB_CLIENT_ID",
+                    "set ELSE_GITHUB_CLIENT_ID and ELSE_GITHUB_CLIENT_SECRET together",
+                ));
+            }
         };
         let backup = crate::backup::capture::BackupConfig {
             dir: match source.get("ELSE_BACKUP_DIR") {
@@ -265,6 +282,7 @@ impl Config {
             claude_bin,
             backup,
             s3,
+            github_oauth,
             synthetic_provider,
             bots_dir,
             max_active_turns,
@@ -379,6 +397,41 @@ pub mod tests {
         fn get(&self, name: &str) -> Option<String> {
             self.0.get(name).cloned()
         }
+    }
+
+    #[test]
+    fn github_oauth_requires_both_credentials_and_redacts_configuration() {
+        for pairs in [
+            vec![("ELSE_GITHUB_CLIENT_ID", "registered-id")],
+            vec![("ELSE_GITHUB_CLIENT_SECRET", "private-secret")],
+            vec![
+                ("ELSE_GITHUB_CLIENT_ID", ""),
+                ("ELSE_GITHUB_CLIENT_SECRET", "private-secret"),
+            ],
+            vec![
+                ("ELSE_GITHUB_CLIENT_ID", "registered-id"),
+                ("ELSE_GITHUB_CLIENT_SECRET", "secret\ninvalid"),
+            ],
+        ] {
+            let mut source = MapSource::new(&pairs);
+            source.0.insert("HOME".into(), "/h".into());
+            let error = Config::load(&source).unwrap_err().to_string();
+            assert!(error.contains("ELSE_GITHUB_CLIENT_ID"));
+            assert!(!error.contains("private-secret"));
+            assert!(!error.contains("secret\ninvalid"));
+        }
+        let config = Config::load(&MapSource::new(&[
+            ("HOME", "/h"),
+            ("ELSE_GITHUB_CLIENT_ID", "registered-id"),
+            ("ELSE_GITHUB_CLIENT_SECRET", "private-secret"),
+        ]))
+        .unwrap();
+        assert!(config.github_oauth.is_some());
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("private-secret"));
+        assert!(!debug.contains("registered-id"));
+        let default = Config::load(&MapSource::new(&[("HOME", "/h")])).unwrap();
+        assert!(default.github_oauth.is_none());
     }
 
     #[test]

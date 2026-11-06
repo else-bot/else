@@ -2,6 +2,44 @@ use super::*;
 use axum::{Json, Router, routing::get};
 use serde_json::json;
 
+#[tokio::test]
+async fn successful_http_responses_with_oauth_errors_require_new_consent_or_server_setup() {
+    for error in [
+        "bad_refresh_token",
+        "bad_verification_code",
+        "invalid_grant",
+        "incorrect_client_credentials",
+        "unknown_error",
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/token",
+            axum::routing::post(move || async move {
+                Json(json!({"error":error, "error_description":"private-provider-data"}))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let result = token(&endpoint, &[], None)
+            .await
+            .err()
+            .expect("OAuth error");
+        if matches!(
+            error,
+            "bad_refresh_token" | "bad_verification_code" | "invalid_grant"
+        ) {
+            assert!(matches!(result, Error::OAuthRevoked), "{result}");
+        } else if error == "incorrect_client_credentials" {
+            assert!(
+                result.to_string().contains("client ID or secret"),
+                "{result}"
+            );
+        }
+        assert!(!result.to_string().contains("private-provider-data"));
+        server.abort();
+    }
+}
+
 #[test]
 fn challenge_fields_preserve_quoted_commas_and_reject_duplicate_parameters() {
     let fields = challenge_parameters(r#"Bearer realm="hello, world", resource_metadata="https://mcp.example.com/meta", scope="read:issues write:issues""#).unwrap();

@@ -369,10 +369,17 @@ pub(super) struct TokenResponse {
 pub(super) async fn token(
     endpoint: &str,
     fields: &[(&str, String)],
+    client_secret: Option<&str>,
 ) -> Result<TokenResponse, Error> {
+    let fields: Vec<_> = fields
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .chain(client_secret.map(|secret| ("client_secret", secret)))
+        .collect();
     let response = client()?
         .post(endpoint)
-        .form(fields)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .form(&fields)
         .send()
         .await
         .map_err(|_| Error::Connection)?;
@@ -382,7 +389,26 @@ pub(super) async fn token(
     ) {
         return Err(Error::OAuthRevoked);
     }
-    let token: TokenResponse = json(response).await?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TokenResult {
+        Error { error: String },
+        Token(TokenResponse),
+    }
+    let token = match json::<TokenResult>(response).await? {
+        TokenResult::Token(token) => token,
+        TokenResult::Error { error } => {
+            return Err(match error.as_str() {
+                "invalid_grant" | "bad_refresh_token" | "bad_verification_code" => {
+                    Error::OAuthRevoked
+                }
+                "invalid_client" | "incorrect_client_credentials" => Error::Invalid(
+                    "The OAuth app client ID or secret is incorrect. Update the API server's OAuth app configuration.",
+                ),
+                _ => Error::Invalid("The OAuth provider rejected the token request."),
+            });
+        }
+    };
     if !token.token_type.eq_ignore_ascii_case("bearer")
         || token.access_token.is_empty()
         || token.access_token.len() > 16_384
