@@ -59,6 +59,47 @@ async fn output(fx: &Fixture, spec: &LaunchSpec) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_probe_waits_for_an_executable_writer_to_close() {
+    let fx = fixture();
+    let program = fx.data.join("provider");
+    std::fs::write(&program, "#!/bin/sh\necho provider-version\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&program)
+        .unwrap();
+    let error = std::process::Command::new(&program).output().unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(writer);
+        });
+        assert_eq!(
+            fx.host.probe(&program, &["--version"], &[]).as_deref(),
+            Some("provider-version")
+        );
+    });
+}
+
+#[test]
+fn a_probe_does_not_repeat_a_command_that_exits_with_failure() {
+    let fx = fixture();
+    let calls = fx.data.join("probe-calls");
+    assert!(
+        fx.host
+            .probe(
+                Path::new("/bin/sh"),
+                &["-c", "echo called >> \"$CALLS\"; exit 1"],
+                &[("CALLS".into(), calls.to_str().unwrap().into())],
+            )
+            .is_none()
+    );
+    assert_eq!(std::fs::read_to_string(calls).unwrap(), "called\n");
+}
+
 #[tokio::test]
 async fn runs_start_in_the_project_with_the_users_session_environment() {
     let fx = fixture();
