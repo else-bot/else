@@ -28,6 +28,9 @@ impl Drop for Credential {
     }
 }
 
+/// The package's one saved sign-in, shared by every bot. It keeps the file
+/// name and encryption purpose of the nil bot, which stdio packages always
+/// used. Sign-ins saved per bot by older versions are adopted on load.
 #[derive(Clone)]
 pub(in crate::mcp) struct Store {
     path: PathBuf,
@@ -36,7 +39,16 @@ pub(in crate::mcp) struct Store {
 }
 
 impl Store {
-    pub(in crate::mcp) fn new(path: PathBuf, bot: Uuid, key: Option<Arc<SecretKey>>) -> Self {
+    pub(in crate::mcp) fn new(path: PathBuf, key: Option<Arc<SecretKey>>) -> Self {
+        Self {
+            path,
+            bot: Uuid::nil(),
+            key,
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::mcp) fn for_bot(path: PathBuf, bot: Uuid, key: Option<Arc<SecretKey>>) -> Self {
         Self { path, bot, key }
     }
 
@@ -52,9 +64,16 @@ impl Store {
 
     pub(super) async fn load(&self) -> Result<Option<Credential>, Error> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || load(&store.path, store.bot, store.key.as_deref()))
-            .await
-            .map_err(|_| Error::Connection)?
+        tokio::task::spawn_blocking(move || {
+            if let Some(key) = store.key.as_deref()
+                && store.bot.is_nil()
+            {
+                adopt_per_bot(&store.path, store.bot, key)?;
+            }
+            load(&store.path, store.bot, store.key.as_deref())
+        })
+        .await
+        .map_err(|_| Error::Connection)?
     }
 
     pub(super) async fn save(&self, credential: &Credential) -> Result<(), Error> {
@@ -180,6 +199,47 @@ fn load(path: &Path, bot: Uuid, key: Option<&SecretKey>) -> Result<Option<Creden
     let credential = serde_json::from_slice(&plain)
         .map_err(|_| Error::Invalid("Invalid decrypted MCP credentials."))?;
     Ok(Some(credential))
+}
+
+/// Move the most recent sign-in saved for one bot to the shared file, then
+/// delete every per-bot file, so a disconnect cannot leave one behind.
+fn adopt_per_bot(path: &Path, shared: Uuid, key: &SecretKey) -> Result<(), Error> {
+    let mut per_bot = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(bot) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("oauth-")?.strip_suffix(".json"))
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|bot| *bot != shared)
+        else {
+            continue;
+        };
+        if entry.file_type()?.is_file() {
+            per_bot.push((entry.metadata()?.modified()?, bot));
+        }
+    }
+    if per_bot.is_empty() {
+        return Ok(());
+    }
+    if !path.join(filename(shared)).exists() {
+        per_bot.sort();
+        for (_, bot) in per_bot.iter().rev() {
+            match load(path, *bot, Some(key)) {
+                Ok(Some(credential)) => {
+                    save(path, shared, key, &credential)?;
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => tracing::warn!("Skipping an unreadable per-bot MCP sign-in"),
+            }
+        }
+    }
+    for (_, bot) in per_bot {
+        remove(path, bot)?;
+    }
+    Ok(())
 }
 
 fn remove(path: &Path, bot: Uuid) -> Result<(), Error> {

@@ -230,7 +230,7 @@ async fn maintenance_blocks_mutation_and_execution_but_not_discovery() {
 }
 
 #[tokio::test]
-async fn disconnect_closes_the_shared_stdio_session_for_every_bot() {
+async fn disconnect_closes_the_shared_stdio_session() {
     let dir = tempfile::tempdir().unwrap();
     let library = Library::new(dir.path().join("mcp"), Arc::default());
     let mut package = input("stdio-counter");
@@ -256,24 +256,20 @@ for line in sys.stdin:
     };
     let id = package.id.clone();
     library.install(package, "installer".into()).await.unwrap();
-    let first = Uuid::new_v4();
-    let other = Uuid::new_v4();
-    for (bot, expected) in [(first, "1"), (other, "2")] {
+    for expected in ["1", "2"] {
         let response = library
-            .request_for(&id, bot, "tools/list".into(), serde_json::json!({}))
+            .request(&id, "tools/list".into(), serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(response["tools"][0]["description"], expected);
     }
-    library.disconnect(&id, other).await.unwrap();
-    for bot in [first, other] {
-        assert_eq!(
-            library.connection_status(&id, bot).await.unwrap().status,
-            "disconnected"
-        );
-    }
+    library.disconnect(&id).await.unwrap();
+    assert_eq!(
+        library.connection_status(&id).await.unwrap().status,
+        "disconnected"
+    );
     let response = library
-        .request_for(&id, first, "tools/list".into(), serde_json::json!({}))
+        .request(&id, "tools/list".into(), serde_json::json!({}))
         .await
         .unwrap();
     assert_eq!(
