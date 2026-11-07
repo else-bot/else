@@ -1,15 +1,23 @@
 name: cargo-test
 
+# Pull requests skip the suite (the pre-commit hook runs it); the release
+# workflow calls it on the release commit, and anyone can dispatch it.
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to test
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: cargo-test-${{ github.event.pull_request.number || github.ref }}
+  group: cargo-test-${{ github.event.pull_request.number || inputs.ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -17,12 +25,13 @@ env:
 
 jobs:
   cargo-test:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+    if: github.event_name != 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: useblacksmith/checkout@v1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Install build dependencies
         run: |

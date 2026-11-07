@@ -10,7 +10,7 @@ published image matching its build inputs at a commit:
 The base holds the heavy packages and the patched x11vnc. An operator
 publishes it once per change with scripts/build-guest-base.sh. The guest
 image adds the helpers on top of the pinned base, and its inputs include the
-base manifest, so release CI rebuilds it without touching APT. `image` is null
+base manifest, so the release workflow rebuilds it without touching APT. `image` is null
 until one is published. --base selects the base manifest.
 
     guest_release.py [--base] hash [--rev REV]
@@ -21,7 +21,7 @@ until one is published. --base selects the base manifest.
     guest_release.py plan [--rev REV] [--main-ref REF]
     guest_release.py platform-digest REF --platform OS/ARCH
     guest_release.py digest REF
-    guest_release.py gate --branch BRANCH [--rev REV] [--main-ref REF]
+    guest_release.py gate [--rev REV] [--main-ref REF]
 """
 
 import argparse
@@ -408,29 +408,14 @@ def write_manifest(kind, source, image):
     os.replace(tmp, path)
 
 
-def cmd_gate(branch, rev, main_ref):
+def cmd_gate(rev, main_ref):
+    """Pull requests keep the workspace version; releases bump it on their own commit."""
     found = cargo_version(rev)
-    match = re.fullmatch(r"release/v([0-9]+\.[0-9]+\.[0-9]+)", branch)
-    if not match:
-        if branch.startswith("release/"):
-            raise Fail(f"{branch} is not a release branch (release/vX.Y.Z)")
-        base_version = cargo_version(git_out("merge-base", main_ref, rev))
-        if found != base_version:
-            raise Fail("only release/vX.Y.Z branches may change the workspace version")
-        print("workspace version unchanged; no release to verify")
-        return
-    version = match.group(1)
-    if found != version:
-        raise Fail(f"{branch} carries version {found} in Cargo.toml, not {version}")
-    if not is_ancestor(main_ref, rev):
-        raise Fail(f"{branch} does not contain {main_ref}; rebase the release branch onto main and rerun guest-image")
-    main_version = cargo_version(main_ref)
-    if version_key(version) <= version_key(main_version):
-        raise Fail(f"version {version} is not newer than {main_ref}'s {main_version}")
-    if git("rev-parse", "-q", "--verify", f"refs/tags/v{version}", check=False).returncode == 0:
-        raise Fail(f"tag v{version} already exists")
-    data = cmd_check(GUEST, rev, allow_unpinned=False)
-    print(f"release v{version} is ready: guest image {data['image']}")
+    base_version = cargo_version(git_out("merge-base", main_ref, rev))
+    if found != base_version:
+        raise Fail(f"pull requests keep the workspace version ({base_version}); "
+                   "the release workflow sets the new version on the release commit")
+    print("workspace version unchanged")
 
 
 def main():
@@ -457,7 +442,6 @@ def main():
     p.add_argument("image")
     p.add_argument("--rev", default="HEAD")
     p = sub.add_parser("gate")
-    p.add_argument("--branch", required=True)
     p.add_argument("--rev", default="HEAD")
     p.add_argument("--main-ref", default="origin/main")
     args = parser.parse_args()
@@ -500,7 +484,7 @@ def main():
             write_manifest(kind, source, args.image)
             print(f"pinned {args.image} for {kind.name} source {source}")
         elif args.command == "gate":
-            cmd_gate(args.branch, args.rev, args.main_ref)
+            cmd_gate(args.rev, args.main_ref)
     except (Fail, ValueError) as e:
         print(f"guest-release: {e}", file=sys.stderr)
         return 1

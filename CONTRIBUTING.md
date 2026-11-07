@@ -107,9 +107,9 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
-The pre-commit hook runs the full Cargo suite locally. Fix test failures before committing. Ordinary pull requests skip the `cargo-test` job. Release pull requests from `release/v*` branches and manual workflow runs execute the full suite on Ubuntu with stable Rust. The required `cargo-test` check accepts the skipped job on ordinary pull requests and requires passing tests on release pull requests.
+The pre-commit hook runs the full Cargo suite locally. Fix test failures before committing. Pull requests skip the `cargo-test` job, and the required `cargo-test` check accepts the skipped job. The release workflow runs the full suite on Ubuntu with stable Rust against every release commit, and manual `cargo-test` runs do the same for the head of a branch.
 
-The `release-ready` check must also pass before merging. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Release automation pushes to release branches and publishes tags without adding commits directly to `main`.
+The `release-ready` check must also pass before merging. It tests the release tooling and installers and rejects a changed workspace version, which only the release workflow sets. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Releases never add commits to `main`.
 
 CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for release tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
 
@@ -187,27 +187,27 @@ docker login ghcr.io
 scripts/build-guest-base.sh
 ```
 
-Commit the base inputs before publishing so the image records their hash. Commit the resulting `infra/guest-base.json` pin and merge it before cutting a release. Native builders can publish each platform separately with `--platform linux/amd64` or `--platform linux/arm64`. Use `--skip-build` to finish the index and pin once both exist. Published packages must allow anonymous pulls.
+Commit the base inputs before publishing so the image records their hash. Commit the resulting `infra/guest-base.json` pin and merge it before releasing. Native builders can publish each platform separately with `--platform linux/amd64` or `--platform linux/arm64`. Use `--skip-build` to finish the index and pin once both exist. Published packages must allow anonymous pulls.
 
-From `main`, prepare a version bump:
+Release the head of `main`:
 
 ```sh
 scripts/release.sh patch
 ```
 
-Use `minor` or `major` for a larger bump. The script creates a release branch and PR without changing your checkout. CI builds or reuses the guest image, tests its VNC behavior, and commits the immutable digest to `infra/guest-image.json`.
+Use `minor` or `major` for a larger bump, `--sha SHA` to release an earlier commit on `main`, and `--wait` to follow the run until it finishes. The script only starts the `release` workflow and prints its run; you can also start it from the Actions tab. Nothing needs a pull request, a rebase, an approval, or a merge, so pull requests keep merging while a release runs. Releases run one at a time. If several wait, GitHub starts only the newest and cancels the others.
 
-Review the version and image pin, wait for `cargo-test` and `release-ready`, then squash merge with the title `chore(release): vX.Y.Z`. The guest-image workflow dispatches both checks after pinning the image so they verify the latest release commit.
+The workflow takes the next version from the newest release tag. It reuses the guest image already published for the commit's guest inputs, or builds one, tests its keymap and VNC behavior, and publishes it. It then pushes one release commit on top of the chosen commit to `release/vX.Y.Z`. That commit only bumps the workspace version in `Cargo.toml` and `Cargo.lock` and pins the image digest in `infra/guest-image.json`. `cargo-test`, `release-ready`, and the native builds run on it in parallel. Linux AMD64 and ARM64 build in Debian 12 containers to support Debian 12+, Ubuntu 24.04+, and Arch Linux. macOS ARM64 builds on a `macos-15` Apple silicon runner with Xcode and Metal. Windows is unsupported.
 
-After the merge, `release-tag` builds the desktop and API on native runners for Linux AMD64, Linux ARM64, and macOS ARM64. Linux builds use Debian 12 containers to support Debian 12+, Ubuntu 24.04+, and Arch Linux. macOS builds use the `macos-15` Apple silicon runner with Xcode and Metal. Windows is unsupported.
+Once everything passes, the workflow verifies the guest image again, tags the release commit, publishes the GitHub release, and deletes the `release/vX.Y.Z` branch. It refuses to tag a commit that is neither on `main` nor a release commit changing only those three files on top of `main`, so a release only ships reviewed code. The version and guest pin on `main` stay at their last merged values. Tagged commits carry the released ones.
 
 `scripts/release.py` coordinates native publication, `scripts/release_binaries.py` owns archive creation, and `scripts/guest_release.py` owns guest-image pins and verification. The guest-image fingerprint covers the guest files, base pin, and build recipe. Version bumps, release helper edits, and CI runner changes reuse the image. When a helper or workflow changes how the image is built, update the recipe in `scripts/guest_release.py` to invalidate the fingerprint.
 
 Images published before release orchestration was excluded from the fingerprint need one rebuild to adopt the new fingerprint. Later releases reuse that image until its build inputs change.
 
-All three builds must pass their binary version checks before the workflow verifies the guest image and tags the release commit. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
+All three builds must pass their binary version checks before the release commit is tagged. The GitHub release stays a draft until all six archives and `SHA256SUMS` are uploaded. Assets are named `else-api-vX.Y.Z-<platform>.tar.gz` and `else-desktop-vX.Y.Z-<platform>.tar.gz`, where `<platform>` is `linux-amd64`, `linux-arm64`, or `macos-arm64`. The macOS desktop archive contains `else.bot.app`; other archives contain the named executable. The app is not notarized. Linux desktops still need the runtime libraries and a Vulkan driver listed above.
 
-Rerun a failed `release-tag` run to resume publication at the same commit. Ordinary pushes after a version is tagged skip the binary builds. The workflow builds before tagging because [tags pushed with `GITHUB_TOKEN` do not trigger another workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow). The installer discovers the latest published binary release through `releases/latest/download/SHA256SUMS`, so a tag with unfinished uploads is not installed. It downloads only the selected components, verifies the checksums and executable versions, and keeps the existing backup and rollback flow. `--from-source` uses version tags and a private Rust toolchain instead; use it for older releases without binary assets. `ELSE_RELEASES_URL` overrides the repository's GitHub releases URL for local fixtures or another release server.
+Rerun the failed jobs of a release run to retry it. A run that fails before tagging leaves nothing behind but its `release/vX.Y.Z` branch, and the next run replaces it. If the newest tag's binaries were never fully published, the next run finishes that release instead of cutting a new one; run it again afterwards. The workflow tags only after building because the installer treats the newest tag as the latest release. The installer discovers the latest published binary release through `releases/latest/download/SHA256SUMS`, so a tag with unfinished uploads is not installed. It downloads only the selected components, verifies the checksums and executable versions, and keeps the existing backup and rollback flow. `--from-source` uses version tags and a private Rust toolchain instead; use it for older releases without binary assets. `ELSE_RELEASES_URL` overrides the repository's GitHub releases URL for local fixtures or another release server.
 
 To package a local native release build, use the matching platform:
 
