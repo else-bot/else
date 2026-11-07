@@ -70,6 +70,28 @@ Owner-only routes are `GET` and `DELETE /v1/bots/{bot_id}/mcp/{id}/connection`, 
 
 Coordinated backups include the shared library in one encrypted `mcp.tar.age` artifact. Restore recreates its package files under the destination data directory. An empty library is captured too, so restoring a later backup preserves removals. Older backups without a library artifact remain restorable.
 
+## Git in bot computers
+
+The GitHub MCP's sign-in also authenticates git over HTTPS in a bot's computer. `computer_run` and `computer_job_start` take an optional `github` argument naming the installed GitHub MCP. That command then runs with ordinary `git clone`, `fetch`, `pull`, and `push` authenticated for `https://github.com`, including inside scripts such as a release script, which need no changes.
+
+The token reaches the guest like a task secret. It is sent over the runtime's stdin as `ELSE_GITHUB_TOKEN`, an environment variable of that one command or job. `GIT_CONFIG_COUNT` variables clear any other github.com credential helper and add one that answers from that variable, with username `x-access-token`. The token is never in a command line, a remote URL, a file, or the repository's `.git` directory. `GIT_TERMINAL_PROMPT=0` turns a missing or rejected credential into an error instead of a hang.
+
+Output is masked inside the computer before it leaves. An isolated Python filter (`-I -S`, so user site packages cannot run first) replaces the token with `[secret ELSE_GITHUB_TOKEN]` in a foreground command's stdout and stderr and in a job's combined output file, which is the only output a job stores. The filter holds back enough bytes to catch a token split across reads. A foreground command's output is masked again on the host. A job's stored tail is not, because the host re-masks jobs only by task secret name, and else.bot does not keep the token on the server for a second pass. A job whose launch script fails is masked on the host with the token it still holds in memory, so the stored error never shows it. Masking prevents accidental disclosure, not a hostile command. Any command given the token can read it.
+
+Only a sign-in made through the server's registered GitHub app qualifies, so no other provider's token is ever sent to github.com. It needs the `repo` scope, which GitHub's MCP requests by default. Each command first makes a read-only `tools/list` call with the token, so a revoked or expired sign-in is caught before git runs. An expired token refreshes. A disconnected or revoked sign-in shows the owner the same connection card `mcp_request` does and runs nothing. Only work that may use shared MCPs may name it. Incoming email and social events cannot. An organization that restricts OAuth apps must approve else.bot's app before its private repositories clone. GitHub's `403` names that organization.
+
+### Push approval is a convention, not a permission boundary
+
+else.bot does not enforce what git may push. The credential helper sees the same request for a fetch and a push, so any command that names `github` can push wherever the signed-in account can. The approval card depends on the bot declaring the command's `effect` honestly, as it does for every other command. The `github` description tells the bot that pushing a release, a tag, or the default branch publishes it, so the call is `external`, and that deleting a remote branch or tag is `destructive`. A command mislabeled `local` runs without a card. Preventing an unapproved push technically needs an authenticating git proxy that inspects `git-receive-pack`. That is deferred.
+
+A release script such as `release.sh` bundles branch pushes, tag pushes, and a rollback that can delete a remote tag. The bot must run it as one `external` call, after the owner approves the complete operation, with the approval context listing every branch and tag it may push or delete. It must not split the script into separately labeled steps. This also relies on the bot following instructions.
+
+GitHub is the enforced boundary. The OAuth app's token reaches every repository the signed-in account can, with that account's permissions. Narrow it where practical:
+
+- Sign the GitHub MCP in as a dedicated machine account with write access only to the repositories bots work on.
+- Protect `main`, `dev`, and release tags (for example `v*`) with [repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) that restrict updates, creation, and deletion to a bypass list.
+- To let bots release without giving everyday work that access, install the GitHub MCP a second time under another id, such as `github-release`. Sign it in as an account on the ruleset bypass list, and name it only for approved release runs. The everyday id's account then cannot change protected branches or tags, whatever the bot declares.
+
 ## Set up GitHub sign-in
 
 Official API releases embed a dedicated GitHub OAuth App registration. The owner clicks **Connect in browser** without configuring credentials. GitHub's remote MCP server does not support dynamic client registration and requires a client secret for token exchange. See [GitHub's host integration guide](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).

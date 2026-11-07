@@ -341,6 +341,55 @@ async fn a_jobs_output_file_never_holds_a_secret() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_job_masks_a_secret_in_the_guest_without_a_host_pass() {
+    let Setup {
+        app: _app,
+        manager,
+        root,
+        bot,
+    } = setup().await;
+    let token = "gho_dummy0123456789abcdefDUMMY";
+    let secrets = env(&[("ELSE_GITHUB_TOKEN", token)]);
+    let Started::Job(job) = manager
+        .start_job_with(
+            bot,
+            None,
+            r#"printf 'out %s\n' "$ELSE_GITHUB_TOKEN"
+t="$ELSE_GITHUB_TOKEN"; printf 'err %s' "${t%????????????}" >&2; sleep 0.3
+printf '%s\n' "${t#"${t%????????????}"}" >&2; exit 3"#,
+            Duration::from_secs(60),
+            &secrets,
+            &[],
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("not started")
+    };
+    let dir = root.path().join(format!("var-lib-elsebot/jobs/{job}"));
+    let started = Instant::now();
+    while !dir.join("exit").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the job did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let file = std::fs::read_to_string(dir.join("out")).unwrap();
+    assert_eq!(
+        file,
+        "out [secret ELSE_GITHUB_TOKEN]\nerr [secret ELSE_GITHUB_TOKEN]\n"
+    );
+    let state = manager.job(bot, job).await.unwrap().unwrap();
+    assert_eq!(
+        (state.status.as_str(), state.exit_code),
+        ("failed", Some(3))
+    );
+    assert_eq!(state.output_tail, file, "stored as the guest masked it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_timed_out_command_and_its_descendants_end_and_are_recorded() {
     let Setup {
         app, manager, bot, ..

@@ -62,7 +62,7 @@ mkdir -p "$3"; cat /proc/sys/kernel/random/boot_id > "$3/boot" 2>/dev/null
 o=$(mktemp); e=$(mktemp)
 if [ -n "$ELSE_REDACT_VARS" ]; then
   mkfifo "$3/o" "$3/e"
-  /usr/bin/setsid /bin/sh -c '/usr/bin/python3 -c "$4" < "$1/o" > "$2" & /usr/bin/python3 -c "$4" < "$1/e" > "$3" & PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$5" > "$1/o" 2> "$1/e" < /dev/null; c=$?; wait; exit $c' sh "$3" "$o" "$e" "$4" "$1" < /dev/null &
+  /usr/bin/setsid /bin/sh -c '/usr/bin/python3 -I -S -c "$4" < "$1/o" > "$2" & /usr/bin/python3 -I -S -c "$4" < "$1/e" > "$3" & PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$5" > "$1/o" 2> "$1/e" < /dev/null; c=$?; wait; exit $c' sh "$3" "$o" "$e" "$4" "$1" < /dev/null &
 else
   PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /usr/bin/setsid /bin/sh -c "$1" > "$o" 2> "$e" < /dev/null &
 fi
@@ -77,7 +77,7 @@ const LAUNCH: &str = r#"mkdir -p "$1" && { cd "$HOME/work" 2>/dev/null || cd "$H
 @ENV@
 cat /proc/sys/kernel/random/boot_id > "$1/boot" 2>/dev/null
 if [ -n "$ELSE_REDACT_VARS" ]; then
-  /usr/bin/setsid /bin/sh -c '{ PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" < /dev/null; echo $? > "$1/code"; } 2>&1 | /usr/bin/python3 -c "$3" > "$1/out"; mv "$1/code" "$1/exit"' sh "$1" "$2" "$3" > /dev/null 2>&1 < /dev/null &
+  /usr/bin/setsid /bin/sh -c '{ PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" < /dev/null; echo $? > "$1/code"; } 2>&1 | /usr/bin/python3 -I -S -c "$3" > "$1/out"; mv "$1/code" "$1/exit"' sh "$1" "$2" "$3" > /dev/null 2>&1 < /dev/null &
 else
   /usr/bin/setsid /bin/sh -c 'PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" /bin/sh -c "$2" > "$1/out" 2>&1 < /dev/null; echo $? > "$1/exit"' sh "$1" "$2" > /dev/null 2>&1 < /dev/null &
 fi
@@ -442,10 +442,12 @@ impl ComputerManager {
         if crate::faults::hit("job.after_launch") {
             return Launch::Interrupted;
         }
+        // The launch script's own errors bypass the guest filter.
+        let masked = |text: &str| redact(text, &env.redaction());
         match launched {
             Ok(out) if out.stdout.contains("launched") => Launch::Launched,
-            Ok(out) => Launch::Uncertain(out.stderr),
-            Err(err) => Launch::Uncertain(err.to_string()),
+            Ok(out) => Launch::Uncertain(masked(&out.stderr)),
+            Err(err) => Launch::Uncertain(masked(&err.to_string())),
         }
     }
 
@@ -751,6 +753,49 @@ impl ComputerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    const TOKEN: &str = "gho_dummy0123456789abcdefDUMMY";
+
+    fn filtered(writes: &[Vec<u8>]) -> String {
+        let mut filter = Command::new("python3")
+            .args(["-I", "-S", "-c", FILTER])
+            .env_clear()
+            .env("ELSE_REDACT_VARS", " ELSE_GITHUB_TOKEN")
+            .env("ELSE_GITHUB_TOKEN", TOKEN)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = filter.stdin.take().unwrap();
+        for write in writes {
+            stdin.write_all(write).unwrap();
+            stdin.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(stdin);
+        let out = filter.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn the_guest_filter_masks_a_secret_split_across_reads() {
+        let (head, rest) = TOKEN.split_at(9);
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![format!("a {head}").into(), format!("{rest} b\n").into()],
+            TOKEN.bytes().map(|byte| vec![byte]).collect(),
+            vec![[vec![b'x'; 65_530], TOKEN.as_bytes().to_vec()].concat()],
+            vec![format!("{TOKEN}{TOKEN}").into()],
+            vec![format!("end {head}").into(), rest.into()],
+        ];
+        for writes in cases {
+            let out = filtered(&writes);
+            assert!(!out.contains(head), "{}", tail(&out, 200));
+            assert!(out.contains("[secret ELSE_GITHUB_TOKEN]"));
+        }
+    }
 
     #[test]
     fn command_output_is_parsed_from_the_run_script_format() {

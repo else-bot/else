@@ -135,6 +135,14 @@ impl ComputerRuntime for Guest {
             self.killed(name).notify_one();
             "stopped".into()
         } else if script.contains("echo launched") {
+            if args.get(at + 3).is_some_and(|c| c.contains("LAUNCH_ERROR")) {
+                return Ok(ExecOutput {
+                    status: Some(2),
+                    stdout: String::new(),
+                    stderr: format!("sh: launch failed: {}", self.run_reply(args, input)),
+                    truncated: false,
+                });
+            }
             "launched".into()
         } else {
             String::new()
@@ -365,6 +373,21 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         .unwrap();
     assert!(launch.1.iter().all(|a| !a.contains(PASSWORD)));
     assert!(String::from_utf8_lossy(&launch.2).contains(&encoded));
+    let failed = tool(
+        &app,
+        &token,
+        "computer_job_start",
+        json!({ "command": "LAUNCH_ERROR", "secrets": ["smtp"], "effect": "local" }),
+    )
+    .await;
+    let id: Uuid = failed["job_id"].as_str().unwrap().parse().unwrap();
+    let error: String = sqlx::query_scalar("SELECT error FROM guest_jobs WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(error.contains("[secret SMTP_PASSWORD]"), "{error}");
+    assert!(!error.contains(PASSWORD), "launch errors are masked");
     let logged: Vec<String> = sqlx::query_scalar("SELECT body FROM memory_entry WHERE bot_id = ?1")
         .bind(bot.parse::<Uuid>().unwrap())
         .fetch_all(&app.db.pool)
