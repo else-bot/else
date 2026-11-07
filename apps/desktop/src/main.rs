@@ -16,6 +16,7 @@ mod profile_picker;
 mod sidebar;
 mod socials;
 mod updates;
+mod window_frame;
 
 use gpui_kit::*;
 
@@ -175,6 +176,16 @@ fn main() {
                 }
             })
             .detach();
+            let frame_path = launch
+                .store
+                .as_ref()
+                .ok()
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|store| store.window_path());
+            let min_size = size(px(640.), px(420.));
+            let restored = frame_path
+                .as_deref()
+                .and_then(|path| window_frame::restore(path, min_size, cx));
             let options = WindowOptions {
                 app_id: Some("else-bot".into()),
                 icon: Some(std::sync::Arc::new(
@@ -184,17 +195,34 @@ fn main() {
                     .expect("decode the bundled application icon")
                     .into_rgba8(),
                 )),
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1100.), px(720.)),
-                    cx,
-                ))),
-                window_min_size: Some(size(px(640.), px(420.))),
+                window_bounds: Some(restored.map_or_else(
+                    || {
+                        WindowBounds::Windowed(Bounds::centered(
+                            None,
+                            size(px(1100.), px(720.)),
+                            cx,
+                        ))
+                    },
+                    |(bounds, _)| bounds,
+                )),
+                display_id: restored.map(|(_, display)| display),
+                window_min_size: Some(min_size),
                 ..window_chrome(title)
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 appearance::observe_window(window, cx);
-                cx.new(|cx| connection::Shell::new(launch, handle, window, cx))
+                if cfg!(target_os = "macos") {
+                    window.on_window_should_close(cx, |_, cx| {
+                        cx.hide();
+                        false
+                    });
+                }
+                cx.new(|cx| {
+                    if let Some(path) = frame_path {
+                        window_frame::remember(path, window, cx);
+                    }
+                    connection::Shell::new(launch, handle, window, cx)
+                })
             })
             .expect("open the else.bot window");
         });

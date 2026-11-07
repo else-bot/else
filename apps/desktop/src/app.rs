@@ -61,7 +61,13 @@ actions!(
         MoveBot,
         ToggleSettings,
         Quit,
-        CloseWindow
+        CloseWindow,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
+        About
     ]
 );
 
@@ -112,6 +118,9 @@ pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
         ]);
     }
 }
@@ -124,17 +133,31 @@ pub fn install_menus(cx: &mut App) {
     }
     use gpui_kit::base::input;
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(window) = cx.active_window() {
+    cx.on_action(|_: &CloseWindow, cx| cx.hide());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window, _| window.minimize_window()));
+    cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window, _| window.zoom_window()));
+    cx.on_action(|_: &About, cx| {
+        if let Some(window) = cx.windows().into_iter().next() {
             cx.defer(move |cx| {
-                let _ = window.update(cx, |_, window, _| window.remove_window());
+                let _ = window.update(cx, |_, window, cx| open_about(window, cx));
             });
         }
     });
     cx.set_menus(vec![
         Menu::new("else.bot").items([
+            MenuItem::action("About else.bot", About),
+            MenuItem::separator(),
             MenuItem::action("Settings…", crate::connection::OpenAppSettings),
             MenuItem::action("Bot details", ToggleSettings),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide else.bot", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
             MenuItem::action("Quit else.bot", Quit),
         ]),
@@ -157,8 +180,53 @@ pub fn install_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Delete Bot…", DeleteBot),
         ]),
-        Menu::new("Window").items([MenuItem::action("Close Window", CloseWindow)]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", Minimize),
+            MenuItem::action("Zoom", Zoom),
+            MenuItem::separator(),
+            MenuItem::action("Close Window", CloseWindow),
+        ]),
     ]);
+}
+
+/// Deferred because a key binding dispatches while its window is updating.
+fn with_active_window(cx: &mut App, f: fn(&mut Window, &mut App)) {
+    if let Some(window) = cx.active_window() {
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| f(window, cx));
+        });
+    }
+}
+
+fn open_about(window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
+    cx.activate(true);
+    window.activate_window();
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    window.open_dialog(cx, |dialog, _, cx| {
+        let theme = cx.theme();
+        dialog.w(px(300.)).close_button(false).child(
+            v_flex()
+                .items_center()
+                .gap_3()
+                .py_4()
+                .child(crate::connection::brand_mark(theme))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("else.bot"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                ),
+        )
+    });
 }
 
 /// What the window knows about its API connection.

@@ -391,20 +391,7 @@ fn story(theme: &Theme) -> AnyElement {
         .bg(theme.secondary)
         .border_r_1()
         .border_color(theme.border)
-        .child(
-            div()
-                .size(px(52.))
-                .mb(px(23.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(14.))
-                .bg(theme.foreground)
-                .text_color(theme.background)
-                .text_size(px(28.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("e."),
-        )
+        .child(brand_mark(theme).mb(px(23.)))
         .child(
             v_flex()
                 .mb(px(14.))
@@ -423,6 +410,20 @@ fn story(theme: &Theme) -> AnyElement {
                 .child("Give it a task and follow its work."),
         )
         .into_any_element()
+}
+
+pub(crate) fn brand_mark(theme: &Theme) -> Div {
+    div()
+        .size(px(52.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(14.))
+        .bg(theme.foreground)
+        .text_color(theme.background)
+        .text_size(px(28.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child("e.")
 }
 
 fn heading(text: String, theme: &Theme) -> Div {
