@@ -128,8 +128,28 @@ def draft_reply(turn, latest, packet, stopped):
     return True
 
 
+def handoff(turn, latest, stopped):
+    if latest not in {'[ui:delegate]', '[ui:council]'}:
+        return False
+    peers = [bot for bot in outgoing_tool('list_bots', {})['bots'] if not bot['self']]
+    task = 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'
+    if latest == '[ui:delegate]':
+        result = outgoing_tool('delegate', {'target_bot_id': peers[0]['bot_id'], 'task': task})
+    else:
+        result = outgoing_tool('council', {'target_bot_ids': [bot['bot_id'] for bot in peers[:3]],
+                                           'task': 'Should the studio plan move from 29 to 39 EUR? [ui:slow]'})
+    if result['status'] != 'pending':
+        return False
+    event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+          'itemId': 'fixture-handoff', 'delta': 'Handing this off.'})
+    finish(turn, stopped, 'completed')
+    return True
+
+
 def stream(turn, latest, packet, stopped):
     try:
+        if handoff(turn, latest, stopped):
+            return
         if packet.rstrip().endswith('[ui:permission]') and '[else.bot owner answers]' not in packet:
             result = outgoing_tool('ask_permission', {
                 'kind': 'destructive',
@@ -168,8 +188,9 @@ def stream(turn, latest, packet, stopped):
         return
     if latest == '[ui:hang]':
         return
+    pause = 4.0 if '[ui:slow]' in packet else 1.0
     for text in ['Fixture ', 'reply ', '✓ ', 'from ', 'the ', 'desktop ', 'composer.']:
-        if stopped.wait(1.0):
+        if stopped.wait(pause):
             return
         event('item/agentMessage/delta', {'threadId':thread_id,'turnId':turn,'itemId':'fixture-message','delta':text})
     finish(turn, stopped, 'completed')
