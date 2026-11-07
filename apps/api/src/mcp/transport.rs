@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use rmcp::model::ClientRequest;
+use rmcp::model::{ClientConfig, ClientRequest, ProtocolVersion};
 use rmcp::service::RunningService;
 use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_client::{
@@ -30,7 +30,7 @@ pub(crate) const METHODS: &[&str] = &[
 ];
 
 pub(super) struct Connection {
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, ClientConfig>,
     process: Option<Supervised>,
 }
 
@@ -39,6 +39,11 @@ pub(super) async fn connect(
     cwd: &Path,
     data_dir: &Path,
 ) -> Result<Connection, Error> {
+    // rmcp offers its newest revision by default, which dropped the
+    // initialize handshake. Servers that accept it, such as GitHub's, then
+    // hand back a session id they never honor.
+    let info =
+        ClientConfig::default().with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     let (service, process) = match config {
         Transport::Http { url, headers } => {
             let client = reqwest::Client::builder()
@@ -61,10 +66,13 @@ pub(super) async fn connect(
                 options.custom_headers.insert(name, value);
             }
             let transport = StreamableHttpClientTransport::with_client(client, options);
-            let service = tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport))
+            let service = tokio::time::timeout(CONNECT_TIMEOUT, info.serve(transport))
                 .await
                 .map_err(|_| Error::Timeout)?
-                .map_err(initialize_error)?;
+                .map_err(|error| {
+                    tracing::warn!(%error, "MCP initialization failed");
+                    initialize_error(error)
+                })?;
             (service, None)
         }
         Transport::Stdio { command, args, env } => {
@@ -94,10 +102,13 @@ pub(super) async fn connect(
             let stdin = process.child.stdin.take().ok_or(Error::Connection)?;
             let transport =
                 AsyncRwTransport::new(stdout, stdin).with_max_line_length(MAX_RESPONSE_BYTES);
-            let service = tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport))
+            let service = tokio::time::timeout(CONNECT_TIMEOUT, info.serve(transport))
                 .await
                 .map_err(|_| Error::Timeout)?
-                .map_err(|_| Error::Connection)?;
+                .map_err(|error| {
+                    tracing::warn!(%error, "MCP initialization failed");
+                    Error::Connection
+                })?;
             (service, Some(process))
         }
     };
@@ -113,7 +124,7 @@ impl Connection {
             return Err(Error::Invalid("MCP request params must be an object."));
         }
         let request: ClientRequest = serde_json::from_value(json!({
-            "method": method,
+            "method": &method,
             "params": params,
         }))
         .map_err(|_| Error::Invalid("Invalid MCP request params."))?;
@@ -126,9 +137,13 @@ impl Connection {
             {
                 Ok(Ok(response)) => response,
                 Ok(Err(rmcp::ServiceError::TransportSend(error))) => {
+                    tracing::warn!(%error, %method, "MCP request failed");
                     return Err(transport_error(error.error.as_ref()));
                 }
-                Ok(Err(_)) => return Err(Error::Connection),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, %method, "MCP request failed");
+                    return Err(Error::Connection);
+                }
                 Err(_) => {
                     self.service.cancellation_token().cancel();
                     return Err(Error::Timeout);
@@ -627,34 +642,40 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
     async fn http_offers_a_protocol_version_that_keeps_the_initialize_session() {
         let router = axum::Router::new().route(
             "/mcp",
-            post(|headers: HeaderMap, Json(message): Json<Value>| async move {
-                let offered = message["params"]["protocolVersion"].as_str();
-                match message["method"].as_str() {
-                    Some("initialize") => (
-                        [(
-                            "mcp-session-id",
-                            if offered < Some("2026-07-28") { "kept" } else { "dropped" },
-                        )],
-                        Json(json!({
-                            "jsonrpc":"2.0","id":message["id"],
-                            "result":{
-                                "protocolVersion":"2025-11-25",
-                                "capabilities":{"tools":{}},
-                                "serverInfo":{"name":"github-like","version":"1"},
-                            }
-                        })),
-                    )
+            post(
+                |headers: HeaderMap, Json(message): Json<Value>| async move {
+                    let offered = message["params"]["protocolVersion"].as_str();
+                    match message["method"].as_str() {
+                        Some("initialize") => (
+                            [(
+                                "mcp-session-id",
+                                if offered < Some("2026-07-28") {
+                                    "kept"
+                                } else {
+                                    "dropped"
+                                },
+                            )],
+                            Json(json!({
+                                "jsonrpc":"2.0","id":message["id"],
+                                "result":{
+                                    "protocolVersion":"2025-11-25",
+                                    "capabilities":{"tools":{}},
+                                    "serverInfo":{"name":"github-like","version":"1"},
+                                }
+                            })),
+                        )
+                            .into_response(),
+                        _ if headers["mcp-session-id"] != "kept" => {
+                            (StatusCode::BAD_REQUEST, "invalid session").into_response()
+                        }
+                        Some("tools/list") => Json(json!({
+                            "jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}
+                        }))
                         .into_response(),
-                    _ if headers["mcp-session-id"] != "kept" => {
-                        (StatusCode::BAD_REQUEST, "invalid session").into_response()
+                        _ => StatusCode::ACCEPTED.into_response(),
                     }
-                    Some("tools/list") => Json(json!({
-                        "jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}
-                    }))
-                    .into_response(),
-                    _ => StatusCode::ACCEPTED.into_response(),
-                }
-            }),
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
