@@ -360,16 +360,30 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
-    sqlx::query(
+    // A delegated task shows its cards here through its receipt item; its
+    // turn lives in a task conversation and continues with the skip.
+    let skipped: Vec<(Uuid, bool)> = sqlx::query_as(
         "UPDATE owner_questions SET status = 'skipped',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE status = 'pending'
-           AND turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2)",
+           AND (turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2)
+                OR turn_id IN (SELECT d.child_turn_id FROM delegations d
+                               JOIN items i ON i.turn_id = d.child_turn_id
+                               WHERE i.conversation_id = ?1))
+         RETURNING turn_id,
+             turn_id IN (SELECT child_turn_id FROM delegations) AS delegated",
     )
     .bind(conversation_id)
     .bind(turn_no)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+    for task in skipped
+        .into_iter()
+        .filter_map(|(turn, delegated)| delegated.then_some(turn))
+    {
+        continue_waiting(&mut tx, task).await?;
+        crate::db::events::turn_changed(&mut tx, req.bot_id, task).await?;
+    }
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
