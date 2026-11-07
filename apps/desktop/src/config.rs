@@ -373,6 +373,10 @@ impl ProfileStore {
         self.path.with_extension("layout.json")
     }
 
+    pub(crate) fn window_path(&self) -> PathBuf {
+        self.path.with_extension("window.json")
+    }
+
     pub(crate) fn server_preferences_path(&self, id: ServerId) -> PathBuf {
         self.path.with_extension(format!("{id}.layout.json"))
     }
