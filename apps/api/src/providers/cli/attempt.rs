@@ -80,12 +80,6 @@ pub struct Lifecycle {
     phase: Phase,
 }
 
-impl Default for Lifecycle {
-    fn default() -> Self {
-        Self::start()
-    }
-}
-
 impl Lifecycle {
     pub fn start() -> Self {
         Self {
@@ -356,6 +350,171 @@ pub async fn conclude(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::VecDeque;
+
+    use serde_json::{Value, json};
+
+    use crate::providers::cli::session::tests::{Log, input};
+    use crate::providers::cli::session::{Opened, PreparedTurn};
+
+    /// Messages to replay, then silence: a provider that never stops.
+    struct Replay {
+        messages: VecDeque<Value>,
+        interrupts: usize,
+    }
+
+    #[async_trait]
+    impl Channel for Replay {
+        type Message = Value;
+
+        async fn next(&mut self) -> Result<Option<Value>, String> {
+            match self.messages.pop_front() {
+                Some(message) => Ok(Some(message)),
+                None => std::future::pending().await,
+            }
+        }
+
+        async fn interrupt(&mut self) {
+            self.interrupts += 1;
+        }
+    }
+
+    struct Plain;
+
+    impl Protocol for Plain {
+        type Message = Value;
+        type Terminal = ();
+
+        fn on(&mut self, message: &Value) -> Result<Vec<Event<()>>, Violation> {
+            Ok(match message["kind"].as_str().unwrap() {
+                "accept" => vec![Event::Accepted {
+                    model: "m".into(),
+                    native_turn: "t".into(),
+                }],
+                "text" => vec![Event::Text(message["text"].as_str().unwrap().into())],
+                "park" => vec![Event::Parked],
+                "end" => vec![Event::Finished(())],
+                _ => return Err(Violation::policy("bad")),
+            })
+        }
+
+        fn outcome(&self, (): (), stopping: Option<StopCause>, _: bool) -> TurnOutcome {
+            if stopping.is_some() {
+                TurnOutcome::Interrupted
+            } else {
+                TurnOutcome::Completed
+            }
+        }
+    }
+
+    fn replay(messages: &[Value]) -> Replay {
+        Replay {
+            messages: messages.iter().cloned().collect(),
+            interrupts: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_reach_a_slow_sink_in_order_and_a_result_ends_the_turn() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[
+            json!({"kind": "accept"}),
+            json!({"kind": "text", "text": "a"}),
+            json!({"kind": "text", "text": "b"}),
+            json!({"kind": "end"}),
+        ]);
+        let ended = drive(
+            &mut channel,
+            &mut Plain,
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(
+            ended,
+            Ended::Terminal {
+                outcome: TurnOutcome::Completed,
+                resumable: true
+            }
+        );
+        assert_eq!(
+            sink.calls(),
+            ["running", "session", "reported:\"m\":t", "text:a", "text:b"]
+        );
+        assert_eq!(channel.interrupts, 0);
+    }
+
+    #[tokio::test]
+    async fn a_fenced_sink_interrupts_and_an_escalation_gives_up_at_once() {
+        let input = input();
+        let sink = Log::default();
+        sink.fenced.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "text", "text": "late"})]);
+        let stop = Stop::default();
+        let escalate = {
+            let stop = stop.clone();
+            async move {
+                stop.requested().await;
+                stop.escalate();
+            }
+        };
+        let mut plain = Plain;
+        let (ended, ()) = tokio::join!(
+            drive(&mut channel, &mut plain, &mut turn, &sink, &stop, "P"),
+            escalate
+        );
+        assert!(matches!(
+            ended,
+            Ended::Abandoned(TurnOutcome::Uncertain { .. })
+        ));
+        assert_eq!(channel.interrupts, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_turn_that_never_stops_ends_interrupted() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"}), json!({"kind": "park"})]);
+        let ended = drive(
+            &mut channel,
+            &mut Plain,
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert_eq!(ended, Ended::Abandoned(TurnOutcome::Interrupted));
+        assert_eq!(channel.interrupts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_violation_abandons_the_attempt_with_its_code() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "other"})]);
+        let ended = drive(
+            &mut channel,
+            &mut Plain,
+            &mut turn,
+            &sink,
+            &Stop::default(),
+            "P",
+        )
+        .await;
+        assert!(matches!(
+            ended,
+            Ended::Abandoned(TurnOutcome::Failed { code, .. }) if code == "policy_violation"
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_parked_turn_is_interrupted_then_given_up_as_interrupted() {

@@ -193,10 +193,6 @@ impl AppServer {
         self.incoming.recv().await
     }
 
-    pub fn pid(&self) -> i32 {
-        self.scope.pid()
-    }
-
     /// Close the server's input (it exits at its end) and keep its process.
     fn into_scope(self) -> Scope {
         let Self {

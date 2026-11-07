@@ -58,10 +58,6 @@ impl Scope {
         &mut self.process.child
     }
 
-    pub fn pid(&self) -> i32 {
-        self.process.pid()
-    }
-
     /// Ask the process group to stop (SIGINT), as a terminal would.
     pub fn interrupt(&self) {
         self.process.signal(libc::SIGINT);

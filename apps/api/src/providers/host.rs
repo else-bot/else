@@ -556,10 +556,6 @@ impl Supervised {
         Ok(Self { child, pgid })
     }
 
-    pub fn pid(&self) -> i32 {
-        self.pgid
-    }
-
     /// Signal the process group while its leader is unreaped, so the group
     /// ID cannot belong to anything else.
     pub fn signal(&self, signal: i32) {
@@ -580,23 +576,12 @@ impl Supervised {
     /// SIGTERM the process group, then SIGKILL after `grace`, and wait for
     /// the process to exit.
     pub async fn terminate(&mut self, grace: Duration) {
-        if self.pgid > 0 {
-            // SAFETY: signalling our own child's process group.
-            unsafe {
-                libc::kill(-self.pgid, libc::SIGTERM);
-            }
-        }
+        self.signal(libc::SIGTERM);
         if tokio::time::timeout(grace, self.child.wait())
             .await
             .is_err()
         {
-            if self.pgid > 0 {
-                // SAFETY: as above.
-                unsafe {
-                    libc::kill(-self.pgid, libc::SIGKILL);
-                }
-            }
-            let _ = self.child.wait().await;
+            self.kill().await;
         }
     }
 }

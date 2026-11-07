@@ -176,7 +176,7 @@ Prefer the session launcher for day-to-day development. For direct binary runs, 
 | `ELSE_API_BIND` | Loopback listener; direct runs default to `127.0.0.1:7879` |
 | `ELSE_BOTS_DIR` | Bot project directory root |
 | `OWNER_TOKEN_FILE`, `SECRET_KEY_FILE` | Owner token and encryption key paths |
-| `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN` | Provider executable paths |
+| `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, `ELSE_GROK_BIN` | Provider executable paths |
 | `ELSE_MSB_BIN`, `ELSE_VM_IMAGE`, `ELSE_VM_DESKTOP` | Microsandbox and guest image settings |
 | `ELSE_BACKUP_DIR`, `ELSE_BACKUP_INTERVAL_SECS`, `ELSE_BACKUP_KEEP` | Backup location, interval, and retention |
 | `ELSE_SYNTHETIC_PROVIDER` | Enable the deterministic provider with `1` |

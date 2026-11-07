@@ -158,12 +158,7 @@ impl Connection {
 
     pub(super) async fn shutdown(&mut self) {
         if let Some(mut process) = self.process.take() {
-            if process.pid() > 0 {
-                // SAFETY: this unreaped child owns the group id until wait completes.
-                unsafe {
-                    libc::kill(-process.pid(), libc::SIGKILL);
-                }
-            }
+            process.signal(libc::SIGKILL);
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, process.child.wait()).await;
         }
         let _ = self.service.close_with_timeout(CLOSE_TIMEOUT).await;

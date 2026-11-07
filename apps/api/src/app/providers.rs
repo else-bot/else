@@ -379,10 +379,6 @@ impl Stop {
         self.graceful.is_cancelled()
     }
 
-    pub fn is_escalated(&self) -> bool {
-        self.hard.is_cancelled()
-    }
-
     pub async fn requested(&self) {
         self.graceful.cancelled().await;
     }

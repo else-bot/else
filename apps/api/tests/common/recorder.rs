@@ -85,6 +85,7 @@ struct Gated<'a> {
     inner: &'a dyn TurnSink,
     gate: Option<(&'a Recorder, Uuid)>,
     open: tokio::sync::OnceCell<()>,
+    stop: else_api::app::providers::Stop,
 }
 
 #[async_trait::async_trait]
@@ -103,9 +104,13 @@ impl TurnSink for Gated<'_> {
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
         if let Some((recorder, turn)) = self.gate {
-            self.open
-                .get_or_init(|| recorder.ask(|open| Message::Hold(turn, open)))
-                .await;
+            let held = self
+                .open
+                .get_or_init(|| recorder.ask(|open| Message::Hold(turn, open)));
+            tokio::select! {
+                _ = held => {}
+                () = self.stop.escalated() => return Err(Fenced),
+            }
         }
         self.inner.text(chunk).await
     }
@@ -160,6 +165,7 @@ impl Provider for Recorder {
             inner: sink,
             gate: gated.then_some((self, input.turn_id)),
             open: tokio::sync::OnceCell::new(),
+            stop: stop.clone(),
         };
         self.inner.run(input, &sink, stop).await
     }
