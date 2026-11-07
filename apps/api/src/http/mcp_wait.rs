@@ -21,15 +21,18 @@ use crate::mcp::{Error, Library, PackageId};
 
 pub const NAME: &str = "mcp_wait";
 
+const ATTEMPT_MINUTES: u64 = crate::providers::cli::attempt::TURN_DEADLINE.as_secs() / 60;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const CONCURRENT_CHECKS: usize = 4;
 
 pub fn schema() -> Value {
     json!({
         "name": NAME,
-        "description": "Wait for a long-running job you started in an installed MCP, such as a \
-            delegated task or thread run that returned an id to check later, instead of ending \
-            the request or polling yourself. Name the MCP's read-only status tool and its \
+        "description": format!("Wait for a long-running job you started in an installed MCP, such \
+            as a delegated task or thread run that returned an id to check later. Each attempt \
+            ends after {minutes} minutes, delegated tasks included, so never wait for a job \
+            inside the attempt: no repeated status calls, sleeps, or blocking wait tools called \
+            through mcp_request, such as T3 Code's t3_thread_wait. Use this tool instead. Name the MCP's read-only status tool and its \
             arguments, a JSON pointer to the status field in its result, and the values that \
             mean the job still runs. The status is read from the tool's structuredContent, or \
             else from the JSON in its first text content block. The status call runs once now: \
@@ -38,8 +41,12 @@ pub fn schema() -> Value {
             you and continues this request once the status leaves running_values, the checks \
             fail three times in a row, or the timeout passes. The continuation gets the last \
             status result. The status tool must be one its server declares read-only, or \
-            non-destructive and idempotent; any other tool is refused. One wait per attempt; \
-            delegated tasks cannot wait.",
+            non-destructive and idempotent, such as T3 Code's task_status; any other tool is \
+            refused with NOT_REPEATABLE. If the MCP has no such tool, do not poll: reply with \
+            the job id and how to check it later. One wait per attempt. It works in the \
+            owner's conversation and in delegated tasks. In a delegated task, the delegating \
+            bot gets your reply only when the task ends, so it keeps waiting while you do.",
+            minutes = ATTEMPT_MINUTES),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -284,8 +291,8 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         return (tool_error("The shared MCP library is unavailable."), None);
     };
     let log = format!("{} {} on {}", NAME, spec.tool, spec.mcp_id);
-    let attempt = match mcp_waits::caller_attempt(&state.db, grant.turn_id).await {
-        Ok(attempt) => attempt,
+    let caller = match mcp_waits::caller(&state.db, grant.turn_id).await {
+        Ok(caller) => caller,
         Err(error) => return refused(error, &log),
     };
     let note = match approval {
@@ -352,7 +359,16 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Some(Check::Running(result)) => result,
     };
-    match mcp_waits::create(&state.db, grant.turn_id, attempt, &spec, &first).await {
+    let next = if caller.owner_conversation {
+        "Tell the owner briefly what you are waiting for and end this attempt now. Do not \
+         poll or call more tools; else.bot checks the job and continues this request with \
+         its result."
+    } else {
+        "End this attempt now without a reply. Do not poll or call more tools; else.bot \
+         checks the job and continues this task with its result. The delegating bot keeps \
+         waiting and receives your reply only when the task ends."
+    };
+    match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
         Ok(wait_id) => {
             state.scheduler.grants().park(grant.turn_id).await;
             (
@@ -360,9 +376,7 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                     "status": "waiting",
                     "parked": true,
                     "wait_id": wait_id,
-                    "next": "Tell the owner briefly what you are waiting for and end this attempt \
-                             now. Do not poll or call more tools; else.bot checks the job and \
-                             continues this request with its result.",
+                    "next": next,
                 })),
                 Some(format!("{log} waiting {wait_id}{note}")),
             )
@@ -373,7 +387,6 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
 
 fn refused(error: CreateError, log: &str) -> Outcome {
     let code = match error {
-        CreateError::NotAllowed => "NOT_ALLOWED",
         CreateError::AttemptParked => "ATTEMPT_PARKED",
         CreateError::NotRunning => "NOT_RUNNING",
         CreateError::Db => "UNAVAILABLE",
@@ -513,6 +526,33 @@ mod tests {
         ] {
             assert!(!repeatable(&unsafe_tool), "{unsafe_tool}");
         }
+    }
+
+    #[test]
+    fn bots_learn_the_attempt_deadline_and_what_to_use_instead_of_polling() {
+        let wait = schema()["description"].as_str().unwrap().to_owned();
+        let request = crate::http::shared_mcp::schemas()
+            .into_iter()
+            .find(|tool| tool["name"] == "mcp_request")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let deadline = format!("{ATTEMPT_MINUTES} minutes");
+        assert_eq!(deadline, "30 minutes");
+        for needle in [
+            &deadline,
+            "t3_thread_wait",
+            "task_status",
+            "NOT_REPEATABLE",
+            "delegated tasks",
+        ] {
+            assert!(wait.contains(needle), "mcp_wait lacks {needle}: {wait}");
+        }
+        assert!(
+            request.contains(&deadline) && request.contains("mcp_wait"),
+            "{request}"
+        );
     }
 
     #[test]
