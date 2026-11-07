@@ -83,12 +83,13 @@ fn delegation_rules(input: &TurnInput) -> String {
         let approvals = if delegation.origin == crate::app::providers::Origin::OwnerRequest {
             "You cannot delegate further, ask the owner questions, or request secrets. Unless \
              a tool result says standing permission applies, a gated destructive or external \
-             tool call, an MCP sign-in, or ask_permission for a host action shows the owner an \
-             approval card in your own chat and returns parked: end this attempt; you continue \
-             after the answer, then retry the exact call once if approved. Your saved task \
-             permissions apply to host actions here; call ask_permission before each sensitive \
-             host action with the saved task and target when the work fits. Report other \
-             actions that need approval instead."
+             tool call, or an MCP sign-in, shows the owner an approval card in your own chat \
+             and returns parked: end this attempt; you continue after the answer, then retry \
+             the exact call once if approved. Your saved task permissions apply to host \
+             actions here: call ask_permission before each sensitive host action, with the \
+             saved task and target when the work fits. If it returns pending, end this \
+             attempt; if the continuation says it was approved, do exactly that host action \
+             once without asking again. Report other actions that need approval instead."
         } else {
             "You cannot delegate further or ask the owner anything (no secrets, questions, or \
              approvals), so you cannot get approval here: take no destructive or external \
