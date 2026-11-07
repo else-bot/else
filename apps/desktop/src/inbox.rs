@@ -340,6 +340,9 @@ impl Inbox {
 }
 
 fn unread(sync: Option<&ReadSync>, bot: &Bot) -> bool {
+    if bot.muted {
+        return false;
+    }
     let mark = sync.and_then(ReadSync::mark);
     let Some(state) = bot.read_state.as_ref().filter(|_| bot.is_active()) else {
         return mark == Some(Mark::Unread);
@@ -491,6 +494,30 @@ mod tests {
         let alerts = inbox.alerts(&bots, |id| id == Uuid::from_u128(1));
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].bot, Uuid::from_u128(2));
+    }
+
+    #[test]
+    fn muted_bots_stay_read_and_silent_and_muting_closes_their_notification() {
+        let mut inbox = Inbox::default();
+        inbox.observe(&[bot(1, None, at(0, 0)), bot(2, None, at(0, 0))]);
+        let mut quiet = flagged(bot(1, Some((1, at(2, 9))), at(0, 0)));
+        quiet.muted = true;
+        let loud = bot(2, Some((2, at(2, 9))), at(0, 0));
+        let bots = vec![quiet.clone(), loud.clone()];
+        inbox.observe(&bots);
+        assert!(
+            !inbox.is_unread(&quiet),
+            "neither new replies nor a mark show"
+        );
+        let alerts = inbox.alerts(&bots, nobody);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].bot, loud.id);
+
+        let mut muted = loud;
+        muted.muted = true;
+        assert_eq!(inbox.settle(&[quiet, muted.clone()]), [muted.id]);
+        muted.muted = false;
+        assert!(inbox.is_unread(&muted), "unmuting shows what is unread");
     }
 
     #[test]

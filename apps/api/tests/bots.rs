@@ -452,6 +452,47 @@ async fn metadata_update_saves_once_and_keeps_everything_else() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn muting_persists_journals_once_and_keeps_the_name() {
+    let app = TestApp::installed().await;
+    let id = app.create_bot("Watcher").await;
+    let before = app.owner("GET", &format!("/v1/bots/{id}"), None).await.body["bot"].clone();
+    assert_eq!(before["muted"], false, "bots start unmuted");
+    let journaled = updated_events(&app, &id).await.len();
+
+    let muted = update(&app, &id, json!({ "muted": true })).await;
+    assert_eq!(muted.status, StatusCode::OK, "{}", muted.body);
+    assert_eq!(muted.body["bot"]["muted"], true);
+    assert_eq!(muted.body["bot"]["name"], "Watcher");
+    let events = updated_events(&app, &id).await;
+    assert_eq!(events.len(), journaled + 1);
+    assert_eq!(events.last().unwrap()["bot"]["muted"], true);
+
+    let again = update(&app, &id, json!({ "muted": true })).await;
+    assert_eq!(again.body, muted.body, "muting twice changes nothing");
+    assert_eq!(updated_events(&app, &id).await.len(), journaled + 1);
+
+    let renamed = update(&app, &id, json!({ "name": "Watch" })).await;
+    assert_eq!(
+        renamed.body["bot"]["muted"], true,
+        "a rename keeps the mute"
+    );
+
+    let unmuted = update(&app, &id, json!({ "muted": false })).await;
+    assert_eq!(unmuted.body["bot"]["muted"], false);
+    let listed = app.owner("GET", "/v1/bots", None).await.body["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id)
+        .unwrap()
+        .clone();
+    assert_eq!(listed, unmuted.body["bot"]);
+
+    let invalid = update(&app, &id, json!({ "muted": "yes" })).await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn metadata_update_validates_and_refuses_deleted_bots() {
     let app = TestApp::installed().await;
     let id = app.create_bot("Work").await;

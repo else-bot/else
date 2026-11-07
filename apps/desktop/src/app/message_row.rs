@@ -380,6 +380,7 @@ impl ElseApp {
             RowKey::Question(id) => self.render_question_card(id, cx),
             RowKey::Draft(id) => self.render_draft_card(id, cx),
             RowKey::SocialSetup(id) => self.render_social_card(id, cx),
+            RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::Pending(request_id) => {
                 let pending = self
                     .selected
@@ -570,7 +571,20 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "waiting" if turn.social_setups.iter().any(|setup| setup.is_pending()) => {
             ("Waiting for you to connect an account…".into(), false)
         }
-        "waiting" => ("Waiting for another bot…".into(), false),
+        "waiting" => {
+            let mut waiting_on = turn
+                .delegations
+                .iter()
+                .filter(|d| !d.status.settled())
+                .map(|d| d.target_name.as_str())
+                .collect::<Vec<_>>();
+            waiting_on.dedup();
+            match waiting_on.as_slice() {
+                [] => ("Waiting for another bot…".into(), false),
+                [name] => (format!("Waiting for {name}…"), false),
+                many => (format!("Waiting for {} bots…", many.len()), false),
+            }
+        }
         "interrupted" => (
             if turn.error.as_ref().is_some_and(|e| e.code == "cancelled") {
                 "Stopped before it ran".into()

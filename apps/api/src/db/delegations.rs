@@ -12,6 +12,9 @@
 //! as a continuation once every child has an outcome. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
 
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -68,6 +71,44 @@ pub struct Accepted {
     pub outcome: Option<String>,
     /// False when this was a retry of an existing delegation.
     pub created: bool,
+}
+
+/// A delegation as shown under the delegating turn: one card per provider
+/// attempt, so a council's reports share a card.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+pub struct Handoff {
+    pub id: Uuid,
+    #[serde(skip)]
+    pub turn_id: Uuid,
+    pub attempt: i64,
+    pub target_bot_id: Uuid,
+    pub target_name: String,
+    pub task: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// The delegations started by each of `turn_ids`, oldest first.
+pub async fn for_turns(
+    conn: &mut SqliteConnection,
+    turn_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<Handoff>>, sqlx::Error> {
+    let rows: Vec<Handoff> = sqlx::query_as(
+        "SELECT d.id, d.root_turn_id AS turn_id, d.parent_attempt AS attempt, d.target_bot_id,
+                b.name AS target_name, d.task, d.status, d.created_at, d.finished_at
+         FROM delegations d JOIN bots b ON b.id = d.target_bot_id
+         WHERE lower(hex(d.root_turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
+         ORDER BY d.created_at, d.id",
+    )
+    .bind(sqlx::types::Json(turn_ids))
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_turn: HashMap<Uuid, Vec<Handoff>> = HashMap::new();
+    for row in rows {
+        by_turn.entry(row.turn_id).or_default().push(row);
+    }
+    Ok(by_turn)
 }
 
 /// Accept a delegation from the provider attempt of `turn_id`.

@@ -980,6 +980,55 @@ async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_delegating_turn_shows_its_handoff_as_the_child_progresses() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    let snapshot = else_api::db::conversation::snapshot(&db.pool, main, 50, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = snapshot.turns.iter().find(|t| t.id == root).unwrap();
+    let shown = else_api::views::turn_json(turn);
+    assert_eq!(
+        shown["delegations"][0]["id"],
+        delegation.to_string().as_str()
+    );
+    assert_eq!(shown["delegations"][0]["target_name"], "Target");
+    assert_eq!(shown["delegations"][0]["task"], "seeded task");
+    assert_eq!(shown["delegations"][0]["status"], "queued");
+    assert_eq!(shown["delegations"][0]["attempt"], 1);
+
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    for status in ["running", "completed"] {
+        let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE turns SET status = ?1 WHERE id = ?2")
+            .bind(status)
+            .bind(child)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        else_api::db::events::turn_changed(&mut tx, target, child)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let handoffs: Vec<Value> = turn_events(&db.pool, main, root)
+        .await
+        .into_iter()
+        .filter(|(kind, _)| kind == "turn.updated")
+        .map(|(_, data)| data["turn"]["delegations"][0]["status"].clone())
+        .collect();
+    assert_eq!(
+        handoffs,
+        [json!("queued"), json!("running"), json!("completed")]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_settling_while_the_parent_parks_still_requeues_it() {
     let db = TestDb::migrated().await;
     let (_, root, child, delegation) = seed(&db).await;
@@ -1648,9 +1697,9 @@ async fn the_parent_chat_shows_the_childs_reply_once_before_its_continuation() {
         "the root was parked"
     );
     assert_eq!(
-        root_status(&events[at..]).first().map(String::as_str),
-        Some("preparing"),
-        "the root resumes after the reply"
+        root_status(&events[at..]).get(..2),
+        Some(&["queued".to_owned(), "preparing".to_owned()][..]),
+        "the root requeues with the reply, then resumes"
     );
     let continuation = root_items[3]["id"].as_str().unwrap();
     assert!(

@@ -191,6 +191,10 @@ pub struct Bot {
     /// unassigned.
     #[serde(default)]
     pub category_id: Option<Uuid>,
+    /// The owner silenced it: never unread and never announced. Absent
+    /// from receipts and older servers.
+    #[serde(default)]
+    pub muted: bool,
     /// Absent from receipts and older servers.
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
@@ -682,6 +686,17 @@ impl Client {
             Method::PATCH,
             format!("/v1/bots/{bot}/category"),
             Some(body),
+        )
+        .await
+        .map(|(_, v)| v.bot)
+    }
+
+    /// Mute or unmute a bot. Repeating it is a no-op.
+    pub async fn set_muted(self: Arc<Self>, bot: Uuid, muted: bool) -> Result<Bot, ClientError> {
+        self.call::<BotEnvelope>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}"),
+            Some(json!({ "muted": muted })),
         )
         .await
         .map(|(_, v)| v.bot)

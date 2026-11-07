@@ -27,6 +27,8 @@ gpui_kit::assets::icon_assets!(
     [
         FolderInput,
         BellDot,
+        Bell,
+        BellOff,
         PencilLine,
         PanelRightOpen,
         PanelRightClose,
@@ -65,6 +67,7 @@ gpui_kit::assets::icon_assets!(
         LockKeyhole,
         Square,
         CircleX,
+        CircleCheck,
         CircleOff,
         Users,
         MessageSquareOff,

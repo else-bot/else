@@ -294,6 +294,40 @@ pub struct Turn {
     pub outgoing_drafts: Vec<OutgoingDraft>,
     #[serde(default)]
     pub social_setups: Vec<crate::api::socials::SocialSetup>,
+    /// Tasks this turn handed to other bots. Absent from older servers.
+    #[serde(default)]
+    pub delegations: Vec<Delegation>,
+}
+
+/// A task a turn handed to another bot. Its settled reply is the item
+/// with the same ID.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Delegation {
+    pub id: Uuid,
+    /// The provider attempt that sent it; a council's tasks share one.
+    pub attempt: i64,
+    pub target_bot_id: Uuid,
+    pub target_name: String,
+    pub task: String,
+    pub status: DelegationStatus,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl DelegationStatus {
+    pub fn settled(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -591,6 +625,21 @@ impl Conversation {
             .values()
             .flat_map(|t| &t.questions)
             .find(|q| q.id == id)
+    }
+
+    /// The tasks sent in the same provider attempt as delegation `id`.
+    pub fn handoff(&self, id: Uuid) -> Option<(&Turn, Vec<&Delegation>)> {
+        let turn = self
+            .turns
+            .values()
+            .find(|t| t.delegations.iter().any(|d| d.id == id))?;
+        let attempt = turn.delegations.iter().find(|d| d.id == id)?.attempt;
+        let group = turn
+            .delegations
+            .iter()
+            .filter(|d| d.attempt == attempt)
+            .collect();
+        Some((turn, group))
     }
 
     pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {

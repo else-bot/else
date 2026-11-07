@@ -20,6 +20,8 @@ pub(super) enum RowKey {
     Question(Uuid),
     Draft(Uuid),
     SocialSetup(Uuid),
+    /// The first task of a provider attempt's delegations.
+    Handoff(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +87,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for setup in &turn.social_setups {
                 turns.insert(RowKey::SocialSetup(setup.id), turn.id);
             }
+            for delegation in &turn.delegations {
+                turns.insert(RowKey::Handoff(delegation.id), turn.id);
+            }
         }
     }
     let turns: Vec<_> = rows
@@ -97,7 +102,8 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             RowKey::Question(_)
             | RowKey::SecretRequest(_)
             | RowKey::Draft(_)
-            | RowKey::SocialSetup(_) => turns.get(key).copied(),
+            | RowKey::SocialSetup(_)
+            | RowKey::Handoff(_) => turns.get(key).copied(),
             RowKey::Task(_) | RowKey::Pending(_) => None,
         })
         .collect();
@@ -131,6 +137,24 @@ fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                     (question.is_pending() || anchor.is_some())
                         .then_some((RowKey::Question(question.id), anchor))
                 }))
+                .chain(
+                    turn.delegations
+                        .iter()
+                        .enumerate()
+                        .filter(|(ix, d)| {
+                            turn.delegations[..*ix]
+                                .iter()
+                                .all(|earlier| earlier.attempt != d.attempt)
+                        })
+                        .filter_map(move |(_, d)| {
+                            let anchor = c.question_anchor(turn.id, Some(d.created_at));
+                            let live = turn
+                                .delegations
+                                .iter()
+                                .any(|other| other.attempt == d.attempt && !other.status.settled());
+                            (live || anchor.is_some()).then_some((RowKey::Handoff(d.id), anchor))
+                        }),
+                )
                 .chain(turn.social_setups.iter().map(move |setup| {
                     (
                         RowKey::SocialSetup(setup.id),
@@ -410,6 +434,9 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
+        if self.bots.iter().any(|b| b.id == bot && b.muted) {
+            view.unread_since = None;
+        }
         let conversation = view.conversation.as_ref();
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));
@@ -518,7 +545,8 @@ impl ElseApp {
                 RowKey::SecretRequest(_)
                 | RowKey::Question(_)
                 | RowKey::Draft(_)
-                | RowKey::SocialSetup(_) => (None, None),
+                | RowKey::SocialSetup(_)
+                | RowKey::Handoff(_) => (None, None),
             })
             .collect();
         let unread_start =
@@ -551,6 +579,9 @@ impl ElseApp {
                     }),
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
                     RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
+                    RowKey::Handoff(id) => c.handoff(id).map(|(_, group)| {
+                        format!("{:?}", group.iter().map(|d| d.status).collect::<Vec<_>>())
+                    }),
                     RowKey::Item(id) => c
                         .item(id)
                         .and_then(|i| c.turn(i.turn_id))
@@ -808,6 +839,87 @@ mod tests {
                 )]
             );
         }
+    }
+
+    #[test]
+    fn each_attempts_delegations_share_one_handoff_after_the_message_before_them() {
+        let task = |id: u128, attempt: i64, at: &str| {
+            json!({ "id": Uuid::from_u128(id), "attempt": attempt,
+                    "target_bot_id": Uuid::from_u128(id + 50), "target_name": "Scout",
+                    "task": "Research", "status": "running", "created_at": at })
+        };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [
+                { "id": Uuid::from_u128(1), "seq": 1, "turn_id": Uuid::from_u128(10), "kind": "assistant",
+                  "text": "Asking the council.", "created_at": "2026-11-07T10:00:00Z" },
+                { "id": Uuid::from_u128(2), "seq": 2, "turn_id": Uuid::from_u128(10), "kind": "assistant",
+                  "text": "Now Scout alone.", "created_at": "2026-11-07T10:05:00Z" }
+            ],
+            "turns": [{
+                "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 1,
+                "provider_id": "codex", "status": "waiting", "error": null, "effect_uncertain": false,
+                "delegations": [task(20, 1, "2026-11-07T10:01:00Z"), task(21, 1, "2026-11-07T10:01:00Z"),
+                                task(22, 2, "2026-11-07T10:06:00Z")]
+            }],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        }))
+        .unwrap();
+        let c = Conversation::from_snapshot(snapshot).unwrap();
+        assert_eq!(
+            request_rows(&c),
+            [
+                (
+                    RowKey::Handoff(Uuid::from_u128(20)),
+                    Some(Uuid::from_u128(1))
+                ),
+                (
+                    RowKey::Handoff(Uuid::from_u128(22)),
+                    Some(Uuid::from_u128(2))
+                ),
+            ]
+        );
+        let council: Vec<_> = c
+            .handoff(Uuid::from_u128(21))
+            .unwrap()
+            .1
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(council, [Uuid::from_u128(20), Uuid::from_u128(21)]);
+    }
+
+    #[test]
+    fn a_settled_handoff_waits_for_its_history_page_but_a_live_one_shows() {
+        let page = |status: &str| -> Snapshot {
+            serde_json::from_value(json!({
+                "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+                "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+                "older_before_seq": 5, "items": [],
+                "turns": [{
+                    "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 1,
+                    "provider_id": "codex", "status": "completed", "error": null,
+                    "effect_uncertain": false,
+                    "delegations": [{ "id": Uuid::from_u128(20), "attempt": 1,
+                        "target_bot_id": Uuid::from_u128(30), "target_name": "Scout",
+                        "task": "Research", "status": status,
+                        "created_at": "2026-11-07T10:01:00Z" }]
+                }],
+                "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+            }))
+            .unwrap()
+        };
+        let settled = Conversation::from_snapshot(page("completed")).unwrap();
+        assert!(
+            request_rows(&settled).is_empty(),
+            "no stale summary at the tail"
+        );
+        let live = Conversation::from_snapshot(page("running")).unwrap();
+        assert_eq!(
+            request_rows(&live),
+            [(RowKey::Handoff(Uuid::from_u128(20)), None)]
+        );
     }
 
     #[test]

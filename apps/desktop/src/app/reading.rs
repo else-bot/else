@@ -151,7 +151,7 @@ impl ElseApp {
                 .bots
                 .iter()
                 .find(|b| b.id == view.bot_id)
-                .is_some_and(|bot| position > self.inbox.seen_through(bot))
+                .is_some_and(|bot| !bot.muted && position > self.inbox.seen_through(bot))
     }
 
     pub(super) fn jump_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {

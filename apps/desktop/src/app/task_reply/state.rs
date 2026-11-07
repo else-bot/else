@@ -55,7 +55,7 @@ impl TaskReply {
     }
 }
 
-pub(super) fn format_elapsed(seconds: i64) -> String {
+pub(in crate::app) fn format_elapsed(seconds: i64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
         60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
