@@ -66,6 +66,9 @@ def record():
     x.XSync(dpy, 0)
     time.sleep(0.2)
     x.XSetInputFocus(dpy, win, 2, ctypes.c_ulong(0))
+    # Xlib loads its keymap on the first lookup; load it before any key
+    # arrives so a mapping change cannot slip in while it is being loaded.
+    x.XKeysymToKeycode(dpy, ctypes.c_ulong(ord("a")))
     x.XSync(dpy, 0)
     print(json.dumps({"ready": True}), flush=True)
     ev = ctypes.create_string_buffer(192)
