@@ -216,20 +216,28 @@ pub(super) struct MentionDisplay {
 }
 
 impl MentionDisplay {
-    pub(super) fn new(source: &str, mentions: &[BotMention]) -> Self {
+    pub(super) fn new(source: &str, mentions: &[BotMention], hard_breaks: &[usize]) -> Self {
+        let mut edits: Vec<_> = mentions
+            .iter()
+            .map(|mention| {
+                (
+                    mention.range.clone(),
+                    format!("[bot](bot-mention:{}:{})", mention.id, mention.range.start),
+                )
+            })
+            .chain(hard_breaks.iter().map(|&at| (at..at, "  ".to_owned())))
+            .collect();
+        edits.sort_by_key(|(range, _)| range.start);
         let mut display = Self::default();
         let mut end = 0;
-        for mention in mentions {
-            display.text.push_str(&source[end..mention.range.start]);
+        for (range, replacement) in edits {
+            display.text.push_str(&source[end..range.start]);
             let start = display.text.len();
-            display.text.push_str(&format!(
-                "[bot](bot-mention:{}:{})",
-                mention.id, mention.range.start
-            ));
+            display.text.push_str(&replacement);
             display
                 .replacements
-                .push((mention.range.clone(), start..display.text.len()));
-            end = mention.range.end;
+                .push((range.clone(), start..display.text.len()));
+            end = range.end;
         }
         display.text.push_str(&source[end..]);
         display
@@ -350,7 +358,7 @@ mod tests {
         let matches = BotMention::in_markdown(source, &bots);
         assert_eq!(matches.len(), 1);
         assert_eq!(&source[matches[0].range.clone()], "@Scout Comp");
-        let display = MentionDisplay::new(source, &matches);
+        let display = MentionDisplay::new(source, &matches, &[]);
         assert!(display.text.contains("**[bot](bot-mention:"));
         assert!(display.text.contains("`@Scout Comp`"));
         assert!(
@@ -367,7 +375,7 @@ mod tests {
             source,
             &MentionRegistry::new(&[bot(1, "Scout"), bot(2, "日報")]),
         );
-        let display = MentionDisplay::new(source, &matches);
+        let display = MentionDisplay::new(source, &matches, &[]);
         assert_eq!(display.source_bytes(0), 0);
         for (original, replacement) in &display.replacements {
             assert_eq!(display.source_bytes(replacement.start), original.start);
@@ -375,7 +383,7 @@ mod tests {
             assert_eq!(display.source_bytes(replacement.end), original.end);
         }
         assert_eq!(display.source_bytes(display.text.len()), source.len());
-        let plain = MentionDisplay::new("no mentions ✓", &[]);
+        let plain = MentionDisplay::new("no mentions ✓", &[], &[]);
         assert_eq!(plain.source_bytes(plain.text.len()), "no mentions ✓".len());
     }
 
