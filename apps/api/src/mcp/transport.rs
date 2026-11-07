@@ -254,9 +254,37 @@ for line in sys.stdin:
         break
 "#;
 
+    fn interpreter_environment() -> Vec<String> {
+        let output = std::process::Command::new("python3")
+            .env_clear()
+            .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
+            .args(["-c", "import json, os; print(json.dumps(list(os.environ)))"])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
     #[tokio::test]
     async fn stdio_reuses_the_server_and_exposes_only_configured_environment() {
         let dir = tempfile::tempdir().unwrap();
+        let mut allowed: Vec<String> = [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TMPDIR",
+            "SYSTEMROOT",
+            "EXPLICIT_CONFIG",
+            MARKER_VAR,
+        ]
+        .map(String::from)
+        .into();
+        allowed.extend(interpreter_environment());
+        let host_only: Vec<String> = std::env::vars_os()
+            .filter_map(|(key, _)| key.into_string().ok())
+            .filter(|key| !allowed.contains(key))
+            .collect();
+        assert!(!host_only.is_empty(), "the test host has variables to leak");
         let config = Transport::Stdio {
             command: "python3".into(),
             args: vec!["-u".into(), "-c".into(), STDIO_SERVER.into()],
@@ -281,24 +309,15 @@ for line in sys.stdin:
                 serde_json::from_str(called["content"][0]["text"].as_str().unwrap()).unwrap();
             assert_eq!(environment["calls"], expected);
             assert_eq!(environment["env"]["EXPLICIT_CONFIG"], "present");
-            assert_eq!(environment["cwd"], dir.path().to_str().unwrap());
+            assert_eq!(
+                Path::new(environment["cwd"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap(),
+                dir.path().canonicalize().unwrap()
+            );
             pid = environment["pid"].as_i64().unwrap() as libc::pid_t;
             for key in environment["env"].as_object().unwrap().keys() {
-                assert!(
-                    [
-                        "PATH",
-                        "HOME",
-                        "LANG",
-                        "LC_ALL",
-                        "LC_CTYPE",
-                        "TMPDIR",
-                        "SYSTEMROOT",
-                        "EXPLICIT_CONFIG",
-                        MARKER_VAR,
-                    ]
-                    .contains(&key.as_str()),
-                    "unexpected inherited variable {key}"
-                );
+                assert!(allowed.contains(key), "unexpected inherited variable {key}");
             }
         }
         connection.shutdown().await;
