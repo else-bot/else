@@ -93,9 +93,10 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
     for feature in DISABLED_FEATURES {
         text.push_str(&format!("{feature} = false\n"));
     }
-    // Codex reaches MCP tools only through its code-mode host; without
-    // else.bot tools there is nothing for it to call.
-    text.push_str(&format!("code_mode_host = {}\n", tool_url.is_some()));
+    // Codex reaches its shell, file edits, and MCP tools only through its
+    // code-mode host; a summary has none of them to call.
+    let code_mode = host_tools || tool_url.is_some();
+    text.push_str(&format!("code_mode_host = {code_mode}\n"));
     if !host_tools {
         text.push_str("\n[tools]\nupdate_plan = { enabled = false }\nexperimental_request_user_input = { enabled = false }\n");
     }
@@ -262,6 +263,25 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+    }
+
+    #[test]
+    fn code_mode_runs_whenever_the_launch_has_a_tool_to_call() {
+        let url = Some("http://127.0.0.1:7878/tools/v1/mcp");
+        for (tool_url, host_tools, code_mode) in [
+            (None, true, true),
+            (url, true, true),
+            (url, false, true),
+            (None, false, false),
+        ] {
+            let text = config_toml(tool_url, host_tools);
+            assert!(
+                text.contains(&format!("code_mode_host = {code_mode}\n")),
+                "{tool_url:?} {host_tools}"
+            );
+            assert!(text.contains("[agents]\nenabled = false"));
+            assert!(text.contains("multi_agent = false\nmulti_agent_v2 = false\n"));
+        }
     }
 
     #[test]
