@@ -225,7 +225,7 @@ impl MentionDisplay {
                     format!("[bot](bot-mention:{}:{})", mention.id, mention.range.start),
                 )
             })
-            .chain(hard_breaks.iter().map(|&at| (at..at, "\\".to_owned())))
+            .chain(hard_breaks.iter().map(|&at| (at..at, "  ".to_owned())))
             .collect();
         edits.sort_by_key(|(range, _)| range.start);
         let mut display = Self::default();

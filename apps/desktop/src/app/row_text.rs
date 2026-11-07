@@ -23,13 +23,15 @@ pub(super) enum RowFormat {
     Plain,
     Markdown,
     OwnerMarkdown,
-    Quoted,
+    Quoted { chips: bool },
 }
 
 impl RowFormat {
     pub(super) fn for_owner(text: &str, parts: &[MessagePart]) -> Self {
         if super::reply::QuotedReply::parse(text).is_some() {
-            Self::Quoted
+            Self::Quoted {
+                chips: Self::owner_body(parts) == Self::Plain,
+            }
         } else {
             Self::owner_body(parts)
         }
@@ -59,7 +61,7 @@ impl RowFormat {
 
     fn mentions(self, source: &str, bots: &MentionRegistry) -> Vec<BotMention> {
         match self {
-            Self::Plain | Self::Quoted => BotMention::find(source, bots),
+            Self::Plain | Self::Quoted { .. } => BotMention::find(source, bots),
             Self::Markdown | Self::OwnerMarkdown => BotMention::in_markdown(source, bots),
         }
     }
@@ -81,9 +83,9 @@ pub(super) struct RowSource {
 
 impl RowSource {
     fn split_quote(mut self) -> (Option<Self>, Self) {
-        if self.format != RowFormat::Quoted {
+        let RowFormat::Quoted { chips } = self.format else {
             return (None, self);
-        }
+        };
         let reply = super::reply::QuotedReply::parse(&self.text)
             .expect("quoted row format comes from a complete reply");
         let prefix = &self.text[..self.text.len() - reply.body.len()];
@@ -98,7 +100,11 @@ impl RowSource {
             format: RowFormat::Markdown,
         };
         self.text = reply.body.to_owned();
-        self.format = RowFormat::owner_body(&self.parts);
+        self.format = if chips {
+            RowFormat::Plain
+        } else {
+            RowFormat::OwnerMarkdown
+        };
         (Some(quote), self)
     }
 }
@@ -156,7 +162,7 @@ impl RowText {
         let content = plain_content(&visible, &visible_parts, &mut mentions);
         let display = MentionDisplay::new(&visible, &mentions, &format.hard_breaks(&visible));
         let widget = match format {
-            RowFormat::Plain | RowFormat::Quoted => Widget::Plain(cx.new(|cx| {
+            RowFormat::Plain | RowFormat::Quoted { .. } => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
                     .auto_grow(1, 100_000)
                     .context_menu(!matches!(key, RowKey::Item(_)));
@@ -205,7 +211,9 @@ impl RowText {
 
     pub(super) fn format(&self) -> RowFormat {
         if self.quote.is_some() {
-            RowFormat::Quoted
+            RowFormat::Quoted {
+                chips: self.format == RowFormat::Plain,
+            }
         } else {
             self.format
         }
@@ -596,23 +604,6 @@ mod tests {
             );
             assert_eq!(RowFormat::for_owner(text, &[]), RowFormat::OwnerMarkdown);
         }
-        for author in [Author::Owner, Author::Bot] {
-            let draft = Draft {
-                content: InputContent::new("You can already mark it as always approved."),
-                reply_to: Some(MessageReference {
-                    item: Uuid::nil(), author,
-                    text: "Created the routine for **04:00 Europe/Paris**.\n\nPreserve `main`.\n> An earlier quote.".into(),
-                }),
-                ..Draft::default()
-            };
-            let text = draft.message().unwrap();
-            assert_eq!(RowFormat::for_item(&item("user", &text)), RowFormat::Quoted);
-            assert_eq!(RowFormat::for_owner(&text, &[]), RowFormat::Quoted);
-        }
-        assert_eq!(
-            RowFormat::for_item(&item("assistant", "**Done**")),
-            RowFormat::Markdown
-        );
         let attached = |media_type: &str| {
             let file = Attachment {
                 id: Uuid::new_v4(),
@@ -638,6 +629,28 @@ mod tests {
             RowFormat::for_owner("See **this**", &attached("text/plain")),
             RowFormat::Plain
         );
+        for author in [Author::Owner, Author::Bot] {
+            let draft = Draft {
+                content: InputContent::new("You can already mark it as always approved."),
+                reply_to: Some(MessageReference {
+                    item: Uuid::nil(), author,
+                    text: "Created the routine for **04:00 Europe/Paris**.\n\nPreserve `main`.\n> An earlier quote.".into(),
+                }),
+                ..Draft::default()
+            };
+            let text = draft.message().unwrap();
+            let quoted = RowFormat::Quoted { chips: false };
+            assert_eq!(RowFormat::for_item(&item("user", &text)), quoted);
+            assert_eq!(RowFormat::for_owner(&text, &[]), quoted);
+            assert_eq!(
+                RowFormat::for_owner(&text, &attached("text/plain")),
+                RowFormat::Quoted { chips: true }
+            );
+        }
+        assert_eq!(
+            RowFormat::for_item(&item("assistant", "**Done**")),
+            RowFormat::Markdown
+        );
     }
 
     #[test]
@@ -653,30 +666,51 @@ mod tests {
         assert_eq!(
             display.text,
             format!(
-                "What should I do:\n\n**Open.**\\\nFirst line\\\r\nsecond [bot](bot-mention:{}:{})\n\n```\na\nb\n```\n> quoted\\\n> more",
+                "What should I do:\n\n**Open.**  \nFirst line  \r\nsecond [bot](bot-mention:{}:{})\n\n```\na\nb\n```\n> quoted  \n> more",
                 Uuid::from_u128(1),
                 source.find('@').unwrap()
             )
         );
         assert_eq!(display.source_bytes(display.text.len()), source.len());
-        let first = display.text.find('\\').unwrap();
+        let first = display.text.find("  ").unwrap();
         assert_eq!(display.source_bytes(first), source.find("\nFirst").unwrap());
-        assert_eq!(display.source_bytes(first + 1), first);
-        let tree = markdown::to_mdast(&display.text, &markdown::ParseOptions::gfm()).unwrap();
-        let mut kinds = Vec::new();
+        assert_eq!(display.source_bytes(first + 2), first);
+        assert_eq!(kinds(&display.text), ["strong", "break", "break", "break"]);
+        assert!(RowFormat::Markdown.hard_breaks(source).is_empty());
+        for (typed, expected) in [
+            ("hello **\nworld**", vec!["break"]),
+            (
+                "[a\nb]\n\n[a b]: https://example.com",
+                vec!["link", "break"],
+            ),
+        ] {
+            let breaks = RowFormat::OwnerMarkdown.hard_breaks(typed);
+            assert_eq!(
+                kinds(&MentionDisplay::new(typed, &[], &breaks).text),
+                expected,
+                "{typed:?}"
+            );
+        }
+    }
+
+    fn kinds(display: &str) -> Vec<&'static str> {
         fn collect(node: &markdown::mdast::Node, kinds: &mut Vec<&'static str>) {
             match node {
                 markdown::mdast::Node::Strong(_) => kinds.push("strong"),
                 markdown::mdast::Node::Break(_) => kinds.push("break"),
+                markdown::mdast::Node::LinkReference(_) => kinds.push("link"),
                 _ => {}
             }
             for child in node.children().into_iter().flatten() {
                 collect(child, kinds);
             }
         }
-        collect(&tree, &mut kinds);
-        assert_eq!(kinds, ["strong", "break", "break", "break"]);
-        assert!(RowFormat::Markdown.hard_breaks(source).is_empty());
+        let mut kinds = Vec::new();
+        collect(
+            &markdown::to_mdast(display, &markdown::ParseOptions::gfm()).unwrap(),
+            &mut kinds,
+        );
+        kinds
     }
 
     #[test]
@@ -715,8 +749,8 @@ mod tests {
             parts.push(MessagePart::File { file: file.clone() });
             let (quote, body_source) = RowSource {
                 text: message.clone(),
+                format: RowFormat::for_owner(&message, &parts),
                 parts,
-                format: RowFormat::for_owner(&message, &[]),
             }
             .split_quote();
             let quote = quote.unwrap();
