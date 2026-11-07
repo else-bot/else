@@ -614,22 +614,46 @@ class Publication(unittest.TestCase):
         self.finalize()
         self.assertEqual(self.latest.read_text(), "v0.0.2")
 
-    def test_guest_build_fingerprint_ignores_native_publisher_changes(self):
-        helper = self.repo / "scripts/guest_release.py"
-        helper.parent.mkdir()
-        helper.write_text(Path(guest_release.__file__).read_text())
-        self.git("add", "scripts")
-        self.git("commit", "-m", "guest build helper")
+    def test_guest_build_fingerprint_ignores_release_orchestration(self):
+        paths = ("scripts/release.py", "scripts/guest_release.py", "scripts/guest-release.py",
+                 ".github/workflows/guest-image.yml")
+        guest = self.repo / "infra/guest/Dockerfile"
+        guest.parent.mkdir(parents=True)
+        guest.write_text("FROM scratch\n")
+        for path in paths:
+            file = self.repo / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("original orchestration\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "guest build inputs")
         before = guest_release.source_sha256(guest_release.GUEST)
-        publisher = helper.parent / "release.py"
-        publisher.write_text(Path(release.__file__).read_text())
-        self.git("add", "scripts")
-        self.git("commit", "-m", "native publisher change")
+        self.commit_version("0.0.3")
         self.assertEqual(guest_release.source_sha256(guest_release.GUEST), before)
-        helper.write_text(helper.read_text() + "\n# changed guest build inputs\n")
-        self.git("add", "scripts")
-        self.git("commit", "-m", "guest helper change")
-        self.assertNotEqual(guest_release.source_sha256(guest_release.GUEST), before)
+        for path in paths:
+            with self.subTest(path=path):
+                (self.repo / path).write_text("updated orchestration\n")
+                self.git("add", path)
+                self.git("commit", "-m", "release orchestration change")
+                self.assertEqual(guest_release.source_sha256(guest_release.GUEST), before)
+
+    def test_guest_build_fingerprint_tracks_image_inputs(self):
+        paths = ("infra/guest/Dockerfile", "infra/guest/else-init", "infra/guest-base.json")
+        for path in paths:
+            file = self.repo / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("original build input\n")
+        self.git("add", "infra")
+        self.git("commit", "-m", "guest build inputs")
+        for path in paths:
+            with self.subTest(path=path):
+                before = guest_release.source_sha256(guest_release.GUEST)
+                (self.repo / path).write_text("updated build input\n")
+                self.git("add", path)
+                self.git("commit", "-m", "guest input change")
+                self.assertNotEqual(guest_release.source_sha256(guest_release.GUEST), before)
+        before = guest_release.source_sha256(guest_release.GUEST)
+        with patch.dict(guest_release.GUEST.build_args, {"IMAGE_TAG": "else-guest:4"}):
+            self.assertNotEqual(guest_release.source_sha256(guest_release.GUEST), before)
 
 
 if __name__ == "__main__":

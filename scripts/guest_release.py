@@ -83,9 +83,7 @@ GUEST = Kind(
     repo=os.environ.get("ELSE_GUEST_IMAGE_REPO", "ghcr.io/else-bot/else-guest"),
     label="bot.else.guest.source_sha256",
     dockerfile=f"{CONTEXT}/Dockerfile",
-    # Both paths preserve source hashes recorded before the helper was renamed.
-    inputs=(CONTEXT, BASE.manifest, "scripts/guest-release.py", "scripts/guest_release.py",
-            ".github/workflows/guest-image.yml"),
+    inputs=(CONTEXT, BASE.manifest),
     build_args={"IMAGE_TAG": "else-guest:3"},
     publisher="the release workflow pins a new image",
     parent=BASE,
