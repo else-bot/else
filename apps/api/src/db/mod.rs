@@ -87,7 +87,67 @@ pub async fn migrate_in(conn: &mut SqliteConnection) -> Result<(), DbError> {
         .run(&mut *conn)
         .await
         .map_err(|err| DbError::Migration(err.to_string()))?;
-    import_legacy_descriptions(conn).await
+    import_legacy_descriptions(conn).await?;
+    import_legacy_task_secrets(conn).await
+}
+
+/// Give each duplicate a bot stored before task secrets were shared a free
+/// name (`<name>-<bot id prefix>`, numbered if that is taken), and point
+/// that bot's jobs at it so their output is still redacted with its values.
+async fn import_legacy_task_secrets(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    let staged: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT bot_id, name FROM legacy_task_secrets ORDER BY bot_id, name")
+            .fetch_all(&mut *conn)
+            .await?;
+    for (bot_id, name) in staged {
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+        let prefix = &bot_id.simple().to_string()[..8];
+        let mut renamed = String::new();
+        for n in 1.. {
+            let suffix = if n == 1 {
+                format!("-{prefix}")
+            } else {
+                format!("-{prefix}-{n}")
+            };
+            renamed = format!("{}{suffix}", &name[..name.len().min(40 - suffix.len())]);
+            let taken: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_secrets WHERE name = ?1)")
+                    .bind(&renamed)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !taken {
+                break;
+            }
+        }
+        sqlx::query(
+            "INSERT INTO task_secrets (name, env_names, salt, ciphertext, created_at, updated_at)
+             SELECT ?3, env_names, salt, ciphertext, created_at, updated_at
+             FROM legacy_task_secrets WHERE bot_id = ?1 AND name = ?2",
+        )
+        .bind(bot_id)
+        .bind(&name)
+        .bind(&renamed)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE guest_jobs SET secrets = (
+                 SELECT json_group_array(CASE WHEN value = ?2 THEN ?3 ELSE value END)
+                 FROM json_each(guest_jobs.secrets))
+             WHERE bot_id = ?1 AND EXISTS (SELECT 1 FROM json_each(guest_jobs.secrets) WHERE value = ?2)",
+        )
+        .bind(bot_id)
+        .bind(&name)
+        .bind(&renamed)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM legacy_task_secrets WHERE bot_id = ?1 AND name = ?2")
+            .bind(bot_id)
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+    Ok(())
 }
 
 async fn import_legacy_descriptions(conn: &mut SqliteConnection) -> Result<(), DbError> {

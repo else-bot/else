@@ -251,8 +251,8 @@ fn tool_list() -> Value {
         {
             "name": "create_bot",
             "description": "Register a new else.bot specialist in your owner conversation for an owner request, with \
-                the installation's default provider and no credentials, shared memory, or \
-                other access. Returns its bot_id at once; you may delegate to it in this \
+                the installation's default provider, the task secrets stored on this server, and no \
+                shared memory or other access. Returns its bot_id at once; you may delegate to it in this \
                 attempt. Repeating the same name in this owner request returns the same bot. \
                 The bot learns its responsibilities from the tasks it receives, so give its \
                 first task with delegate. Supply its purpose, required for non-main bots. The server \

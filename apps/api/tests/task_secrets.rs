@@ -743,15 +743,26 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
         .await
         .unwrap();
     let older = Uuid::parse_str("0badc0de-0000-4000-8000-000000000000").unwrap();
+    let alike = Uuid::parse_str("0badc0de-1111-4000-8000-000000000000").unwrap();
     let newer = Uuid::new_v4();
-    for (bot, name, secret, updated) in [
-        (older, "Older", "kaneo", "2026-01-01T00:00:00.000+00:00"),
-        (newer, "Newer", "kaneo", "2026-02-01T00:00:00.000+00:00"),
-        (older, "Older", "smtp", "2026-01-01T00:00:00.000+00:00"),
+    let long = "a".repeat(40);
+    let (jan, feb, mar) = (
+        "2026-01-01T00:00:00.000+00:00",
+        "2026-02-01T00:00:00.000+00:00",
+        "2026-03-01T00:00:00.000+00:00",
+    );
+    for (bot, bot_name, secret, updated) in [
+        (older, "Older", "kaneo", jan),
+        (alike, "Alike", "kaneo", feb),
+        (newer, "Newer", "kaneo", mar),
+        (newer, "Newer", "kaneo-0badc0de", mar),
+        (older, "Older", long.as_str(), jan),
+        (newer, "Newer", long.as_str(), mar),
+        (older, "Older", "smtp", jan),
     ] {
         sqlx::query("INSERT OR IGNORE INTO bots (id, name) VALUES (?1, ?2)")
             .bind(bot)
-            .bind(name)
+            .bind(bot_name)
             .execute(&db.pool)
             .await
             .unwrap();
@@ -761,13 +772,34 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
         )
         .bind(bot)
         .bind(secret)
-        .bind(format!("{name}-{secret}").into_bytes())
+        .bind(format!("{bot_name}:{secret}").into_bytes())
         .bind(updated)
         .execute(&db.pool)
         .await
         .unwrap();
     }
+    sqlx::query(
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
+         VALUES (?1, 'older', 'image', 1, 512)",
+    )
+    .bind(older)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO guest_jobs (id, bot_id, command, deadline, status, secrets)
+         VALUES (?1, ?2, './sync.sh', '2030-01-01T00:00:00Z', 'running', '[\"kaneo\",\"smtp\"]')",
+    )
+    .bind(job)
+    .bind(older)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
     else_api::db::migrate(&db.pool).await.unwrap();
+    else_api::db::migrate(&db.pool).await.unwrap();
+
     let rows: Vec<(String, Vec<u8>)> =
         sqlx::query_as("SELECT name, ciphertext FROM task_secrets ORDER BY name")
             .fetch_all(&db.pool)
@@ -777,13 +809,29 @@ async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
         .into_iter()
         .map(|(n, c)| (n, String::from_utf8(c).unwrap()))
         .collect();
+    let short = "a".repeat(31);
+    let expected: Vec<(String, String)> = [
+        (format!("{short}-0badc0de"), format!("Older:{long}")),
+        (long.clone(), format!("Newer:{long}")),
+        ("kaneo".into(), "Newer:kaneo".into()),
+        ("kaneo-0badc0de".into(), "Newer:kaneo-0badc0de".into()),
+        ("kaneo-0badc0de-2".into(), "Older:kaneo".into()),
+        ("kaneo-0badc0de-3".into(), "Alike:kaneo".into()),
+        ("smtp".into(), "Older:smtp".into()),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
-        rows,
-        [
-            ("kaneo".to_owned(), "Newer-kaneo".to_owned()),
-            ("kaneo-0badc0de".to_owned(), "Older-kaneo".to_owned()),
-            ("smtp".to_owned(), "Older-smtp".to_owned()),
-        ],
+        rows, expected,
         "the newest copy keeps the name and no stored secret is lost"
+    );
+    let secrets: String = sqlx::query_scalar("SELECT secrets FROM guest_jobs WHERE id = ?1")
+        .bind(job)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        secrets, r#"["kaneo-0badc0de-2","smtp"]"#,
+        "a running job still names its own bot's copy"
     );
 }

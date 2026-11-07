@@ -126,8 +126,9 @@ fn delegation_rules(input: &TurnInput) -> String {
          receives and the owner's messages. When the owner said what the new bot is for, \
          delegate its first task to it at once: a self-contained task that states that purpose \
          and the context it needs. Do this even when the credentials or external access its \
-         work will need do not exist yet; creating a bot grants no access, so tell the owner \
-         what to configure for it later (for example task secrets). Do not substitute a script \
+         work will need do not exist yet. A new bot can use the task secrets already stored \
+         on this server and has no other access, so tell the owner what to configure for it \
+         later (for example a missing task secret). Do not substitute a script \
          or external integration for creating the else.bot. If the owner explicitly asks to \
          build a bot application or register a GitHub App, follow that request instead. \
          create_bot returns the new bot_id, which you can delegate to at once even though it \

@@ -691,7 +691,7 @@ async fn the_vm_automation_and_categories_milestone_works_end_to_end() {
         false,
     );
     let (status, body) = api
-        .call(reqwest::Method::PUT, &format!("/v1/bots/{scripter}/task-secrets/smtp"),
+        .call(reqwest::Method::PUT, "/v1/task-secrets/smtp",
               Some(json!({ "env": { "SMTP_HOST": "127.0.0.1", "SMTP_PORT": "2525", "SMTP_USER": "mailer",
                                     "SMTP_PASSWORD": password, "SMTP_FROM": "owner@example.test" } })))
         .await;
