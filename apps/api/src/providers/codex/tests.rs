@@ -848,8 +848,9 @@ fn any_running_logged_in_version_is_available() {
     }
 }
 
-#[test]
-fn fingerprints_keep_their_values() {
+pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static str, String); 2] {
+    use crate::app::providers::Origin;
+
     let codex = Codex::offline(Some("http://127.0.0.1:1/tools/v1/mcp"));
     let mut input = input(vec![]);
     input.bot_id = Uuid::nil();
@@ -860,16 +861,15 @@ fn fingerprints_keep_their_values() {
         reasoning_effort: "high".into(),
         service_tier: "priority".into(),
     };
-    input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
-    assert_eq!(
-        codex.fingerprint_of(&profile, &input, "chatgpt:me@example.com"),
-        "d2b114addcacbb728139feef3cf4d10d"
-    );
-    input.delegation.origin = crate::app::providers::Origin::ConnectorEvent;
-    assert_eq!(
-        codex.fingerprint_of(&profile, &input, "chatgpt:me@example.com"),
-        "3c6c1298438988a5cf162a6c6de54fd9"
-    );
+    [
+        (Origin::OwnerRequest, "d2b114addcacbb728139feef3cf4d10d"),
+        (Origin::ConnectorEvent, "3c6c1298438988a5cf162a6c6de54fd9"),
+    ]
+    .map(|(origin, expected)| {
+        input.delegation.origin = origin;
+        let actual = codex.fingerprint_of(&profile, &input, "chatgpt:me@example.com");
+        (origin, expected, actual)
+    })
 }
 
 #[tokio::test]
