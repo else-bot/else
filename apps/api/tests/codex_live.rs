@@ -97,7 +97,10 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         dirs.provider_home.to_string_lossy().into_owned(),
     )];
     if let Some((_, grant)) = &tools {
-        env.push((codex_home::GRANT_ENV.into(), grant.clone()));
+        env.push((
+            else_api::providers::cli::files::GRANT_ENV.into(),
+            grant.clone(),
+        ));
     }
     let spec = LaunchSpec {
         turn_id: Uuid::new_v4(),
@@ -187,7 +190,7 @@ async fn probe_native_tools(tools: Option<(String, String)>) {
         "turn status={status} item types={item_types:?} server requests={server_requests:?} extra threads={threads_started}"
     );
     eprintln!("reply: {reply}");
-    server.shutdown(Duration::from_secs(5)).await;
+    server.close().await.unwrap();
     assert_eq!(status, "completed");
     for forbidden in FORBIDDEN_ITEMS {
         assert!(

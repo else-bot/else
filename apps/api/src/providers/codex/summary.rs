@@ -1,6 +1,8 @@
-use super::{AppServer, Codex, Incoming, LaunchSpec, Profile, Provider, codex_home, json, prompt};
-use super::{ID, RPC_TIMEOUT, Reported, SHUTDOWN_GRACE};
+use super::super::codex_rpc::{AppServer, Incoming};
+use super::policy::Reported;
+use super::{Codex, DEFINITION, ID, LaunchSpec, Profile, RPC_TIMEOUT, codex_home, prompt};
 use async_trait::async_trait;
+use serde_json::json;
 use std::ffi::OsString;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -40,21 +42,16 @@ impl Codex {
         deadline: Duration,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        if let Some(reason) = &self.unavailable {
-            return Err(reason.clone());
-        }
-        let (Some(host), Some(program), Some(auth)) = (&self.host, &self.program, &self.auth)
-        else {
-            return Err("Codex is not configured.".into());
-        };
-        self.validate_profile(profile)?;
+        let ready = self.ready.as_ref().map_err(Clone::clone)?;
+        let host = &ready.host;
+        DEFINITION.validate(profile)?;
         let dirs = host
             .bot_dirs(bot_id, "codex-summary")
             .map_err(|e| e.to_string())?;
-        codex_home::prepare(&dirs, auth, None, false).map_err(|e| e.to_string())?;
+        codex_home::prepare(&dirs, &ready.auth, None, false).map_err(|e| e.to_string())?;
         let mut spec = LaunchSpec {
             turn_id: uuid::Uuid::new_v4(),
-            program: program.clone(),
+            program: ready.program.clone(),
             args: Vec::new(),
             env: vec![(
                 "CODEX_HOME".into(),
@@ -77,8 +74,9 @@ impl Codex {
                 self.summary_exchange(&mut server, profile, system, prompt),
             ) => outcome.unwrap_or_else(|_| Err("the summary exceeded its deadline".into())),
         };
-        server.shutdown(SHUTDOWN_GRACE).await;
-        result
+        let closed = server.close().await;
+        let text = result?;
+        closed.map(|()| text)
     }
 
     async fn summary_exchange(
@@ -159,10 +157,11 @@ impl Codex {
                     let kind = item["type"].as_str().unwrap_or_default();
                     if !matches!(kind, "userMessage" | "agentMessage" | "reasoning") {
                         violation.get_or_insert(format!("Codex produced a {kind} item"));
-                    } else if method == "item/completed" && kind == "agentMessage" {
-                        if item["phase"].as_str() != Some("commentary") {
-                            text = item["text"].as_str().unwrap_or_default().to_owned();
-                        }
+                    } else if method == "item/completed"
+                        && kind == "agentMessage"
+                        && item["phase"].as_str() != Some("commentary")
+                    {
+                        text = item["text"].as_str().unwrap_or_default().to_owned();
                     }
                 }
                 "model/rerouted" if params["toModel"].as_str() != Some(&profile.model) => {
@@ -202,7 +201,7 @@ impl crate::memory_worker::Summarizer for Codex {
     }
 
     fn available(&self) -> bool {
-        self.unavailable.is_none() && self.host.is_some()
+        self.ready.is_ok()
     }
 
     async fn summarize(

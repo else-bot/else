@@ -1,6 +1,27 @@
 use super::*;
-use crate::app::providers::MemoryContext;
-use serde_json::Value;
+use crate::app::providers::{MemoryContext, SessionState};
+use crate::providers::cli::attempt::StopCause;
+use protocol::ResultInfo;
+
+type Emitted = Vec<Event<ResultInfo>>;
+
+impl Claude {
+    fn offline(account: &str) -> Self {
+        Self {
+            ready: Ok(Ready {
+                host: Host::new(std::path::Path::new("/data"), std::path::Path::new("/bots")),
+                program: PathBuf::new(),
+                config: claude_home::HostConfig {
+                    dir: PathBuf::new(),
+                    explicit: false,
+                },
+                account: account.into(),
+                version: "2.1.999 (Claude Code)".into(),
+            }),
+            tool_url: Some("http://127.0.0.1:1/tools/v1/mcp".into()),
+        }
+    }
+}
 
 fn tracker() -> Tracker {
     Tracker::new(claude_home::tool_names(), "claude-haiku-5-5", "u-1")
@@ -16,93 +37,126 @@ fn connected() -> Value {
     json!([{ "name": "elsebot", "status": "connected" }])
 }
 
-#[test]
-fn a_turn_is_accepted_by_its_echo_and_streams_text() {
-    let mut t = tracker();
-    t.on(&init(claude_home::tool_names(), connected()));
-    assert!(t.violation.is_none(), "{:?}", t.violation);
-    assert!(
-        t.on(&json!({"type":"user","uuid":"other","isReplay":true}))
-            .is_empty()
-    );
-    assert_eq!(
-        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true})),
-        vec![Step::Accepted]
-    );
-    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}));
-    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}));
-    let steps = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}}));
-    assert_eq!(steps, vec![Step::Text("Hi".into())]);
-    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}}));
-    let steps = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"again"}}}));
-    assert_eq!(steps, vec![Step::EndMessage, Step::Text("again".into())]);
-    let steps =
-        t.on(&json!({"type":"result","subtype":"success","is_error":false,"result":"Hi\n\nagain"}));
-    assert_eq!(
-        steps,
-        vec![Step::Result(ResultInfo {
-            success: true,
-            message: "Hi\n\nagain".into(),
-            num_turns: None,
-        })]
-    );
-    assert!(t.violation.is_none());
+fn accepted() -> Event<ResultInfo> {
+    Event::Accepted {
+        model: "claude-haiku-5-5".into(),
+        native_turn: "u-1".into(),
+    }
 }
 
 #[test]
-fn an_agent_tool_or_extra_server_in_the_inventory_is_refused() {
+fn a_turn_is_accepted_by_its_echo_and_streams_text() {
+    let mut t = tracker();
+    t.on(&init(claude_home::tool_names(), connected())).unwrap();
+    assert_eq!(
+        t.on(&json!({"type":"user","uuid":"other","isReplay":true})),
+        Ok(Emitted::new())
+    );
+    assert_eq!(
+        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true})),
+        Ok(vec![accepted()])
+    );
+    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}})).unwrap();
+    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}})).unwrap();
+    let events = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}}));
+    assert_eq!(events, Ok(vec![Event::Text("Hi".into())]));
+    t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}})).unwrap();
+    let events = t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"again"}}}));
+    assert_eq!(
+        events,
+        Ok(vec![Event::EndMessage, Event::Text("again".into())])
+    );
+    let events =
+        t.on(&json!({"type":"result","subtype":"success","is_error":false,"result":"Hi\n\nagain"}));
+    assert_eq!(
+        events,
+        Ok(vec![Event::Finished(ResultInfo {
+            success: true,
+            message: "Hi\n\nagain".into(),
+            num_turns: None,
+        })])
+    );
+}
+
+#[test]
+fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     let mut tools = claude_home::tool_names();
     tools.push("Agent".into());
-    let mut t = tracker();
-    t.on(&init(tools, connected()));
-    assert_eq!(t.violation.as_ref().unwrap().0, "policy_violation");
-    let mut t = tracker();
-    t.on(&init(
-            claude_home::tool_names(),
-            json!([{ "name": "elsebot", "status": "connected" }, { "name": "other", "status": "connected" }]),
-        ));
-    assert!(t.violation.is_some());
-    let mut t = tracker();
-    t.on(&init(
-        claude_home::tool_names(),
+    assert_eq!(
+        tracker().on(&init(tools, connected())).unwrap_err().code,
+        "policy_violation"
+    );
+    for servers in [
+        json!([{ "name": "elsebot", "status": "connected" }, { "name": "other", "status": "connected" }]),
         json!([{ "name": "elsebot", "status": "failed" }]),
-    ));
-    assert!(t.violation.is_some());
+        json!([{ "name": "elsebot" }]),
+        json!("elsebot"),
+    ] {
+        assert!(
+            tracker()
+                .on(&init(claude_home::tool_names(), servers.clone()))
+                .is_err(),
+            "{servers}"
+        );
+    }
+    let mut event = init(claude_home::tool_names(), connected());
+    event["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "Bash"}));
+    assert!(
+        tracker().on(&event).is_err(),
+        "a non-string tool cannot hide"
+    );
+    let mut event = init(claude_home::tool_names(), connected());
+    event["tools"] = Value::Null;
+    assert!(tracker().on(&event).is_err());
 }
 
 #[test]
 fn the_built_in_agent_list_alone_is_not_a_violation_but_its_activity_is() {
-    // The init event lists built-in agents even with no Agent tool.
     let mut t = tracker();
-    t.on(&init(claude_home::tool_names(), connected()));
-    assert!(t.violation.is_none());
-    t.on(&json!({"type":"system","subtype":"task_started","task_id":"x"}));
-    assert!(t.violation.as_ref().unwrap().1.contains("task_started"));
-    let mut t = tracker();
-    t.on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[]}}));
-    assert!(t.violation.as_ref().unwrap().1.contains("sub-agent"));
+    assert!(t.on(&init(claude_home::tool_names(), connected())).is_ok());
+    let violation = t
+        .on(&json!({"type":"system","subtype":"task_started","task_id":"x"}))
+        .unwrap_err();
+    assert!(violation.message.contains("task_started"));
+    let violation = tracker()
+        .on(&json!({"type":"assistant","parent_tool_use_id":"toolu_1","message":{"model":"claude-haiku-5-5","content":[]}}))
+        .unwrap_err();
+    assert!(violation.message.contains("sub-agent"));
 }
 
 #[test]
 fn other_tools_models_and_permission_prompts_are_refused() {
     let mut t = tracker();
-    t.on(
-        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
-            {"type":"tool_use","id":"t1","name":"mcp__elsebot__memory_search","input":{}}]}}),
+    assert!(
+        t.on(
+            &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+            {"type":"tool_use","id":"t1","name":"mcp__elsebot__memory_search","input":{}}]}})
+        )
+        .is_ok()
     );
-    assert!(t.violation.is_none());
-    t.on(
-        &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
+    let violation = t
+        .on(
+            &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
             {"type":"tool_use","id":"t2","name":"WebFetch","input":{}}]}}),
+        )
+        .unwrap_err();
+    assert!(violation.message.contains("WebFetch"));
+    let violation = tracker()
+        .on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5"}}}))
+        .unwrap_err();
+    assert_eq!(violation.code, "profile_mismatch");
+    let violation = tracker()
+        .on(&json!({"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write"}}))
+        .unwrap_err();
+    assert!(violation.message.contains("Write"));
+    assert!(
+        tracker()
+            .on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":7}]}}))
+            .is_err()
     );
-    assert!(t.violation.as_ref().unwrap().1.contains("WebFetch"));
-    let mut t = tracker();
-    t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5"}}}));
-    assert_eq!(t.violation.as_ref().unwrap().0, "profile_mismatch");
-    let mut t = tracker();
-    let steps = t.on(&json!({"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"Write"}}));
-    assert_eq!(steps, vec![Step::Control("r9".into())]);
-    assert!(t.violation.as_ref().unwrap().1.contains("Write"));
 }
 
 #[test]
@@ -111,30 +165,30 @@ fn a_pending_delegation_or_secret_request_is_noticed_from_its_tool_result() {
     t.on(
         &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
             {"type":"tool_use","id":"d1","name":"mcp__elsebot__delegate","input":{}}]}}),
-    );
-    let steps = t.on(&json!({"type":"user","message":{"content":[
+    )
+    .unwrap();
+    let events = t.on(&json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"d1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
-    assert_eq!(steps, vec![Step::Parked]);
+    assert_eq!(events, Ok(vec![Event::Parked]));
     let mut t = tracker();
     t.on(
         &json!({"type":"assistant","message":{"model":"claude-haiku-5-5","content":[
             {"type":"tool_use","id":"s1","name":"mcp__elsebot__request_secret","input":{}},
             {"type":"tool_use","id":"m1","name":"mcp__elsebot__memory_search","input":{}}]}}),
-    );
-    let steps = t.on(&json!({"type":"user","message":{"content":[
+    )
+    .unwrap();
+    let events = t.on(&json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"m1","content":[{"type":"text","text":"pending"}]},
             {"type":"tool_result","tool_use_id":"s1","content":[{"type":"text","text":"{\"status\":\"pending\",\"parked\":true}"}]}]}}));
-    assert_eq!(steps, vec![Step::Parked]);
+    assert_eq!(events, Ok(vec![Event::Parked]));
 }
 
 #[test]
 fn a_no_tool_checkpoint_requires_an_empty_inventory() {
     let mut t = Tracker::new(Vec::new(), "claude-haiku-5-5", "u");
-    t.on(&init(Vec::new(), json!([])));
-    assert!(t.violation.is_none());
+    assert!(t.on(&init(Vec::new(), json!([]))).is_ok());
     let mut t = Tracker::new(Vec::new(), "claude-haiku-5-5", "u");
-    t.on(&init(claude_home::tool_names(), connected()));
-    assert!(t.violation.is_some());
+    assert!(t.on(&init(claude_home::tool_names(), connected())).is_err());
 }
 
 #[test]
@@ -182,12 +236,7 @@ fn arguments_offer_only_host_and_elsebot_tools_and_resume_explicitly() {
         service_tier: "default".into(),
     };
     let args: Vec<String> = claude
-        .args(
-            &profile,
-            &Session::Resume("abc".into()),
-            "SYSTEM",
-            Tools::HostAndElsebot,
-        )
+        .args(&profile, true, "abc", "SYSTEM", Tools::HostAndElsebot)
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();
@@ -277,56 +326,51 @@ fn info(success: bool, num_turns: Option<i64>) -> ResultInfo {
 fn only_a_provable_non_start_is_a_refusal() {
     let t = tracker();
     assert!(matches!(
-        decide(&t, &info(false, Some(0)), false, false),
+        t.outcome(info(false, Some(0)), None, false),
         TurnOutcome::Failed { ref code, .. } if code == "provider_refused"
     ));
     assert!(matches!(
-        decide(&t, &info(true, Some(1)), false, false),
+        t.outcome(info(false, Some(0)), Some(StopCause::Owner), false),
         TurnOutcome::Uncertain { .. }
     ));
     assert!(matches!(
-        decide(&t, &info(false, None), false, false),
+        t.outcome(info(true, Some(1)), None, false),
+        TurnOutcome::Uncertain { .. }
+    ));
+    assert!(matches!(
+        t.outcome(info(false, None), None, false),
         TurnOutcome::Uncertain { .. }
     ));
     let mut active = tracker();
-    active.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}}));
+    active.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}})).unwrap();
     assert!(matches!(
-        decide(&active, &info(false, Some(0)), false, false),
+        active.outcome(info(false, Some(0)), None, false),
         TurnOutcome::Uncertain { .. }
     ));
 }
 
 #[test]
-fn completion_requires_a_verified_init() {
+fn completion_requires_a_verified_init_and_a_stop_explains_a_failure() {
     let mut t = tracker();
-    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}));
+    t.on(&json!({"type":"user","uuid":"u-1","isReplay":true}))
+        .unwrap();
     assert!(matches!(
-        decide(&t, &info(true, Some(1)), false, false),
+        t.outcome(info(true, Some(1)), None, true),
         TurnOutcome::Failed { ref code, .. } if code == "policy_violation"
     ));
-    t.on(&init(claude_home::tool_names(), connected()));
+    t.on(&init(claude_home::tool_names(), connected())).unwrap();
     assert_eq!(
-        decide(&t, &info(true, Some(1)), false, false),
+        t.outcome(info(true, Some(1)), None, true),
         TurnOutcome::Completed
     );
-}
-
-#[tokio::test]
-async fn an_abandoned_read_keeps_its_partial_line() {
-    use tokio::io::AsyncWriteExt;
-    let (mut tx, rx) = tokio::io::duplex(64);
-    let mut events = Events::new(BufReader::new(rx));
-    tx.write_all(br#"{"type":"result","#).await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), events.next())
-            .await
-            .is_err()
+    assert_eq!(
+        t.outcome(info(false, Some(1)), Some(StopCause::Owner), true),
+        TurnOutcome::Interrupted
     );
-    tx.write_all(b"\"subtype\":\"success\"}\n").await.unwrap();
-    let event = events.next().await.unwrap().unwrap();
-    assert_eq!(event["subtype"], "success");
-    drop(tx);
-    assert_eq!(events.next().await.unwrap(), None);
+    assert!(matches!(
+        t.outcome(info(false, Some(1)), None, true),
+        TurnOutcome::Failed { ref code, .. } if code == "provider_failed"
+    ));
 }
 
 fn fake_claude(dir: &std::path::Path) -> (Claude, std::path::PathBuf) {
@@ -379,7 +423,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         parts: Vec::new(),
         files: Vec::new(),
         profile: Some(Profile {
-            model: MODELS[0].into(),
+            model: DEFINITION.catalog.models[0].into(),
             reasoning_effort: "medium".into(),
             service_tier: "default".into(),
         }),
@@ -410,12 +454,13 @@ async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
     let (claude, received) = fake_claude(dir.path());
     let base = specialist_turn(None);
     let profile = base.profile.clone().unwrap();
-    let fingerprint = claude.fingerprint(&profile, &base);
+    let fingerprint = claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &base);
     let native = Uuid::new_v4().to_string();
     let dirs = claude
-        .host
+        .ready
         .as_ref()
         .unwrap()
+        .host
         .bot_dirs(base.bot_id, ID)
         .unwrap();
     let project: String = std::fs::canonicalize(&dirs.project)
@@ -456,7 +501,7 @@ async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
         let resumed = session.as_ref().map(|s| s.native_id.clone());
         let sink = super::super::recording::Recorded::default();
         let outcome = claude
-            .run(specialist_turn(session), &sink, CancellationToken::new())
+            .run(specialist_turn(session), &sink, Stop::default())
             .await;
         assert_eq!(outcome, TurnOutcome::Completed);
         let text = super::super::recording::received(&received).pop().unwrap();
@@ -516,10 +561,10 @@ async fn files_reach_claude_in_order_with_images_inline() {
     input.files = vec![image.clone(), report.clone(), huge.clone()];
     let bot_id = input.bot_id;
     let sink = super::super::recording::Recorded::default();
-    let outcome = claude.run(input, &sink, CancellationToken::new()).await;
+    let outcome = claude.run(input, &sink, Stop::default()).await;
     assert_eq!(outcome, TurnOutcome::Completed);
 
-    let project = claude.host.as_ref().unwrap().project_path(bot_id);
+    let project = claude.project_dir(bot_id).unwrap();
     for f in [&image, &report, &huge] {
         let staged = project.join(super::attachments::relative_path(&f.attachment));
         assert_eq!(
@@ -621,9 +666,7 @@ async fn a_connector_event_launches_with_only_elsebot_tools() {
         let dir = tempfile::tempdir().unwrap();
         let claude = fake_inventory_claude(dir.path(), None);
         let sink = super::super::recording::Recorded::default();
-        let outcome = claude
-            .run(turn_from(origin), &sink, CancellationToken::new())
-            .await;
+        let outcome = claude.run(turn_from(origin), &sink, Stop::default()).await;
         assert_eq!(outcome, TurnOutcome::Completed, "{origin:?}");
         let launched: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("launched.json")).unwrap(),
@@ -679,11 +722,7 @@ async fn a_connector_event_offered_host_tools_anyway_fails() {
         let claude = fake_inventory_claude(dir.path(), Some(&[tool]));
         let sink = super::super::recording::Recorded::default();
         let outcome = claude
-            .run(
-                turn_from(Origin::ConnectorEvent),
-                &sink,
-                CancellationToken::new(),
-            )
+            .run(turn_from(Origin::ConnectorEvent), &sink, Stop::default())
             .await;
         assert!(
             matches!(&outcome, TurnOutcome::Failed { code, message }
@@ -696,13 +735,37 @@ async fn a_connector_event_offered_host_tools_anyway_fails() {
 #[test]
 fn a_connector_event_never_resumes_a_session_with_host_tools() {
     use crate::app::providers::Origin;
-    let claude = Claude::detect(None, None, None, String::new())
-        .with_tools("http://127.0.0.1:1/tools/v1/mcp".into());
+    let claude = Claude::offline("");
     let owner = turn_from(Origin::OwnerRequest);
     let event = turn_from(Origin::ConnectorEvent);
     let profile = owner.profile.clone().unwrap();
     assert_ne!(
-        claude.fingerprint(&profile, &owner),
-        claude.fingerprint(&profile, &event)
+        claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &owner),
+        claude.fingerprint(claude.ready.as_ref().unwrap(), &profile, &event)
+    );
+}
+
+#[test]
+fn fingerprints_keep_their_values() {
+    let claude = Claude::offline("acct:org");
+    let mut input = specialist_turn(None);
+    input.bot_id = Uuid::nil();
+    input.bot_name = "Golden".into();
+    input.delegation.registry = vec![(Uuid::from_u128(7), "Other".into())];
+    let profile = Profile {
+        model: "claude-opus-5-5".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    let ready = claude.ready.as_ref().unwrap();
+    input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
+    assert_eq!(
+        claude.fingerprint(ready, &profile, &input),
+        "ea6274702363f7c48e59eadbea0760aa"
+    );
+    input.delegation.origin = crate::app::providers::Origin::ConnectorEvent;
+    assert_eq!(
+        claude.fingerprint(ready, &profile, &input),
+        "c1f65e42c63766152c31d2bc97833f81"
     );
 }

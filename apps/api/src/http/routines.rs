@@ -197,8 +197,10 @@ fn fields() -> Value {
                        never blocks saving: the routine uses your model and the result says \
                        so." },
         "provider_id": { "type": "string",
-                         "description": "With model, only when the owner named the provider \
-                             (codex, claude, or grok)." },
+                         "description": format!(
+                             "With model, only when the owner named the provider ({}).",
+                             crate::providers::definitions::id_list()
+                         ) },
         "reasoning_effort": { "type": "string",
                               "description": "With model, only when the owner asked for one \
                                   (low, medium, high, xhigh, max). Defaults to your usual \

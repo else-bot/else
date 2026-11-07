@@ -1,10 +1,12 @@
 pub mod attachments;
 pub mod claude;
 pub mod claude_home;
+pub mod cli;
 pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
 mod default_skills;
+pub mod definitions;
 pub mod grok;
 pub mod grok_home;
 pub mod host;

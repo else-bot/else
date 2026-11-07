@@ -399,7 +399,10 @@ async fn first_model_request(
                 "CODEX_HOME".into(),
                 dirs.provider_home.to_string_lossy().into_owned(),
             ),
-            (codex_home::GRANT_ENV.into(), "tg_test".into()),
+            (
+                else_api::providers::cli::files::GRANT_ENV.into(),
+                "tg_test".into(),
+            ),
         ],
     };
     if no_native {
@@ -514,7 +517,7 @@ async fn codex_offers_a_connector_event_no_native_tools() {
                 )
                 .await
                 .unwrap();
-            server.shutdown(Duration::from_secs(3)).await;
+            server.close().await.unwrap();
             listed["data"]
                 .as_array()
                 .unwrap()

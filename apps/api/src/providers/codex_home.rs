@@ -23,14 +23,13 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::host::{BotDirs, Host, LaunchSpec, link_login};
+use super::cli::files::{GRANT_ENV, link_login, replace_private};
+use super::host::{BotDirs, Host, LaunchSpec};
 
 /// Feature flags forced off for every bot session. Native sub-agents
 /// (`multi_agent*`) are disabled by policy, not only by prompt. `shell_tool`
@@ -62,10 +61,6 @@ pub const DISABLED_FEATURES: &[&str] = &[
     "skill_mcp_dependency_install",
     "workspace_dependencies",
 ];
-
-/// Environment variable carrying the turn's task grant to Codex, which
-/// sends it as the bearer token to else.bot's MCP endpoint.
-pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
 
 /// The sandbox mode for a session: full host access with host tools,
 /// otherwise read-only.
@@ -137,22 +132,6 @@ pub fn host_auth_file(codex_home: Option<&str>, home: Option<&str>) -> Option<Pa
     Some(dir.join("auth.json"))
 }
 
-fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
-    if !fs::symlink_metadata(dir)?.is_dir() {
-        return Err(std::io::Error::other("provider home is not a directory"));
-    }
-    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    fs::rename(&temp, dir.join(name))
-}
-
 const CATALOG_FILE: &str = "no-native-tools-catalog.json";
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPORT_LIMIT: usize = 8 << 20;
@@ -214,7 +193,7 @@ pub async fn no_native_tools(
         .map_err(|e| format!("`codex debug models` failed: {e}"))?;
     let catalog = no_native_catalog(&exported, model)?;
     let home = &launch.dirs.provider_home;
-    replace_file(home, CATALOG_FILE, &catalog).map_err(|e| e.to_string())?;
+    replace_private(home, CATALOG_FILE, &catalog).map_err(|e| e.to_string())?;
     let path = home.join(CATALOG_FILE);
     let path = path.to_str().ok_or("the provider home path is not UTF-8")?;
     let path = serde_json::to_string(path).expect("strings serialize");
@@ -242,7 +221,7 @@ pub fn prepare(
     tool_url: Option<&str>,
     host_tools: bool,
 ) -> std::io::Result<()> {
-    replace_file(
+    replace_private(
         &dirs.provider_home,
         "config.toml",
         config_toml(tool_url, host_tools).as_bytes(),

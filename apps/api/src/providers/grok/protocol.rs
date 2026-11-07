@@ -1,34 +1,64 @@
-use serde_json::Value;
+//! Grok's `streaming-messages-json` events, validated against the turn's
+//! policy. Known events must be well formed; unknown event types are
+//! progress notes and are ignored.
+
 use std::collections::HashMap;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+use serde_json::Value;
 
 use super::grok_home;
 use crate::app::providers::TurnOutcome;
+use crate::app::tools::{SERVER_NAME, TOOL_NAMES};
+use crate::providers::cli::attempt::{Event, Protocol, StopCause, Violation};
+
+/// Grok's terminal event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Terminal {
+    Result {
+        success: bool,
+        stop_reason: Option<String>,
+        errors: String,
+    },
+    Error(String),
+}
 
 pub(super) struct Tracker {
     model: String,
     session: String,
     expected: Vec<String>,
     mcp: bool,
-    pub initialized: bool,
-    pub accepted: bool,
+    initialized: bool,
     calls: HashMap<String, String>,
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum Step {
-    Accepted,
-    Text(String),
-    EndMessage,
-    Parked,
-    Result(TurnOutcome),
+fn malformed(what: &str) -> Violation {
+    Violation::policy(format!("Grok sent a malformed {what}"))
+}
+
+fn text<'v>(value: &'v Value, what: &str) -> Result<Option<&'v str>, Violation> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => Ok(Some(text)),
+        _ => Err(malformed(what)),
+    }
+}
+
+fn required<'v>(value: &'v Value, what: &str) -> Result<&'v str, Violation> {
+    text(value, what)?.ok_or_else(|| malformed(what))
+}
+
+fn list<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Violation> {
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| malformed(what))
 }
 
 impl Tracker {
     pub fn new(model: &str, session: &str, host: bool, mcp: bool) -> Self {
         let mut expected: Vec<String> = grok_home::MCP_TOOLS.iter().map(|s| (*s).into()).collect();
         if host {
-            expected.extend(grok_home::HOST_TOOL_NAMES.iter().map(|s| (*s).into()));
+            expected.extend(grok_home::HOST_TOOLS.iter().map(|(_, name)| (*name).into()));
         }
         expected.sort();
         Self {
@@ -37,213 +67,234 @@ impl Tracker {
             expected,
             mcp,
             initialized: false,
-            accepted: false,
             calls: HashMap::new(),
         }
     }
 
     fn mcp_tool<'a>(&self, name: &'a str) -> Option<&'a str> {
-        name.strip_prefix("elsebot__")
-            .filter(|tool| self.mcp && crate::app::tools::TOOL_NAMES.contains(tool))
+        name.strip_prefix(SERVER_NAME)
+            .and_then(|rest| rest.strip_prefix("__"))
+            .filter(|tool| self.mcp && TOOL_NAMES.contains(tool))
     }
 
-    pub fn on(&mut self, event: &Value) -> Result<Vec<Step>, String> {
-        let mut steps = Vec::new();
-        if event["parent_tool_use_id"].is_string() {
-            return Err("Grok ran a native subagent".into());
+    fn check_model(&self, model: &Value) -> Result<(), Violation> {
+        match text(model, "model")? {
+            Some(model) if model != self.model => Err(Violation::profile(format!(
+                "Grok used {model} instead of {}.",
+                self.model
+            ))),
+            _ => Ok(()),
         }
-        if event["session_id"]
-            .as_str()
-            .is_some_and(|id| id != self.session)
-        {
-            return Err("Grok reported a different native session".into());
+    }
+
+    fn on_init(&mut self, event: &Value) -> Result<(), Violation> {
+        if self.initialized || text(&event["session_id"], "session ID")? != Some(&self.session) {
+            return Err(Violation::policy(
+                "Grok did not initialize the requested session",
+            ));
         }
-        for model in [
-            event["model"].as_str(),
-            event["message"]["model"].as_str(),
-            event["event"]["message"]["model"].as_str(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if model != self.model {
-                return Err(format!("Grok used {model} instead of {}", self.model));
+        if text(&event["model"], "model")?.is_none() {
+            return Err(Violation::profile("Grok did not report its model."));
+        }
+        let mut tools = list(&event["tools"], "tool inventory")?
+            .iter()
+            .map(|tool| required(tool, "tool inventory").map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        tools.retain(|tool| self.mcp_tool(tool).is_none());
+        tools.sort();
+        if tools != self.expected {
+            return Err(Violation::policy(format!(
+                "Grok offered unexpected tools: {tools:?}"
+            )));
+        }
+        let servers = list(&event["mcp_servers"], "MCP inventory")?
+            .iter()
+            .map(|server| {
+                Ok((
+                    required(&server["name"], "MCP inventory")?,
+                    required(&server["status"], "MCP inventory")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Violation>>()?;
+        let valid = if self.mcp {
+            matches!(servers.as_slice(), [(name, "connected" | "pending")] if *name == SERVER_NAME)
+        } else {
+            servers.is_empty()
+        };
+        if !valid {
+            return Err(Violation::policy(format!(
+                "Grok reported unexpected MCP servers: {servers:?}"
+            )));
+        }
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
+        for block in list(&event["message"]["content"], "assistant message")? {
+            match required(&block["type"], "content block")? {
+                "server_tool_use" => return Err(Violation::policy("Grok used a backend tool")),
+                "tool_use" => {}
+                _ => continue,
+            }
+            let name = required(&block["name"], "tool call")?;
+            let id = required(&block["id"], "tool call")?;
+            let tool = if name == "use_tool" {
+                let target = required(&block["input"]["tool_name"], "use_tool call")?;
+                Some(self.mcp_tool(target).ok_or_else(|| {
+                    Violation::policy(format!(
+                        "Grok called an MCP tool outside else.bot: {target}"
+                    ))
+                })?)
+            } else if let Some(tool) = self.mcp_tool(name) {
+                Some(tool)
+            } else if self.expected.iter().any(|t| t == name) {
+                None
+            } else {
+                return Err(Violation::policy(format!(
+                    "Grok called an unexpected tool: {name}"
+                )));
+            };
+            if let Some(tool) = tool {
+                self.calls.insert(id.to_owned(), tool.to_owned());
             }
         }
-        match event["type"].as_str().unwrap_or_default() {
-            "system" if event["subtype"] == "init" => {
-                if self.initialized
-                    || event["model"] != self.model
-                    || event["session_id"] != self.session
-                {
-                    return Err("Grok did not initialize the requested model and session".into());
+        Ok(())
+    }
+
+    fn parked(&self, event: &Value) -> Result<bool, Violation> {
+        let mut parked = false;
+        for block in list(&event["message"]["content"], "user message")? {
+            let Some(id) = text(&block["tool_use_id"], "tool result")? else {
+                continue;
+            };
+            parked |= self
+                .calls
+                .get(id)
+                .is_some_and(|tool| crate::app::tools::parks(tool, &block["content"]));
+        }
+        Ok(parked)
+    }
+}
+
+impl Protocol for Tracker {
+    type Message = Value;
+    type Terminal = Terminal;
+
+    fn on(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
+        if text(&event["parent_tool_use_id"], "parent tool use")?.is_some() {
+            return Err(Violation::policy("Grok ran a native subagent"));
+        }
+        if text(&event["session_id"], "session ID")?.is_some_and(|id| id != self.session) {
+            return Err(Violation::policy(
+                "Grok reported a different native session",
+            ));
+        }
+        self.check_model(&event["model"])?;
+        self.check_model(&event["message"]["model"])?;
+        self.check_model(&event["event"]["message"]["model"])?;
+        let mut events = Vec::new();
+        match required(&event["type"], "event")? {
+            "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
+                "init" => self.on_init(event)?,
+                sub if sub.starts_with("task_") || sub.contains("agent") => {
+                    return Err(Violation::policy("Grok reported native agent activity"));
                 }
-                let mut tools: Vec<_> = event["tools"]
-                    .as_array()
-                    .ok_or("Grok omitted its tool inventory")?
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                tools.retain(|tool| self.mcp_tool(tool).is_none());
-                tools.sort();
-                if tools != self.expected {
-                    return Err(format!("Grok offered unexpected tools: {tools:?}"));
-                }
-                let servers = event["mcp_servers"]
-                    .as_array()
-                    .ok_or("Grok omitted its MCP inventory")?;
-                let valid = if self.mcp {
-                    matches!(servers.as_slice(), [server] if server["name"] == "elsebot" && matches!(server["status"].as_str(), Some("connected" | "pending")))
-                } else {
-                    servers.is_empty()
-                };
-                if !valid {
-                    return Err(format!("Grok reported unexpected MCP servers: {servers:?}"));
-                }
-                self.initialized = true;
-            }
+                _ => {}
+            },
             "stream_event" => {
                 if !self.initialized {
-                    return Err("Grok produced output before its inventory".into());
+                    return Err(Violation::policy(
+                        "Grok produced output before its inventory",
+                    ));
                 }
                 let inner = &event["event"];
-                match inner["type"].as_str().unwrap_or_default() {
-                    "message_start" => {
-                        if !self.accepted {
-                            self.accepted = true;
-                            steps.push(Step::Accepted);
-                        }
+                match required(&inner["type"], "stream event")? {
+                    "message_start" => events.push(Event::Accepted {
+                        model: self.model.clone(),
+                        native_turn: self.session.clone(),
+                    }),
+                    "content_block_delta"
+                        if text(&inner["delta"]["type"], "delta")? == Some("text_delta") =>
+                    {
+                        let delta = required(&inner["delta"]["text"], "text delta")?;
+                        events.push(Event::Text(delta.to_owned()));
                     }
-                    "content_block_delta" if inner["delta"]["type"] == "text_delta" => {
-                        if let Some(text) = inner["delta"]["text"].as_str() {
-                            steps.push(Step::Text(text.into()));
-                        }
-                    }
-                    "message_stop" => steps.push(Step::EndMessage),
+                    "message_stop" => events.push(Event::EndMessage),
                     _ => {}
                 }
             }
-            "assistant" => {
-                for block in event["message"]["content"].as_array().into_iter().flatten() {
-                    if block["type"] == "server_tool_use" {
-                        return Err("Grok used a backend tool".into());
-                    }
-                    if block["type"] != "tool_use" {
-                        continue;
-                    }
-                    let name = block["name"].as_str().unwrap_or_default();
-                    let direct = self.mcp_tool(name);
-                    if direct.is_none() && !self.expected.iter().any(|t| t == name) {
-                        return Err(format!("Grok called an unexpected tool: {name}"));
-                    }
-                    let tool = if name == "use_tool" {
-                        Some(
-                            self.mcp_tool(block["input"]["tool_name"].as_str().unwrap_or_default())
-                                .ok_or("Grok called an MCP tool outside else.bot")?,
-                        )
-                    } else {
-                        direct
-                    };
-                    if let Some(tool) = tool {
-                        self.calls
-                            .insert(block["id"].as_str().unwrap_or_default().into(), tool.into());
-                    }
-                }
-            }
+            "assistant" => self.on_assistant(event)?,
             "user" => {
-                for block in event["message"]["content"].as_array().into_iter().flatten() {
-                    if let Some(tool) = block["tool_use_id"]
-                        .as_str()
-                        .and_then(|id| self.calls.get(id))
-                        && crate::app::tools::parks(tool, &block["content"])
-                    {
-                        steps.push(Step::Parked);
-                    }
+                if self.parked(event)? {
+                    events.push(Event::Parked);
                 }
             }
-            "control_request" => return Err("Grok requested interactive permission".into()),
-            "system"
-                if event["subtype"]
-                    .as_str()
-                    .is_some_and(|s| s.starts_with("task_") || s.contains("agent")) =>
-            {
-                return Err("Grok reported native agent activity".into());
+            "control_request" => {
+                return Err(Violation::policy("Grok requested interactive permission"));
             }
-            "result" => {
-                let outcome = if !self.initialized || !self.accepted {
-                    TurnOutcome::Uncertain {
-                        message: format!(
-                            "Grok ended without acknowledging the prompt: {}",
-                            event["errors"]
-                        ),
-                    }
-                } else if event["subtype"] == "success"
-                    && event["is_error"] == false
-                    && event["stop_reason"] == "end_turn"
-                {
-                    TurnOutcome::Completed
-                } else if event["stop_reason"] == "cancelled" {
-                    TurnOutcome::Interrupted
-                } else {
-                    TurnOutcome::Failed {
-                        code: "provider_failed".into(),
-                        message: format!(
-                            "Grok ended with {}: {}",
-                            event["stop_reason"], event["errors"]
-                        ),
-                    }
-                };
-                steps.push(Step::Result(outcome));
-            }
-            "error" => steps.push(Step::Result(TurnOutcome::Failed {
-                code: "provider_failed".into(),
-                message: event["message"].as_str().unwrap_or("Grok failed").into(),
+            "result" => events.push(Event::Finished(Terminal::Result {
+                success: text(&event["subtype"], "result")? == Some("success")
+                    && event["is_error"] == false,
+                stop_reason: text(&event["stop_reason"], "result")?.map(str::to_owned),
+                errors: event["errors"].to_string(),
             })),
+            "error" => events.push(Event::Finished(Terminal::Error(
+                text(&event["message"], "error")?
+                    .unwrap_or("Grok failed")
+                    .to_owned(),
+            ))),
             _ => {}
         }
-        Ok(steps)
+        Ok(events)
+    }
+
+    fn outcome(
+        &self,
+        terminal: Terminal,
+        stopping: Option<StopCause>,
+        accepted: bool,
+    ) -> TurnOutcome {
+        let (success, stop_reason, errors) = match terminal {
+            Terminal::Error(message) => return failed("provider_failed", message),
+            Terminal::Result {
+                success,
+                stop_reason,
+                errors,
+            } => (success, stop_reason, errors),
+        };
+        if !self.initialized || !accepted {
+            return TurnOutcome::Uncertain {
+                message: format!("Grok ended without acknowledging the prompt: {errors}"),
+            };
+        }
+        match stop_reason.as_deref() {
+            Some("end_turn") if success => TurnOutcome::Completed,
+            Some("cancelled") if stopping.is_some() => TurnOutcome::Interrupted,
+            Some("cancelled") => failed(
+                "provider_refused",
+                "Grok refused to execute a tool without additional permission.",
+            ),
+            reason => failed(
+                "provider_failed",
+                format!(
+                    "Grok ended with {}: {errors}",
+                    reason.unwrap_or("no stop reason")
+                ),
+            ),
+        }
+    }
+
+    /// Only a completed native turn is known to have settled; Grok sessions
+    /// that ended any other way are rebuilt from SQLite.
+    fn resumable(&self, outcome: &TurnOutcome) -> bool {
+        *outcome == TurnOutcome::Completed
     }
 }
 
-pub(super) struct Events<R> {
-    reader: R,
-    buf: Vec<u8>,
-}
-impl<R: tokio::io::AsyncBufRead + Unpin> Events<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            buf: Vec::new(),
-        }
-    }
-    pub async fn next(&mut self) -> Result<Option<Value>, String> {
-        loop {
-            let room = (8 * 1024 * 1024usize).saturating_sub(self.buf.len());
-            if room == 0 {
-                return Err("Grok sent an oversized event".into());
-            }
-            let n = (&mut self.reader)
-                .take(room as u64)
-                .read_until(b'\n', &mut self.buf)
-                .await
-                .map_err(|e| e.to_string())?;
-            if n == 0 && self.buf.is_empty() {
-                return Ok(None);
-            }
-            if n != 0 && !self.buf.ends_with(b"\n") {
-                continue;
-            }
-            let line = std::mem::take(&mut self.buf);
-            if line.iter().all(u8::is_ascii_whitespace) {
-                if n == 0 {
-                    return Ok(None);
-                }
-                continue;
-            }
-            return serde_json::from_slice(&line)
-                .map(Some)
-                .map_err(|e| format!("Grok sent malformed output: {e}"));
-        }
+fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
+    TurnOutcome::Failed {
+        code: code.into(),
+        message: message.into(),
     }
 }

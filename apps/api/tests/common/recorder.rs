@@ -148,7 +148,7 @@ impl Provider for Recorder {
         &self,
         input: TurnInput,
         sink: &dyn TurnSink,
-        cancel: tokio_util::sync::CancellationToken,
+        stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
         self.mailbox
             .send(Message::Record(Box::new(input.clone())))
@@ -161,7 +161,7 @@ impl Provider for Recorder {
             gate: gated.then_some((self, input.turn_id)),
             open: tokio::sync::OnceCell::new(),
         };
-        self.inner.run(input, &sink, cancel).await
+        self.inner.run(input, &sink, stop).await
     }
 }
 

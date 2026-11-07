@@ -56,10 +56,10 @@ impl Provider for Catalogued {
         &self,
         input: TurnInput,
         sink: &dyn TurnSink,
-        cancel: tokio_util::sync::CancellationToken,
+        stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
         Synthetic::new(Duration::from_millis(5))
-            .run(input, sink, cancel)
+            .run(input, sink, stop)
             .await
     }
 }

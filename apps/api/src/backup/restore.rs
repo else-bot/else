@@ -463,13 +463,7 @@ async fn load_and_check(
             reasoning_effort,
             service_tier,
         };
-        let checked = match provider.as_str() {
-            crate::providers::codex::ID => crate::providers::codex::validate(&profile),
-            crate::providers::claude::ID => crate::providers::claude::validate(&profile),
-            crate::providers::grok::ID => crate::providers::grok::validate(&profile),
-            _ => Ok(()),
-        };
-        if let Err(reason) = checked {
+        if let Err(reason) = crate::providers::definitions::validate_restored(&provider, &profile) {
             return Err(BackupError::Invalid(format!(
                 "restored {provider} profile is not allowed: {reason}"
             )));

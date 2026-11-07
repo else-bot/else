@@ -346,6 +346,57 @@ pub trait TurnSink: Send + Sync {
     ) -> Result<(), Fenced>;
 }
 
+/// The owner's stop requests for one attempt. [`Stop::request`] asks the
+/// provider to interrupt its turn gracefully. [`Stop::escalate`] follows
+/// when that takes too long: the provider must then stop at once, verify
+/// its cleanup, and return. Its caller keeps awaiting it either way, so
+/// capacity is never released while provider processes may remain.
+#[derive(Debug, Clone, Default)]
+pub struct Stop {
+    graceful: CancellationToken,
+    hard: CancellationToken,
+}
+
+impl Stop {
+    /// A stop whose graceful requests come from `graceful`.
+    pub fn new(graceful: CancellationToken) -> Self {
+        Self {
+            graceful,
+            hard: CancellationToken::new(),
+        }
+    }
+
+    pub fn request(&self) {
+        self.graceful.cancel();
+    }
+
+    pub fn escalate(&self) {
+        self.graceful.cancel();
+        self.hard.cancel();
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.graceful.is_cancelled()
+    }
+
+    pub fn is_escalated(&self) -> bool {
+        self.hard.is_cancelled()
+    }
+
+    pub async fn requested(&self) {
+        self.graceful.cancelled().await;
+    }
+
+    pub async fn escalated(&self) {
+        self.hard.cancelled().await;
+    }
+
+    /// The graceful request, for work that only stops gracefully.
+    pub fn token(&self) -> &CancellationToken {
+        &self.graceful
+    }
+}
+
 /// Availability as reported in capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Availability {
@@ -384,12 +435,8 @@ pub trait Provider: Send + Sync {
         let _ = (request, cancel);
         Err("this provider cannot produce a verified no-tool checkpoint".into())
     }
-    /// Run one turn to a terminal outcome. Cancellation must interrupt the
-    /// provider and return only after it has stopped or been terminated.
-    async fn run(
-        &self,
-        input: TurnInput,
-        sink: &dyn TurnSink,
-        cancel: CancellationToken,
-    ) -> TurnOutcome;
+    /// Run one turn to a terminal outcome. A stop request must interrupt
+    /// the provider; an escalation must end it at once. Either way it
+    /// returns only after its processes have stopped.
+    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome;
 }

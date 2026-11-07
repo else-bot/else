@@ -1,72 +1,149 @@
 use super::*;
+use crate::app::providers::Origin;
+use crate::providers::cli::attempt::{Event, Protocol, StopCause};
+use protocol::Terminal;
 use serde_json::{Value, json};
 
 fn tracker(host: bool) -> Tracker {
     Tracker::new("grok-4.7", "session", host, true)
 }
+
 fn init(host: bool) -> Value {
     let mut tools = grok_home::MCP_TOOLS.to_vec();
     if host {
-        tools.extend(grok_home::HOST_TOOL_NAMES);
+        tools.extend(grok_home::HOST_TOOLS.iter().map(|(_, name)| *name));
     }
     json!({"type":"system","subtype":"init","session_id":"session","model":"grok-4.7","tools":tools,"mcp_servers":[{"name":"elsebot","status":"connected"}]})
+}
+
+fn result(stop_reason: &str) -> Value {
+    json!({"type":"result","subtype":"success","is_error":false,"stop_reason":stop_reason})
+}
+
+fn finish(t: &mut Tracker, event: &Value, stopping: Option<StopCause>) -> TurnOutcome {
+    match t.on(event).unwrap().pop() {
+        Some(Event::Finished(terminal)) => t.outcome(terminal, stopping, true),
+        other => panic!("not terminal: {other:?}"),
+    }
 }
 
 #[test]
 fn text_is_streamed_once_and_only_a_terminal_result_completes() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();
-    assert!(!t.accepted);
-    assert_eq!(t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"grok-4.7"}}})).unwrap(), vec![Step::Accepted]);
-    assert_eq!(t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}})).unwrap(), vec![Step::Text("hello".into())]);
-    assert!(t.on(&json!({"type":"assistant","message":{"model":"grok-4.7","content":[{"type":"text","text":"hello"}]}})).unwrap().is_empty());
     assert_eq!(
-        t.on(
-            &json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"})
-        )
-        .unwrap(),
-        vec![Step::Result(TurnOutcome::Completed)]
+        t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"grok-4.7"}}})),
+        Ok(vec![Event::Accepted { model: "grok-4.7".into(), native_turn: "session".into() }])
+    );
+    assert_eq!(
+        t.on(&json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}})),
+        Ok(vec![Event::Text("hello".into())])
+    );
+    assert_eq!(
+        t.on(&json!({"type":"assistant","message":{"model":"grok-4.7","content":[{"type":"text","text":"hello"}]}})),
+        Ok(vec![])
+    );
+    assert_eq!(
+        finish(&mut t, &result("end_turn"), None),
+        TurnOutcome::Completed
+    );
+    assert!(t.resumable(&TurnOutcome::Completed));
+    assert!(
+        !t.resumable(&TurnOutcome::Interrupted),
+        "only a completed native turn is resumed"
     );
 }
 
 #[test]
 fn inventories_models_subagents_and_sessions_are_checked() {
+    let edit = |change: fn(&mut Value)| {
+        let mut event = init(true);
+        change(&mut event);
+        event
+    };
     for event in [
-        {
-            let mut e = init(true);
+        edit(|e| {
             e["tools"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!("spawn_subagent"));
-            e
-        },
-        {
-            let mut e = init(true);
-            e["mcp_servers"][0]["status"] = json!("failed");
-            e
-        },
-        {
-            let mut e = init(true);
+                .push(json!("spawn_subagent"))
+        }),
+        edit(|e| {
+            e["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name": "spawn_subagent"}))
+        }),
+        edit(|e| e["tools"].as_array_mut().unwrap().push(json!(7))),
+        edit(|e| e["tools"] = json!("search_tool")),
+        edit(|e| e["mcp_servers"][0]["status"] = json!("failed")),
+        edit(|e| e["mcp_servers"][0]["name"] = json!(["elsebot"])),
+        edit(|e| {
             e["mcp_servers"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({"name":"other","status":"connected"}));
-            e
-        },
-        {
-            let mut e = init(true);
-            e["model"] = json!("grok-4.6");
-            e
-        },
+                .push(json!({"name":"other","status":"connected"}))
+        }),
+        edit(|e| {
+            e["mcp_servers"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("elsebot"))
+        }),
+        edit(|e| e["model"] = json!("grok-4.6")),
+        edit(|e| e["model"] = json!(4.7)),
+        edit(|e| e["session_id"] = json!(1)),
         json!({"type":"assistant","parent_tool_use_id":"child"}),
         json!({"type":"system","subtype":"task_started"}),
         json!({"type":"assistant","session_id":"another"}),
         json!({"type":"control_request"}),
+        json!({"subtype":"init"}),
     ] {
         assert!(tracker(true).on(&event).is_err(), "{event}");
     }
     assert!(tracker(false).on(&init(true)).is_err());
     assert!(tracker(false).on(&init(false)).is_ok());
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    assert!(t.on(&init(true)).is_err(), "a second inventory is refused");
+}
+
+#[test]
+fn errors_are_classified_by_their_cause() {
+    let model = tracker(true)
+        .on(&json!({"type":"assistant","message":{"model":"grok-4.6","content":[]}}))
+        .unwrap_err();
+    assert_eq!(model.code, "profile_mismatch");
+    let tool = tracker(true)
+        .on(&json!({"type":"assistant","message":{"content":[{"type":"server_tool_use"}]}}))
+        .unwrap_err();
+    assert_eq!(tool.code, "policy_violation");
+}
+
+#[test]
+fn malformed_known_events_fail_and_unknown_events_are_ignored() {
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    for event in [
+        json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":7}}}),
+        json!({"type":"stream_event","event":{}}),
+        json!({"type":"assistant","message":{}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"use_tool","id":"c1","input":{}}]}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"read_file"}]}}),
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":5}]}}),
+        json!({"type":"result","subtype":1}),
+        json!({"type":7}),
+    ] {
+        assert!(t.on(&event).is_err(), "{event}");
+    }
+    assert_eq!(
+        t.on(&json!({"type":"progress","anything":[1, 2]})),
+        Ok(vec![])
+    );
+    assert_eq!(
+        t.on(&json!({"type":"system","subtype":"status"})),
+        Ok(vec![])
+    );
 }
 
 #[test]
@@ -74,14 +151,34 @@ fn truncated_refused_or_cancelled_results_do_not_complete() {
     for reason in ["max_tokens", "max_turn_requests", "refusal", "cancelled"] {
         let mut t = tracker(true);
         t.on(&init(true)).unwrap();
-        t.on(&json!({"type":"stream_event","event":{"type":"message_start"}}))
-            .unwrap();
-        let steps = t
-            .on(&json!({"type":"result","subtype":"success","is_error":false,"stop_reason":reason}))
-            .unwrap();
-        assert_ne!(steps, vec![Step::Result(TurnOutcome::Completed)]);
+        assert_ne!(
+            finish(&mut t, &result(reason), None),
+            TurnOutcome::Completed
+        );
     }
-    assert!(matches!(tracker(true).on(&json!({"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"})).unwrap().as_slice(),[Step::Result(TurnOutcome::Uncertain{..})]));
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    assert!(matches!(
+        finish(&mut t, &result("cancelled"), None),
+        TurnOutcome::Failed { code, .. } if code == "provider_refused"
+    ));
+    assert_eq!(
+        finish(&mut t, &result("cancelled"), Some(StopCause::Owner)),
+        TurnOutcome::Interrupted
+    );
+    let mut fresh = tracker(true);
+    let Some(Event::Finished(terminal)) = fresh.on(&result("end_turn")).unwrap().pop() else {
+        panic!("terminal");
+    };
+    assert!(matches!(
+        fresh.outcome(terminal, None, false),
+        TurnOutcome::Uncertain { .. }
+    ));
+    let mut t = tracker(true);
+    assert_eq!(
+        t.on(&json!({"type":"error","message":"boom"})),
+        Ok(vec![Event::Finished(Terminal::Error("boom".into()))])
+    );
 }
 
 #[test]
@@ -89,11 +186,14 @@ fn only_elsebot_mcp_calls_are_allowed_and_parking_is_preserved() {
     let mut t = tracker(false);
     t.on(&init(false)).unwrap();
     t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"use_tool","input":{"tool_name":"elsebot__ask_owner"}}]}})).unwrap();
-    assert_eq!(t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"parked\":true}"}]}})).unwrap(),vec![Step::Parked]);
+    assert_eq!(
+        t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"{\"parked\":true}"}]}})),
+        Ok(vec![Event::Parked])
+    );
     for name in ["other-ask_owner", "elsebot__not_real"] {
         assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c2","name":"use_tool","input":{"tool_name":name}}]}})).is_err());
     }
-    assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"run_terminal_command"}]}})).is_err());
+    assert!(t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c3","name":"run_terminal_command"}]}})).is_err());
 }
 
 #[test]
@@ -103,7 +203,7 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
         reasoning_effort: "high".into(),
         service_tier: "default".into(),
     };
-    assert!(validate(&profile).is_ok());
+    assert!(DEFINITION.validate(&profile).is_ok());
     for bad in [
         Profile {
             model: "grok".into(),
@@ -118,7 +218,7 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
             ..profile
         },
     ] {
-        assert!(validate(&bad).is_err());
+        assert!(DEFINITION.validate(&bad).is_err());
     }
     assert!(matches!(
         Grok::detect(None, None, None).availability(),
@@ -126,25 +226,48 @@ fn profiles_reject_settings_the_cli_cannot_apply() {
     ));
 }
 
-#[tokio::test]
-async fn event_reads_survive_cancellation_and_reject_malformed_or_oversized_lines() {
-    use tokio::io::AsyncWriteExt;
-    let (mut writer, reader) = tokio::io::duplex(1024);
-    let mut events = Events::new(BufReader::new(reader));
-    writer.write_all(b"{\"type\":").await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), events.next())
-            .await
-            .is_err()
-    );
-    writer.write_all(b"\"result\"}\n").await.unwrap();
-    assert_eq!(events.next().await.unwrap(), Some(json!({"type":"result"})));
-    assert!(Events::new(&b"oops\n"[..]).next().await.is_err());
-    assert!(
-        Events::new(&vec![b'x'; 8 * 1024 * 1024][..])
-            .next()
-            .await
-            .is_err()
+#[test]
+fn the_fingerprint_follows_the_account_not_the_login_path() {
+    let root = tempfile::tempdir().unwrap();
+    let login = root.path().join("login");
+    std::fs::create_dir(&login).unwrap();
+    let auth = |user: &str| {
+        let entry =
+            json!({"key": "secret", "refresh_token": "secret", "user_id": user, "team_id": "t"});
+        std::fs::write(
+            login.join("auth.json"),
+            json!({"https://auth.x.ai::id": entry}).to_string(),
+        )
+        .unwrap();
+    };
+    let grok = Grok {
+        ready: Ok(Ready {
+            host: Host::new(&root.path().join("data"), &root.path().join("bots")),
+            program: PathBuf::new(),
+            version: "grok 1.0".into(),
+            login: login.clone(),
+        }),
+        tool_url: Some("http://127.0.0.1:1/mcp".into()),
+    };
+    let ready = grok.ready.as_ref().unwrap();
+    let mut input = crate::providers::cli::session::tests::input();
+    let profile = Profile {
+        model: "grok-4.7".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    auth("alice");
+    let alice = grok.fingerprint(ready, &input, &profile);
+    assert_eq!(alice, grok.fingerprint(ready, &input, &profile));
+    assert!(!grok_home::host_account(&login).contains("secret"));
+    auth("bob");
+    assert_ne!(alice, grok.fingerprint(ready, &input, &profile), "account");
+    let bob = grok.fingerprint(ready, &input, &profile);
+    input.delegation.origin = Origin::ConnectorEvent;
+    assert_ne!(
+        bob,
+        grok.fingerprint(ready, &input, &profile),
+        "tool policy"
     );
 }
 
@@ -190,25 +313,6 @@ fn provider_homes_link_login_and_keep_grants_out_of_config() {
         &dirs.project,
         "../../session"
     ));
-}
-
-#[test]
-fn pending_mcp_and_dynamic_direct_tools_are_valid_but_foreign_tools_are_not() {
-    let mut inventory = init(true);
-    inventory["mcp_servers"][0]["status"] = json!("pending");
-    inventory["tools"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("elsebot__list_bots"));
-    let mut t = tracker(true);
-    t.on(&inventory).unwrap();
-    t.on(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"direct","name":"elsebot__ask_owner","input":{}}]}})).unwrap();
-    assert_eq!(t.on(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"direct","content":"{\"parked\":true}"}]}})).unwrap(),vec![Step::Parked]);
-    inventory["tools"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("other__list_bots"));
-    assert!(tracker(true).on(&inventory).is_err());
 }
 
 #[test]

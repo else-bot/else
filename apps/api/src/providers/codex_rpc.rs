@@ -6,7 +6,7 @@
 //! refused immediately by the reader itself, so a request waiting for a
 //! response can never deadlock behind one; the refusal is reported to the
 //! caller as [`Incoming::Refused`]. Provider output is bounded: a line over
-//! [`MAX_LINE`] bytes or a backlog over [`MAX_QUEUED`] messages closes the
+//! [`super::cli::lines::MAX_LINE`] bytes or a backlog over [`MAX_QUEUED`] messages closes the
 //! connection rather than growing API memory.
 
 use std::collections::HashMap;
@@ -16,12 +16,15 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
-use super::host::{Host, LaunchSpec, Supervised};
+use super::cli::attempt::{self, Ended};
+use super::cli::lines::{JsonLines, LineError};
+use super::cli::process::{Finish, Scope};
+use super::host::{Host, LaunchSpec};
+use crate::app::providers::{TurnOutcome, TurnSink};
 
-const MAX_LINE: u64 = 8 * 1024 * 1024;
 const MAX_QUEUED: usize = 4096;
 
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +79,7 @@ pub enum Incoming {
 pub struct AppServer {
     /// The bot's project directory, for `cwd`.
     pub cwd: String,
-    process: Supervised,
+    scope: Scope,
     commands: mpsc::Sender<Command>,
     slots: Arc<Semaphore>,
     next_id: AtomicI64,
@@ -101,21 +104,16 @@ async fn write_line(
 impl AppServer {
     /// Start the server on the host and complete the initialize handshake.
     pub async fn start(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
-        let mut command = host.command(spec);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut process =
-            Supervised::spawn(command).map_err(|err| RpcError::Spawn(err.to_string()))?;
-        let stdin = process.child.stdin.take().ok_or(RpcError::Closed)?;
-        let stdout = process.child.stdout.take().ok_or(RpcError::Closed)?;
+        let mut scope = Scope::spawn(host, spec, Stdio::piped(), Stdio::null())
+            .map_err(|err| RpcError::Spawn(err.to_string()))?;
+        let stdin = scope.child().stdin.take().ok_or(RpcError::Closed)?;
+        let stdout = scope.child().stdout.take().ok_or(RpcError::Closed)?;
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
         let (commands, command_rx) = mpsc::channel(MAX_REQUESTS);
         tokio::spawn(io_loop(stdout, stdin, command_rx, tx));
         let server = Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
-            process,
+            scope,
             commands,
             slots: Arc::new(Semaphore::new(MAX_REQUESTS)),
             next_id: AtomicI64::new(1),
@@ -196,12 +194,30 @@ impl AppServer {
     }
 
     pub fn pid(&self) -> i32 {
-        self.process.pid()
+        self.scope.pid()
     }
 
-    /// Terminate the server's process group and wait for it to exit.
-    pub async fn shutdown(mut self, grace: Duration) {
-        self.process.terminate(grace).await;
+    /// Close the server's input (it exits at its end) and keep its process.
+    fn into_scope(self) -> Scope {
+        let Self {
+            scope,
+            commands,
+            incoming,
+            ..
+        } = self;
+        drop((commands, incoming));
+        scope
+    }
+
+    /// Close the server, let it exit, and sweep its processes.
+    pub async fn close(self) -> Result<(), String> {
+        self.into_scope().finish(Finish::Exit).await
+    }
+
+    /// End a turn's attempt: close the server, verify its cleanup, and
+    /// retire the native session if the turn may be unfinished.
+    pub async fn conclude(self, ended: Ended, sink: &dyn TurnSink) -> TurnOutcome {
+        attempt::conclude(ended, self.into_scope(), None, sink, "Codex").await
     }
 }
 
@@ -282,24 +298,18 @@ async fn io_loop(
 }
 
 async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
+    let mut lines = JsonLines::new(BufReader::new(stdout), "Codex");
     loop {
-        line.clear();
-        match (&mut reader)
-            .take(MAX_LINE + 1)
-            .read_until(b'\n', &mut line)
-            .await
-        {
-            Ok(0) | Err(_) => break,
-            Ok(_) if line.len() as u64 > MAX_LINE => {
-                tracing::warn!("provider sent an oversized message; closing it");
-                break;
+        match lines.next().await {
+            Ok(Some(message)) => {
+                if tx.try_send(message).is_err() {
+                    break;
+                }
             }
-            Ok(_) => {}
-        }
-        if let Ok(message) = serde_json::from_slice::<Value>(&line) {
-            if tx.try_send(message).is_err() {
+            Ok(None) => break,
+            Err(LineError::Malformed(..)) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "closing the provider's output");
                 break;
             }
         }
@@ -309,6 +319,7 @@ async fn read_loop(stdout: impl AsyncRead + Unpin, tx: mpsc::Sender<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncBufReadExt;
 
     #[tokio::test]
     async fn actor_refuses_server_requests_while_waiting_for_a_response() {

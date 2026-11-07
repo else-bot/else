@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use else_api::app::messages::{MessagePart, flatten};
-use else_api::app::providers::{Availability, Profile, Provider, TurnInput, TurnOutcome, TurnSink};
+use else_api::app::providers::{
+    Availability, Profile, Provider, Stop, TurnInput, TurnOutcome, TurnSink,
+};
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
@@ -41,7 +42,7 @@ impl Provider for ImageProvider {
     fn project_dir(&self, bot: Uuid) -> Option<PathBuf> {
         Some(self.root.join(bot.to_string()))
     }
-    async fn run(&self, _: TurnInput, sink: &dyn TurnSink, _: CancellationToken) -> TurnOutcome {
+    async fn run(&self, _: TurnInput, sink: &dyn TurnSink, _: Stop) -> TurnOutcome {
         sink.sending().await.unwrap();
         sink.running().await.unwrap();
         for (index, reply) in self.replies.iter().enumerate() {
