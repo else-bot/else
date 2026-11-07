@@ -1219,10 +1219,16 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    assert_ne!(
-        app.wait_turn(&child.to_string(), &["queued", "running", "completed"])
-            .await,
-        "waiting",
-        "the delegated task continues with the skipped outcome"
+    wait(&app, child, "running").await;
+    let delivered: Option<i32> =
+        sqlx::query_scalar("SELECT delivered_attempt FROM owner_questions WHERE id = ?1")
+            .bind(question)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        delivered,
+        Some(2),
+        "the delegated task continues and receives the skipped outcome"
     );
 }
