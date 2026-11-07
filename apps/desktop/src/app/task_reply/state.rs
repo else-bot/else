@@ -72,6 +72,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
         })
         .collect();
     let mut task_turns = HashSet::new();
+    let mut notice_turns = HashSet::new();
     let mut replies: HashMap<_, _> = conversation
         .turns_in_order()
         .into_iter()
@@ -149,16 +150,20 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             }
             reply.latest_kept = reaction.is_some() || has_file;
             reply.anchor = Some(item.id);
+        } else if item.bot_created.is_some() {
+            notice_turns.insert(item.turn_id);
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);
         }
     }
     replies.retain(|turn, reply| {
-        reply.state != ReplyState::Complete
-            || reply.latest.is_none()
-            || !reply.history.is_empty()
-            || !reply.kept.is_empty()
-            || task_turns.contains(turn)
+        let notice_only = reply.latest.is_none() && notice_turns.contains(turn);
+        !notice_only
+            && (reply.state != ReplyState::Complete
+                || reply.latest.is_none()
+                || !reply.history.is_empty()
+                || !reply.kept.is_empty()
+                || task_turns.contains(turn))
     });
     for reply in replies
         .values_mut()
@@ -359,6 +364,22 @@ mod tests {
         assert_eq!(reply.history, [id(2), id(3)]);
         assert_eq!(reply.state, ReplyState::Complete);
         assert_eq!(c.items().count(), 4);
+    }
+
+    #[test]
+    fn a_bot_creation_notice_stands_alone_without_an_empty_task_card() {
+        let mut notice = item(1, 10, "status");
+        notice["bot_created"] = json!({
+            "bot_id": id(20), "name": "Auto", "creator_bot_id": id(21),
+            "creator_name": "Tech Manager", "purpose": "Own the routines."
+        });
+        let c = conversation(vec![notice], vec![turn(10, "completed")]);
+        assert!(task_replies(&c).is_empty());
+        let c = conversation(vec![item(1, 10, "status")], vec![turn(10, "completed")]);
+        assert!(
+            task_replies(&c).contains_key(&id(10)),
+            "plain notices keep theirs"
+        );
     }
 
     #[test]
