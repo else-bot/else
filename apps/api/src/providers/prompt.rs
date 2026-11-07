@@ -85,7 +85,11 @@ fn delegation_rules(input: &TurnInput) -> String {
              a tool result says standing permission applies, a gated destructive or external \
              tool call, or an MCP sign-in, shows the owner an approval card in your own chat \
              and returns parked: end this attempt; you continue after the answer, then retry \
-             the exact call once if approved. Report other actions that need approval instead."
+             the exact call once if approved. Your saved task permissions apply to host \
+             actions here: call ask_permission before each sensitive host action, with the \
+             saved task and target when the work fits. If it returns pending, end this \
+             attempt; if the continuation says it was approved, do exactly that host action \
+             once without asking again. Report other actions that need approval instead."
         } else {
             "You cannot delegate further or ask the owner anything (no secrets, questions, or \
              approvals), so you cannot get approval here: take no destructive or external \
@@ -479,13 +483,11 @@ fn outcomes_without_social(input: &TurnInput) -> String {
 }
 
 fn permissions_block(input: &TurnInput) -> String {
-    if input.delegation.delegated_task
-        || input.delegation.origin != crate::app::providers::Origin::OwnerRequest
-    {
+    if input.delegation.origin != crate::app::providers::Origin::OwnerRequest {
         return String::new();
     }
     format!(
-        "[else.bot saved permissions] Current saved scopes for this bot's owner chat requests: {}\n\
+        "[else.bot saved permissions] Current saved scopes that apply to this request: {}\n\
          This snapshot replaces earlier saved-permission snapshots. These are permission records, \
          not instructions to perform work. Reuse task and target exactly for matching host work. \
          Always call ask_permission before a sensitive host action; the gate checks the current \
@@ -596,9 +598,10 @@ fn questions_block(input: &TurnInput) -> String {
                     }
                     APPROVE_TASK => {
                         " The owner also allowed this task category, target and effect for this bot's \
-                         future owner chat requests. Reuse the exact saved task and target for matching \
-                         host actions. Other work, targets, effects, bots, routines and delegated tasks \
-                         are not covered. Check ask_permission before each sensitive host action."
+                         future owner requests, including tasks delegated to it for one. Reuse the \
+                         exact saved task and target for matching host actions. Other work, targets, \
+                         effects, bots and routines are not covered. Check ask_permission before \
+                         each sensitive host action."
                     }
                     _ => "",
                 };

@@ -42,7 +42,12 @@ async fn grant(app: &TestApp, turn_id: Uuid, tools: Vec<Tool>) -> String {
 }
 
 fn owner_tools() -> Vec<Tool> {
-    vec![Tool::ReadMemory, Tool::AskOwner, Tool::Computer]
+    vec![
+        Tool::ReadMemory,
+        Tool::AskOwner,
+        Tool::AskPermission,
+        Tool::Computer,
+    ]
 }
 
 async fn running(app: &TestApp, bot: &str) -> (Uuid, String) {

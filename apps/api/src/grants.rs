@@ -40,6 +40,9 @@ pub enum Tool {
     RequestSecret,
     /// Ask the owner a question or for permission (owner conversations only).
     AskOwner,
+    /// Check a host action against the owner's approvals; the gate decides
+    /// whether this turn may use a saved grant or show a card.
+    AskPermission,
     /// Manage the bot's own routines (work rooted in an owner message,
     /// including a task delegated for one; never a routine run or its tasks).
     Routines,

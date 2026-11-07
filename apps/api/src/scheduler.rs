@@ -431,6 +431,7 @@ fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
         Tool::ReadMemory,
         Tool::Computer,
         Tool::Mcp,
+        Tool::AskPermission,
     ];
     if !delegation.delegated_task {
         tools.extend([Tool::Mail, Tool::Social]);
