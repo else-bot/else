@@ -4,6 +4,7 @@
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
+- Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.
 - Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
 - Do not draw focus rings or decorative outlines on controls; use outlines only to indicate a selected state.
 - Add hover popovers, tooltips, or image descriptions only when they provide information beyond visible labels, familiar icons, or surrounding context.

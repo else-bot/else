@@ -29,6 +29,10 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Check migration numbering
+        run: python3 scripts/check_migrations.py
+      - name: Test migration numbering check
+        run: python3 scripts/test-migrations.py
       - name: Test release packaging and publication
         run: python3 scripts/test-release.py
       - name: Test installation removal

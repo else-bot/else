@@ -229,3 +229,25 @@ pub fn options(url: &str) -> Result<SqliteConnectOptions, DbError> {
         .command_buffer_size(64)
         .row_buffer_size(64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MIGRATOR;
+
+    /// SQLx records each applied migration by its version number, so a
+    /// shipped version can never be renumbered. Keep new ones contiguous.
+    #[test]
+    fn migration_versions_are_contiguous_from_one() {
+        let versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+        assert!(
+            !versions.is_empty(),
+            "no migrations embedded from apps/api/migrations"
+        );
+        let expected: Vec<i64> = (1..=versions.len() as i64).collect();
+        assert_eq!(
+            versions, expected,
+            "apps/api/migrations versions must be unique and contiguous from 1; \
+             give a new migration the next number and never renumber a shipped one"
+        );
+    }
+}
