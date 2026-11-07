@@ -296,7 +296,7 @@ impl ElseApp {
             if let Some(reply) = item.bot_reply.as_ref() {
                 let prompt_open = view.bot_disclosures.contains(&Disclosure::Prompt(item.id));
                 card = card.child(
-                    div().pt_2().child(
+                    h_flex().pt_2().child(
                         self.bot_disclosure_button(
                             Disclosure::Prompt(item.id),
                             item.id,
@@ -318,16 +318,22 @@ impl ElseApp {
                 }
             }
         } else {
+            let preview = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            // Clipped, not `line_clamp`: GPUI caches a clamped line under the
+            // same key as the unclamped one, so the expanded reply would
+            // reuse this preview's unwrapped lines.
             card = card.child(
                 div()
-                    .pt_1()
+                    .mt_1()
                     .text_sm()
+                    .line_height(rems(1.25))
+                    .max_h(rems(2.5))
+                    .overflow_hidden()
                     .text_color(theme.muted_foreground)
-                    .line_clamp(2)
-                    .child(if body.trim().is_empty() {
+                    .child(if preview.is_empty() {
                         "Finished without a reply.".to_owned()
                     } else {
-                        body.to_owned()
+                        preview
                     }),
             );
         }
