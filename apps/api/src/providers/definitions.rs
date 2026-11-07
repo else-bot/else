@@ -1,6 +1,7 @@
-//! The static identity and profile rules of each provider CLI, shared by
-//! the running adapters and by offline checks (restore) that must not probe
-//! an installed CLI.
+//! The one registration of each provider CLI: its identity and profile
+//! rules, shared by the running adapters and by offline checks (restore)
+//! that must not probe an installed CLI, and the constructor the runtime
+//! registry calls. Adding a CLI is one entry in [`DEFINITIONS`].
 
 use crate::app::providers::{Catalog, Profile};
 
@@ -14,9 +15,12 @@ pub struct Definition {
     pub model_note: &'static str,
     pub effort_note: &'static str,
     pub tier_note: &'static str,
+    /// Construct the running adapter. Only [`super::build`] calls it;
+    /// offline checks never do.
+    pub build: fn(&super::Wiring) -> super::Built,
 }
 
-/// Registration order is default-selection order.
+/// Every provider CLI. Registration order is default-selection order.
 pub const DEFINITIONS: &[&Definition] = &[
     &super::codex::DEFINITION,
     &super::claude::DEFINITION,

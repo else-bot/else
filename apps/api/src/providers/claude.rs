@@ -80,7 +80,24 @@ pub static DEFINITION: Definition = Definition {
     model_note: " An alias would follow the CLI's floating default.",
     effort_note: "",
     tier_note: " Fast mode needs an SDK opt-in this adapter does not use.",
+    build,
 };
+
+fn build(wiring: &super::Wiring) -> super::Built {
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let home = std::env::var("HOME").ok();
+    let claude = Claude::detect(
+        Some(wiring.host.clone()),
+        super::executable(wiring.config.claude_bin.as_deref(), "claude"),
+        claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+        claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+    )
+    .with_tools(wiring.tool_url.clone());
+    super::Built {
+        provider: std::sync::Arc::new(claude),
+        summarizer: None,
+    }
+}
 
 /// A CLI that runs, logged in with the host configuration.
 struct Ready {

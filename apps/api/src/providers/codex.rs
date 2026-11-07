@@ -73,7 +73,28 @@ pub static DEFINITION: Definition = Definition {
     model_note: "",
     effort_note: " Ultra delegates to native sub-agents, which are disabled.",
     tier_note: "",
+    build,
 };
+
+/// The one Codex is both a provider and the memory summarizer.
+fn build(wiring: &super::Wiring) -> super::Built {
+    let auth = codex_home::host_auth_file(
+        std::env::var("CODEX_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    );
+    let codex = std::sync::Arc::new(
+        Codex::detect(
+            Some(wiring.host.clone()),
+            super::executable(wiring.config.codex_bin.as_deref(), "codex"),
+            auth,
+        )
+        .with_tools(wiring.tool_url.clone()),
+    );
+    super::Built {
+        provider: codex.clone(),
+        summarizer: Some(codex),
+    }
+}
 
 /// A CLI that runs and a host login.
 struct Ready {

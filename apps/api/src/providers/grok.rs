@@ -45,7 +45,21 @@ pub static DEFINITION: Definition = Definition {
     model_note: "",
     effort_note: "",
     tier_note: " Choose grok-4.7-build-fast for its fast model.",
+    build,
 };
+
+fn build(wiring: &super::Wiring) -> super::Built {
+    let grok = Grok::detect(
+        Some(wiring.host.clone()),
+        super::executable(wiring.config.grok_bin.as_deref(), "grok"),
+        grok_home::host_home(),
+    )
+    .with_tools(wiring.tool_url.clone());
+    super::Built {
+        provider: std::sync::Arc::new(grok),
+        summarizer: None,
+    }
+}
 
 /// A CLI that runs and a host login.
 struct Ready {
