@@ -222,7 +222,7 @@ pub(super) struct ModelRequest<'a> {
 }
 
 impl ModelRequest<'_> {
-    fn key(&self) -> String {
+    pub(super) fn key(&self) -> String {
         [
             "model",
             self.model,

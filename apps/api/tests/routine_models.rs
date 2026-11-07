@@ -586,8 +586,40 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
     assert_eq!(created.result["model"]["model"], "gpt-6.1-sol");
     let bot = created.result["bot_id"].as_str().unwrap().to_owned();
 
+    let effort = created.result["model"]["reasoning_effort"]
+        .as_str()
+        .unwrap();
+    let other = if effort == "xhigh" { "low" } else { "xhigh" };
+    sqlx::query(
+        "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
+         VALUES ('codex', 'gpt-6-luna', ?1, 'default')
+         ON CONFLICT (provider_id) DO UPDATE SET reasoning_effort = excluded.reasoning_effort",
+    )
+    .bind(other)
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    let edited = h
+        .app
+        .owner(
+            "PUT",
+            &format!("/v1/bots/{bot}/profile"),
+            Some(json!({ "provider_id": "codex", "model": "gpt-6-luna",
+                         "reasoning_effort": "high", "service_tier": "default" })),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
     let retry = tool(&h.app, &token, "create_bot", args).await;
-    assert_eq!(retry.result["created"], false, "{}", retry.body);
+    assert_eq!(
+        retry.result["created"], false,
+        "a retry matches after the defaults change: {}",
+        retry.body
+    );
+    assert_eq!(
+        retry.result["model"]["model"], "gpt-6-luna",
+        "a retry reports the bot's saved model"
+    );
     let changed = tool(
         &h.app,
         &token,
@@ -612,7 +644,7 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
         .await;
     assert_eq!(profile.status, StatusCode::OK);
     assert_eq!(profile.body["profile"]["own"], true, "{}", profile.body);
-    assert_eq!(profile.body["profile"]["model"], "gpt-6.1-sol");
+    assert_eq!(profile.body["profile"]["model"], "gpt-6-luna");
 
     let first = h.send(&bot, "hello").await;
     h.app.wait_turn(&first.to_string(), &["completed"]).await;
@@ -624,7 +656,7 @@ async fn a_bot_created_with_a_named_model_runs_on_it() {
             .unwrap();
     assert_eq!(provider, "codex");
     let profile: Value = serde_json::from_str(&profile).unwrap();
-    assert_eq!(profile["model"], "gpt-6.1-sol");
+    assert_eq!(profile["model"], "gpt-6-luna");
 }
 
 #[tokio::test]

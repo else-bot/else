@@ -1095,13 +1095,13 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 service_tier: parsed.service_tier.as_deref(),
             };
             match super::routines::resolve(state, None, &request).await {
-                Ok(model) => Some(model),
+                Ok(model) => Some((request.key(), model)),
                 Err(reason) => {
                     return reject(
                         "MODEL_NOT_AVAILABLE",
                         &format!(
                             "the model \"{}\" was not applied: {reason}. No bot was created; \
-                             retry with one of these models or tell the owner.",
+                             retry with an available model or tell the owner.",
                             request.requested()
                         ),
                     );
@@ -1119,13 +1119,17 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         None => None,
     };
-    let profile = model.as_ref().map(|m| (m.provider_id.as_str(), &m.profile));
+    let model = model.as_ref().map(|(request, model)| bots::TurnModel {
+        request,
+        provider_id: &model.provider_id,
+        profile: &model.profile,
+    });
     match bots::create_for_turn(
         &state.db,
         grant.turn_id,
         &name,
         purpose.as_ref(),
-        profile,
+        model,
         parsed.category_id,
     )
     .await
@@ -1157,13 +1161,8 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 "created": new,
                 "next": next,
             });
-            if let Some(model) = &model {
-                result["model"] = json!({
-                    "provider_id": model.provider_id,
-                    "model": model.profile.model,
-                    "reasoning_effort": model.profile.reasoning_effort,
-                    "service_tier": model.profile.service_tier,
-                });
+            if let Ok(Some(own)) = crate::db::bot_profiles::get(&state.db, bot.id).await {
+                result["model"] = super::settings::choice_json(&own.provider_id, &own.profile);
             }
             (tool_result(result), Some(log))
         }
