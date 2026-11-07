@@ -344,14 +344,17 @@ def stop(child, grace=15):
 
 
 def cargo_env():
-    return {**os.environ, "CARGO_TARGET_DIR": str(ROOT / ".else-dev/.build"),
-            "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "4")}
+    env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "4")}
+    env.pop("CARGO_TARGET_DIR", None)
+    return env
 
 
 def build(package, explicit):
     if explicit:
         return str(Path(explicit).resolve())
     output = subprocess.run(["cargo", "build", "--locked", "-q", "-p", package, "--bins",
+                             "--target-dir", str(ROOT / ".else-dev/.build"),
+                             "--config", "build.incremental=false",
                              "--message-format=json-render-diagnostics"],
                             cwd=ROOT, env=cargo_env(),
                             stdout=subprocess.PIPE, text=True, check=True).stdout
