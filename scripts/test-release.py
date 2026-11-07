@@ -501,6 +501,30 @@ class Publication(unittest.TestCase):
             self.plan(sha="HEAD~1")
         self.assertIsNone(self.remote_ref("refs/tags/v0.0.2"))
 
+    def tamper(self, candidate, path, extra):
+        self.git("checkout", "-q", "--detach", candidate)
+        with (self.repo / path).open("a") as file:
+            file.write(extra)
+        self.git("commit", "-q", "-a", "--amend", "--no-edit")
+        return self.git("rev-parse", "HEAD")
+
+    def test_dependency_changes_hidden_in_the_release_files_are_rejected(self):
+        candidate = self.prepare()
+        for path, extra in (("Cargo.lock", '\n[[package]]\nname = "gpui-base"\nversion = "9.9.9"\n'),
+                            ("Cargo.toml", '\n[patch.crates-io]\ngpui-base = { git = "https://example.invalid" }\n')):
+            with self.subTest(path=path):
+                tampered = self.tamper(candidate, path, extra)
+                with self.assertRaisesRegex(release.Fail, f"changes {path} beyond the version bump"):
+                    self.finalize(tampered)
+        self.assertIsNone(self.remote_ref("refs/tags/v0.0.2"))
+
+    def test_a_tampered_unpublished_tag_is_never_resumed(self):
+        tampered = self.tamper(self.prepare(), "Cargo.lock", '\n[[package]]\nname = "evil"\nversion = "1.0.0"\n')
+        self.git("tag", "-a", "v0.0.2", "-m", "tampered", tampered)
+        self.git("push", "-q", "origin", "v0.0.2")
+        with self.assertRaisesRegex(release.Fail, "beyond the version bump"):
+            self.plan()
+
     def test_a_tag_at_another_commit_is_never_moved(self):
         candidate = self.prepare()
         self.git("tag", "-a", "v0.0.2", "-m", "elsewhere", "origin/main")

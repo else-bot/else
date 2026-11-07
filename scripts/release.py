@@ -20,7 +20,7 @@ import subprocess
 import sys
 
 from guest_release import (Fail, GUEST, VERSION, cargo_version, cmd_check, cmd_plan as guest_plan, git, git_out,
-                           is_ancestor, remote_tags, source_sha256, verify, version_key, write_manifest)
+                           is_ancestor, parse_manifest, remote_tags, source_sha256, verify, version_key, write_manifest)
 from release_binaries import BINARIES, PLATFORMS as BINARY_PLATFORMS, archive_name, release_assets
 
 BUMPS = ("patch", "minor", "major")
@@ -51,17 +51,29 @@ def newest(tags):
 
 
 def require_release_commit(rev, main_ref):
-    """REV is on main, or it is one commit on top of main that changes only
-    the version and the guest image pin, so a release ships reviewed code."""
+    """REV is on main, or it is one commit on top of main whose Cargo files
+    differ from its parent only by the version bump and whose only other
+    change is the guest pin, so a release ships reviewed code."""
     if is_ancestor(rev, main_ref):
         return
     commit, *parents = git_out("rev-list", "--parents", "-n", "1", rev).split()
     if len(parents) != 1 or not is_ancestor(parents[0], main_ref):
         raise Fail(f"{commit} is neither on {main_ref} nor a release commit on top of it")
-    changed = set(git_out("diff-tree", "--no-commit-id", "--name-only", "-r", parents[0], commit).splitlines())
+    parent = parents[0]
+    changed = set(git_out("diff-tree", "--no-commit-id", "--name-only", "-r", parent, commit).splitlines())
     extra = sorted(changed - set(RELEASE_FILES))
     if extra:
         raise Fail(f"release commit {commit} changes more than the version and guest pin: {', '.join(extra)}")
+    current, version = cargo_version(parent), cargo_version(commit)
+    if version_key(version) <= version_key(current):
+        raise Fail(f"release commit {commit} does not raise the version above {current}")
+    show = lambda r, path: git("show", f"{r}:{path}").stdout.decode()
+    expected = {"Cargo.toml": bump_manifest(show(parent, "Cargo.toml"), version),
+                "Cargo.lock": bump_lock(show(parent, "Cargo.lock"), current, version)}
+    for path, text in expected.items():
+        if show(commit, path) != text:
+            raise Fail(f"release commit {commit} changes {path} beyond the version bump")
+    parse_manifest(GUEST, show(commit, GUEST.manifest), f"{GUEST.manifest} at {commit}")
 
 
 def github_release(tag=None):
@@ -106,22 +118,28 @@ def cmd_release_plan(remote, main, bump, sha=None):
             "guest_state": guest_state, "guest_hash": guest_hash, "guest_image": guest_image}
 
 
-def bump_files(root, current, version):
-    manifest = root / "Cargo.toml"
-    text = manifest.read_text()
+def bump_manifest(text, version):
     text, count = re.subn(r'(?ms)^(\[workspace\.package\]\n(?:(?!^\[).)*?^version = )"[^"]*"',
                           lambda m: m[1] + f'"{version}"', text, count=1)
     if count != 1:
         raise Fail("cannot find the [workspace.package] version in Cargo.toml")
-    manifest.write_text(text)
-    lock = root / "Cargo.lock"
-    contents = lock.read_text()
+    return text
+
+
+def bump_lock(text, current, version):
     for name in CRATES:
-        contents, count = re.subn(rf'(?m)^(name = "{name}"\nversion = )"{re.escape(current)}"$',
-                                  lambda m: m[1] + f'"{version}"', contents)
+        text, count = re.subn(rf'(?m)^(name = "{name}"\nversion = )"{re.escape(current)}"$',
+                              lambda m: m[1] + f'"{version}"', text)
         if count != 1:
             raise Fail(f"expected one {name} {current} entry in Cargo.lock, found {count}")
-    lock.write_text(contents)
+    return text
+
+
+def bump_files(root, current, version):
+    for name, bump in (("Cargo.toml", lambda t: bump_manifest(t, version)),
+                       ("Cargo.lock", lambda t: bump_lock(t, current, version))):
+        path = root / name
+        path.write_text(bump(path.read_text()))
 
 
 def cmd_prepare(version, image, remote=None):

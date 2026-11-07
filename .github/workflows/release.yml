@@ -6,6 +6,8 @@ name: release
 # release/vX.Y.Z that bumps the version and pins the image. Tests and native
 # builds run on that commit, then `publish` tags it and publishes the binaries.
 # Main is never changed, so pull requests can keep merging meanwhile.
+# Jobs run this revision's release helpers (.release-tools) against the
+# selected commit, so older commits and tags need no matching helpers.
 on:
   workflow_dispatch:
     inputs:
@@ -88,9 +90,15 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      - name: Check out the release tooling
+        uses: useblacksmith/checkout@v1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          persist-credentials: false
       - name: Build on the pinned guest base
         run: |
-          described="$(python3 scripts/guest_release.py build-args)"
+          described="$(python3 .release-tools/scripts/guest_release.py build-args)"
           mapfile -t args <<<"$described"
           docker build --provenance=false --sbom=false --pull "${args[@]}" -t else-guest:candidate infra/guest
       - name: Test keymap settling
@@ -106,7 +114,7 @@ jobs:
           ref="$IMAGE_REPO:src-$HASH-${{ matrix.arch }}"
           docker tag else-guest:candidate "$ref"
           docker push -q "$ref"
-          python3 scripts/guest_release.py platform-digest "$ref" --platform linux/${{ matrix.arch }} > digest-${{ matrix.arch }}
+          python3 .release-tools/scripts/guest_release.py platform-digest "$ref" --platform linux/${{ matrix.arch }} > digest-${{ matrix.arch }}
           cat digest-${{ matrix.arch }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -129,6 +137,12 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      - name: Check out the release tooling
+        uses: useblacksmith/checkout@v1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-*
@@ -142,7 +156,7 @@ jobs:
           printf '%s' "$ELSE_GUEST_REGISTRY_PASSWORD" | docker login ghcr.io -u "$ELSE_GUEST_REGISTRY_USER" --password-stdin
           docker buildx imagetools create -t "$IMAGE_REPO:src-$HASH" \
             "$IMAGE_REPO@$(cat digest-amd64)" "$IMAGE_REPO@$(cat digest-arm64)"
-          echo "image=$IMAGE_REPO@$(python3 scripts/guest_release.py digest "$IMAGE_REPO:src-$HASH")" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE_REPO@$(python3 .release-tools/scripts/guest_release.py digest "$IMAGE_REPO:src-$HASH")" >> "$GITHUB_OUTPUT"
 
   prepare:
     needs: [plan, guest-index]
@@ -157,6 +171,12 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
+      - name: Check out the release tooling
+        uses: useblacksmith/checkout@v1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          persist-credentials: false
       - id: commit
         env:
           VERSION: ${{ needs.plan.outputs.version }}
@@ -164,7 +184,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          python3 scripts/release.py prepare --version "$VERSION" --image "$IMAGE" --push | tee -a "$GITHUB_OUTPUT"
+          python3 .release-tools/scripts/release.py prepare --version "$VERSION" --image "$IMAGE" --push | tee -a "$GITHUB_OUTPUT"
 
   cargo-test:
     needs: [plan, prepare]
@@ -224,6 +244,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.candidate || needs.plan.outputs.candidate }}
+          persist-credentials: false
+      - name: Check out the release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
           persist-credentials: false
       - name: Check the Metal compiler
         if: runner.os == 'macOS'
@@ -328,7 +354,7 @@ jobs:
             test "$actual" = "$binary $version"
           done
       - name: Package binaries
-        run: python3 scripts/release_binaries.py --platform '${{ matrix.platform }}' --binaries 'target/${{ matrix.target }}/release'
+        run: python3 .release-tools/scripts/release_binaries.py --platform '${{ matrix.platform }}' --binaries 'target/${{ matrix.target }}/release'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.platform }}
@@ -349,6 +375,12 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.candidate || needs.plan.outputs.candidate }}
           fetch-depth: 0
+      - name: Check out the release tooling
+        uses: useblacksmith/checkout@v1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
@@ -361,4 +393,4 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          python3 scripts/release.py finalize --version "$VERSION" --rev "$CANDIDATE" --assets-dir target/release-assets
+          python3 .release-tools/scripts/release.py finalize --version "$VERSION" --rev "$CANDIDATE" --assets-dir target/release-assets
