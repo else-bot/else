@@ -201,7 +201,7 @@ impl Scheduler {
         for turn_id in turns::cancelling(&self.pool).await? {
             self.interrupt(turn_id).await;
         }
-        let live: Vec<Uuid> = self
+        let mut live: Vec<Uuid> = self
             .running
             .call(|running| running.keys().copied().collect())
             .await;
@@ -247,9 +247,12 @@ impl Scheduler {
             let Ok(slot) = self.slots.clone().try_acquire_owned() else {
                 break;
             };
-            let claimed = turns::claim_next(&self.pool, &[]).await;
+            let claimed = turns::claim_next(&self.pool, &live).await;
             let turn_id = match claimed {
-                Ok(Some(turn_id)) => turn_id,
+                Ok(Some(turn_id)) => {
+                    live.push(turn_id);
+                    turn_id
+                }
                 Ok(None) => {
                     break;
                 }
