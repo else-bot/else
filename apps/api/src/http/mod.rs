@@ -11,6 +11,7 @@ pub mod error;
 pub mod guest_tools;
 pub mod maintenance;
 pub mod mcp;
+pub mod mcp_wait;
 pub mod memory;
 pub mod onboarding;
 pub mod outgoing_drafts;

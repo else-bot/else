@@ -446,6 +446,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         standing_permissions: Vec::new(),
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
+        mcp_waits: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
         run: None,
@@ -765,11 +766,11 @@ fn fingerprints_keep_their_values() {
     input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
     assert_eq!(
         claude.fingerprint(ready, &profile, &input),
-        "ea6274702363f7c48e59eadbea0760aa"
+        "d5bafc1dac9ec6d1a57b1f0e8b5caacb"
     );
     input.delegation.origin = crate::app::providers::Origin::ConnectorEvent;
     assert_eq!(
         claude.fingerprint(ready, &profile, &input),
-        "c1f65e42c63766152c31d2bc97833f81"
+        "d45137cf868ffc0c78cc9977c44e68c5"
     );
 }
