@@ -528,10 +528,17 @@ impl Shell {
                 .id("updates-status-scroll")
                 .flex_1()
                 .min_h_0()
+                .flex()
+                .flex_col()
                 .overflow_y_scroll()
                 .track_scroll(&view.page_scroll)
                 .vertical_scrollbar(&view.page_scroll)
-                .child(content.flex_none().w_full()),
+                .child(
+                    content
+                        .w_full()
+                        .when(output_visible, |content| content.flex_1())
+                        .when(!output_visible, |content| content.flex_none()),
+                ),
         );
         if view.confirm_restart {
             panel = panel.child(
@@ -680,6 +687,8 @@ impl Shell {
             _ => "OUTPUT",
         };
         v_flex()
+            .flex_1()
+            .min_h(px(144.))
             .rounded(theme.radius)
             .overflow_hidden()
             .bg(theme.secondary.opacity(0.45))
@@ -710,7 +719,8 @@ impl Shell {
             .child(
                 div()
                     .id("updates-output-scroll")
-                    .h(px(144.))
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&view.scroll)
                     .vertical_scrollbar(&view.scroll)
