@@ -144,6 +144,35 @@ impl Codex {
         Ok((Opened::Fresh(thread), Reported::from_response(&response)))
     }
 
+    /// Everything before delivery: the handshake, the policy checks, and
+    /// the native thread. Nothing here reaches the sink.
+    async fn open<'s>(
+        &self,
+        ready: &Ready,
+        server: &AppServer,
+        input: &'s TurnInput,
+        profile: &Profile,
+    ) -> Result<(String, Opened<'s>, Reported), TurnOutcome> {
+        server
+            .initialize()
+            .await
+            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        let account = self.preflight(server).await?;
+        if !input.delegation.host_tools() {
+            Self::check_catalog(server, &profile.model)
+                .await
+                .map_err(|reason| failed("policy_violation", reason))?;
+        }
+        let fingerprint = self.fingerprint(ready, profile, input, &account);
+        let (opened, reported) = self
+            .open_thread(server, input, profile, &fingerprint)
+            .await?;
+        if let Some(mismatch) = reported.mismatch(profile) {
+            return Err(failed("profile_mismatch", mismatch));
+        }
+        Ok((fingerprint, opened, reported))
+    }
+
     pub(super) async fn converse(
         &self,
         ready: &Ready,
@@ -153,24 +182,14 @@ impl Codex {
         sink: &dyn TurnSink,
         stop: &Stop,
     ) -> Ended {
-        let account = match self.preflight(server).await {
-            Ok(account) => account,
-            Err(outcome) => return Ended::Undelivered(outcome),
+        let opened = tokio::select! {
+            opened = self.open(ready, server, input, profile) => opened,
+            () = stop.escalated() => return Ended::Undelivered(TurnOutcome::Interrupted),
         };
-        if !input.delegation.host_tools()
-            && let Err(reason) = Self::check_catalog(server, &profile.model).await
-        {
-            return Ended::Undelivered(failed("policy_violation", reason));
-        }
-        let fingerprint = self.fingerprint(ready, profile, input, &account);
-        let (opened, reported) = match self.open_thread(server, input, profile, &fingerprint).await
-        {
+        let (fingerprint, opened, reported) = match opened {
             Ok(opened) => opened,
             Err(outcome) => return Ended::Undelivered(outcome),
         };
-        if let Some(mismatch) = reported.mismatch(profile) {
-            return Ended::Undelivered(failed("profile_mismatch", mismatch));
-        }
         if stop.is_requested() {
             return Ended::Undelivered(TurnOutcome::Interrupted);
         }
@@ -180,19 +199,26 @@ impl Codex {
         }
         let thread_id = turn.native_id().to_owned();
         let project = std::path::PathBuf::from(&server.cwd);
-        let started = server
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "model": profile.model,
-                    "effort": profile.reasoning_effort,
-                    "serviceTier": profile.service_tier,
-                    "input": turn_input(&turn.segments, &project),
-                }),
-                RPC_TIMEOUT,
-            )
-            .await;
+        let start = server.request(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "model": profile.model,
+                "effort": profile.reasoning_effort,
+                "serviceTier": profile.service_tier,
+                "input": turn_input(&turn.segments, &project),
+            }),
+            RPC_TIMEOUT,
+        );
+        let started = tokio::select! {
+            started = start => started,
+            () = stop.escalated() => {
+                return Ended::Abandoned(TurnOutcome::Uncertain {
+                    message: "Delivery to Codex is unknown: the stop escalated during delivery."
+                        .into(),
+                });
+            }
+        };
         let native_turn = match started {
             Ok(response) => match response["turn"]["id"].as_str() {
                 Some(id) => id.to_owned(),

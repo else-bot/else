@@ -164,7 +164,11 @@ impl Tracker {
 
     fn parked(&self, event: &Value) -> Result<bool, Violation> {
         let mut parked = false;
-        for block in list(&event["message"]["content"], "user message")? {
+        let blocks = match &event["message"]["content"] {
+            Value::String(_) => &[],
+            content => list(content, "user message")?,
+        };
+        for block in blocks {
             let Some(id) = text(&block["tool_use_id"], "tool result")? else {
                 continue;
             };

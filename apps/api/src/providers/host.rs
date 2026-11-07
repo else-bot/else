@@ -556,8 +556,9 @@ impl Supervised {
         Ok(Self { child, pgid })
     }
 
-    /// Signal the process group while its leader is unreaped, so the group
-    /// ID cannot belong to anything else.
+    /// Signal the process group, only while its leader is unreaped: until
+    /// then the group ID cannot belong to anything else. After the leader is
+    /// reaped this does nothing; survivors are reached by their marker.
     pub fn signal(&self, signal: i32) {
         if self.pgid > 0 && self.child.id().is_some() {
             // SAFETY: signalling our own child's process group.

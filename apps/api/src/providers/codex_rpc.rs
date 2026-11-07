@@ -104,6 +104,18 @@ async fn write_line(
 impl AppServer {
     /// Start the server on the host and complete the initialize handshake.
     pub async fn start(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
+        let server = Self::spawn(host, spec)?;
+        match server.initialize().await {
+            Ok(()) => Ok(server),
+            Err(err) => {
+                let _ = server.close().await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Start the server on the host without its handshake.
+    pub fn spawn(host: &Host, spec: &LaunchSpec) -> Result<Self, RpcError> {
         let mut scope = Scope::spawn(host, spec, Stdio::piped(), Stdio::null())
             .map_err(|err| RpcError::Spawn(err.to_string()))?;
         let stdin = scope.child().stdin.take().ok_or(RpcError::Closed)?;
@@ -111,23 +123,25 @@ impl AppServer {
         let (tx, incoming) = mpsc::channel(MAX_QUEUED);
         let (commands, command_rx) = mpsc::channel(MAX_REQUESTS);
         tokio::spawn(io_loop(stdout, stdin, command_rx, tx));
-        let server = Self {
+        Ok(Self {
             cwd: spec.dirs.project.to_string_lossy().into_owned(),
             scope,
             commands,
             slots: Arc::new(Semaphore::new(MAX_REQUESTS)),
             next_id: AtomicI64::new(1),
             incoming,
-        };
-        server
-            .request(
-                "initialize",
-                json!({ "clientInfo": { "name": "else_bot", "version": env!("ELSE_VERSION") } }),
-                Duration::from_secs(30),
-            )
-            .await?;
-        server.notify("initialized", json!({})).await?;
-        Ok(server)
+        })
+    }
+
+    /// The initialize handshake.
+    pub async fn initialize(&self) -> Result<(), RpcError> {
+        self.request(
+            "initialize",
+            json!({ "clientInfo": { "name": "else_bot", "version": env!("ELSE_VERSION") } }),
+            Duration::from_secs(30),
+        )
+        .await?;
+        self.notify("initialized", json!({})).await
     }
 
     /// Send a request and wait for its response. The deadline covers

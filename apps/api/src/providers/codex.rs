@@ -194,7 +194,14 @@ impl Codex {
         };
         if !host_tools {
             let mut args = tokio::select! {
-                () = stop.requested() => return Err(TurnOutcome::Interrupted),
+                () = stop.requested() => {
+                    if let Err(err) = super::cli::process::sweep(&ready.host, input.turn_id).await {
+                        return Err(TurnOutcome::Uncertain {
+                            message: format!("Codex's processes could not be stopped: {err}"),
+                        });
+                    }
+                    return Err(TurnOutcome::Interrupted);
+                }
                 catalog = codex_home::no_native_tools(&ready.host, &spec, model) => {
                     catalog.map_err(unavailable)?
                 }
@@ -286,7 +293,7 @@ impl Provider for Codex {
             Ok(spec) => spec,
             Err(outcome) => return outcome,
         };
-        let mut server = match AppServer::start(&ready.host, &spec).await {
+        let mut server = match AppServer::spawn(&ready.host, &spec) {
             Ok(server) => server,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };

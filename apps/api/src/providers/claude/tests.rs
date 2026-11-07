@@ -53,8 +53,12 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
         Ok(Emitted::new())
     );
     assert_eq!(
-        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true})),
+        t.on(&json!({"type":"user","uuid":"u-1","isReplay":true,"message":{"role":"user","content":"hello"}})),
         Ok(vec![accepted()])
+    );
+    assert!(
+        t.on(&json!({"type":"user","message":{"content":7}}))
+            .is_err()
     );
     t.on(&json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5"}}})).unwrap();
     t.on(&json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text"}}})).unwrap();

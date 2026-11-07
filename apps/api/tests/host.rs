@@ -929,3 +929,61 @@ async fn turn_cleanup_kills_stubborn_descendants_without_touching_another_turn()
     assert!(!fx.host.live_processes(other.turn_id).is_empty());
     other_process.terminate(Duration::ZERO).await;
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_dropped_finish_still_sweeps_a_detached_worker() {
+    use else_api::providers::cli::process::{Finish, Scope};
+    let fx = fixture();
+    let ready = fx.data.join("worker-ready");
+    let mut spec = shell(
+        &fx,
+        Uuid::new_v4(),
+        "python3 -c 'import os,signal,time,sys\nif os.fork() == 0:\n    os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").close()\n    while True: time.sleep(1)' \"$READY\"; while :; do sleep 1; done",
+    );
+    spec.env
+        .push(("READY".into(), ready.to_string_lossy().into_owned()));
+    let scope = Scope::spawn(
+        &fx.host,
+        &spec,
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fx.host.live_processes(spec.turn_id).len() >= 2);
+    let abandoned =
+        tokio::time::timeout(Duration::from_millis(200), scope.finish(Finish::Exit)).await;
+    assert!(abandoned.is_err(), "the leader was still in its exit grace");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !fx.host.live_processes(spec.turn_id).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the dropped cleanup swept the detached worker");
+}
+
+#[tokio::test]
+async fn a_reaped_process_no_longer_owns_its_group_id() {
+    let fx = fixture();
+    let spec = shell(&fx, Uuid::new_v4(), "exit 0");
+    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
+    assert!(
+        process.child.id().is_some(),
+        "an unreaped leader owns its group"
+    );
+    process.child.wait().await.unwrap();
+    assert!(
+        process.child.id().is_none(),
+        "group signals are guarded by the unreaped leader"
+    );
+    process.kill().await;
+    drop(process);
+}

@@ -218,8 +218,19 @@ pub trait Channel: Send {
     /// The next message; `None` once the provider has exited.
     async fn next(&mut self) -> Result<Option<Self::Message>, String>;
 
-    /// Ask the provider to end its turn.
+    /// Ask the provider to end its turn. It may be abandoned midway when the
+    /// stop escalates, so it must not hold state the attempt still needs.
     async fn interrupt(&mut self);
+}
+
+/// Ask the provider to stop; false when the stop escalated first. A
+/// transport wait (a full pipe, an unanswered request) never delays a hard
+/// stop.
+async fn interrupt<C: Channel>(channel: &mut C, stop: &Stop) -> bool {
+    tokio::select! {
+        () = channel.interrupt() => true,
+        () = stop.escalated() => false,
+    }
 }
 
 /// Run an accepted or about-to-be-accepted turn to its end: report its
@@ -244,16 +255,18 @@ where
         let read = tokio::select! {
             () = stop.escalated() => return Ended::Abandoned(life.abandoned(not_stopped())),
             () = stop.requested(), if life.running() => {
-                if life.stop(StopCause::Owner) {
-                    channel.interrupt().await;
+                if life.stop(StopCause::Owner) && !interrupt(channel, stop).await {
+                    return Ended::Abandoned(life.abandoned(not_stopped()));
                 }
                 continue;
             }
             () = tokio::time::sleep_until(life.wake_at()) => {
                 match life.on_timer() {
-                    Tick::Interrupt => channel.interrupt().await,
+                    Tick::Interrupt if !interrupt(channel, stop).await => {
+                        return Ended::Abandoned(life.abandoned(not_stopped()));
+                    }
                     Tick::GiveUp => return Ended::Abandoned(life.abandoned(not_stopped())),
-                    Tick::Wait => {}
+                    Tick::Interrupt | Tick::Wait => {}
                 }
                 continue;
             }
@@ -362,6 +375,7 @@ mod tests {
     struct Replay {
         messages: VecDeque<Value>,
         interrupts: usize,
+        interrupt_hangs: bool,
     }
 
     #[async_trait]
@@ -377,6 +391,9 @@ mod tests {
 
         async fn interrupt(&mut self) {
             self.interrupts += 1;
+            if self.interrupt_hangs {
+                std::future::pending::<()>().await;
+            }
         }
     }
 
@@ -412,6 +429,7 @@ mod tests {
         Replay {
             messages: messages.iter().cloned().collect(),
             interrupts: 0,
+            interrupt_hangs: false,
         }
     }
 
@@ -469,6 +487,38 @@ mod tests {
             drive(&mut channel, &mut plain, &mut turn, &sink, &stop, "P"),
             escalate
         );
+        assert!(matches!(
+            ended,
+            Ended::Abandoned(TurnOutcome::Uncertain { .. })
+        ));
+        assert_eq!(channel.interrupts, 1);
+    }
+
+    #[tokio::test]
+    async fn an_escalation_preempts_an_interrupt_that_never_completes() {
+        let input = input();
+        let sink = Log::default();
+        let mut turn = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n".into()));
+        let mut channel = replay(&[json!({"kind": "accept"})]);
+        channel.interrupt_hangs = true;
+        let stop = Stop::default();
+        let owner = {
+            let stop = stop.clone();
+            async move {
+                stop.request();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                stop.escalate();
+            }
+        };
+        let mut plain = Plain;
+        let (ended, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                drive(&mut channel, &mut plain, &mut turn, &sink, &stop, "P"),
+                owner
+            )
+        })
+        .await
+        .expect("the escalation reached cleanup");
         assert!(matches!(
             ended,
             Ended::Abandoned(TurnOutcome::Uncertain { .. })

@@ -863,3 +863,45 @@ fn fingerprints_keep_their_values() {
         "9d453ecb30a97f38c6f23217620e044c"
     );
 }
+
+#[tokio::test]
+async fn an_escalated_stop_ends_a_codex_that_never_answers_its_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = detect_with(
+        dir.path(),
+        r#"[ "$1" = --version ] && { echo codex-cli 9.0.0; exit 0; }
+exec python3 -c '
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("method") == "initialize":
+        print(json.dumps({"id": m["id"], "result": {}}), flush=True)
+'"#,
+        true,
+    );
+    let input = turn_from(crate::app::providers::Origin::OwnerRequest);
+    let turn_id = input.turn_id;
+    let stop = Stop::default();
+    let owner = {
+        let stop = stop.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            stop.request();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            stop.escalate();
+        }
+    };
+    let sink = crate::providers::recording::Recorded::default();
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(codex.run(input, &sink, stop), owner)
+    })
+    .await
+    .expect("the escalation preempted the unanswered preflight");
+    assert_eq!(outcome, TurnOutcome::Interrupted);
+    assert!(
+        sink.sessions.lock().unwrap().is_empty(),
+        "nothing was delivered"
+    );
+    let host = &codex.ready.as_ref().unwrap().host;
+    assert!(host.live_processes(turn_id).is_empty());
+}

@@ -135,7 +135,11 @@ impl Tracker {
             });
         }
         let prefix = format!("mcp__{SERVER_NAME}__");
-        for block in list(&event["message"]["content"], "user message")? {
+        let blocks = match &event["message"]["content"] {
+            Value::String(_) => &[],
+            content => list(content, "user message")?,
+        };
+        for block in blocks {
             if block["type"] != "tool_result" {
                 continue;
             }

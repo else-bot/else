@@ -465,7 +465,11 @@ impl Provider for Claude {
             Ended::Undelivered(TurnOutcome::Interrupted)
         } else {
             let line = user_message(&message_uuid, message_content(&turn.segments));
-            match attempt.write(&line).await {
+            let written = tokio::select! {
+                written = attempt.write(&line) => written.map_err(|e| e.to_string()),
+                () = stop.escalated() => Err("the stop escalated during delivery".to_owned()),
+            };
+            match written {
                 Ok(()) => attempt.drive(&mut tracker, &mut turn, sink, &stop).await,
                 Err(err) => Ended::Abandoned(TurnOutcome::Uncertain {
                     message: format!("Delivery to Claude is unknown: {err}"),
@@ -503,10 +507,13 @@ impl Claude {
         let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
         let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
         let result = async {
-            attempt
-                .write(&user_message(&uuid, Value::from(prompt_text)))
-                .await
-                .map_err(|e| e.to_string())?;
+            let line = user_message(&uuid, Value::from(prompt_text));
+            tokio::select! {
+                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+                written = attempt.write(&line) => {
+                    written.map_err(|e| e.to_string())?;
+                }
+            }
             loop {
                 let event = tokio::select! {
                     _ = cancel.cancelled() => return Err("cancelled".to_owned()),

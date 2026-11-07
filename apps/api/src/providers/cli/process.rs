@@ -63,19 +63,27 @@ impl Scope {
         self.process.signal(libc::SIGINT);
     }
 
+    /// Stop the process tree and verify that nothing under the marker
+    /// survived. Until this completes, dropping the scope still kills and
+    /// sweeps it.
     pub async fn finish(mut self, how: Finish) -> Result<(), String> {
-        self.finished = true;
         if how == Finish::Exit {
             let _ = tokio::time::timeout(EXIT_GRACE, self.process.child.wait()).await;
         }
         self.process.kill().await;
-        let host = self.host.clone();
-        let marker = self.marker;
-        match tokio::task::spawn_blocking(move || host.sweep_turn(marker)).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(err)) => Err(err.to_string()),
-            Err(err) => Err(err.to_string()),
-        }
+        let swept = sweep(&self.host, self.marker).await;
+        self.finished = true;
+        swept
+    }
+}
+
+/// Kill every remaining process carrying `marker` and wait until they exit.
+pub async fn sweep(host: &Host, marker: Uuid) -> Result<(), String> {
+    let host = host.clone();
+    match tokio::task::spawn_blocking(move || host.sweep_turn(marker)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(err) => Err(err.to_string()),
     }
 }
 
