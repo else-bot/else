@@ -96,6 +96,26 @@ On Linux, agents checking the UI use `scripts/dev.py run`. It creates an isolate
 
 Both binaries use the workspace version in `Cargo.toml`. The workspace pins `gpui-base` to the else-bot fork for native link previews. Checkout builds omit debug information by default; use `CARGO_PROFILE_DEV_DEBUG=2` when debugging needs source lines and variables.
 
+## Reuse compiled dependencies across worktrees
+
+Install sccache once with `cargo install sccache --locked --no-default-features`. Add the wrapper to your user-level `~/.cargo/config.toml`, merging with any existing `[build]` section. Use the absolute path reported by `command -v sccache` so editors and hooks can find it:
+
+```toml
+[build]
+rustc-wrapper = "/home/you/.cargo/bin/sccache"
+```
+
+Set a shared-cache limit in `~/.config/sccache/config` on Linux:
+
+```toml
+[cache.disk]
+size = 21474836480 # 20 GiB
+```
+
+Each checkout keeps its own build directory. The launcher passes `--target-dir` to Cargo instead of exporting `CARGO_TARGET_DIR`, because sccache hashes `CARGO_*` environment variables. For direct Cargo builds with a custom target directory, use `--target-dir` too. The first build fills the shared cache. Later checkouts reuse a share of registry and git dependency compilations, plus native object files. Binaries and procedural macros still compile. Crates that read a per-checkout `OUT_DIR` at compile time, such as serde and thiserror, miss the cache. Changes in their outputs can also invalidate dependent libraries.
+
+The launcher disables incremental compilation to limit disk growth in development worktrees. This trades faster edits to local crates for less disk use. Other Cargo builds keep their usual incremental settings. The cache limit bounds sccache storage, but private target directories still need cleanup when you remove worktrees. These settings do not remove existing build data. Use `RUSTC_WRAPPER= cargo build` for a direct build without sccache.
+
 ## Check changes
 
 ```sh
