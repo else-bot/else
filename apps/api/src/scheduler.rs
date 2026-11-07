@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::app::providers::TurnOutcome;
+use crate::app::providers::{Stop, TurnOutcome};
 use crate::db::turn_sink::{FLUSH_INTERVAL, SqliteSink};
 use crate::db::turns;
 use crate::grants::{Grants, Tool};
@@ -50,7 +50,8 @@ impl Drop for SummaryPermit {
     }
 }
 
-/// How long an interrupted provider may take to stop before it is abandoned.
+/// How long an interrupted provider may take to stop before it must stop at
+/// once.
 pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 impl Scheduler {
@@ -363,21 +364,22 @@ impl Scheduler {
             },
             Some(provider) => {
                 let provider = provider.clone();
+                let stop = Stop::new(cancel.clone());
                 let done = CancellationToken::new();
                 let run = async {
-                    let watchdog = async {
+                    let escalation = async {
                         cancel.cancelled().await;
                         tokio::time::sleep(self.cancel_grace).await;
                     };
+                    let attempt = provider.run(input, &sink, stop.clone());
+                    tokio::pin!(attempt);
                     let outcome = tokio::select! {
-                        outcome = provider.run(input, &sink, cancel.clone()) => outcome,
-                        () = watchdog => TurnOutcome::Uncertain {
-                            message: format!(
-                                "The provider did not stop within {} seconds after being \
-                                 interrupted; its effects are unknown.",
-                                self.cancel_grace.as_secs()
-                            ),
-                        },
+                        outcome = &mut attempt => outcome,
+                        () = escalation => {
+                            tracing::warn!(turn = %turn_id, "provider did not stop in time; escalating");
+                            stop.escalate();
+                            attempt.await
+                        }
                     };
                     done.cancel();
                     outcome

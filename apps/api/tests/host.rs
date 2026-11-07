@@ -399,7 +399,10 @@ async fn first_model_request(
                 "CODEX_HOME".into(),
                 dirs.provider_home.to_string_lossy().into_owned(),
             ),
-            (codex_home::GRANT_ENV.into(), "tg_test".into()),
+            (
+                else_api::providers::cli::files::GRANT_ENV.into(),
+                "tg_test".into(),
+            ),
         ],
     };
     if no_native {
@@ -514,7 +517,7 @@ async fn codex_offers_a_connector_event_no_native_tools() {
                 )
                 .await
                 .unwrap();
-            server.shutdown(Duration::from_secs(3)).await;
+            server.close().await.unwrap();
             listed["data"]
                 .as_array()
                 .unwrap()
@@ -895,4 +898,92 @@ async fn launch_secrets_stay_off_host_command_lines() {
         "tg_canary_secret",
         "the value reached the provider"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn turn_cleanup_kills_stubborn_descendants_without_touching_another_turn() {
+    let fx = fixture();
+    let ready = fx.data.join("child-ready");
+    let mut spec = shell(
+        &fx,
+        Uuid::new_v4(),
+        "sh -c 'trap \"\" TERM; touch \"$READY\"; while :; do sleep 1; done' & wait",
+    );
+    spec.env
+        .push(("READY".into(), ready.to_string_lossy().into_owned()));
+    let other = shell(&fx, Uuid::new_v4(), "sleep 300");
+    let mut other_process = Supervised::spawn(fx.host.command(&other)).unwrap();
+    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    process.terminate(Duration::from_millis(100)).await;
+    assert!(!fx.host.live_processes(spec.turn_id).is_empty());
+    assert!(fx.host.sweep_turn(spec.turn_id).unwrap() > 0);
+    assert!(fx.host.live_processes(spec.turn_id).is_empty());
+    assert!(!fx.host.live_processes(other.turn_id).is_empty());
+    other_process.terminate(Duration::ZERO).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_dropped_finish_still_sweeps_a_detached_worker() {
+    use else_api::providers::cli::process::{Finish, Scope};
+    let fx = fixture();
+    let ready = fx.data.join("worker-ready");
+    let mut spec = shell(
+        &fx,
+        Uuid::new_v4(),
+        "python3 -c 'import os,signal,time,sys\nif os.fork() == 0:\n    os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").close()\n    while True: time.sleep(1)' \"$READY\"; while :; do sleep 1; done",
+    );
+    spec.env
+        .push(("READY".into(), ready.to_string_lossy().into_owned()));
+    let scope = Scope::spawn(
+        &fx.host,
+        &spec,
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fx.host.live_processes(spec.turn_id).len() >= 2);
+    let abandoned =
+        tokio::time::timeout(Duration::from_millis(200), scope.finish(Finish::Exit)).await;
+    assert!(abandoned.is_err(), "the leader was still in its exit grace");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !fx.host.live_processes(spec.turn_id).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the dropped cleanup swept the detached worker");
+}
+
+#[tokio::test]
+async fn a_reaped_process_no_longer_owns_its_group_id() {
+    let fx = fixture();
+    let spec = shell(&fx, Uuid::new_v4(), "exit 0");
+    let mut process = Supervised::spawn(fx.host.command(&spec)).unwrap();
+    assert!(
+        process.child.id().is_some(),
+        "an unreaped leader owns its group"
+    );
+    process.child.wait().await.unwrap();
+    assert!(
+        process.child.id().is_none(),
+        "group signals are guarded by the unreaped leader"
+    );
+    process.kill().await;
+    drop(process);
 }

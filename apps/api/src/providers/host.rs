@@ -1,6 +1,6 @@
 //! Provider CLIs on the host.
 //!
-//! Codex and Claude Code run directly on the host as the API's user, so a
+//! Provider CLIs run directly on the host as the API's user, so a
 //! bot can work with the owner's files and machine when the owner asks.
 //! Every run starts in the
 //! bot's project directory (`<ELSE_BOTS_DIR>/<bot id>`), which is also
@@ -69,8 +69,7 @@ pub struct BotDirs {
     /// The bot's project directory, where every provider run starts; also
     /// its computer's `~/work`.
     pub project: PathBuf,
-    /// The provider's own home (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) under
-    /// `root`.
+    /// The provider's own private files under `root`.
     pub provider_home: PathBuf,
 }
 
@@ -132,7 +131,8 @@ impl Host {
 
     /// Run a launch to completion like a provider run and return its stdout:
     /// an error if it fails, writes more than `limit` bytes, or outlives
-    /// `timeout`. The process group is terminated on any early return.
+    /// `timeout`. Everything it started is stopped and swept before it
+    /// returns (or in the background if the call is dropped).
     pub async fn bounded_output(
         &self,
         spec: &LaunchSpec,
@@ -140,13 +140,9 @@ impl Host {
         limit: usize,
     ) -> Result<Vec<u8>, String> {
         use tokio::io::AsyncReadExt;
-        let mut command = self.command(spec);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut process = Supervised::spawn(command).map_err(|e| e.to_string())?;
-        let stdout = process.child.stdout.take();
+        let mut scope = super::cli::process::Scope::spawn(self, spec, Stdio::null(), Stdio::null())
+            .map_err(|e| e.to_string())?;
+        let stdout = scope.child().stdout.take();
         let run = async {
             let mut out = Vec::new();
             if let Some(stdout) = stdout {
@@ -159,7 +155,7 @@ impl Host {
             if out.len() > limit {
                 return Err(format!("output exceeded {limit} bytes"));
             }
-            let status = process.child.wait().await.map_err(|e| e.to_string())?;
+            let status = scope.child().wait().await.map_err(|e| e.to_string())?;
             if status.success() {
                 Ok(out)
             } else {
@@ -169,10 +165,9 @@ impl Host {
         let result = tokio::time::timeout(timeout, run)
             .await
             .unwrap_or_else(|_| Err(format!("did not finish within {}s", timeout.as_secs())));
-        if result.is_err() {
-            process.terminate(Duration::ZERO).await;
-        }
-        result
+        let cleanup = scope.finish(super::cli::process::Finish::Kill).await;
+        let out = result?;
+        cleanup.map(|()| out)
     }
 
     pub fn marker_prefix(&self) -> &str {
@@ -240,9 +235,20 @@ impl Host {
     /// signalled, so a reused PID can never be hit. Returns how many were
     /// terminated, or an error if any survived.
     pub fn sweep_orphans(&self) -> Result<usize, HostError> {
-        let wanted = format!("{MARKER_VAR}={}:", self.marker_prefix);
+        self.sweep(None)
+    }
+
+    pub fn sweep_turn(&self, turn_id: Uuid) -> Result<usize, HostError> {
+        self.sweep(Some(turn_id))
+    }
+
+    fn sweep(&self, turn_id: Option<Uuid>) -> Result<usize, HostError> {
+        let wanted = match turn_id {
+            Some(id) => format!("{MARKER_VAR}={}", self.marker(id)),
+            None => format!("{MARKER_VAR}={}:", self.marker_prefix),
+        };
         let mut killed = Vec::new();
-        for pid in find_marked(&self.marker_prefix, None) {
+        for pid in find_marked(&self.marker_prefix, turn_id) {
             let Some(process) = procs::pin(pid, &wanted) else {
                 continue;
             };
@@ -277,17 +283,6 @@ pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("not a directory"));
     }
     Ok(dir)
-}
-
-/// Point `dir/name` at the host login `source`, replacing whatever is there
-/// (an earlier link, or a placeholder file). The login is never copied, so
-/// token refreshes write through to the one file.
-pub fn link_login(dir: &Path, name: &str, source: &Path) -> std::io::Result<()> {
-    let temp = dir.join(format!(".{name}.{}.link", Uuid::new_v4()));
-    std::os::unix::fs::symlink(source, &temp)?;
-    fs::rename(&temp, dir.join(name)).inspect_err(|_| {
-        let _ = fs::remove_file(&temp);
-    })
 }
 
 fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
@@ -561,41 +556,39 @@ impl Supervised {
         Ok(Self { child, pgid })
     }
 
-    pub fn pid(&self) -> i32 {
-        self.pgid
+    /// Signal the process group, only while its leader is unreaped: until
+    /// then the group ID cannot belong to anything else. After the leader is
+    /// reaped this does nothing; survivors are reached by their marker.
+    pub fn signal(&self, signal: i32) {
+        if self.pgid > 0 && self.child.id().is_some() {
+            // SAFETY: signalling our own child's process group.
+            unsafe {
+                libc::kill(-self.pgid, signal);
+            }
+        }
+    }
+
+    /// SIGKILL the process group and reap its leader.
+    pub async fn kill(&mut self) {
+        self.signal(libc::SIGKILL);
+        let _ = self.child.wait().await;
     }
 
     /// SIGTERM the process group, then SIGKILL after `grace`, and wait for
     /// the process to exit.
     pub async fn terminate(&mut self, grace: Duration) {
-        if self.pgid > 0 {
-            // SAFETY: signalling our own child's process group.
-            unsafe {
-                libc::kill(-self.pgid, libc::SIGTERM);
-            }
-        }
+        self.signal(libc::SIGTERM);
         if tokio::time::timeout(grace, self.child.wait())
             .await
             .is_err()
         {
-            if self.pgid > 0 {
-                // SAFETY: as above.
-                unsafe {
-                    libc::kill(-self.pgid, libc::SIGKILL);
-                }
-            }
-            let _ = self.child.wait().await;
+            self.kill().await;
         }
     }
 }
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        if self.pgid > 0 && self.child.id().is_some() {
-            // SAFETY: signalling our own child's process group.
-            unsafe {
-                libc::kill(-self.pgid, libc::SIGKILL);
-            }
-        }
+        self.signal(libc::SIGKILL);
     }
 }

@@ -23,14 +23,13 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::host::{BotDirs, Host, LaunchSpec, link_login};
+use super::cli::files::{GRANT_ENV, link_login, replace_private};
+use super::host::{BotDirs, Host, LaunchSpec};
 
 /// Feature flags forced off for every bot session. Native sub-agents
 /// (`multi_agent*`) are disabled by policy, not only by prompt. `shell_tool`
@@ -63,10 +62,6 @@ pub const DISABLED_FEATURES: &[&str] = &[
     "workspace_dependencies",
 ];
 
-/// Environment variable carrying the turn's task grant to Codex, which
-/// sends it as the bearer token to else.bot's MCP endpoint.
-pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
-
 /// The sandbox mode for a session: full host access with host tools,
 /// otherwise read-only.
 pub fn sandbox_mode(host_tools: bool) -> &'static str {
@@ -98,9 +93,10 @@ pub fn config_toml(tool_url: Option<&str>, host_tools: bool) -> String {
     for feature in DISABLED_FEATURES {
         text.push_str(&format!("{feature} = false\n"));
     }
-    // Codex reaches MCP tools only through its code-mode host; without
-    // else.bot tools there is nothing for it to call.
-    text.push_str(&format!("code_mode_host = {}\n", tool_url.is_some()));
+    // Codex reaches its shell, file edits, and MCP tools only through its
+    // code-mode host; a summary has none of them to call.
+    let code_mode = host_tools || tool_url.is_some();
+    text.push_str(&format!("code_mode_host = {code_mode}\n"));
     if !host_tools {
         text.push_str("\n[tools]\nupdate_plan = { enabled = false }\nexperimental_request_user_input = { enabled = false }\n");
     }
@@ -135,22 +131,6 @@ pub fn host_auth_file(codex_home: Option<&str>, home: Option<&str>) -> Option<Pa
         _ => return None,
     };
     Some(dir.join("auth.json"))
-}
-
-fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
-    if !fs::symlink_metadata(dir)?.is_dir() {
-        return Err(std::io::Error::other("provider home is not a directory"));
-    }
-    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    fs::rename(&temp, dir.join(name))
 }
 
 const CATALOG_FILE: &str = "no-native-tools-catalog.json";
@@ -214,7 +194,7 @@ pub async fn no_native_tools(
         .map_err(|e| format!("`codex debug models` failed: {e}"))?;
     let catalog = no_native_catalog(&exported, model)?;
     let home = &launch.dirs.provider_home;
-    replace_file(home, CATALOG_FILE, &catalog).map_err(|e| e.to_string())?;
+    replace_private(home, CATALOG_FILE, &catalog).map_err(|e| e.to_string())?;
     let path = home.join(CATALOG_FILE);
     let path = path.to_str().ok_or("the provider home path is not UTF-8")?;
     let path = serde_json::to_string(path).expect("strings serialize");
@@ -242,7 +222,7 @@ pub fn prepare(
     tool_url: Option<&str>,
     host_tools: bool,
 ) -> std::io::Result<()> {
-    replace_file(
+    replace_private(
         &dirs.provider_home,
         "config.toml",
         config_toml(tool_url, host_tools).as_bytes(),
@@ -283,6 +263,25 @@ mod tests {
             assert!(text.contains(flag), "{flag}");
         }
         assert!(text.contains("web_search = \"disabled\""));
+    }
+
+    #[test]
+    fn code_mode_runs_whenever_the_launch_has_a_tool_to_call() {
+        let url = Some("http://127.0.0.1:7878/tools/v1/mcp");
+        for (tool_url, host_tools, code_mode) in [
+            (None, true, true),
+            (url, true, true),
+            (url, false, true),
+            (None, false, false),
+        ] {
+            let text = config_toml(tool_url, host_tools);
+            assert!(
+                text.contains(&format!("code_mode_host = {code_mode}\n")),
+                "{tool_url:?} {host_tools}"
+            );
+            assert!(text.contains("[agents]\nenabled = false"));
+            assert!(text.contains("multi_agent = false\nmulti_agent_v2 = false\n"));
+        }
     }
 
     #[test]

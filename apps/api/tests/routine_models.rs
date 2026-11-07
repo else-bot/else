@@ -56,10 +56,10 @@ impl Provider for Catalogued {
         &self,
         input: TurnInput,
         sink: &dyn TurnSink,
-        cancel: tokio_util::sync::CancellationToken,
+        stop: else_api::app::providers::Stop,
     ) -> TurnOutcome {
         Synthetic::new(Duration::from_millis(5))
-            .run(input, sink, cancel)
+            .run(input, sink, stop)
             .await
     }
 }
@@ -419,15 +419,19 @@ async fn unknown_or_omitted_models_never_block_creation() {
         .app
         .owner("GET", &format!("/v1/bots/{bot}/routines"), None)
         .await;
-    let unknown = routines.body["routines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "Unknown")
-        .unwrap()
-        .clone();
+    let routines = routines.body["routines"].as_array().unwrap();
+    for other in routines.iter().filter(|r| r["name"] != "Unknown") {
+        let paused = patch(&h.app, &bot, other, json!({ "enabled": false })).await;
+        assert_eq!(paused.status, StatusCode::OK);
+    }
+    let unknown = routines.iter().find(|r| r["name"] == "Unknown").unwrap();
     assert_eq!(unknown["requested_model"], "Gemini 3");
-    let run = fire(&h.app, &unknown).await.expect("queued");
+    let run = fire(&h.app, unknown).await.expect("queued");
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM routine_runs")
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 1, "only the unknown-model routine was due");
     h.app.wait_turn(&run.to_string(), &["completed"]).await;
     let (provider, lane): (String, String) =
         sqlx::query_as("SELECT provider_id, session_lane FROM turns WHERE id = ?1")

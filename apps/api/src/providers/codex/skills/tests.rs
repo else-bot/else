@@ -130,7 +130,7 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
     assert!(!input.contains("owner-home-fixture"));
     assert!(!input.contains("ancestor-fixture"));
     assert!(input.contains("bot-project-fixture"));
-    server.shutdown(Duration::from_secs(5)).await;
+    server.close().await.unwrap();
     fixture.abort();
 }
 

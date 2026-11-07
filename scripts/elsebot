@@ -220,6 +220,9 @@ process_pid() {
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
 	installation="$(cd "$ELSE_HOME" && pwd -P)" || return 1
 	executable="$(readlink "/proc/$pid/exe" 2>/dev/null || ps -ww -o comm= -p "$pid" 2>/dev/null)" || return 1
+	# macOS reports the path the API was launched with, which may go through
+	# a symlink such as /var -> /private/var.
+	executable="$(cd "${executable%/*}" 2>/dev/null && pwd -P)/${executable##*/}" || return 1
 	case "$executable" in
 	"$installation/versions/"*/bin/else-api | "$installation/current/bin/else-api" | "$installation/server-current/bin/else-api") ;;
 	*) return 1 ;;
@@ -358,8 +361,22 @@ else:
 PYTHON
 }
 
+owned_desktop() {
+	local process_home="$2" app_bundles="$3" executable bundle
+	for executable in "$1" "$(cd "${1%/*}" 2>/dev/null && pwd -P)/${1##*/}"; do
+		case "$executable" in
+		"$ELSE_HOME/"*/bin/else-desktop | "$ELSE_HOME/"*/Contents/MacOS/else-desktop | \
+		"$process_home/"*/bin/else-desktop | "$process_home/"*/Contents/MacOS/else-desktop) return 0 ;;
+		esac
+		while IFS= read -r bundle; do
+			[ -n "$bundle" ] && [ "$executable" = "$bundle/Contents/MacOS/else-desktop" ] && return 0
+		done <<<"$app_bundles"
+	done
+	return 1
+}
+
 remove_desktop() {
-	local pid executable processes process_home="$1" app_bundles="$2" bundle matched
+	local pid executable processes process_home="$1" app_bundles="$2"
 	processes="$(ps -axww -o pid= -o comm=)" || die "could not list desktop processes"
 	while read -r pid executable; do
 		[ -n "$pid" ] || continue
@@ -367,16 +384,7 @@ remove_desktop() {
 			executable="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
 			executable="${executable% (deleted)}"
 		fi
-		case "$executable" in
-		"$ELSE_HOME/"*/bin/else-desktop | "$ELSE_HOME/"*/Contents/MacOS/else-desktop | \
-		"$process_home/"*/bin/else-desktop | "$process_home/"*/Contents/MacOS/else-desktop) ;;
-		*)
-			matched=0
-			while IFS= read -r bundle; do
-				if [ -n "$bundle" ] && [ "$executable" = "$bundle/Contents/MacOS/else-desktop" ]; then matched=1; break; fi
-			done <<<"$app_bundles"
-			[ "$matched" = 1 ] || continue ;;
-		esac
+		owned_desktop "$executable" "$process_home" "$app_bundles" || continue
 		kill -TERM "$pid" 2>/dev/null || die "could not stop desktop process $pid; close it and retry removal"
 		local attempt
 		for attempt in $(seq 1 10); do

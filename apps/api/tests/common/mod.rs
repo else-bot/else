@@ -76,10 +76,10 @@ impl else_api::app::providers::Provider for ProfiledFake {
         &self,
         input: else_api::app::providers::TurnInput,
         sink: &dyn else_api::app::providers::TurnSink,
-        cancel: tokio_util::sync::CancellationToken,
+        stop: else_api::app::providers::Stop,
     ) -> else_api::app::providers::TurnOutcome {
         else_api::providers::synthetic::Synthetic::new(std::time::Duration::from_millis(5))
-            .run(input, sink, cancel)
+            .run(input, sink, stop)
             .await
     }
 }

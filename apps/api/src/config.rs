@@ -61,6 +61,8 @@ pub struct Config {
     pub codex_bin: Option<PathBuf>,
     /// The Claude Code CLI (`ELSE_CLAUDE_BIN`), else `claude` on `PATH`.
     pub claude_bin: Option<PathBuf>,
+    /// Explicit Grok CLI path; otherwise `grok` on `PATH`.
+    pub grok_bin: Option<PathBuf>,
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
     pub computers: crate::computers::ComputerConfig,
@@ -142,6 +144,10 @@ impl Config {
         };
         let claude_bin = match source.get("ELSE_CLAUDE_BIN") {
             Some(path) => Some(absolute_path("ELSE_CLAUDE_BIN", path)?),
+            None => None,
+        };
+        let grok_bin = match source.get("ELSE_GROK_BIN") {
+            Some(path) => Some(absolute_path("ELSE_GROK_BIN", path)?),
             None => None,
         };
         let msb_bin = match source.get("ELSE_MSB_BIN") {
@@ -266,6 +272,7 @@ impl Config {
             computers,
             codex_bin,
             claude_bin,
+            grok_bin,
             backup,
             s3,
             github_oauth,

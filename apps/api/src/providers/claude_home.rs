@@ -13,17 +13,13 @@
 //! wrote are ignored.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use super::cli::files::{GRANT_ENV, replace_private};
 use super::host::BotDirs;
 
-/// Environment variable carrying the turn's task grant; the MCP
-/// configuration references it, so the grant is never written to disk.
-pub const GRANT_ENV: &str = "ELSE_TASK_GRANT";
 pub const SETTINGS_FILE: &str = "else-settings.json";
 pub const MCP_FILE: &str = "elsebot-mcp.json";
 
@@ -164,33 +160,17 @@ pub fn tool_names() -> Vec<String> {
         .collect()
 }
 
-fn replace_file(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
-    if !fs::symlink_metadata(dir)?.is_dir() {
-        return Err(std::io::Error::other("provider home is not a directory"));
-    }
-    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    fs::rename(&temp, dir.join(name))
-}
-
 /// Prepare the bot's private Claude files (passed to the CLI by path):
 /// rewrite the locked settings and MCP configuration (removed when there
 /// are no tools).
 pub fn prepare(dirs: &BotDirs, tool_url: Option<&str>, host_tools: bool) -> std::io::Result<()> {
-    replace_file(
+    replace_private(
         &dirs.provider_home,
         SETTINGS_FILE,
         settings_json(host_tools).as_bytes(),
     )?;
     match tool_url {
-        Some(url) => replace_file(&dirs.provider_home, MCP_FILE, mcp_json(url).as_bytes())?,
+        Some(url) => replace_private(&dirs.provider_home, MCP_FILE, mcp_json(url).as_bytes())?,
         None => match fs::remove_file(dirs.provider_home.join(MCP_FILE)) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
             _ => {}

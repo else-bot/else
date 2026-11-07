@@ -32,7 +32,7 @@ cargo build --workspace --locked
 
 The pre-commit hook runs `cargo test --workspace --locked` and blocks commits when tests fail. Git does not enable repository hooks on clone, so run the hook configuration commands once per checkout. For an existing linked worktree, run `git config --worktree core.hooksPath .githooks` there.
 
-For real provider replies, install Codex or Claude Code and sign in as your development user. Set `ELSE_CODEX_BIN` or `ELSE_CLAUDE_BIN` if a CLI is outside `PATH`.
+For real provider replies, install Codex, Claude Code, or Grok Build and sign in as your development user. Set `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, or `ELSE_GROK_BIN` if a CLI is outside `PATH`.
 
 ## Run a development session
 
@@ -107,6 +107,14 @@ cargo test --workspace --locked
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
+To check Grok through the API, sign in with `grok login` and run:
+
+```sh
+ELSE_LIVE_GROK=1 cargo test -p else-api --test grok_live --locked -- --nocapture
+```
+
+This journey creates disposable bots and checks session reuse, host files, MCP calls, cancellation, and provider handoffs with the installed Grok CLI.
+
 The pre-commit hook runs the full Cargo suite locally. Fix test failures before committing. Pull requests skip the `cargo-test` job, and the required `cargo-test` check accepts the skipped job. The release workflow runs the full suite on Ubuntu with stable Rust against every release commit, and manual `cargo-test` runs do the same for the head of a branch.
 
 The `release-ready` check must also pass before merging. It tests the release tooling and installers and rejects a changed workspace version, which only the release workflow sets. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Releases never add commits to `main`.
@@ -168,7 +176,7 @@ Prefer the session launcher for day-to-day development. For direct binary runs, 
 | `ELSE_API_BIND` | Loopback listener; direct runs default to `127.0.0.1:7879` |
 | `ELSE_BOTS_DIR` | Bot project directory root |
 | `OWNER_TOKEN_FILE`, `SECRET_KEY_FILE` | Owner token and encryption key paths |
-| `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN` | Provider executable paths |
+| `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, `ELSE_GROK_BIN` | Provider executable paths |
 | `ELSE_MSB_BIN`, `ELSE_VM_IMAGE`, `ELSE_VM_DESKTOP` | Microsandbox and guest image settings |
 | `ELSE_BACKUP_DIR`, `ELSE_BACKUP_INTERVAL_SECS`, `ELSE_BACKUP_KEEP` | Backup location, interval, and retention |
 | `ELSE_SYNTHETIC_PROVIDER` | Enable the deterministic provider with `1` |

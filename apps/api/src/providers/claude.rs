@@ -5,10 +5,11 @@
 //! input and output, user-message replay, and partial messages. A new
 //! native session gets an ID allocated here (`--session-id`); the next turn
 //! resumes it explicitly (`--resume <id>`), never by directory. Sessions
-//! live in the bot's own `CLAUDE_CONFIG_DIR`, so another bot cannot resume
-//! them; one whose transcript is missing, whose fingerprint changed, or that
-//! may hold an uncertain delivery is replaced and the conversation rebuilt
-//! from SQLite.
+//! live in the host's Claude Code configuration directory under the bot's
+//! own project directory (see [`claude_home`]), so another bot cannot
+//! resume them; one whose transcript is missing, whose fingerprint changed,
+//! or that may hold an uncertain delivery is replaced and the conversation
+//! rebuilt from SQLite.
 //!
 //! Tools, enforced by the CLI's flags and verified from its events: a turn
 //! gets the built-in shell and file tools ([`claude_home::HOST_TOOLS`], so
@@ -25,8 +26,9 @@
 //! `system/init` event must report exactly the expected tools and server and
 //! the saved model; any other tool use, a permission request, a sub-agent's
 //! event (anything carrying a parent tool use), a task lifecycle event, or
-//! another model ends the turn as a policy failure. An empty custom-agent list is not taken as proof:
-//! the built-in agents are listed but unusable without the `Agent` tool.
+//! another model stops the turn at once as a policy failure. An empty
+//! custom-agent list is not taken as proof: the built-in agents are listed
+//! but unusable without the `Agent` tool.
 //!
 //! The owner's message carries a UUID chosen here; acceptance is its replayed
 //! echo, never initialization. Completion comes only from the terminal
@@ -36,57 +38,78 @@
 
 mod protocol;
 
-#[cfg(test)]
-use protocol::ResultInfo;
-use protocol::{Events, Step, Tracker, decide, event_model};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::host::{Host, LaunchSpec, Supervised};
+use super::cli::attempt::{Channel, Ended, Event, Protocol};
+use super::cli::files::GRANT_ENV;
+use super::cli::session::{self, Identity, Opened, PreparedTurn};
+use super::cli::stream::{Interrupt, StreamAttempt};
+use super::definitions::Definition;
+use super::host::{BotDirs, Host, LaunchSpec};
 use super::prompt;
 use super::{attachments, claude_home};
 use crate::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, SessionState, TurnInput, TurnOutcome,
+    Availability, Catalog, CheckpointRequest, Profile, Provider, Stop, TurnInput, TurnOutcome,
     TurnSink,
 };
+use protocol::Tracker;
 
 pub const ID: &str = "claude";
 const PROMPT_VERSION: &str = "else-claude-v16";
-/// Explicit model IDs only: an alias would follow the CLI's floating default.
-pub const MODELS: &[&str] = &[
-    "claude-opus-5-5",
-    "claude-sonnet-5-5",
-    "claude-haiku-5-5",
-    "claude-fable-5-1",
-];
-const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-/// Fast mode needs an SDK opt-in this adapter does not use.
-const TIERS: &[&str] = &["default"];
-const TURN_DEADLINE: Duration = Duration::from_secs(30 * 60);
-const INTERRUPT_GRACE: Duration = Duration::from_secs(15);
-const EXIT_GRACE: Duration = Duration::from_secs(5);
-const PARK_GRACE: Duration = Duration::from_secs(20);
-const PARK_STOP: Duration = Duration::from_secs(15);
-const MAX_LINE: u64 = 8 * 1024 * 1024;
-const STDERR_TAIL: usize = 4096;
-const PIPE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct Claude {
-    host: Option<Host>,
-    program: Option<PathBuf>,
-    config: Option<claude_home::HostConfig>,
+pub static DEFINITION: Definition = Definition {
+    id: ID,
+    label: "Claude",
+    catalog: Catalog {
+        models: &[
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+        ],
+        featured_models: &[],
+        efforts: &["low", "medium", "high", "xhigh", "max"],
+        tiers: &["default"],
+    },
+    model_note: " An alias would follow the CLI's floating default.",
+    effort_note: "",
+    tier_note: " Fast mode needs an SDK opt-in this adapter does not use.",
+    build,
+};
+
+fn build(wiring: &super::Wiring) -> super::Built {
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let home = std::env::var("HOME").ok();
+    let claude = Claude::detect(
+        Some(wiring.host.clone()),
+        super::executable(wiring.config.claude_bin.as_deref(), "claude"),
+        claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+        claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+    )
+    .with_tools(wiring.tool_url.clone());
+    super::Built {
+        provider: std::sync::Arc::new(claude),
+        summarizer: None,
+    }
+}
+
+/// A CLI that runs, logged in with the host configuration.
+struct Ready {
+    host: Host,
+    program: PathBuf,
+    config: claude_home::HostConfig,
     account: String,
     version: String,
-    unavailable: Option<String>,
+}
+
+pub struct Claude {
+    ready: Result<Ready, String>,
     tool_url: Option<String>,
 }
 
@@ -111,19 +134,6 @@ impl Tools {
     }
 }
 
-enum Session {
-    New(String),
-    Resume(String),
-}
-
-impl Session {
-    fn id(&self) -> &str {
-        match self {
-            Self::New(id) | Self::Resume(id) => id,
-        }
-    }
-}
-
 impl Claude {
     /// Locate the CLI, check that it runs (`claude --version`), and ask it
     /// whether the host login works (`claude auth status`, with the
@@ -136,37 +146,42 @@ impl Claude {
         config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Self {
+        Self {
+            ready: Self::ready(host, program, config, account),
+            tool_url: None,
+        }
+    }
+
+    fn ready(
+        host: Option<Host>,
+        program: Option<PathBuf>,
+        config: Option<claude_home::HostConfig>,
+        account: String,
+    ) -> Result<Ready, String> {
+        let host = host.ok_or("Claude Code is not configured on this host.")?;
+        let program = program.ok_or("Claude Code (`claude`) was not found on PATH.")?;
         let env = config
             .as_ref()
             .map(claude_home::HostConfig::env)
             .unwrap_or_default();
-        let probe = |args: &[&str]| match (&host, &program) {
-            (Some(host), Some(program)) => host.probe(program, args, &env),
-            _ => None,
-        };
-        let version = probe(&["--version"]);
-        let logged_in = config.is_some()
-            && probe(&["auth", "status"]).is_some_and(|s| claude_home::logged_in(&s));
-        let unavailable = if host.is_none() {
-            Some("Claude Code is not configured on this host.".to_owned())
-        } else if program.is_none() {
-            Some("Claude Code (`claude`) was not found on PATH.".to_owned())
-        } else if version.is_some() && !logged_in {
-            Some("Claude Code is not logged in on the host (run `claude` and log in).".to_owned())
-        } else if version.is_none() {
-            Some("Claude Code does not run (`claude --version` failed).".to_owned())
-        } else {
-            None
-        };
-        Self {
+        let version = host
+            .probe(&program, &["--version"], &env)
+            .ok_or("Claude Code does not run (`claude --version` failed).")?;
+        let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
+        let config = config.ok_or(not_logged_in)?;
+        if !host
+            .probe(&program, &["auth", "status"], &env)
+            .is_some_and(|s| claude_home::logged_in(&s))
+        {
+            return Err(not_logged_in.into());
+        }
+        Ok(Ready {
             host,
             program,
             config,
             account,
-            version: version.unwrap_or_default(),
-            unavailable,
-            tool_url: None,
-        }
+            version,
+        })
     }
 
     pub fn with_tools(mut self, url: String) -> Self {
@@ -174,41 +189,23 @@ impl Claude {
         self
     }
 
-    fn fingerprint(&self, profile: &Profile, input: &TurnInput) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
-        let registry = prompt::registry_text(input);
-        let runtime = self
-            .host
-            .as_ref()
-            .map_or_else(String::new, |h| h.runtime(input.bot_id));
-        for part in [
-            registry.as_str(),
-            PROMPT_VERSION,
-            &self.version,
-            &runtime,
-            match (input.delegation.host_tools(), self.tool_url.is_some()) {
-                (true, true) => "tools:host+elsebot-v5",
-                (true, false) => "tools:host",
-                (false, true) => "tools:elsebot-v2",
-                (false, false) => "tools:none",
+    fn fingerprint(&self, ready: &Ready, profile: &Profile, input: &TurnInput) -> String {
+        session::fingerprint(
+            input,
+            profile,
+            &Identity {
+                prompt_version: PROMPT_VERSION,
+                version: &ready.version,
+                runtime: &ready.host.runtime(input.bot_id),
+                tools: match (input.delegation.host_tools(), self.tool_url.is_some()) {
+                    (true, true) => "tools:host+elsebot-v5",
+                    (true, false) => "tools:host",
+                    (false, true) => "tools:elsebot-v2",
+                    (false, false) => "tools:none",
+                },
+                policy: &["agents:disabled", &ready.account],
             },
-            "agents:disabled",
-            &self.account,
-            &profile.model,
-            &profile.reasoning_effort,
-            &profile.service_tier,
-            &input.bot_name,
-        ] {
-            hasher.update(part.as_bytes());
-            hasher.update([0]);
-        }
-        hasher
-            .finalize()
-            .iter()
-            .take(16)
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        )
     }
 
     fn offered_tools(&self, tools: Tools) -> Vec<String> {
@@ -225,7 +222,8 @@ impl Claude {
     fn args(
         &self,
         profile: &Profile,
-        session: &Session,
+        resume: bool,
+        session: &str,
         system: &str,
         tools: Tools,
     ) -> Vec<OsString> {
@@ -267,27 +265,21 @@ impl Claude {
         if !offered.is_empty() {
             args.extend(["--allowedTools".into(), offered.join(",").into()]);
         }
-        match session {
-            Session::New(id) => args.extend(["--session-id".into(), id.into()]),
-            Session::Resume(id) => args.extend(["--resume".into(), id.into()]),
-        }
+        let flag = if resume { "--resume" } else { "--session-id" };
+        args.extend([flag.into(), session.into()]);
         args
     }
 
+    /// Prepare the bot's private files and start the CLI.
     fn launch(
         &self,
+        ready: &Ready,
         turn_id: Uuid,
-        home: &str,
-        bot_id: Uuid,
+        dirs: BotDirs,
         args: Vec<OsString>,
         tools: Tools,
         grant: Option<&str>,
-    ) -> Result<(Supervised, super::host::BotDirs), String> {
-        let (Some(host), Some(program), Some(config)) = (&self.host, &self.program, &self.config)
-        else {
-            return Err("Claude Code is not configured.".into());
-        };
-        let dirs = host.bot_dirs(bot_id, home).map_err(|e| e.to_string())?;
+    ) -> Result<StreamAttempt, String> {
         let tool_url = self.tool_url.as_deref().filter(|_| tools != Tools::None);
         claude_home::prepare(&dirs, tool_url, tools.host()).map_err(|e| e.to_string())?;
         let mut args = args;
@@ -296,25 +288,25 @@ impl Claude {
         if tool_url.is_some() {
             args.extend(["--mcp-config".into(), file(claude_home::MCP_FILE)]);
         }
-        let mut env = config.env();
+        let mut env = ready.config.env();
         env.push(("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned()));
         if let (Some(_), Some(grant)) = (tool_url, grant) {
-            env.push((claude_home::GRANT_ENV.to_owned(), grant.to_owned()));
+            env.push((GRANT_ENV.to_owned(), grant.to_owned()));
         }
         let spec = LaunchSpec {
             turn_id,
-            dirs: dirs.clone(),
-            program: program.clone(),
+            dirs,
+            program: ready.program.clone(),
             args,
             env,
         };
-        let mut command = host.command(&spec);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = Supervised::spawn(command).map_err(|e| e.to_string())?;
-        Ok((child, dirs))
+        StreamAttempt::spawn(
+            &ready.host,
+            &spec,
+            Interrupt::Line(interrupt_request()),
+            "Claude",
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -381,60 +373,13 @@ fn interrupt_request() -> String {
     line
 }
 
-fn collect_stderr(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut tail: Vec<u8> = Vec::new();
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf).await {
-            if n == 0 {
-                break;
-            }
-            tail.extend_from_slice(&buf[..n]);
-            if tail.len() > STDERR_TAIL * 2 {
-                tail.drain(..tail.len() - STDERR_TAIL);
-            }
-        }
-        let text = String::from_utf8_lossy(&tail).into_owned();
-        text.lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or_default()
-            .to_owned()
-    })
-}
-
-/// The profile rules without an adapter (also used to check restored
-/// settings).
-pub fn validate(profile: &Profile) -> Result<(), String> {
-    if !MODELS.contains(&profile.model.as_str()) {
-        return Err(format!(
-            "Unsupported Claude model {}. Use an explicit model ID: {}.",
-            profile.model,
-            MODELS.join(", ")
-        ));
-    }
-    if !EFFORTS.contains(&profile.reasoning_effort.as_str()) {
-        return Err(format!(
-            "Unsupported reasoning effort {}. Supported: {}.",
-            profile.reasoning_effort,
-            EFFORTS.join(", ")
-        ));
-    }
-    if !TIERS.contains(&profile.service_tier.as_str()) {
-        return Err(format!(
-            "Unsupported service tier {}. Supported: {}.",
-            profile.service_tier,
-            TIERS.join(", ")
-        ));
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl Provider for Claude {
     fn project_dir(&self, bot_id: Uuid) -> Option<std::path::PathBuf> {
-        self.host.as_ref().map(|host| host.project_path(bot_id))
+        self.ready
+            .as_ref()
+            .ok()
+            .map(|r| r.host.project_path(bot_id))
     }
 
     fn id(&self) -> &'static str {
@@ -442,13 +387,13 @@ impl Provider for Claude {
     }
 
     fn label(&self) -> &'static str {
-        "Claude"
+        DEFINITION.label
     }
 
     fn availability(&self) -> Availability {
-        match &self.unavailable {
-            Some(reason) => Availability::Unavailable(reason.clone()),
-            None => Availability::Available,
+        match &self.ready {
+            Ok(_) => Availability::Available,
+            Err(reason) => Availability::Unavailable(reason.clone()),
         }
     }
 
@@ -457,16 +402,11 @@ impl Provider for Claude {
     }
 
     fn validate_profile(&self, profile: &Profile) -> Result<(), String> {
-        validate(profile)
+        DEFINITION.validate(profile)
     }
 
-    fn catalog(&self) -> crate::app::providers::Catalog {
-        crate::app::providers::Catalog {
-            models: MODELS,
-            efforts: EFFORTS,
-            tiers: TIERS,
-            ..Default::default()
-        }
+    fn catalog(&self) -> Catalog {
+        DEFINITION.catalog
     }
 
     async fn checkpoint(
@@ -474,79 +414,46 @@ impl Provider for Claude {
         request: CheckpointRequest,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        if let Some(reason) = &self.unavailable {
-            return Err(reason.clone());
-        }
+        let ready = self.ready.as_ref().map_err(Clone::clone)?;
         let profile = request.profile.ok_or("no saved Claude execution profile")?;
-        self.validate_profile(&profile)?;
-        let result = tokio::time::timeout(
-            super::CHECKPOINT_DEADLINE,
-            self.checkpoint_once(request.bot_id, &profile, &request.prompt, cancel),
-        )
-        .await
-        .unwrap_or_else(|_| Err("the checkpoint exceeded its deadline".into()))?;
-        super::bounded_checkpoint(result, request.max_bytes)
+        DEFINITION.validate(&profile)?;
+        let text = self
+            .checkpoint_once(ready, request.bot_id, &profile, &request.prompt, cancel)
+            .await?;
+        super::bounded_checkpoint(text, request.max_bytes)
     }
 
-    async fn run(
-        &self,
-        input: TurnInput,
-        sink: &dyn TurnSink,
-        cancel: CancellationToken,
-    ) -> TurnOutcome {
-        if let Some(reason) = &self.unavailable {
-            return failed("provider_unavailable", reason.clone());
-        }
+    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
+        let ready = match &self.ready {
+            Ok(ready) => ready,
+            Err(reason) => return failed("provider_unavailable", reason.clone()),
+        };
         let Some(profile) = input.profile.clone() else {
             return failed(
                 "provider_misconfigured",
                 "No execution profile was snapshotted.",
             );
         };
-        if let Err(reason) = self.validate_profile(&profile) {
+        if let Err(reason) = DEFINITION.validate(&profile) {
             return failed("invalid_profile", reason);
         }
-        let Some(host) = &self.host else {
-            return failed("provider_unavailable", "Claude Code is not configured.");
-        };
-        let dirs = match host.bot_dirs(input.bot_id, ID) {
+        let dirs = match ready.host.bot_dirs(input.bot_id, ID) {
             Ok(dirs) => dirs,
             Err(err) => return failed("provider_unavailable", err.to_string()),
         };
-        let fingerprint = self.fingerprint(&profile, &input);
-        let resumed = input.session.as_ref().filter(|s| {
+        let fingerprint = self.fingerprint(ready, &profile, &input);
+        let opened = match input.session.as_ref().filter(|s| {
             s.fingerprint == fingerprint
-                && self.config.as_ref().is_some_and(|c| {
-                    claude_home::session_exists(&c.dir, &dirs.project, &s.native_id)
-                })
-        });
-        let (session, considered) = match resumed {
-            Some(s) => (
-                Session::Resume(s.native_id.clone()),
-                s.considered_through_turn,
-            ),
-            None => (Session::New(Uuid::new_v4().to_string()), 0),
+                && claude_home::session_exists(&ready.config.dir, &dirs.project, &s.native_id)
+        }) {
+            Some(session) => Opened::Resumed(session),
+            None => Opened::Fresh(Uuid::new_v4().to_string()),
         };
-        if cancel.is_cancelled() {
+        if stop.is_requested() {
             return TurnOutcome::Interrupted;
         }
-        let inject = prompt::memory_for(input.memory.as_ref(), resumed);
-        let skills = super::default_skills::for_session(resumed);
-        let mut state = SessionState {
-            native_id: session.id().to_owned(),
-            fingerprint,
-            considered_through_turn: considered,
-            memory_revision: resumed.and_then(|s| s.memory_revision),
-            default_skills: resumed
-                .map(|s| s.default_skills.clone())
-                .unwrap_or_default(),
-        };
-        if sink.session(&state).await.is_err() {
-            return TurnOutcome::Interrupted;
-        }
-        let (segments, selection) = prompt::turn_content(&input, considered, inject, &skills);
-        let packet = prompt::segments_text(&segments);
-        if sink.packet(&selection, &packet).await.is_err() {
+        let mut turn = PreparedTurn::new(&input, fingerprint, opened);
+        if turn.record(sink).await.is_err() {
             return TurnOutcome::Interrupted;
         }
         if let Err(err) = attachments::stage(&dirs.project, &input.files).await {
@@ -557,284 +464,106 @@ impl Provider for Claude {
         }
         let tools = Tools::for_turn(&input);
         let system = prompt::instructions(&input, &dirs.project.to_string_lossy());
-        let args = self.args(&profile, &session, &system, tools);
-        let (mut child, _) = match self.launch(
+        let args = self.args(&profile, turn.resumed(), turn.native_id(), &system, tools);
+        let mut attempt = match self.launch(
+            ready,
             input.turn_id,
-            ID,
-            input.bot_id,
+            dirs,
             args,
             tools,
             input.tool_grant.as_deref(),
         ) {
-            Ok(launched) => launched,
+            Ok(attempt) => attempt,
             Err(err) => return failed("provider_unavailable", err),
         };
-        let mut stdin = child.child.stdin.take();
-        let stdout = child.child.stdout.take().expect("piped");
-        let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
-        let mut events = Events::new(BufReader::new(stdout));
         let message_uuid = Uuid::new_v4().to_string();
-        let expected = self.offered_tools(tools);
-        let mut tracker = Tracker::new(expected, &profile.model, &message_uuid);
-
-        if sink.sending().await.is_err() {
-            child.terminate(EXIT_GRACE).await;
-            return TurnOutcome::Interrupted;
-        }
-        let line = user_message(&message_uuid, message_content(&segments));
-        let written = match stdin.as_mut() {
-            Some(pipe) => tokio::time::timeout(PIPE_TIMEOUT, async {
-                pipe.write_all(line.as_bytes()).await?;
-                pipe.flush().await
-            })
-            .await
-            .unwrap_or_else(|_| Err(std::io::Error::other("the CLI stopped reading its input"))),
-            None => Err(std::io::Error::other("no stdin")),
-        };
-        if let Err(err) = written {
-            child.terminate(EXIT_GRACE).await;
-            let reason = stderr_tail(stderr).await;
-            return TurnOutcome::Uncertain {
-                message: format!("Delivery to Claude is unknown: {err} {reason}"),
+        let mut tracker = Tracker::new(self.offered_tools(tools), &profile.model, &message_uuid);
+        let ended = if sink.sending().await.is_err() {
+            Ended::Undelivered(TurnOutcome::Interrupted)
+        } else {
+            let line = user_message(&message_uuid, message_content(&turn.segments));
+            let written = tokio::select! {
+                written = attempt.write(&line) => written.map_err(|e| e.to_string()),
+                () = stop.escalated() => Err("the stop escalated during delivery".to_owned()),
             };
-        }
-
-        let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
-        let mut interrupted = false;
-        let mut stop_by: Option<tokio::time::Instant> = None;
-        let mut park_at: Option<tokio::time::Instant> = None;
-        let mut deadline_hit = false;
-        let mut parked = false;
-        let outcome = loop {
-            let wake_at = stop_by.or(park_at).unwrap_or(deadline).min(deadline);
-            let event = tokio::select! {
-                _ = cancel.cancelled(), if !interrupted => {
-                    interrupted = true;
-                    stop_by = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
-                    send(&mut stdin, &interrupt_request()).await;
-                    continue;
-                }
-                _ = tokio::time::sleep_until(wake_at) => {
-                    if stop_by.is_some_and(|t| t <= tokio::time::Instant::now()) {
-                        child.terminate(EXIT_GRACE).await;
-                        sink.retire_session().await;
-                        if parked {
-                            break TurnOutcome::Interrupted;
-                        }
-                        break TurnOutcome::Uncertain {
-                            message: "Claude did not stop after being interrupted.".into(),
-                        };
-                    }
-                    if park_at.is_some_and(|t| t <= tokio::time::Instant::now()) && !interrupted {
-                        tracing::info!(turn = %input.turn_id, "parent kept going after delegating; interrupting");
-                        park_at = None;
-                        parked = true;
-                        interrupted = true;
-                        stop_by = Some(tokio::time::Instant::now() + PARK_STOP);
-                        send(&mut stdin, &interrupt_request()).await;
-                        continue;
-                    }
-                    if tokio::time::Instant::now() >= deadline && !deadline_hit {
-                        deadline_hit = true;
-                        interrupted = true;
-                        stop_by = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
-                        send(&mut stdin, &interrupt_request()).await;
-                    }
-                    continue;
-                }
-                event = events.next() => event,
-            };
-            let event = match event {
-                Ok(Some(event)) => event,
-                Ok(None) => {
-                    child.terminate(EXIT_GRACE).await;
-                    let reason = stderr_tail(stderr).await;
-                    break TurnOutcome::Uncertain {
-                        message: format!(
-                            "The Claude process exited before the turn finished. {reason}"
-                        )
-                        .trim()
-                        .to_owned(),
-                    };
-                }
-                Err(err) => {
-                    child.terminate(EXIT_GRACE).await;
-                    break TurnOutcome::Uncertain { message: err };
-                }
-            };
-            if event["type"] != "stream_event" {
-                tracing::debug!(
-                    kind = event["type"].as_str().unwrap_or_default(),
-                    subtype = event["subtype"].as_str().unwrap_or_default(),
-                    "claude event"
-                );
-            }
-            let had_violation = tracker.violation.is_some();
-            let mut result = None;
-            for step in tracker.on(&event) {
-                match step {
-                    Step::Text(text) => {
-                        if sink.text(&text).await.is_err() {
-                            cancel.cancel();
-                        }
-                    }
-                    Step::EndMessage => {
-                        if sink.end_message().await.is_err() {
-                            cancel.cancel();
-                        }
-                    }
-                    Step::Accepted => {
-                        if sink.running().await.is_err() {
-                            cancel.cancel();
-                        }
-                        state.default_skills = skills.applied.clone();
-                        state.considered_through_turn = input.turn_no;
-                        if let Some(memory) = inject {
-                            state.memory_revision = Some(memory.revision);
-                        }
-                        let _ = sink.session(&state).await;
-                        let reported = json!({
-                            "model": event_model(&event).unwrap_or(&profile.model),
-                            "reasoning_effort": null,
-                            "service_tier": null,
-                        });
-                        let _ = sink.reported(&reported, &message_uuid).await;
-                    }
-                    Step::Control(request_id) => {
-                        let reply = json!({
-                            "type": "control_response",
-                            "response": {
-                                "subtype": "error",
-                                "request_id": request_id,
-                                "error": "denied by else.bot",
-                            },
-                        });
-                        send(&mut stdin, &format!("{reply}\n")).await;
-                    }
-                    Step::Parked => {
-                        if park_at.is_none() && !parked {
-                            park_at = Some(tokio::time::Instant::now() + PARK_GRACE);
-                        }
-                    }
-                    Step::Result(info) => result = Some(info),
-                }
-            }
-            if !had_violation && tracker.violation.is_some() && !interrupted {
-                interrupted = true;
-                stop_by = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
-                send(&mut stdin, &interrupt_request()).await;
-            }
-            if let Some(info) = result {
-                break decide(&tracker, &info, interrupted, deadline_hit);
+            match written {
+                Ok(()) => attempt.drive(&mut tracker, &mut turn, sink, &stop).await,
+                Err(err) => Ended::Abandoned(TurnOutcome::Uncertain {
+                    message: format!("Delivery to Claude is unknown: {err}"),
+                }),
             }
         };
-        drop(stdin);
-        if tokio::time::timeout(EXIT_GRACE, child.child.wait())
-            .await
-            .is_err()
-        {
-            child.terminate(EXIT_GRACE).await;
-        }
-        let observed = host.live_processes(input.turn_id);
-        if !observed.is_empty() {
-            tracing::warn!(turn = %input.turn_id, count = observed.len(), "Claude left processes; terminated");
-            child.terminate(EXIT_GRACE).await;
-        }
-        outcome
+        attempt.conclude(ended, sink).await
     }
-}
-
-async fn send(stdin: &mut Option<tokio::process::ChildStdin>, line: &str) {
-    if let Some(pipe) = stdin.as_mut() {
-        let _ = tokio::time::timeout(PIPE_TIMEOUT, async {
-            pipe.write_all(line.as_bytes()).await?;
-            pipe.flush().await
-        })
-        .await;
-    }
-}
-
-async fn stderr_tail(stderr: tokio::task::JoinHandle<String>) -> String {
-    tokio::time::timeout(Duration::from_secs(2), stderr)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
 }
 
 impl Claude {
     async fn checkpoint_once(
         &self,
+        ready: &Ready,
         bot_id: Uuid,
         profile: &Profile,
         prompt_text: &str,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
-        let session = Session::New(Uuid::new_v4().to_string());
-        let mut args = self.args(profile, &session, prompt::CHECKPOINT_SYSTEM, Tools::None);
-        args.push("--no-session-persistence".into());
-        let (mut child, _) = self.launch(
-            Uuid::new_v4(),
-            "claude-summary",
-            bot_id,
-            args,
+        let session = Uuid::new_v4().to_string();
+        let mut args = self.args(
+            profile,
+            false,
+            &session,
+            prompt::CHECKPOINT_SYSTEM,
             Tools::None,
-            None,
-        )?;
-        let mut stdin = child.child.stdin.take();
-        let stdout = child.child.stdout.take().expect("piped");
-        let stderr = collect_stderr(child.child.stderr.take().expect("piped"));
-        let mut events = Events::new(BufReader::new(stdout));
+        );
+        args.push("--no-session-persistence".into());
+        let dirs = ready
+            .host
+            .bot_dirs(bot_id, "claude-summary")
+            .map_err(|e| e.to_string())?;
+        let mut attempt = self.launch(ready, Uuid::new_v4(), dirs, args, Tools::None, None)?;
         let uuid = Uuid::new_v4().to_string();
-        send(&mut stdin, &user_message(&uuid, Value::from(prompt_text))).await;
         let mut tracker = Tracker::new(Vec::new(), &profile.model, &uuid);
-        let result = loop {
-            let event = tokio::select! {
-                _ = cancel.cancelled() => break Err("cancelled".to_owned()),
-                event = events.next() => event,
-            };
-            let event = match event {
-                Ok(Some(event)) => event,
-                Ok(None) => {
-                    child.terminate(EXIT_GRACE).await;
-                    break Err(format!(
-                        "Claude exited before the checkpoint finished: {}",
-                        stderr_tail(stderr).await
-                    ));
-                }
-                Err(err) => break Err(err),
-            };
-            let mut done = None;
-            for step in tracker.on(&event) {
-                match step {
-                    Step::Result(info) => done = Some(info),
-                    Step::Control(_) => {}
-                    _ => {}
+        let deadline = tokio::time::Instant::now() + super::CHECKPOINT_DEADLINE;
+        let result = async {
+            let line = user_message(&uuid, Value::from(prompt_text));
+            tokio::select! {
+                _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+                written = attempt.write(&line) => {
+                    written.map_err(|e| e.to_string())?;
                 }
             }
-            if tracker.violation.is_some() {
-                break Err(format!(
-                    "policy_violation: {}",
-                    tracker.violation.clone().unwrap().1
-                ));
-            }
-            if let Some(info) = done {
-                break if !tracker.init_seen {
-                    Err("Claude did not report its tool set".into())
-                } else if info.success {
-                    Ok(if tracker.text.trim().is_empty() {
-                        info.message
-                    } else {
-                        tracker.text.clone()
-                    })
-                } else {
-                    Err(info.message)
+            loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => return Err("cancelled".to_owned()),
+                    _ = tokio::time::sleep_until(deadline) => {
+                        return Err("the checkpoint exceeded its deadline".to_owned());
+                    }
+                    event = attempt.next() => event?,
                 };
+                let Some(event) = event else {
+                    return Err("Claude exited before the checkpoint finished".to_owned());
+                };
+                let events = tracker
+                    .on(&event)
+                    .map_err(|v| format!("{}: {}", v.code, v.message))?;
+                for event in events {
+                    if let Event::Finished(info) = event {
+                        return if !tracker.init_seen {
+                            Err("Claude did not report its tool set".into())
+                        } else if !info.success {
+                            Err(info.message)
+                        } else if tracker.text.trim().is_empty() {
+                            Ok(info.message)
+                        } else {
+                            Ok(tracker.text.clone())
+                        };
+                    }
+                }
             }
-        };
-        drop(stdin);
-        child.terminate(EXIT_GRACE).await;
-        result
+        }
+        .await;
+        let closed = attempt.close().await;
+        let text = result?;
+        closed.map(|()| text)
     }
 }
 

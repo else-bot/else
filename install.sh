@@ -902,11 +902,13 @@ ensure_bots_dir() {
 }
 
 refresh_provider_paths() {
-	local codex claude
+	local codex claude grok
 	codex="$(command -v codex 2>/dev/null || true)"
 	claude="$(command -v claude 2>/dev/null || true)"
 	if [ -n "$codex" ]; then config_set ELSE_CODEX_BIN "$codex"; fi
 	if [ -n "$claude" ]; then config_set ELSE_CLAUDE_BIN "$claude"; fi
+	grok="$(command -v grok 2>/dev/null || true)"
+	if [ -n "$grok" ]; then config_set ELSE_GROK_BIN "$grok"; fi
 }
 
 GUEST_IMAGE_STATE=missing
@@ -1126,6 +1128,11 @@ check_providers() {
 		ok "claude $(claude --version 2>/dev/null | awk '{print $1}')"
 	else
 		info "Claude Code not found (optional): https://claude.com/claude-code"
+	fi
+	if have grok; then
+		ok "$(grok --version 2>/dev/null)"
+	else
+		info "Grok CLI not found (optional). Install Grok Build and run grok login."
 	fi
 }
 

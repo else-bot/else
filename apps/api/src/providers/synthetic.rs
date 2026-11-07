@@ -9,7 +9,7 @@
 //! - `[synthetic:hang]` acknowledges, then waits until cancelled and takes
 //!   200 ms to drain, like a provider confirming an interrupt.
 //! - `[synthetic:fail]` acknowledges, then fails.
-//! - `[synthetic:ignore-cancel]` acknowledges and never stops on its own.
+//! - `[synthetic:ignore-cancel]` acknowledges and stops only when the stop escalates.
 //! - `[synthetic:stall-send]` marks delivery as started, then waits until
 //!   cancelled without acknowledging (a crash here leaves delivery unknown).
 //! - `[synthetic:refuse]` fails before delivery (nothing was sent).
@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::providers::{
-    Availability, CheckpointRequest, Profile, Provider, SessionState, TurnInput, TurnOutcome,
+    Availability, CheckpointRequest, Profile, Provider, SessionState, Stop, TurnInput, TurnOutcome,
     TurnSink,
 };
 
@@ -151,12 +151,8 @@ impl Provider for Synthetic {
         )
     }
 
-    async fn run(
-        &self,
-        input: TurnInput,
-        sink: &dyn TurnSink,
-        cancel: CancellationToken,
-    ) -> TurnOutcome {
+    async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
+        let cancel = stop.token();
         if input.text.contains("[synthetic:refuse]") {
             return TurnOutcome::Failed {
                 code: "provider_refused".into(),
@@ -222,7 +218,10 @@ impl Provider for Synthetic {
             };
         }
         if input.text.contains("[synthetic:ignore-cancel]") {
-            std::future::pending::<()>().await;
+            stop.escalated().await;
+            return TurnOutcome::Uncertain {
+                message: "The synthetic provider did not stop after being interrupted.".into(),
+            };
         }
         if input.text.contains("[synthetic:hang]") {
             cancel.cancelled().await;
