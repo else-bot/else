@@ -61,7 +61,12 @@ actions!(
         MoveBot,
         ToggleSettings,
         Quit,
-        CloseWindow
+        CloseWindow,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom
     ]
 );
 
@@ -112,6 +117,9 @@ pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+            KeyBinding::new("cmd-m", Minimize, None),
         ]);
     }
 }
@@ -124,17 +132,22 @@ pub fn install_menus(cx: &mut App) {
     }
     use gpui_kit::base::input;
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(window) = cx.active_window() {
-            cx.defer(move |cx| {
-                let _ = window.update(cx, |_, window, _| window.remove_window());
-            });
-        }
-    });
+    cx.on_action(|_: &CloseWindow, cx| cx.hide());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &Minimize, cx| with_active_window(cx, Window::minimize_window));
+    cx.on_action(|_: &Zoom, cx| with_active_window(cx, Window::zoom_window));
     cx.set_menus(vec![
         Menu::new("else.bot").items([
             MenuItem::action("Settings…", crate::connection::OpenAppSettings),
             MenuItem::action("Bot details", ToggleSettings),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide else.bot", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
             MenuItem::action("Quit else.bot", Quit),
         ]),
@@ -157,8 +170,22 @@ pub fn install_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Delete Bot…", DeleteBot),
         ]),
-        Menu::new("Window").items([MenuItem::action("Close Window", CloseWindow)]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", Minimize),
+            MenuItem::action("Zoom", Zoom),
+            MenuItem::separator(),
+            MenuItem::action("Close Window", CloseWindow),
+        ]),
     ]);
+}
+
+/// Deferred because a key binding dispatches while its window is updating.
+fn with_active_window(cx: &mut App, f: fn(&Window)) {
+    if let Some(window) = cx.active_window() {
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, _| f(window));
+        });
+    }
 }
 
 /// What the window knows about its API connection.
