@@ -170,7 +170,7 @@ impl View {
         }
     }
 
-    fn can_install(&self) -> bool {
+    pub(super) fn can_install(&self) -> bool {
         self.snapshot.unavailable.is_none()
             && matches!(self.snapshot.check, UpdateCheck::Available { .. })
             && matches!(self.snapshot.work, Work::Idle)
@@ -178,6 +178,11 @@ impl View {
                 self.snapshot.operation,
                 Operation::Idle | Operation::Failed(_)
             )
+    }
+
+    pub(super) fn install(&mut self) -> Result<(), String> {
+        self.show_output = true;
+        self.commands.install()
     }
 }
 
@@ -257,10 +262,7 @@ impl Shell {
         }
         let outcome = match action {
             Action::Check => view.commands.check(),
-            Action::Install => {
-                view.show_output = true;
-                view.commands.install()
-            }
+            Action::Install => view.install(),
             Action::Restart => {
                 view.confirm_restart = true;
                 Ok(())

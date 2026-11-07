@@ -166,17 +166,40 @@ impl Shell {
 
     pub(super) fn render_server_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let can_update = self
+            .registry
+            .servers
+            .iter()
+            .any(|saved| self.can_update_server(saved.id));
+        let updating = self.registry.servers.iter().any(|saved| {
+            self.server_update_view(saved.id)
+                .is_some_and(updates::View::busy)
+        });
         let mut content = v_flex()
             .gap_0()
             .child(
                 h_flex()
                     .items_start()
                     .gap_3()
-                    .child(div().flex_1().child(settings::section_heading(
+                    .child(div().flex_1().min_w_0().child(settings::section_heading(
                         "Servers",
                         "Manage where your bots run.",
                         cx,
                     )))
+                    .child(
+                        Button::new("servers-update-all")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .small()
+                            .label(if updating {
+                                "Updating…"
+                            } else {
+                                "Update all"
+                            })
+                            .loading(updating)
+                            .disabled(!can_update || updating)
+                            .on_click(cx.listener(|shell, _, _, cx| shell.update_all_servers(cx))),
+                    )
                     .child(
                         Button::new("servers-add")
                             .focus_ring(false)
@@ -298,14 +321,28 @@ impl Shell {
                         })),
                 );
             }
-            let update_activity = self
-                .remote_updates
-                .get(&id)
-                .or_else(|| {
-                    self.managed_server(&saved.profile)
-                        .then_some(&self.server_updates)
-                })
-                .is_some_and(updates::View::has_activity);
+            let update_view = self.server_update_view(id);
+            let update_activity = update_view.is_some_and(updates::View::has_activity);
+            if let Some(view) = update_view {
+                use crate::updates::Operation;
+                let progress = match &view.snapshot.operation {
+                    Operation::Preparing => {
+                        Some(("Checking ongoing work…", theme.muted_foreground))
+                    }
+                    Operation::Installing => Some(("Updating…", theme.muted_foreground)),
+                    Operation::Restarting | Operation::RestartScheduled => {
+                        Some(("Restarting…", theme.muted_foreground))
+                    }
+                    Operation::Ready { .. } => Some(("Update installed", theme.success)),
+                    Operation::Failed(_) | Operation::RestartFailed(_) => {
+                        Some(("Update failed", theme.danger))
+                    }
+                    Operation::Idle => None,
+                };
+                if let Some((label, color)) = progress {
+                    facts = facts.child(div().text_color(color).child(label));
+                }
+            }
             if (update_available && online)
                 || observation.is_some_and(|entry| entry.health == Health::Incompatible)
                 || update_activity
