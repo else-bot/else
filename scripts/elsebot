@@ -220,6 +220,9 @@ process_pid() {
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
 	installation="$(cd "$ELSE_HOME" && pwd -P)" || return 1
 	executable="$(readlink "/proc/$pid/exe" 2>/dev/null || ps -ww -o comm= -p "$pid" 2>/dev/null)" || return 1
+	# macOS reports the path the API was launched with, which may go through
+	# a symlink such as /var -> /private/var.
+	executable="$(cd "${executable%/*}" 2>/dev/null && pwd -P)/${executable##*/}" || return 1
 	case "$executable" in
 	"$installation/versions/"*/bin/else-api | "$installation/current/bin/else-api" | "$installation/server-current/bin/else-api") ;;
 	*) return 1 ;;
