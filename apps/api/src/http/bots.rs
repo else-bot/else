@@ -179,6 +179,8 @@ struct UpdateBot {
     name: Option<String>,
     #[serde(default)]
     avatar: Option<Avatar>,
+    #[serde(default)]
+    muted: Option<bool>,
 }
 
 async fn update(
@@ -186,10 +188,10 @@ async fn update(
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<UpdateBot>,
 ) -> Result<Json<Value>, ApiError> {
-    if body.name.is_none() && body.avatar.is_none() {
+    if body.name.is_none() && body.avatar.is_none() && body.muted.is_none() {
         return Err(ApiError::bad_request(
             "invalid_input",
-            "Send a name, an avatar, or both.",
+            "Send a name, an avatar, or muted.",
         ));
     }
     let name = body
@@ -201,6 +203,7 @@ async fn update(
     let patch = bots::Patch {
         name: name.as_ref(),
         avatar: body.avatar,
+        muted: body.muted,
     };
     let bot = bots::update(&state.db, bot_id, patch).await?;
     Ok(Json(json!({ "bot": bot_json(&bot) })))

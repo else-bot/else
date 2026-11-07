@@ -27,6 +27,8 @@ gpui_kit::assets::icon_assets!(
     [
         FolderInput,
         BellDot,
+        Bell,
+        BellOff,
         PencilLine,
         PanelRightOpen,
         PanelRightClose,

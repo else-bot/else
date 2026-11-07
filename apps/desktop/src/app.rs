@@ -498,7 +498,7 @@ impl ElseApp {
         cx.notify();
     }
 
-    fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(list) = client.bots().await {

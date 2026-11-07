@@ -43,6 +43,8 @@ pub struct BotRecord {
     pub queued_count: i64,
     /// Its sidebar category, if any.
     pub category_id: Option<Uuid>,
+    /// The owner silenced it: no notifications or unread state.
+    pub muted: bool,
     /// When the newest owner or bot message in its owner conversation was
     /// created; `None` before the first message.
     pub last_message_at: Option<DateTime<Utc>>,
@@ -67,7 +69,7 @@ impl BotRecord {
 }
 
 const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status,
-        b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id,
+        b.created_at, b.deleted_at, b.selected_provider_id, b.cancel_pending, b.category_id, b.muted,
         b.avatar_shape, b.avatar_color,
         c.read_item_seq, c.read_text_bytes, c.marked_unread,
         h.id AS head_item_id, h.turn_id AS head_turn_id, h.seq AS head_seq,
@@ -481,9 +483,10 @@ pub async fn list(pool: &SqlitePool, include_deleting: bool) -> Result<Listing, 
 pub struct Patch<'a> {
     pub name: Option<&'a BotName>,
     pub avatar: Option<Avatar>,
+    pub muted: Option<bool>,
 }
 
-/// Change an active bot's name, avatar, or both at once. Saving the values
+/// Change an active bot's name, avatar, or mute in one save. Saving the values
 /// it already shows changes nothing and journals nothing; a change journals
 /// one `bot.updated` in the same transaction. A deleted bot is refused and
 /// never revived.
@@ -522,6 +525,7 @@ pub async fn rename_for_turn(
         Patch {
             name: Some(name),
             avatar: None,
+            muted: None,
         },
     )
     .await?;
@@ -540,18 +544,21 @@ async fn update_in(
     }
     let name = patch.name.map_or(current.name.as_str(), BotName::as_str);
     let avatar = patch.avatar.unwrap_or(current.avatar());
-    if name == current.name && avatar == current.avatar() {
+    let muted = patch.muted.unwrap_or(current.muted);
+    if name == current.name && avatar == current.avatar() && muted == current.muted {
         return Ok(current);
     }
     sqlx::query(
         "UPDATE bots SET name = ?2,
-             avatar_shape = coalesce(?3, avatar_shape), avatar_color = coalesce(?4, avatar_color)
+             avatar_shape = coalesce(?3, avatar_shape), avatar_color = coalesce(?4, avatar_color),
+             muted = ?5
          WHERE id = ?1",
     )
     .bind(bot_id)
     .bind(name)
     .bind(patch.avatar.map(|a| a.shape))
     .bind(patch.avatar.map(|a| a.color))
+    .bind(muted)
     .execute(&mut *conn)
     .await?;
     super::events::bot_updated(conn, bot_id).await?;

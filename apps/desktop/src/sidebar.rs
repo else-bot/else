@@ -3,11 +3,11 @@
 //! without a window.
 //!
 //! Categories are ordered as the server orders them: by the case-folded
-//! name's code points, then ID. Bots within a group are ordered by recency:
-//! the newest message first, a never-messaged bot by its creation time, then
-//! the folded name and ID. A bot with no category, or with a category the
-//! client does not know (older records, a category being deleted), is
-//! unassigned. Empty categories are kept.
+//! name's code points, then ID. Muted bots go last in their group. Bots are
+//! otherwise ordered by recency: the newest message first, a never-messaged
+//! bot by its creation time, then the folded name and ID. A bot with no
+//! category, or with a category the client does not know (older records, a
+//! category being deleted), is unassigned. Empty categories are kept.
 
 use std::cmp::Reverse;
 
@@ -65,6 +65,7 @@ impl<'a> Layout<'a> {
         for group in &mut groups {
             group.bots.sort_by_key(|b| {
                 (
+                    b.muted,
                     Reverse(b.last_message_at.or(b.created_at)),
                     fold(&b.name),
                     b.id,
@@ -120,6 +121,7 @@ mod tests {
             activity: None,
             cleanup: None,
             category_id: category.map(Uuid::from_u128),
+            muted: false,
             created_at: None,
             last_message_at: None,
             read_state: None,
@@ -283,6 +285,28 @@ mod tests {
             layout.visible_order(&Default::default()),
             [3, 1, 2, 4].map(Uuid::from_u128).to_vec(),
             "navigation skips the bot being deleted"
+        );
+    }
+
+    #[test]
+    fn muted_bots_sink_below_the_rest_of_their_group() {
+        let mut quiet = bot(1, "Quiet", Some(1));
+        quiet.last_message_at = at(50);
+        quiet.muted = true;
+        let mut idle = bot(2, "Idle", Some(1));
+        idle.last_message_at = at(1);
+        let mut silent = bot(3, "Silent", Some(1));
+        silent.last_message_at = at(10);
+        silent.muted = true;
+        let bots = vec![quiet, idle, silent];
+        let categories = [category(1, "Tech")];
+        let layout = Layout::new(&categories, &bots, None);
+        assert_eq!(
+            shape(&layout),
+            vec![
+                (Some("Tech"), vec!["Idle", "Quiet", "Silent"]),
+                (None, vec![])
+            ]
         );
     }
 }

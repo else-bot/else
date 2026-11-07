@@ -31,9 +31,9 @@ impl ElseApp {
         categories.sort_by_key(|(id, name)| (fold(name), *id));
         let movable = !categories.is_empty() && app.movable_bot(id).is_some();
         let unread = app.is_unread(id);
-        let deletable = app.default_bot_id != Some(id)
-            && app.connection == Connection::Connected
-            && !app.deleting.contains(&id);
+        let muted = bot.muted;
+        let connected = app.connection == Connection::Connected;
+        let deletable = app.default_bot_id != Some(id) && connected && !app.deleting.contains(&id);
         let delete_color = if deletable {
             cx.theme().danger
         } else {
@@ -85,14 +85,28 @@ impl ElseApp {
                     .disabled(true),
             )
         };
+        let menu = if muted {
+            menu
+        } else {
+            menu.item(
+                PopupMenuItem::new(if unread {
+                    "Mark as read"
+                } else {
+                    "Mark as unread"
+                })
+                .icon(IconName::BellDot)
+                .on_click(act(Self::toggle_unread)),
+            )
+        };
         menu.item(
-            PopupMenuItem::new(if unread {
-                "Mark as read"
-            } else {
-                "Mark as unread"
-            })
-            .icon(IconName::BellDot)
-            .on_click(act(Self::toggle_unread)),
+            PopupMenuItem::new(if muted { "Unmute bot" } else { "Mute bot" })
+                .icon(if muted {
+                    IconName::Bell
+                } else {
+                    IconName::BellOff
+                })
+                .disabled(!connected)
+                .on_click(act(Self::toggle_mute)),
         )
         .item(
             PopupMenuItem::new("Rename bot")
@@ -115,5 +129,22 @@ impl ElseApp {
             Mark::Unread
         };
         self.mark_bot(id, mark, cx);
+    }
+
+    fn toggle_mute(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(muted) = self.active_bots().find(|b| b.id == id).map(|b| !b.muted) else {
+            return;
+        };
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.set_muted(id, muted).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Err(err) = result {
+                    app.notice = Some(format!("Could not save the mute setting: {err}"));
+                }
+                app.refresh_now(window, cx);
+            });
+        })
+        .detach();
     }
 }

@@ -326,6 +326,7 @@ impl ElseApp {
         let selected = self.selected == Some(id);
         let unread = self.is_unread(id);
         let pending = !bot.is_active();
+        let muted = bot.muted && !pending;
         let connected = self.connected();
         let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
         let color = if !connected {
@@ -395,15 +396,35 @@ impl ElseApp {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        div()
-                            .text_sm()
-                            .truncate()
-                            .font_weight(if unread {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .child(bot.name.clone()),
+                        h_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    .font_weight(if unread {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .child(bot.name.clone()),
+                            )
+                            .when(muted, |line| {
+                                line.child(
+                                    div()
+                                        .id("muted")
+                                        .flex_none()
+                                        .role(Role::Image)
+                                        .aria_label("Muted")
+                                        .child(
+                                            Icon::new(IconName::BellOff)
+                                                .xsmall()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                            }),
                     )
                     .child(subtitle),
             )
@@ -412,8 +433,9 @@ impl ElseApp {
             row = row.opacity(0.5);
         } else {
             row = row
+                .when(muted && !selected, |row| row.opacity(0.5))
                 .cursor_pointer()
-                .hover(|style| style.bg(theme.sidebar_accent))
+                .hover(|style| style.bg(theme.sidebar_accent).opacity(1.))
                 .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)));
         }
         if !self.categories.is_empty() && self.movable_bot(id).is_some() {
