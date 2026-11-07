@@ -479,7 +479,7 @@ impl ElseApp {
             texts.push((
                 RowKey::Pending(pending.request_id),
                 pending.text.clone(),
-                RowFormat::for_owner(&pending.text),
+                RowFormat::for_owner(&pending.text, &pending.parts),
                 pending.parts.clone(),
             ));
         }

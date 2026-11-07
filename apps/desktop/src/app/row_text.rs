@@ -22,15 +22,28 @@ use uuid::Uuid;
 pub(super) enum RowFormat {
     Plain,
     Markdown,
+    OwnerMarkdown,
     Quoted,
 }
 
 impl RowFormat {
-    pub(super) fn for_owner(text: &str) -> Self {
+    pub(super) fn for_owner(text: &str, parts: &[MessagePart]) -> Self {
         if super::reply::QuotedReply::parse(text).is_some() {
             Self::Quoted
         } else {
+            Self::owner_body(parts)
+        }
+    }
+
+    // File chips are textarea tokens, so a message attaching a document
+    // keeps the plain widget instead of losing its clickable chips.
+    fn owner_body(parts: &[MessagePart]) -> Self {
+        if parts.iter().any(
+            |part| matches!(part, MessagePart::File { file } if !super::images::is_image(file)),
+        ) {
             Self::Plain
+        } else {
+            Self::OwnerMarkdown
         }
     }
 
@@ -38,9 +51,24 @@ impl RowFormat {
         if item.kind == "assistant" || item.bot_reply.is_some() {
             Self::Markdown
         } else if item.kind == "user" && item.bot_task.is_none() {
-            Self::for_owner(&item.text)
+            Self::for_owner(&item.text, &item.parts)
         } else {
             Self::Plain
+        }
+    }
+
+    fn mentions(self, source: &str, bots: &MentionRegistry) -> Vec<BotMention> {
+        match self {
+            Self::Plain | Self::Quoted => BotMention::find(source, bots),
+            Self::Markdown | Self::OwnerMarkdown => BotMention::in_markdown(source, bots),
+        }
+    }
+
+    fn hard_breaks(self, source: &str) -> Vec<usize> {
+        if self == Self::OwnerMarkdown {
+            soft_line_breaks(source)
+        } else {
+            Vec::new()
         }
     }
 }
@@ -70,7 +98,7 @@ impl RowSource {
             format: RowFormat::Markdown,
         };
         self.text = reply.body.to_owned();
-        self.format = RowFormat::Plain;
+        self.format = RowFormat::owner_body(&self.parts);
         (Some(quote), self)
     }
 }
@@ -80,6 +108,7 @@ pub(super) struct RowText {
     mentions: Vec<BotMention>,
     bots: Arc<MentionRegistry>,
     display: MentionDisplay,
+    format: RowFormat,
     widget: Widget,
     quote: Option<Box<RowText>>,
     parts: Vec<MessagePart>,
@@ -122,12 +151,10 @@ impl RowText {
         let quote = quote
             .map(|quote| Box::new(Self::new(key, quote, client.clone(), bots, bot, window, cx)));
         let (visible, visible_parts) = without_images(&body.text, &body.parts);
-        let mut mentions = match format {
-            RowFormat::Plain | RowFormat::Quoted => BotMention::find(&visible, bots),
-            RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
-        };
+        let format = body.format;
+        let mut mentions = format.mentions(&visible, bots);
         let content = plain_content(&visible, &visible_parts, &mut mentions);
-        let display = MentionDisplay::new(&visible, &mentions);
+        let display = MentionDisplay::new(&visible, &mentions, &format.hard_breaks(&visible));
         let widget = match format {
             RowFormat::Plain | RowFormat::Quoted => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
@@ -136,7 +163,7 @@ impl RowText {
                 state.set_value(content, window, cx);
                 state
             })),
-            RowFormat::Markdown => {
+            RowFormat::Markdown | RowFormat::OwnerMarkdown => {
                 let state = cx.new(|cx| TextViewState::markdown(&display.text, cx));
                 // Markdown parses in the background, so the row's height is
                 // only known once the state notifies.
@@ -164,6 +191,7 @@ impl RowText {
             mentions,
             bots: bots.clone(),
             display,
+            format,
             widget,
             quote,
             files: file_map(&parts),
@@ -177,11 +205,9 @@ impl RowText {
 
     pub(super) fn format(&self) -> RowFormat {
         if self.quote.is_some() {
-            return RowFormat::Quoted;
-        }
-        match self.widget {
-            Widget::Plain(_) => RowFormat::Plain,
-            Widget::Markdown { .. } => RowFormat::Markdown,
+            RowFormat::Quoted
+        } else {
+            self.format
         }
     }
 
@@ -247,10 +273,7 @@ impl RowText {
         };
         let (visible, visible_parts) = without_images(&body.text, &body.parts);
         self.images.update(cx, |images, cx| images.sync(&parts, cx));
-        let mut mentions = match self.format() {
-            RowFormat::Plain | RowFormat::Quoted => BotMention::find(&visible, bots),
-            RowFormat::Markdown => BotMention::in_markdown(&visible, bots),
-        };
+        let mut mentions = self.format.mentions(&visible, bots);
         self.bots = bots.clone();
         let content = plain_content(&visible, &visible_parts, &mut mentions);
         if self.source == source
@@ -260,7 +283,7 @@ impl RowText {
         {
             return false;
         }
-        let display = MentionDisplay::new(&visible, &mentions);
+        let display = MentionDisplay::new(&visible, &mentions, &self.format.hard_breaks(&visible));
         match &self.widget {
             Widget::Plain(state) => {
                 state.update(cx, |state, cx| state.set_value(content, window, cx))
@@ -506,6 +529,32 @@ fn plain_content(
     content
 }
 
+fn soft_line_breaks(source: &str) -> Vec<usize> {
+    fn visit(node: &markdown::mdast::Node, source: &str, breaks: &mut Vec<usize>) {
+        if let markdown::mdast::Node::Text(text) = node
+            && let Some(position) = &text.position
+        {
+            let start = position.start.offset;
+            let run = &source[start..position.end.offset];
+            breaks.extend(
+                run.char_indices()
+                    .filter(|&(at, ch)| ch == '\r' || (ch == '\n' && !run[..at].ends_with('\r')))
+                    .map(|(at, _)| start + at),
+            );
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, source, breaks);
+        }
+    }
+    let mut breaks = Vec::new();
+    if (source.contains('\n') || source.contains('\r'))
+        && let Ok(root) = markdown::to_mdast(source, &markdown::ParseOptions::gfm())
+    {
+        visit(&root, source, &mut breaks);
+    }
+    breaks
+}
+
 fn activates_link(event: &ClickEvent) -> bool {
     match event {
         ClickEvent::Mouse(click) => {
@@ -520,6 +569,7 @@ fn activates_link(event: &ClickEvent) -> bool {
 mod tests {
     use super::{RowFormat, RowSource, plain_content};
     use crate::api::Bot;
+    use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
     use crate::app::reply::{Author, Draft, MessageReference};
     use crate::attachments::{Attachment, MessagePart, file_id};
@@ -527,7 +577,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn quoted_owner_replies_render_markdown_and_ordinary_messages_stay_literal() {
+    fn owner_messages_render_markdown_unless_they_carry_file_chips() {
         let item = |kind: &str, text: &str| {
             serde_json::from_value(serde_json::json!({
                 "id": Uuid::nil(), "seq": 1, "turn_id": Uuid::nil(),
@@ -540,8 +590,11 @@ mod tests {
             "Replying to your earlier message:\nThis is ordinary text.",
             "Replying to your earlier message:\n> quoted\nnot quoted\n\nAnswer.",
         ] {
-            assert_eq!(RowFormat::for_item(&item("user", text)), RowFormat::Plain);
-            assert_eq!(RowFormat::for_owner(text), RowFormat::Plain);
+            assert_eq!(
+                RowFormat::for_item(&item("user", text)),
+                RowFormat::OwnerMarkdown
+            );
+            assert_eq!(RowFormat::for_owner(text, &[]), RowFormat::OwnerMarkdown);
         }
         for author in [Author::Owner, Author::Bot] {
             let draft = Draft {
@@ -554,12 +607,76 @@ mod tests {
             };
             let text = draft.message().unwrap();
             assert_eq!(RowFormat::for_item(&item("user", &text)), RowFormat::Quoted);
-            assert_eq!(RowFormat::for_owner(&text), RowFormat::Quoted);
+            assert_eq!(RowFormat::for_owner(&text, &[]), RowFormat::Quoted);
         }
         assert_eq!(
             RowFormat::for_item(&item("assistant", "**Done**")),
             RowFormat::Markdown
         );
+        let attached = |media_type: &str| {
+            let file = Attachment {
+                id: Uuid::new_v4(),
+                name: "attached".into(),
+                media_type: media_type.into(),
+                size: 1,
+            };
+            vec![
+                MessagePart::Text {
+                    text: "See **this** ".into(),
+                },
+                MessagePart::Text {
+                    text: file.fallback(),
+                },
+                MessagePart::File { file },
+            ]
+        };
+        assert_eq!(
+            RowFormat::for_owner("See **this**", &attached("image/png")),
+            RowFormat::OwnerMarkdown
+        );
+        assert_eq!(
+            RowFormat::for_owner("See **this**", &attached("text/plain")),
+            RowFormat::Plain
+        );
+    }
+
+    #[test]
+    fn owner_line_breaks_survive_markdown_without_touching_code_or_offsets() {
+        let source = "What should I do:\n\n**Open.**\nFirst line\r\nsecond @Scout\n\n```\na\nb\n```\n> quoted\n> more";
+        let scout: Bot =
+            serde_json::from_value(serde_json::json!({"id": Uuid::from_u128(1), "name": "Scout"}))
+                .unwrap();
+        let bots = MentionRegistry::new(&[scout]);
+        let mentions = RowFormat::OwnerMarkdown.mentions(source, &bots);
+        let breaks = RowFormat::OwnerMarkdown.hard_breaks(source);
+        let display = MentionDisplay::new(source, &mentions, &breaks);
+        assert_eq!(
+            display.text,
+            format!(
+                "What should I do:\n\n**Open.**\\\nFirst line\\\r\nsecond [bot](bot-mention:{}:{})\n\n```\na\nb\n```\n> quoted\\\n> more",
+                Uuid::from_u128(1),
+                source.find('@').unwrap()
+            )
+        );
+        assert_eq!(display.source_bytes(display.text.len()), source.len());
+        let first = display.text.find('\\').unwrap();
+        assert_eq!(display.source_bytes(first), source.find("\nFirst").unwrap());
+        assert_eq!(display.source_bytes(first + 1), first);
+        let tree = markdown::to_mdast(&display.text, &markdown::ParseOptions::gfm()).unwrap();
+        let mut kinds = Vec::new();
+        fn collect(node: &markdown::mdast::Node, kinds: &mut Vec<&'static str>) {
+            match node {
+                markdown::mdast::Node::Strong(_) => kinds.push("strong"),
+                markdown::mdast::Node::Break(_) => kinds.push("break"),
+                _ => {}
+            }
+            for child in node.children().into_iter().flatten() {
+                collect(child, kinds);
+            }
+        }
+        collect(&tree, &mut kinds);
+        assert_eq!(kinds, ["strong", "break", "break", "break"]);
+        assert!(RowFormat::Markdown.hard_breaks(source).is_empty());
     }
 
     #[test]
@@ -599,7 +716,7 @@ mod tests {
             let (quote, body_source) = RowSource {
                 text: message.clone(),
                 parts,
-                format: RowFormat::for_owner(&message),
+                format: RowFormat::for_owner(&message, &[]),
             }
             .split_quote();
             let quote = quote.unwrap();
