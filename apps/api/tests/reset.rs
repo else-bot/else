@@ -62,7 +62,9 @@ impl Installation {
         let result = self.command().args(args).output().unwrap();
         assert!(
             result.status.success(),
-            "{}",
+            "status: {}, stdout: {}, stderr: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
         result
@@ -527,6 +529,7 @@ fn remove_stops_its_running_server_before_deleting_the_installation() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(reaper.join().unwrap().success());
+    let status = reaper.join().unwrap();
+    assert!(status.success(), "server exited with {status}");
     assert!(!installation.home.exists());
 }
