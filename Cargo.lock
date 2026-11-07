@@ -2140,6 +2140,7 @@ dependencies = [
  "markdown",
  "mime_guess",
  "notify",
+ "proc-macro2",
  "rand 0.10.3",
  "reqwest 0.13.5",
  "rustls",

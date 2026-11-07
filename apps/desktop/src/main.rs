@@ -6,6 +6,8 @@ mod avatar;
 mod config;
 mod connection;
 mod email;
+#[cfg(test)]
+mod icon_assets_tests;
 mod inbox;
 mod launch;
 mod mcp_oauth;
