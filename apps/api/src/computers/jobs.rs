@@ -769,13 +769,16 @@ mod tests {
             .spawn()
             .unwrap();
         let mut stdin = filter.stdin.take().unwrap();
-        for write in writes {
-            stdin.write_all(write).unwrap();
-            stdin.flush().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        drop(stdin);
-        let out = filter.wait_with_output().unwrap();
+        let out = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for write in writes {
+                    stdin.write_all(write).unwrap();
+                    stdin.flush().unwrap();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+            filter.wait_with_output().unwrap()
+        });
         assert!(out.status.success());
         String::from_utf8(out.stdout).unwrap()
     }
