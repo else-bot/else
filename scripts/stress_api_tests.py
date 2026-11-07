@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -14,6 +15,8 @@ TARGETS = {
     "tool_permissions": [],
     "ws": ["ended_channels_do_not_use_up_the_subscription_limit", "--exact"],
     "owner_questions": [],
+    "routine_grants": [],
+    "task_permissions": [],
     "email_api": [],
     "reset": [],
     "turns": [],
@@ -29,6 +32,8 @@ def main():
     parser.add_argument("--jobs", type=int, default=6)
     parser.add_argument("--target", action="append", choices=TARGETS)
     args = parser.parse_args()
+    if args.iterations < 1 or args.jobs < 1:
+        parser.error("--iterations and --jobs must be positive")
     targets = args.target or list(TARGETS)
     binaries = {}
     for line in args.build.read_text().splitlines():
@@ -52,7 +57,8 @@ def main():
             code, output = 124, (error.stdout or b"") + (error.stderr or b"")
         log = args.output / f"{target}-{iteration:03}.log"
         log.write_bytes(output)
-        if b"0 passed; 0 failed" in output or b"test result:" not in output:
+        summary = re.search(rb"^test result: \w+\. (\d+) passed; (\d+) failed;", output, re.MULTILINE)
+        if summary is None or int(summary[1]) + int(summary[2]) == 0:
             code = code or 125
         record = {"target": target, "iteration": iteration, "exit": code,
                   "seconds": round(time.monotonic() - start, 3), "log": str(log), "command": command}
