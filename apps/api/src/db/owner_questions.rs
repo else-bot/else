@@ -17,8 +17,9 @@
 //! longer offer it. "Always allow for this routine" covers runs of that one
 //! routine admitted with its current prompt revision; editing the prompt
 //! ends it. A tool grant covers one MCP tool and effect, and a task grant
-//! one declared task, target, and effect of host actions, both only in the
-//! bot's owner requests. Which scope a card offers and which grant applies
+//! one declared task, target, and effect of host actions. A tool grant
+//! applies only in the bot's owner requests; a task grant also in tasks
+//! delegated to the bot for an owner request, whose cards approve once. Which scope a card offers and which grant applies
 //! come from the turn's source in the database; a task grant matches the
 //! declared task and target exactly and never interprets the action.
 
@@ -368,7 +369,8 @@ async fn owner_message_quotes(
 /// grant of the turn's scope runs a destructive call; a denial of exactly
 /// this action in this request stands; an approval for exactly these
 /// arguments is consumed by this one call; a tool or task grant matching the
-/// action runs it in an owner request; otherwise the owner is asked, on a
+/// action runs it in an owner request (a task grant also in work delegated
+/// for one); otherwise the owner is asked, on a
 /// card offering only the grant this turn's scope can receive. A host action
 /// without a task scope is offered no standing grant.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
@@ -393,12 +395,13 @@ pub async fn gate_host(
         .await?
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
-    let target = if caller.owner_conversation
-        && super::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest
-    {
+    // A task grant also covers the bot's work that another bot delegated
+    // for an owner request; a tool grant covers only the owner's own chat.
+    let target = if super::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest {
         spec.approval
             .as_ref()
             .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
+            .filter(|t| caller.owner_conversation || matches!(t, PermissionTarget::Task { .. }))
     } else {
         None
     };

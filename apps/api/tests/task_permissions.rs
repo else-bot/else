@@ -511,6 +511,12 @@ async fn work_delegated_for_an_owner_request_uses_but_never_records_a_task_grant
         .await
         .unwrap();
     let (_, child_token) = h.started(child).await;
+    let saved = &h.inputs(child).await[0].standing_permissions;
+    assert_eq!(
+        saved.len(),
+        1,
+        "the task sees its saved task scope: {saved:?}"
+    );
     runs_by_task_grant(app, &child_token, tailscale("up")).await;
     let recorded = tool(
         app,

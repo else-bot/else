@@ -91,9 +91,8 @@ pub async fn endpoint(
                 Some("create_bot") => Tool::CreateBot,
                 Some("rename_bot") => Tool::RenameBot,
                 Some("request_secret") => Tool::RequestSecret,
-                Some("ask_owner" | "ask_permission" | "confirm_permission" | "social_connect") => {
-                    Tool::AskOwner
-                }
+                Some("ask_permission") => Tool::AskPermission,
+                Some("ask_owner" | "confirm_permission" | "social_connect") => Tool::AskOwner,
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name) if name.starts_with("routine_") || name.starts_with("webhook_") => {
                     Tool::Routines

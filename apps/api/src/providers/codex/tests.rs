@@ -79,9 +79,16 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
     assert!(!recorded.contains("Continue the owner's request with these results."));
     turn.standing_permissions.clear();
     let revoked = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
-    assert!(revoked.contains("Current saved scopes for this bot's owner chat requests: []"));
+    assert!(revoked.contains("Current saved scopes that apply to this request: []"));
     assert!(!revoked.contains("Manage Tailscale"));
     turn.delegation.delegated_task = true;
+    assert!(
+        prompt::turn_packet(&turn, turn.turn_no, None, &skills)
+            .0
+            .contains("[else.bot saved permissions]"),
+        "work delegated for an owner request sees its task scopes"
+    );
+    turn.delegation.origin = crate::app::providers::Origin::RoutineRun;
     assert!(
         !prompt::turn_packet(&turn, turn.turn_no, None, &skills)
             .0
