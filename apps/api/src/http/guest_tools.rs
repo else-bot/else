@@ -67,7 +67,9 @@ pub fn tool_list() -> Vec<Value> {
             git over HTTPS to github.com for this command only, so clone, fetch, pull, and push \
             work, including from scripts, without credentials in URLs or arguments. Pushing a \
             release, a tag, or to the default branch publishes it: declare effect external. \
-            Deleting a remote branch or tag is destructive." });
+            Deleting a remote branch or tag is destructive. Run a release script as one \
+            external call whose context lists every branch and tag it may push or delete, \
+            including rollback deletions; never split it into separately labeled steps." });
     let effect = json!({ "type": "string", "enum": ["local", "destructive", "external"],
         "description": EFFECT_DESCRIPTION });
     let purpose = json!({ "type": "string", "maxLength": MAX_PURPOSE,

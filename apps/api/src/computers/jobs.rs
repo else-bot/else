@@ -442,10 +442,12 @@ impl ComputerManager {
         if crate::faults::hit("job.after_launch") {
             return Launch::Interrupted;
         }
+        // The launch script's own errors bypass the guest filter.
+        let masked = |text: &str| redact(text, &env.redaction());
         match launched {
             Ok(out) if out.stdout.contains("launched") => Launch::Launched,
-            Ok(out) => Launch::Uncertain(out.stderr),
-            Err(err) => Launch::Uncertain(err.to_string()),
+            Ok(out) => Launch::Uncertain(masked(&out.stderr)),
+            Err(err) => Launch::Uncertain(masked(&err.to_string())),
         }
     }
 
@@ -751,6 +753,49 @@ impl ComputerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    const TOKEN: &str = "gho_dummy0123456789abcdefDUMMY";
+
+    fn filtered(writes: &[Vec<u8>]) -> String {
+        let mut filter = Command::new("python3")
+            .args(["-I", "-S", "-c", FILTER])
+            .env_clear()
+            .env("ELSE_REDACT_VARS", " ELSE_GITHUB_TOKEN")
+            .env("ELSE_GITHUB_TOKEN", TOKEN)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = filter.stdin.take().unwrap();
+        for write in writes {
+            stdin.write_all(write).unwrap();
+            stdin.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(stdin);
+        let out = filter.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn the_guest_filter_masks_a_secret_split_across_reads() {
+        let (head, rest) = TOKEN.split_at(9);
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![format!("a {head}").into(), format!("{rest} b\n").into()],
+            TOKEN.bytes().map(|byte| vec![byte]).collect(),
+            vec![[vec![b'x'; 65_530], TOKEN.as_bytes().to_vec()].concat()],
+            vec![format!("{TOKEN}{TOKEN}").into()],
+            vec![format!("end {head}").into(), rest.into()],
+        ];
+        for writes in cases {
+            let out = filtered(&writes);
+            assert!(!out.contains(head), "{}", tail(&out, 200));
+            assert!(out.contains("[secret ELSE_GITHUB_TOKEN]"));
+        }
+    }
 
     #[test]
     fn command_output_is_parsed_from_the_run_script_format() {
