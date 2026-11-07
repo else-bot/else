@@ -12,7 +12,6 @@ use gpui_kit::*;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// What the card says about a group of tasks sent in one attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Working,
@@ -29,11 +28,11 @@ impl Phase {
             Self::Failed
         } else if group
             .iter()
-            .all(|d| d.status == DelegationStatus::Cancelled)
+            .all(|d| d.status == DelegationStatus::Completed)
         {
-            Self::Stopped
-        } else {
             Self::Replied
+        } else {
+            Self::Stopped
         }
     }
 }
@@ -77,7 +76,10 @@ impl ElseApp {
         };
         let elapsed = format_elapsed((end - start).num_seconds().max(0));
         let council = group.len() > 1;
-        let answered = group.iter().filter(|d| d.status.settled()).count();
+        let replied = group
+            .iter()
+            .filter(|d| d.status == DelegationStatus::Completed)
+            .count();
         let accent = match phase {
             Phase::Working => theme.primary,
             Phase::Replied => theme.success,
@@ -103,11 +105,11 @@ impl ElseApp {
             let (title, detail) = match (council, phase) {
                 (true, Phase::Replied) => (
                     "Council answered".to_owned(),
-                    format!("{answered} of {}", group.len()),
+                    format!("{replied} of {} replied", group.len()),
                 ),
                 (true, _) => (
                     "Council ended".to_owned(),
-                    format!("{answered} of {}", group.len()),
+                    format!("{replied} of {} replied", group.len()),
                 ),
                 (false, Phase::Failed) => {
                     (format!("{} couldn't finish", name(group[0])), String::new())
@@ -120,9 +122,8 @@ impl ElseApp {
                 Phase::Stopped => IconName::CircleOff,
                 _ => IconName::CircleCheck,
             };
-            return Some(
+            let pill =
                 h_flex()
-                    .id(SharedString::from(format!("handoff-{id}")))
                     .max_w_full()
                     .items_center()
                     .gap_2()
@@ -139,7 +140,7 @@ impl ElseApp {
                             avatar(d, 20.).map(|a| div().when(ix > 0, |d| d.ml(px(-6.))).child(a))
                         }),
                     ))
-                    .child(Icon::new(icon).xsmall().text_color(accent))
+                    .child(Icon::new(icon).xsmall().flex_none().text_color(accent))
                     .child(div().min_w_0().truncate().child(title))
                     .when(!detail.is_empty(), |row| {
                         row.child(
@@ -155,7 +156,12 @@ impl ElseApp {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(elapsed),
-                    )
+                    );
+            return Some(
+                h_flex()
+                    .id(SharedString::from(format!("handoff-{id}")))
+                    .w_full()
+                    .child(pill)
                     .into_any_element(),
             );
         }
@@ -202,20 +208,32 @@ impl ElseApp {
                 .flex_none()
                 .gap_1p5()
                 .children(group.iter().map(|d| {
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .text_xs()
-                        .children(avatar(d, 22.))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(name(d)))
+                    let target = d.target_bot_id;
+                    Button::new(SharedString::from(format!("handoff-{id}-open-{target}")))
+                        .ghost()
+                        .xsmall()
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .accessibility_label(format!("Open chat with {}", name(d)))
+                        .on_click(
+                            cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
+                        )
                         .child(
-                            div()
-                                .text_color(if d.status == DelegationStatus::Failed {
-                                    theme.danger
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(status_label(d.status)),
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .text_xs()
+                                .children(avatar(d, 22.))
+                                .child(div().font_weight(FontWeight::MEDIUM).child(name(d)))
+                                .child(
+                                    div()
+                                        .text_color(if d.status == DelegationStatus::Failed {
+                                            theme.danger
+                                        } else {
+                                            theme.muted_foreground
+                                        })
+                                        .child(status_label(d.status)),
+                                ),
                         )
                 }))
                 .into_any_element()
@@ -233,7 +251,7 @@ impl ElseApp {
             format!("{} is on it", name(group[0]))
         };
         let footer = if council {
-            format!("{answered} of {} answered", group.len())
+            format!("{replied} of {} replied", group.len())
         } else {
             format!("{sender_name} continues when {} replies", name(group[0]))
         };

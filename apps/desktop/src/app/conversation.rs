@@ -146,11 +146,13 @@ fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                                 .iter()
                                 .all(|earlier| earlier.attempt != d.attempt)
                         })
-                        .map(move |(_, d)| {
-                            (
-                                RowKey::Handoff(d.id),
-                                c.question_anchor(turn.id, Some(d.created_at)),
-                            )
+                        .filter_map(move |(_, d)| {
+                            let anchor = c.question_anchor(turn.id, Some(d.created_at));
+                            let live = turn
+                                .delegations
+                                .iter()
+                                .any(|other| other.attempt == d.attempt && !other.status.settled());
+                            (live || anchor.is_some()).then_some((RowKey::Handoff(d.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
@@ -886,6 +888,38 @@ mod tests {
             .map(|d| d.id)
             .collect();
         assert_eq!(council, [Uuid::from_u128(20), Uuid::from_u128(21)]);
+    }
+
+    #[test]
+    fn a_settled_handoff_waits_for_its_history_page_but_a_live_one_shows() {
+        let page = |status: &str| -> Snapshot {
+            serde_json::from_value(json!({
+                "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+                "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+                "older_before_seq": 5, "items": [],
+                "turns": [{
+                    "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 1,
+                    "provider_id": "codex", "status": "completed", "error": null,
+                    "effect_uncertain": false,
+                    "delegations": [{ "id": Uuid::from_u128(20), "attempt": 1,
+                        "target_bot_id": Uuid::from_u128(30), "target_name": "Scout",
+                        "task": "Research", "status": status,
+                        "created_at": "2026-11-07T10:01:00Z" }]
+                }],
+                "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+            }))
+            .unwrap()
+        };
+        let settled = Conversation::from_snapshot(page("completed")).unwrap();
+        assert!(
+            request_rows(&settled).is_empty(),
+            "no stale summary at the tail"
+        );
+        let live = Conversation::from_snapshot(page("running")).unwrap();
+        assert_eq!(
+            request_rows(&live),
+            [(RowKey::Handoff(Uuid::from_u128(20)), None)]
+        );
     }
 
     #[test]

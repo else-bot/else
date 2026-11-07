@@ -67,6 +67,7 @@ gpui_kit::assets::icon_assets!(
         LockKeyhole,
         Square,
         CircleX,
+        CircleCheck,
         CircleOff,
         Users,
         MessageSquareOff,

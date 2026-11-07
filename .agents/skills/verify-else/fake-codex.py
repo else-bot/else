@@ -129,16 +129,18 @@ def draft_reply(turn, latest, packet, stopped):
 
 
 def handoff(turn, latest, stopped):
-    if latest not in {'[ui:delegate]', '[ui:council]'}:
+    marker, *targets = latest.split()
+    if marker not in {'[ui:delegate]', '[ui:council]'} or not targets:
         return False
-    peers = [bot for bot in outgoing_tool('list_bots', {})['bots'] if not bot['self']]
-    task = 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'
-    if latest == '[ui:delegate]':
-        result = outgoing_tool('delegate', {'target_bot_id': peers[0]['bot_id'], 'task': task})
+    if marker == '[ui:delegate]':
+        result = outgoing_tool('delegate', {'target_bot_id': targets[0],
+            'task': 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'})
     else:
-        result = outgoing_tool('council', {'target_bot_ids': [bot['bot_id'] for bot in peers[:3]],
-                                           'task': 'Should the studio plan move from 29 to 39 EUR? [ui:slow]'})
+        result = outgoing_tool('council', {'target_bot_ids': targets,
+            'task': 'Should the studio plan move from 29 to 39 EUR a month? [ui:slow]'})
     if result['status'] != 'pending':
+        event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+              'itemId': 'fixture-handoff-result', 'delta': 'Handoff result: ' + json.dumps(result) + '\n\n'})
         return False
     event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
           'itemId': 'fixture-handoff', 'delta': 'Handing this off.'})
@@ -184,6 +186,8 @@ def stream(turn, latest, packet, stopped):
             return
     except Exception as error:
         print('Outgoing draft fixture failed: ' + str(error), file=sys.stderr, flush=True)
+        event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+              'itemId': 'fixture-error', 'delta': 'Fixture tool call failed: ' + str(error)})
         finish(turn, stopped, 'failed')
         return
     if latest == '[ui:hang]':
