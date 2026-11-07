@@ -350,10 +350,10 @@ impl ElseApp {
                         if activity.as_ref().is_some_and(|a| a.phase == "idle") {
                             self.stopping.remove(&bot);
                         }
-                        if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot) {
-                            if activity.is_some() {
-                                entry.activity = activity;
-                            }
+                        if let Some(entry) = self.bots.iter_mut().find(|b| b.id == bot)
+                            && activity.is_some()
+                        {
+                            entry.activity = activity;
                         }
                         self.sync_rows(window, cx);
                     }

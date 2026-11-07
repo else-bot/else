@@ -59,23 +59,25 @@ async fn show(
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     require_bot(&state, bot_id, false).await?;
-    let row: Option<(
-        String,
-        String,
-        i32,
-        i32,
-        String,
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-        i64,
-        bool,
-    )> = sqlx::query_as(
+    #[derive(sqlx::FromRow)]
+    struct ComputerRow {
+        runtime_name: String,
+        image: String,
+        cpus: i32,
+        memory_mib: i32,
+        desired_state: String,
+        observed_state: String,
+        last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_error: Option<String>,
+        leases: i64,
+        has_desktop: bool,
+    }
+    let row: Option<ComputerRow> = sqlx::query_as(
         "SELECT runtime_name, image, cpus, memory_mib, desired_state, observed_state,
                     last_used_at, last_error,
                     (SELECT count(*) FROM computer_leases l
-                     WHERE l.bot_id = c.bot_id AND l.released_at IS NULL),
-                    desktop_port IS NOT NULL OR observed_state IN ('absent', 'creating')
+                     WHERE l.bot_id = c.bot_id AND l.released_at IS NULL) AS leases,
+                    desktop_port IS NOT NULL OR observed_state IN ('absent', 'creating') AS has_desktop
              FROM bot_computers c WHERE bot_id = ?1",
     )
     .bind(bot_id)
@@ -85,8 +87,18 @@ async fn show(
         .computers
         .as_ref()
         .is_some_and(|computers| computers.config().desktop);
-    let Some((name, image, cpus, memory, desired, observed, last_used, error, leases, has_desktop)) =
-        row
+    let Some(ComputerRow {
+        runtime_name: name,
+        image,
+        cpus,
+        memory_mib: memory,
+        desired_state: desired,
+        observed_state: observed,
+        last_used_at: last_used,
+        last_error: error,
+        leases,
+        has_desktop,
+    }) = row
     else {
         return Ok(Json(json!({
             "bot_id": bot_id,

@@ -64,7 +64,7 @@ struct Pending {
 enum State {
     Disconnected,
     Required(Discovery),
-    Authorizing(Pending),
+    Authorizing(Box<Pending>),
     Authorized(Credential),
     ReauthRequired(Discovery),
 }
@@ -352,7 +352,7 @@ impl Session {
         };
         let provider = Some(discovery.issuer.clone());
         let scopes = discovery.scopes.clone();
-        self.state = State::Authorizing(Pending {
+        self.state = State::Authorizing(Box::new(Pending {
             id,
             discovery,
             client_id,
@@ -361,7 +361,7 @@ impl Session {
             verifier,
             expires: Instant::now() + AUTH_LIFETIME,
             previous,
-        });
+        }));
         Ok(Started {
             request_id: id,
             authorization_url: url.into(),
@@ -402,9 +402,10 @@ impl Session {
         }
         let discovery = pending.discovery.clone();
         let previous = std::mem::replace(&mut self.state, State::Required(discovery));
-        let State::Authorizing(mut pending) = previous else {
+        let State::Authorizing(pending) = previous else {
             unreachable!()
         };
+        let mut pending = *pending;
         if let Some(previous) = pending.previous.take() {
             self.state = State::Authorized(previous);
         }

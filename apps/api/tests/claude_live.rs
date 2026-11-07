@@ -419,14 +419,14 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
             .fetch_all(&app.db.pool)
             .await
             .unwrap();
-    let handoffs: Vec<(
-        i64,
-        String,
-        String,
-        String,
-        String,
-        sqlx::types::Json<Vec<i64>>,
-    )> = sqlx::query_as(
+    #[derive(Debug, sqlx::FromRow)]
+    struct HandoffRow {
+        source_provider_id: String,
+        target_provider_id: String,
+        state: String,
+        selected_turns: sqlx::types::Json<Vec<i64>>,
+    }
+    let handoffs: Vec<HandoffRow> = sqlx::query_as(
         "SELECT t.turn_no, h.source_provider_id, h.target_provider_id, h.kind, h.state,
                 h.selected_turns
          FROM handoffs h JOIN turns t ON t.id = h.turn_id WHERE h.bot_id = ?1 ORDER BY t.turn_no",
@@ -476,13 +476,23 @@ async fn codex_to_claude_to_codex_keeps_the_job_and_context() {
         "Claude inspected the job by ID: {claude_checks:?}"
     );
     assert_eq!(handoffs.len(), 2, "{handoffs:?}");
-    let (_, src, dst, _, state, selected) = &handoffs[0];
+    let HandoffRow {
+        source_provider_id: src,
+        target_provider_id: dst,
+        state,
+        selected_turns: selected,
+    } = &handoffs[0];
     assert_eq!(
         (src.as_str(), dst.as_str(), state.as_str()),
         ("codex", "claude", "accepted")
     );
     assert_eq!(&selected.0, &vec![1]);
-    let (_, src, dst, _, state, selected) = &handoffs[1];
+    let HandoffRow {
+        source_provider_id: src,
+        target_provider_id: dst,
+        state,
+        selected_turns: selected,
+    } = &handoffs[1];
     assert_eq!(
         (src.as_str(), dst.as_str(), state.as_str()),
         ("claude", "codex", "accepted")

@@ -13,9 +13,14 @@ use else_api::computers::{
 };
 use uuid::Uuid;
 
+struct Computer {
+    state: RuntimeState,
+    files: HashMap<String, String>,
+}
+
 #[derive(Default)]
 struct Fake {
-    computers: Mutex<HashMap<String, (RuntimeState, HashMap<String, String>)>>,
+    computers: Mutex<HashMap<String, Computer>>,
     calls: Mutex<Vec<String>>,
     fail_stop: std::sync::atomic::AtomicBool,
     fail_list: std::sync::atomic::AtomicBool,
@@ -40,7 +45,7 @@ impl Fake {
                 operation: "control".into(),
                 message: format!("no sandbox {name}"),
             })?;
-        entry.0 = state;
+        entry.state = state;
         Ok(())
     }
 }
@@ -57,7 +62,7 @@ impl ComputerRuntime for Fake {
             .lock()
             .unwrap()
             .iter()
-            .map(|(n, (s, _))| (n.clone(), *s))
+            .map(|(name, computer)| (name.clone(), computer.state))
             .collect())
     }
     async fn create(&self, spec: &Spec) -> Result<(), RuntimeError> {
@@ -77,7 +82,13 @@ impl ComputerRuntime for Fake {
                 message: "exists".into(),
             });
         }
-        computers.insert(spec.name.clone(), (RuntimeState::Running, HashMap::new()));
+        computers.insert(
+            spec.name.clone(),
+            Computer {
+                state: RuntimeState::Running,
+                files: HashMap::new(),
+            },
+        );
         Ok(())
     }
     async fn copy_out(
@@ -89,7 +100,7 @@ impl ComputerRuntime for Fake {
         let computers = self.computers.lock().unwrap();
         let content = computers
             .get(name)
-            .and_then(|(_, f)| f.get(guest))
+            .and_then(|computer| computer.files.get(guest))
             .cloned()
             .unwrap_or_default();
         std::fs::write(host, content).map_err(|e| RuntimeError::Unavailable(e.to_string()))
@@ -120,7 +131,10 @@ impl ComputerRuntime for Fake {
         self.log(format!("remove {name}"));
         let mut computers = self.computers.lock().unwrap();
         match computers.get(name) {
-            Some((RuntimeState::Stopped, _)) => {
+            Some(Computer {
+                state: RuntimeState::Stopped,
+                ..
+            }) => {
                 computers.remove(name);
                 Ok(())
             }
@@ -144,7 +158,7 @@ impl ComputerRuntime for Fake {
             self.log(format!("checkpoint {name}"));
         }
         let mut computers = self.computers.lock().unwrap();
-        let (state, files) = computers.get_mut(name).expect("exists");
+        let Computer { state, files } = computers.get_mut(name).expect("exists");
         assert_eq!(
             *state,
             RuntimeState::Running,
@@ -681,7 +695,7 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
         "only the old computer is left"
     );
     assert_eq!(
-        fake.computers.lock().unwrap()[&old_name].0,
+        fake.computers.lock().unwrap()[&old_name].state,
         RuntimeState::Stopped
     );
     let (state, error): (String, String) =
@@ -696,10 +710,13 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     fake.fail_unpack
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let leftover = format!("{old_name}-leftover");
-    fake.computers
-        .lock()
-        .unwrap()
-        .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
+    fake.computers.lock().unwrap().insert(
+        leftover.clone(),
+        Computer {
+            state: RuntimeState::Running,
+            files: HashMap::new(),
+        },
+    );
     sqlx::query(
         "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
          VALUES (?1, ?2, ?3, 'python:3.12-slim', ?4, 'img:new', 'started')",
@@ -726,12 +743,12 @@ async fn image_upgrades_fail_cleanly_and_keep_the_old_computer() {
     );
     assert_eq!(report.data_bytes, 4);
     assert_eq!(
-        fake.computers.lock().unwrap()[&old_name].0,
+        fake.computers.lock().unwrap()[&old_name].state,
         RuntimeState::Stopped,
         "old kept"
     );
     assert_eq!(
-        fake.computers.lock().unwrap()[&report.to_runtime_name].0,
+        fake.computers.lock().unwrap()[&report.to_runtime_name].state,
         RuntimeState::Stopped
     );
     let counts: Vec<(String, i64)> = sqlx::query_as(
@@ -792,7 +809,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
         "{busy:?}"
     );
     assert_eq!(
-        fake.computers.lock().unwrap()[&old_name].0,
+        fake.computers.lock().unwrap()[&old_name].state,
         RuntimeState::Stopped,
         "not booted"
     );
@@ -840,10 +857,13 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     assert_eq!(network, None);
 
     let leftover = format!("{}-leftover", third.to_runtime_name);
-    fake.computers
-        .lock()
-        .unwrap()
-        .insert(leftover.clone(), (RuntimeState::Running, HashMap::new()));
+    fake.computers.lock().unwrap().insert(
+        leftover.clone(),
+        Computer {
+            state: RuntimeState::Running,
+            files: HashMap::new(),
+        },
+    );
     sqlx::query(
         "INSERT INTO computer_upgrades (id, bot_id, from_runtime_name, from_image, to_runtime_name, to_image, state)
          VALUES (?1, ?2, 'x', 'y', ?3, 'z', 'started')",
@@ -857,7 +877,7 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     drop(manager);
     let _restarted = self::manager(&app, &fake, config(1)).await;
     assert_eq!(
-        fake.computers.lock().unwrap()[&leftover].0,
+        fake.computers.lock().unwrap()[&leftover].state,
         RuntimeState::Stopped
     );
 }
@@ -992,7 +1012,7 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
     );
     assert_eq!(observed(&app, bot).await, "running");
     assert_eq!(
-        fake.computers.lock().unwrap()[&old_name].0,
+        fake.computers.lock().unwrap()[&old_name].state,
         RuntimeState::Running
     );
     let attempts: i64 =

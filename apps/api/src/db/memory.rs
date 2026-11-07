@@ -219,14 +219,32 @@ pub async fn append(
 /// Log a conversation item's final text, once. Missing or empty items and
 /// inactive bots are skipped: memory follows visible history.
 pub async fn log_item(conn: &mut SqliteConnection, item_id: Uuid) -> Result<(), sqlx::Error> {
-    let row: Option<(Uuid, Uuid, Uuid, String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind
+    #[derive(sqlx::FromRow)]
+    struct ItemRow {
+        bot_id: Uuid,
+        conversation_id: Uuid,
+        turn_id: Uuid,
+        kind: String,
+        text: String,
+        provider_id: Option<String>,
+        conversation_kind: String,
+    }
+    let row: Option<ItemRow> = sqlx::query_as(
+        "SELECT c.bot_id, i.conversation_id, i.turn_id, i.kind, i.text, i.provider_id, c.kind AS conversation_kind
          FROM items i JOIN conversations c ON c.id = i.conversation_id WHERE i.id = ?1 AND NOT i.hidden",
     )
     .bind(item_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((bot_id, conversation_id, turn_id, kind, text, provider_id, conversation_kind)) = row
+    let Some(ItemRow {
+        bot_id,
+        conversation_id,
+        turn_id,
+        kind,
+        text,
+        provider_id,
+        conversation_kind,
+    }) = row
     else {
         return Ok(());
     };
@@ -410,29 +428,6 @@ pub async fn search(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_respects_utf8_boundaries_and_limits() {
-        let text = "é".repeat(10);
-        let parts = split(&text, 7);
-        assert!(parts.iter().all(|p| p.len() <= 7 && !p.is_empty()));
-        assert_eq!(parts.concat(), text);
-        assert_eq!(split("short", 64), vec!["short"]);
-        assert_eq!(split("", 64), vec![""]);
-    }
-
-    #[test]
-    fn only_owner_kinds_carry_owner_authority() {
-        for kind in [Kind::AssistantMessage, Kind::ToolActivity] {
-            assert_ne!(kind.authority(), "owner");
-        }
-        assert_eq!(Kind::OwnerCorrection.authority(), "owner");
-    }
-}
-
 fn search_query(query: &str) -> String {
     let mut tokens = Vec::new();
     let mut chars = query.chars().peekable();
@@ -484,5 +479,28 @@ fn search_query(query: &str) -> String {
         "\"\"".into()
     } else {
         alternatives.join(" OR ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_respects_utf8_boundaries_and_limits() {
+        let text = "é".repeat(10);
+        let parts = split(&text, 7);
+        assert!(parts.iter().all(|p| p.len() <= 7 && !p.is_empty()));
+        assert_eq!(parts.concat(), text);
+        assert_eq!(split("short", 64), vec!["short"]);
+        assert_eq!(split("", 64), vec![""]);
+    }
+
+    #[test]
+    fn only_owner_kinds_carry_owner_authority() {
+        for kind in [Kind::AssistantMessage, Kind::ToolActivity] {
+            assert_ne!(kind.authority(), "owner");
+        }
+        assert_eq!(Kind::OwnerCorrection.authority(), "owner");
     }
 }

@@ -1023,7 +1023,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
     let target_url = format!(
         "sqlite://{}",
         target_params
-            .with_database(&format!("{target}"))
+            .with_database(&target)
             .options
             .get_filename()
             .display()

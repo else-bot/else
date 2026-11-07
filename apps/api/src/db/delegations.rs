@@ -489,16 +489,18 @@ pub async fn undelivered(
     conn: &mut SqliteConnection,
     root: Uuid,
 ) -> Result<Vec<Outcome>, sqlx::Error> {
-    let rows: Vec<(
-        Uuid,
-        Uuid,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT d.id, d.target_bot_id, b.name, d.task, d.status, d.result, d.error
+    #[derive(sqlx::FromRow)]
+    struct OutcomeRow {
+        id: Uuid,
+        target_bot_id: Uuid,
+        target_name: String,
+        task: String,
+        status: String,
+        result: Option<String>,
+        error: Option<String>,
+    }
+    let rows: Vec<OutcomeRow> = sqlx::query_as(
+        "SELECT d.id, d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
              WHERE d.root_turn_id = ?1 AND d.delivered_attempt IS NULL
                AND d.status IN ('completed', 'failed', 'cancelled')
@@ -509,17 +511,15 @@ pub async fn undelivered(
     .await?;
     Ok(rows
         .into_iter()
-        .map(
-            |(id, target_bot_id, target_name, task, status, result, error)| Outcome {
-                id,
-                target_bot_id,
-                target_name,
-                task,
-                status,
-                result,
-                error,
-            },
-        )
+        .map(|row| Outcome {
+            id: row.id,
+            target_bot_id: row.target_bot_id,
+            target_name: row.target_name,
+            task: row.task,
+            status: row.status,
+            result: row.result,
+            error: row.error,
+        })
         .collect())
 }
 
@@ -534,20 +534,39 @@ pub async fn mark_delivered(
     if ids.is_empty() {
         return Ok(());
     }
-    let rows: Vec<(Uuid, Uuid, Uuid, String, String, Option<String>, Option<String>)> =
+    #[derive(sqlx::FromRow)]
+    struct DeliveredRow {
+        id: Uuid,
+        parent_bot_id: Uuid,
+        conversation_id: Uuid,
+        status: String,
+        task: String,
+        result: Option<String>,
+        error: Option<String>,
+    }
+    let rows: Vec<DeliveredRow> =
         sqlx::query_as(
             "UPDATE delegations AS d SET delivered_attempt = ?3
              FROM turns r
              WHERE lower(hex(d.id)) IN (SELECT replace(value, '-', '') FROM json_each(?2)) AND d.root_turn_id = ?1 AND d.delivered_attempt IS NULL
                AND r.id = d.root_turn_id
-             RETURNING id, parent_bot_id, (SELECT conversation_id FROM turns WHERE id = root_turn_id), status, task, result, error",
+             RETURNING id, parent_bot_id, (SELECT conversation_id FROM turns WHERE id = root_turn_id) AS conversation_id, status, task, result, error",
         )
         .bind(root)
         .bind(sqlx::types::Json(ids))
         .bind(attempt)
         .fetch_all(&mut *conn)
         .await?;
-    for (id, parent, conversation, status, task, result, error) in rows {
+    for DeliveredRow {
+        id,
+        parent_bot_id: parent,
+        conversation_id: conversation,
+        status,
+        task,
+        result,
+        error,
+    } in rows
+    {
         let key = format!("delegation:{id}");
         let body = format!(
             "delegated task {id} ({status}): {task}\n-> {}",

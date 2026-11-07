@@ -298,7 +298,7 @@ impl ElseApp {
                     Icon::new(if draft.status == DraftStatus::Sent {
                         IconName::Check
                     } else {
-                        content_icon.clone()
+                        content_icon
                     })
                     .size_4()
                     .text_color(color),
@@ -329,10 +329,10 @@ impl ElseApp {
                     .text_color(theme.muted_foreground),
                 )
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    if let Some(view) = app.view.as_mut() {
-                        if !view.expanded_drafts.remove(&id) {
-                            view.expanded_drafts.insert(id);
-                        }
+                    if let Some(view) = app.view.as_mut()
+                        && !view.expanded_drafts.remove(&id)
+                    {
+                        view.expanded_drafts.insert(id);
                     }
                     app.remeasure_row(RowKey::Draft(id), cx);
                 }));

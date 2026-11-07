@@ -1590,7 +1590,7 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     };
     let step = |field: &str, cycle: u8| match field {
         "*" => Some(1),
-        _ => number(field.strip_prefix("*/")?, 1, cycle - 1).filter(|n| cycle % n == 0),
+        _ => number(field.strip_prefix("*/")?, 1, cycle - 1).filter(|n| cycle.is_multiple_of(*n)),
     };
     let every = |n: u8, unit: &str| match n {
         1 => format!("Every {unit}"),

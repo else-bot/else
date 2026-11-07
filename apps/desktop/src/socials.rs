@@ -105,7 +105,7 @@ enum Receipt {
         provider: Provider,
     },
     Ready {
-        connection: Connection,
+        connection: Box<Connection>,
         access: BindingInput,
         destinations: String,
     },
@@ -307,7 +307,7 @@ impl SocialsView {
                             .collect::<Vec<_>>()
                             .join(", ");
                         Receipt::Ready {
-                            connection: detail.connection,
+                            connection: Box::new(detail.connection),
                             access,
                             destinations,
                         }
@@ -609,10 +609,10 @@ impl SocialsView {
                 view.busy = false;
                 match result {
                     Ok(connection) => {
-                        if let Some(form) = &mut view.form {
-                            if let Some(access) = form.editor.access_mut() {
-                                access.connection = connection.clone();
-                            }
+                        if let Some(form) = &mut view.form
+                            && let Some(access) = form.editor.access_mut()
+                        {
+                            access.connection = connection.clone();
                         }
                         if let Some(existing) =
                             view.connections.iter_mut().find(|c| c.id == connection.id)

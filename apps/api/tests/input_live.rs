@@ -529,9 +529,7 @@ async fn a_bot_completes_visual_tasks_with_pointer_and_keyboard() {
     guest(
         &home,
         &name,
-        &format!(
-            "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/' > /dev/null"
-        ),
+        "DISPLAY=:99 /usr/local/bin/else-browser open 'http://127.0.0.1:8421/' > /dev/null",
         None,
         false,
     );

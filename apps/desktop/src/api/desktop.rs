@@ -21,6 +21,7 @@ const MAX_PIXELS: u64 = 8 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest single text commit the viewer types; longer ones are refused
 /// with a notice instead of being truncated.
+#[cfg(any(target_os = "macos", test))]
 pub const MAX_TEXT_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +60,7 @@ pub enum DesktopEvent {
 
 enum Input {
     Command(DesktopCommand),
+    #[cfg(any(target_os = "macos", test))]
     Text(Box<str>),
 }
 
@@ -77,6 +79,7 @@ impl DesktopCommands {
 
     /// Queues committed text, which is dropped unless the desktop is in control
     /// mode when its turn comes. Callers bound it by [`MAX_TEXT_CHARS`].
+    #[cfg(any(target_os = "macos", test))]
     pub fn type_text(&self, text: &str) -> bool {
         debug_assert!(text.chars().count() <= MAX_TEXT_CHARS);
         text.is_empty() || self.enqueue(Input::Text(text.into()))
@@ -125,6 +128,7 @@ enum ServerEvent {
 
 /// The X11 keysym that types `ch`, or `None` for control characters the
 /// guest cannot receive as text.
+#[cfg(any(target_os = "macos", test))]
 fn text_keysym(ch: char) -> Option<u32> {
     Some(match ch {
         '\n' | '\r' => 0xff0d,
@@ -340,6 +344,9 @@ impl Client {
                 command = commands.recv(), if typing.is_none() => {
                     let Some((sequence, input)) = command else { return Ok(()) };
                     last_sequence = sequence;
+                    #[cfg(not(any(target_os = "macos", test)))]
+                    let Input::Command(command) = input;
+                    #[cfg(any(target_os = "macos", test))]
                     let command = match input {
                         Input::Command(command) => command,
                         Input::Text(text) => {
@@ -612,6 +619,10 @@ mod tests {
         let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
+            #[expect(
+                clippy::result_large_err,
+                reason = "Tungstenite fixes the callback error type to ErrorResponse."
+            )]
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
                 |request: &Request, response: Response| {
@@ -685,6 +696,10 @@ mod tests {
         let (key_seen, key_received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
+            #[expect(
+                clippy::result_large_err,
+                reason = "Tungstenite fixes the callback error type to ErrorResponse."
+            )]
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
                 move |request: &Request, response: Response| {
@@ -725,10 +740,11 @@ mod tests {
                 r#"{"type":"key","key":65,"down":true}"#
             );
             key_seen.send(()).unwrap();
-            assert!(!matches!(
-                tokio::time::timeout(Duration::from_secs(5), ws.next()).await,
-                Err(_)
-            ));
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .is_ok()
+            );
         });
         let mut stream = client(origin).desktop(bot, false);
         assert!(matches!(

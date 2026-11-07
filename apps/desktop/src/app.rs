@@ -723,12 +723,14 @@ impl ElseApp {
             let result = client
                 .send(
                     bot,
-                    pending.request_id,
-                    pending.text.clone(),
-                    pending.provider_id.clone(),
-                    pending.reaction,
-                    pending.parts.clone(),
-                    pending.open_draft.clone(),
+                    crate::api::SendRequest {
+                        request_id: pending.request_id,
+                        text: pending.text.clone(),
+                        provider_id: pending.provider_id.clone(),
+                        reaction: pending.reaction,
+                        parts: pending.parts.clone(),
+                        open_draft: pending.open_draft.clone(),
+                    },
                 )
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
