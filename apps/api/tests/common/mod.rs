@@ -208,6 +208,7 @@ impl TestApp {
                 .with_oauth_key(state.secret_key.clone())
         });
         let state = Arc::new(state);
+        tokio::spawn(else_api::http::mcp_wait::run(state.clone(), stop.clone()));
         let router = else_api::http::router(&config, state.clone());
         Self {
             router,

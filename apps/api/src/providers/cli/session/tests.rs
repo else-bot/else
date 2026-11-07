@@ -45,6 +45,7 @@ pub(crate) fn input() -> TurnInput {
         standing_permissions: Vec::new(),
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
+        mcp_waits: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
         run: None,
