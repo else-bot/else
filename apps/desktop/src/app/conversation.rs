@@ -410,6 +410,9 @@ impl ElseApp {
             return;
         };
         let bot = view.bot_id;
+        if self.bots.iter().any(|b| b.id == bot && b.muted) {
+            view.unread_since = None;
+        }
         let conversation = view.conversation.as_ref();
         if let (Some(pending), Some(conversation)) = (self.pending.get_mut(&bot), conversation) {
             pending.retain(|p| !conversation.has_request(p.request_id));

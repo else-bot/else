@@ -3,11 +3,11 @@
 //! without a window.
 //!
 //! Categories are ordered as the server orders them: by the case-folded
-//! name's code points, then ID. Bots within a group are ordered by recency:
-//! the newest message first, a never-messaged bot by its creation time, then
-//! the folded name and ID, with muted bots after the rest. A bot with no category, or with a category the
-//! client does not know (older records, a category being deleted), is
-//! unassigned. Empty categories are kept.
+//! name's code points, then ID. Muted bots go last in their group. Bots are
+//! otherwise ordered by recency: the newest message first, a never-messaged
+//! bot by its creation time, then the folded name and ID. A bot with no
+//! category, or with a category the client does not know (older records, a
+//! category being deleted), is unassigned. Empty categories are kept.
 
 use std::cmp::Reverse;
 
