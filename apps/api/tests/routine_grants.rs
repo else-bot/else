@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use common::TestApp;
-use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, Harness, tool};
+use common::recorder::{self, GATE, GATE_EVERY_ATTEMPT, tool};
 use else_api::app::questions::Answer;
 use else_api::app::routines::{RoutineName, RoutinePrompt};
 use else_api::db::routines::{self, By, Patch};
@@ -77,18 +77,6 @@ async fn next_run(app: &TestApp, routine: Uuid) -> DateTime<Utc> {
 async fn wait(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
-}
-
-async fn next_grant(h: &Harness, turn: Uuid, old: &str) -> String {
-    for _ in 0..400 {
-        let token = h.grant(turn).await;
-        if token != old {
-            wait(&h.app, turn, "running").await;
-            return token;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("turn {turn} never continued");
 }
 
 async fn asks(app: &TestApp, token: &str, args: Value) -> (Uuid, Vec<String>) {
@@ -470,7 +458,7 @@ async fn a_routine_grant_covers_future_runs_of_that_routine_only() {
     answer(app, &main, question, "approve_routine").await;
     assert_eq!(routine_grants(app).await, [(prune, 1)]);
 
-    let token = next_grant(&h, run, &token).await;
+    let token = h.continued(run, &token).await;
     runs_without_asking(app, &token, delete_args("feature-b")).await;
     h.release(run).await;
     wait(app, run, "completed").await;
@@ -611,7 +599,7 @@ async fn a_prompt_edit_ends_the_grant_and_a_stale_card_grants_nothing() {
     );
     wait(app, run, "waiting").await;
     answer(app, &main, question, "approve").await;
-    let token = next_grant(&h, run, &token).await;
+    let token = h.continued(run, &token).await;
     runs_without_asking(app, &token, delete_args("feature-a")).await;
     let (_, choices) = asks(app, &token, delete_args("feature-b")).await;
     assert_eq!(

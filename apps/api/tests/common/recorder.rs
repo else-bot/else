@@ -9,7 +9,7 @@ use else_api::app::providers::{
 };
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::{TestApp, TestDb};
@@ -19,7 +19,7 @@ pub const GATE_EVERY_ATTEMPT: &str = "[gate:every-attempt]";
 
 enum Message {
     Record(Box<TurnInput>),
-    Grant(Uuid, oneshot::Sender<Option<String>>),
+    Grant(Uuid, oneshot::Sender<watch::Receiver<Option<String>>>),
     Inputs(Uuid, oneshot::Sender<Vec<TurnInput>>),
     Hold(Uuid, oneshot::Sender<()>),
     Release(Uuid),
@@ -27,23 +27,29 @@ enum Message {
 
 #[derive(Default)]
 struct State {
-    grants: HashMap<Uuid, String>,
+    grants: HashMap<Uuid, watch::Sender<Option<String>>>,
     inputs: Vec<TurnInput>,
     held: HashMap<Uuid, oneshot::Sender<()>>,
     released: HashSet<Uuid>,
 }
 
 impl State {
+    fn grant_updates(&mut self, turn: Uuid) -> &watch::Sender<Option<String>> {
+        self.grants
+            .entry(turn)
+            .or_insert_with(|| watch::channel(None).0)
+    }
+
     fn handle(&mut self, message: Message) {
         match message {
             Message::Record(input) => {
                 if let Some(token) = input.tool_grant.clone() {
-                    self.grants.insert(input.turn_id, token);
+                    self.grant_updates(input.turn_id).send_replace(Some(token));
                 }
                 self.inputs.push(*input);
             }
             Message::Grant(turn, reply) => {
-                let _ = reply.send(self.grants.get(&turn).cloned());
+                let _ = reply.send(self.grant_updates(turn).subscribe());
             }
             Message::Inputs(turn, reply) => {
                 let inputs = self.inputs.iter().filter(|i| i.turn_id == turn);
@@ -222,14 +228,24 @@ pub async fn harness_with_providers(
 }
 
 impl Harness {
-    pub async fn grant(&self, turn: Uuid) -> String {
-        for _ in 0..400 {
-            if let Some(token) = self.recorder.ask(|r| Message::Grant(turn, r)).await {
-                return token;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("turn {turn} never started");
+    async fn grant(&self, turn: Uuid, old: Option<&str>) -> String {
+        let mut updates = self.recorder.ask(|r| Message::Grant(turn, r)).await;
+        let token = tokio::time::timeout(
+            Duration::from_secs(20),
+            updates.wait_for(|token| token.as_deref().is_some_and(|token| Some(token) != old)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("turn {turn} never supplied a new grant"))
+        .unwrap();
+        token.as_ref().unwrap().clone()
+    }
+
+    pub async fn continued(&self, turn: Uuid, old: &str) -> String {
+        let token = self.grant(turn, Some(old)).await;
+        self.app
+            .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
+            .await;
+        token
     }
 
     pub async fn release(&self, turn: Uuid) {
@@ -255,7 +271,7 @@ impl Harness {
         self.app
             .wait_turn_for(&turn.to_string(), &["running"], Duration::from_secs(20))
             .await;
-        (turn, self.grant(turn).await)
+        (turn, self.grant(turn, None).await)
     }
 
     pub async fn inputs(&self, turn: Uuid) -> Vec<TurnInput> {
