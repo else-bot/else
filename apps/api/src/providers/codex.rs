@@ -83,11 +83,14 @@ fn build(wiring: &super::Wiring) -> super::Built {
         std::env::var("HOME").ok().as_deref(),
     );
     let codex = std::sync::Arc::new(
-        Codex::detect(
-            Some(wiring.host.clone()),
-            super::executable(wiring.config.codex_bin.as_deref(), "codex"),
-            auth,
-        )
+        Codex {
+            ready: Codex::ready(
+                Some(wiring.host.clone()),
+                super::executable(wiring.config.codex_bin.as_deref(), "codex"),
+                auth,
+            ),
+            tool_url: None,
+        }
         .with_tools(wiring.tool_url.clone()),
     );
     super::Built {
@@ -115,18 +118,18 @@ impl Codex {
     /// failing startup. The version is only session identity.
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, auth: Option<PathBuf>) -> Self {
         Self {
-            ready: Self::ready(host, program, auth),
+            ready: Self::ready(host, Ok(program), auth),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Option<PathBuf>,
+        program: Result<Option<PathBuf>, String>,
         auth: Option<PathBuf>,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Codex is not configured on this host")?;
-        let program = program.ok_or("the codex CLI was not found on the host")?;
+        let program = program?.ok_or("the codex CLI was not found on the host")?;
         let auth = auth.ok_or("the Codex login location is unknown")?;
         if !auth.is_file() {
             return Err("Codex is not logged in on the host (run `codex login`)".into());

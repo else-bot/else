@@ -11,16 +11,10 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn installed() -> PathBuf {
-    std::env::var_os("ELSE_GROK_BIN")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::split_paths(&std::env::var_os("PATH")?)
-                .map(|p| p.join("grok"))
-                .find(|p| p.is_file())
-        })
+    let configured = std::env::var_os("ELSE_GROK_BIN").map(PathBuf::from);
+    else_api::providers::executable::executable(configured.as_deref(), "grok")
+        .expect("resolve Grok CLI")
         .expect("Grok CLI on PATH or ELSE_GROK_BIN")
-        .canonicalize()
-        .unwrap()
 }
 
 async fn ask(app: &TestApp, bot: &str, provider: &str, text: &str) -> (Uuid, String) {

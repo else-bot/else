@@ -14,18 +14,16 @@ fn live() -> bool {
 }
 
 fn codex_and_auth() -> (PathBuf, PathBuf) {
-    let path = std::env::var("PATH").unwrap();
-    let codex = path
-        .split(':')
-        .map(|dir| Path::new(dir).join("codex"))
-        .find(|p| p.is_file())
-        .expect("codex on PATH");
+    let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
+    let codex = else_api::providers::executable::executable(configured.as_deref(), "codex")
+        .expect("resolve Codex CLI")
+        .expect("Codex CLI on PATH or ELSE_CODEX_BIN");
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
     .unwrap();
-    (std::fs::canonicalize(codex).unwrap(), auth)
+    (codex, auth)
 }
 
 const FORBIDDEN_ITEMS: &[&str] = &[

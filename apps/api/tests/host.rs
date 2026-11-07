@@ -198,12 +198,7 @@ async fn orphans_are_swept() {
 }
 
 fn installed_codex() -> Option<(PathBuf, PathBuf)> {
-    let path = std::env::var("PATH").ok()?;
-    let codex = path
-        .split(':')
-        .map(|dir| Path::new(dir).join("codex"))
-        .find(|p| p.is_file())?;
-    let codex = std::fs::canonicalize(codex).ok()?;
+    let codex = codex_on_path()?;
     let auth = codex_home::host_auth_file(
         std::env::var("CODEX_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
@@ -218,6 +213,9 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
         return;
     };
     let fx = fixture();
+    if !codex_supports_startup_config(&fx.host, &codex) {
+        return;
+    }
     let dirs = fx.host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
     codex_home::prepare(&dirs, &auth, None, true).unwrap();
     let launch = |args: &[&str]| LaunchSpec {
@@ -270,12 +268,56 @@ async fn codex_runs_with_host_tools_and_the_shared_login() {
 }
 
 fn codex_on_path() -> Option<PathBuf> {
-    let path = std::env::var("PATH").ok()?;
-    let codex = path
-        .split(':')
-        .map(|dir| Path::new(dir).join("codex"))
-        .find(|p| p.is_file())?;
-    std::fs::canonicalize(codex).ok()
+    let configured = std::env::var_os("ELSE_CODEX_BIN").map(PathBuf::from);
+    else_api::providers::executable::executable(configured.as_deref(), "codex")
+        .unwrap_or_else(|reason| panic!("Codex CLI resolution failed: {reason}"))
+}
+
+fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
+    for (args, flag) in [
+        (&["--help"][..], "--strict-config"),
+        (&["app-server", "--help"][..], "--print-startup-config"),
+    ] {
+        let help = host
+            .probe(codex, args, &[])
+            .unwrap_or_else(|| panic!("{} {} failed", codex.display(), args.join(" ")));
+        if !help.split_whitespace().any(|word| word == flag) {
+            eprintln!(
+                "SKIPPED: {} does not support {flag}; install a Codex CLI with startup-config validation",
+                codex.display()
+            );
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn startup_config_checks_skip_only_clis_without_the_required_flags() {
+    let fx = fixture();
+    for (name, strict, startup, supported) in [
+        ("current", "--strict-config", "--print-startup-config", true),
+        ("old-root", "--config", "--print-startup-config", false),
+        ("old-server", "--strict-config", "--listen", false),
+    ] {
+        let codex = fx.data.join(name);
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  --help) echo '{strict}' ;;\n  'app-server --help') echo '{startup}' ;;\n  *) exit 1 ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(codex_supports_startup_config(&fx.host, &codex), supported);
+    }
+}
+
+#[test]
+#[should_panic(expected = "--help failed")]
+fn a_broken_codex_cli_does_not_skip_startup_config_checks() {
+    let fx = fixture();
+    codex_supports_startup_config(&fx.host, Path::new("/bin/false"));
 }
 
 type Recorded = Arc<Mutex<Vec<serde_json::Value>>>;
@@ -455,6 +497,9 @@ async fn codex_offers_a_connector_event_no_native_tools() {
         return;
     };
     let fx = fixture();
+    if !codex_supports_startup_config(&fx.host, &codex) {
+        return;
+    }
     let dirs = fx.host.bot_dirs(Uuid::new_v4(), "codex").unwrap();
     let login = fx.data.join("no-login.json");
     codex_home::prepare(
