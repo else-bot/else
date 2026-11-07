@@ -1275,7 +1275,8 @@ async fn the_main_bot_creates_specialists_it_can_delegate_to_at_once() {
     let parked = create_bot(&app, &token, json!({ "name": "Late" })).await;
     assert_eq!(parked.status, StatusCode::CONFLICT);
     let name = else_api::app::bots::BotName::parse("Late").unwrap();
-    let direct = else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None).await;
+    let direct =
+        else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None, None).await;
     assert!(
         matches!(
             direct,
@@ -1376,7 +1377,7 @@ async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
     assert!(text(&reply).starts_with("NOT_ALLOWED"), "{}", reply.body);
     let name = else_api::app::bots::BotName::parse("GitHub").unwrap();
     assert!(matches!(
-        else_api::db::bots::create_for_turn(&app.db.pool, child, &name, None, None).await,
+        else_api::db::bots::create_for_turn(&app.db.pool, child, &name, None, None, None).await,
         Err(else_api::db::bots::BotError::Refused(
             else_api::db::bots::Refusal::NotOwnerConversation
         ))
@@ -1396,7 +1397,7 @@ async fn creation_requires_an_owner_request_and_a_purpose_for_peer_bots() {
         StatusCode::UNAUTHORIZED
     );
     assert!(matches!(
-        else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None).await,
+        else_api::db::bots::create_for_turn(&app.db.pool, root, &name, None, None, None).await,
         Err(else_api::db::bots::BotError::Refused(
             else_api::db::bots::Refusal::NotRunning
         ))

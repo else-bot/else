@@ -251,8 +251,8 @@ fn tool_list() -> Value {
         {
             "name": "create_bot",
             "description": "Register a new else.bot specialist in your owner conversation for an owner request, with \
-                the installation's default provider, the task secrets stored on this server, and no \
-                shared memory or other access. Returns its bot_id at once; you may delegate to it in this \
+                the installation's default model unless the owner named one, the task secrets stored \
+                on this server, and no shared memory or other access. Returns its bot_id at once; you may delegate to it in this \
                 attempt. Repeating the same name in this owner request returns the same bot. \
                 The bot learns its responsibilities from the tasks it receives, so give its \
                 first task with delegate. Supply its purpose, required for non-main bots. The server \
@@ -266,6 +266,23 @@ fn tool_list() -> Value {
                               "description": "Short display name, for example GitHub." },
                     "purpose": { "type": "string", "minLength": 1, "maxLength": crate::app::bots::MAX_PURPOSE_CHARS },
                     "category_id": { "type": "string", "format": "uuid" },
+                    "model": { "type": "string", "maxLength": super::routines::MAX_MODEL_CHARS,
+                               "description": "Only when the owner named the model the new bot runs \
+                                   on: its ID or name, such as grok-4.7, Grok 4.7, or Claude Opus 5.5. \
+                                   It also selects the provider. Omit it for the installation's \
+                                   default. A name that matches no single available model creates \
+                                   nothing and the error lists the models." },
+                    "provider_id": { "type": "string",
+                                     "description": format!(
+                                         "With model, only when the owner named the provider ({}).",
+                                         crate::providers::definitions::id_list()
+                                     ) },
+                    "reasoning_effort": { "type": "string",
+                                          "description": "With model, only when the owner asked for \
+                                              one (low, medium, high, xhigh, max)." },
+                    "service_tier": { "type": "string",
+                                      "description": "With model, only when the owner asked: \
+                                          priority is the Fast tier, default the standard one." },
                 },
                 "required": ["name"],
                 "additionalProperties": false,
@@ -1039,6 +1056,10 @@ struct CreateBotArgs {
     name: String,
     purpose: Option<String>,
     category_id: Option<Uuid>,
+    model: Option<String>,
+    provider_id: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
@@ -1053,7 +1074,8 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Ok(parsed) = serde_json::from_value::<CreateBotArgs>(args.clone()) else {
         return reject(
             "INVALID_ARGUMENTS",
-            "pass a name, optional purpose, and optional category_id.",
+            "pass a name, and optionally purpose, category_id, and model with provider_id, \
+             reasoning_effort, and service_tier.",
         );
     };
     let name = match BotName::parse(&parsed.name) {
@@ -1064,11 +1086,50 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         Ok(purpose) => purpose,
         Err(err) => return reject("INVALID_BOT", err),
     };
+    let model = match parsed.model.as_deref() {
+        Some(model) => {
+            let request = super::routines::ModelRequest {
+                model,
+                provider_id: parsed.provider_id.as_deref(),
+                reasoning_effort: parsed.reasoning_effort.as_deref(),
+                service_tier: parsed.service_tier.as_deref(),
+            };
+            match super::routines::resolve(state, None, &request).await {
+                Ok(model) => Some((request.key(), model)),
+                Err(reason) => {
+                    return reject(
+                        "MODEL_NOT_AVAILABLE",
+                        &format!(
+                            "the model \"{}\" was not applied: {reason}. No bot was created; \
+                             retry with an available model or tell the owner.",
+                            request.requested()
+                        ),
+                    );
+                }
+            }
+        }
+        None if parsed.provider_id.is_some()
+            || parsed.reasoning_effort.is_some()
+            || parsed.service_tier.is_some() =>
+        {
+            return reject(
+                "INVALID_ARGUMENTS",
+                "provider_id, reasoning_effort, and service_tier apply only together with model.",
+            );
+        }
+        None => None,
+    };
+    let model = model.as_ref().map(|(request, model)| bots::TurnModel {
+        request,
+        provider_id: &model.provider_id,
+        profile: &model.profile,
+    });
     match bots::create_for_turn(
         &state.db,
         grant.turn_id,
         &name,
         purpose.as_ref(),
+        model,
         parsed.category_id,
     )
     .await
@@ -1093,13 +1154,16 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                 bot.id,
                 bot.status
             );
-            let result = json!({
+            let mut result = json!({
                 "bot_id": bot.id,
                 "name": bot.name,
                 "status": bot.status,
                 "created": new,
                 "next": next,
             });
+            if let Ok(Some(own)) = crate::db::bot_profiles::get(&state.db, bot.id).await {
+                result["model"] = super::settings::choice_json(&own.provider_id, &own.profile);
+            }
             (tool_result(result), Some(log))
         }
         Err(BotError::Refused(refusal)) => {
@@ -1113,7 +1177,7 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Err(BotError::RequestConflict) => reject(
             "REQUEST_CONFLICT",
-            "This name was already used with another purpose or category in this request.",
+            "This name was already used with another purpose, category, or model in this request.",
         ),
         Err(BotError::CategoryNotFound) => {
             reject("CATEGORY_NOT_FOUND", "Use a category_id from list_bots.")

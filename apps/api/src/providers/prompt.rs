@@ -121,7 +121,9 @@ fn delegation_rules(input: &TurnInput) -> String {
     let creation = if delegation.can_create_bot {
         "By default, when the owner asks for a new bot, specialist, or agent (for example a \
          GitHub bot), that means an else.bot: register it with create_bot, giving a short \
-         name and its purpose. Use list_bots to find a suitable category_id when one exists. \
+         name and its purpose. When the owner names the model it runs on, pass it as model; \
+         if create_bot refuses the model, tell the owner instead of creating the bot on another \
+         one. Use list_bots to find a suitable category_id when one exists. \
          A bot has no description; it learns its responsibilities from the tasks it \
          receives and the owner's messages. When the owner said what the new bot is for, \
          delegate its first task to it at once: a self-contained task that states that purpose \

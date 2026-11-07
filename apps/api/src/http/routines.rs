@@ -211,18 +211,18 @@ fn fields() -> Value {
     })
 }
 
-const MAX_MODEL_CHARS: usize = 100;
+pub(super) const MAX_MODEL_CHARS: usize = 100;
 
-/// A model the bot asked a routine to run on, as sent.
-struct ModelRequest<'a> {
-    model: &'a str,
-    provider_id: Option<&'a str>,
-    reasoning_effort: Option<&'a str>,
-    service_tier: Option<&'a str>,
+/// A model a bot asked for, as sent: for a routine or a bot it creates.
+pub(super) struct ModelRequest<'a> {
+    pub(super) model: &'a str,
+    pub(super) provider_id: Option<&'a str>,
+    pub(super) reasoning_effort: Option<&'a str>,
+    pub(super) service_tier: Option<&'a str>,
 }
 
 impl ModelRequest<'_> {
-    fn key(&self) -> String {
+    pub(super) fn key(&self) -> String {
         [
             "model",
             self.model,
@@ -233,7 +233,7 @@ impl ModelRequest<'_> {
         .join("\0")
     }
 
-    fn requested(&self) -> String {
+    pub(super) fn requested(&self) -> String {
         self.model
             .trim()
             .replace('\0', "")
@@ -243,13 +243,14 @@ impl ModelRequest<'_> {
     }
 }
 
-/// The routine's own model for `request`, or why it cannot be used.
-/// Reasoning effort and service tier the bot did not name come from the
-/// bot's effective profile for that provider, else the provider's seeded
-/// default, else the provider's own catalog; the adapter validates them.
-async fn resolve(
+/// The provider and profile `request` names, or why it cannot be used.
+/// Reasoning effort and service tier the bot did not name come from
+/// `bot_id`'s effective profile for that provider (the installation's for
+/// a bot not created yet), else the provider's seeded default, else the
+/// provider's own catalog; the adapter validates them.
+pub(super) async fn resolve(
     state: &AppState,
-    bot_id: Uuid,
+    bot_id: Option<Uuid>,
     request: &ModelRequest<'_>,
 ) -> Result<RoutineModel, String> {
     let registry = state.scheduler.registry();
@@ -284,11 +285,15 @@ async fn resolve(
         return Err(format!("{} is unavailable: {why}", provider.label()));
     }
     let saved = match state.db.acquire().await {
-        Ok(mut conn) => crate::db::bot_profiles::effective(&mut conn, bot_id, provider_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, profile)| profile.0),
+        Ok(mut conn) => match bot_id {
+            Some(bot_id) => {
+                crate::db::bot_profiles::effective(&mut conn, bot_id, provider_id).await
+            }
+            None => crate::db::bot_profiles::installation(&mut conn, provider_id).await,
+        }
+        .ok()
+        .flatten()
+        .map(|(_, profile)| profile.0),
         Err(_) => None,
     }
     .or_else(|| {
@@ -360,7 +365,7 @@ async fn model_setting(
     bot_id: Uuid,
     request: &ModelRequest<'_>,
 ) -> (ModelSetting, String) {
-    match resolve(state, bot_id, request).await {
+    match resolve(state, Some(bot_id), request).await {
         Ok(own) => {
             let setting = ModelSetting::Own(own);
             let note = describe_model(&setting);

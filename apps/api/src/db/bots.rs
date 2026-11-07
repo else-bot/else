@@ -146,15 +146,17 @@ pub struct NewBot<'a> {
     pub avatar: Option<Avatar>,
 }
 
-fn create_hash(bot: &NewBot<'_>) -> Vec<u8> {
+/// A turn's creation passes no `profile` and hashes its model request as
+/// sent instead, so a retry still matches after the defaults that filled in
+/// the resolved profile change.
+fn create_hash(bot: &NewBot<'_>, profile: Option<(&str, &Profile)>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(b"create_bot\0");
     hasher.update(bot.name.as_str().as_bytes());
-    if bot.profile.is_some() || bot.category_id.is_some() {
+    if profile.is_some() || bot.category_id.is_some() {
         hasher.update(b"\0options\0");
-        hasher.update(
-            serde_json::to_vec(&(bot.profile, bot.category_id)).expect("serializable options"),
-        );
+        hasher
+            .update(serde_json::to_vec(&(profile, bot.category_id)).expect("serializable options"));
     }
     if let Some(avatar) = bot.avatar {
         hasher.update(b"\0avatar\0");
@@ -173,12 +175,13 @@ pub async fn create(
 
 /// Create a bot while an owner-request turn is running. Retries of the
 /// same name, including continuation attempts, return the same bot even if
-/// it was deleted. The bot uses installation defaults.
+/// it was deleted. Without a model the bot uses installation defaults.
 pub async fn create_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
     name: &BotName,
     purpose: Option<&BotPurpose>,
+    model: Option<TurnModel<'_>>,
     category_id: Option<Uuid>,
 ) -> Result<Created, BotError> {
     let mut hasher = Sha256::new();
@@ -190,11 +193,30 @@ pub async fn create_for_turn(
         uuid::Builder::from_custom_bytes(digest[..16].try_into().expect("16 bytes")).into_uuid();
     let bot = NewBot {
         name,
-        profile: None,
+        profile: model.as_ref().map(|m| (m.provider_id, m.profile)),
         category_id,
         avatar: None,
     };
-    create_as(pool, request_id, bot, Some((turn_id, purpose))).await
+    let creation = Creation {
+        turn_id,
+        purpose,
+        model_request: model.map(|m| m.request),
+    };
+    create_as(pool, request_id, bot, Some(creation)).await
+}
+
+/// A model a turn named for its new bot: the request as sent and the
+/// profile it resolved to.
+pub struct TurnModel<'a> {
+    pub request: &'a str,
+    pub provider_id: &'a str,
+    pub profile: &'a Profile,
+}
+
+struct Creation<'a> {
+    turn_id: Uuid,
+    purpose: Option<&'a BotPurpose>,
+    model_request: Option<&'a str>,
 }
 
 async fn authorize(
@@ -222,15 +244,29 @@ async fn create_as(
     pool: &SqlitePool,
     request_id: Uuid,
     bot: NewBot<'_>,
-    creation: Option<(Uuid, Option<&BotPurpose>)>,
+    creation: Option<Creation<'_>>,
 ) -> Result<Created, BotError> {
-    let mut hash = create_hash(&bot);
-    if let Some((_, Some(purpose))) = creation {
+    let mut hash = create_hash(&bot, creation.is_none().then_some(bot.profile).flatten());
+    if let Some(Creation {
+        purpose: Some(purpose),
+        ..
+    }) = &creation
+    {
         hash = Sha256::digest([hash.as_slice(), purpose.as_str().as_bytes()].concat()).to_vec();
     }
+    if let Some(Creation {
+        model_request: Some(model),
+        ..
+    }) = &creation
+    {
+        hash = Sha256::digest([hash.as_slice(), b"\0model\0", model.as_bytes()].concat()).to_vec();
+    }
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some((turn_id, purpose)) = creation {
-        let caller = authorize(&mut tx, turn_id).await?;
+    if let Some(Creation {
+        turn_id, purpose, ..
+    }) = &creation
+    {
+        let caller = authorize(&mut tx, *turn_id).await?;
         if !caller.main_bot && purpose.is_none() {
             return Err(Refusal::PurposeRequired.into());
         }
@@ -296,7 +332,12 @@ async fn create_as(
     .bind(&hash)
     .execute(&mut *tx)
     .await?;
-    if let Some((turn_id, Some(purpose))) = creation {
+    if let Some(Creation {
+        turn_id,
+        purpose: Some(purpose),
+        ..
+    }) = creation
+    {
         creation_receipt(&mut tx, turn_id, bot_id, bot.name, purpose, &hash).await?;
     }
     super::events::notify(&mut tx, bot_id).await?;

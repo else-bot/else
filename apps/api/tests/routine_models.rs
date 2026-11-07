@@ -569,3 +569,136 @@ async fn an_unavailable_saved_model_skips_runs_and_keeps_the_choice() {
     assert_eq!(saved["last_run"]["skip_reason"], "provider_unavailable");
     assert_eq!(saved["model"], gone, "the owner's choice is never switched");
 }
+
+#[tokio::test]
+async fn a_bot_created_with_a_named_model_runs_on_it() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let args = json!({ "name": "Sol", "purpose": "Answers with Sol.", "model": "GPT 6.1 Sol" });
+    let created = tool(&h.app, &token, "create_bot", args.clone()).await;
+    assert!(!created.error, "{}", created.body);
+    assert_eq!(
+        created.result["model"]["provider_id"], "codex",
+        "{}",
+        created.body
+    );
+    assert_eq!(created.result["model"]["model"], "gpt-6.1-sol");
+    let bot = created.result["bot_id"].as_str().unwrap().to_owned();
+
+    let effort = created.result["model"]["reasoning_effort"]
+        .as_str()
+        .unwrap();
+    let other = if effort == "xhigh" { "low" } else { "xhigh" };
+    sqlx::query(
+        "INSERT INTO provider_profiles (provider_id, model, reasoning_effort, service_tier)
+         VALUES ('codex', 'gpt-6-luna', ?1, 'default')
+         ON CONFLICT (provider_id) DO UPDATE SET reasoning_effort = excluded.reasoning_effort",
+    )
+    .bind(other)
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    let edited = h
+        .app
+        .owner(
+            "PUT",
+            &format!("/v1/bots/{bot}/profile"),
+            Some(json!({ "provider_id": "codex", "model": "gpt-6-luna",
+                         "reasoning_effort": "high", "service_tier": "default" })),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
+    let retry = tool(&h.app, &token, "create_bot", args).await;
+    assert_eq!(
+        retry.result["created"], false,
+        "a retry matches after the defaults change: {}",
+        retry.body
+    );
+    assert_eq!(
+        retry.result["model"]["model"], "gpt-6-luna",
+        "a retry reports the bot's saved model"
+    );
+    let changed = tool(
+        &h.app,
+        &token,
+        "create_bot",
+        json!({ "name": "Sol", "purpose": "Answers with Sol.", "model": "gpt-6-luna" }),
+    )
+    .await;
+    assert!(
+        changed
+            .result
+            .as_str()
+            .unwrap()
+            .starts_with("REQUEST_CONFLICT"),
+        "{}",
+        changed.body
+    );
+    finish(&h, turn).await;
+
+    let profile = h
+        .app
+        .owner("GET", &format!("/v1/bots/{bot}/profile"), None)
+        .await;
+    assert_eq!(profile.status, StatusCode::OK);
+    assert_eq!(profile.body["profile"]["own"], true, "{}", profile.body);
+    assert_eq!(profile.body["profile"]["model"], "gpt-6-luna");
+
+    let first = h.send(&bot, "hello").await;
+    h.app.wait_turn(&first.to_string(), &["completed"]).await;
+    let (provider, profile): (String, String) =
+        sqlx::query_as("SELECT provider_id, profile FROM turns WHERE id = ?1")
+            .bind(first)
+            .fetch_one(&h.app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(provider, "codex");
+    let profile: Value = serde_json::from_str(&profile).unwrap();
+    assert_eq!(profile["model"], "gpt-6-luna");
+}
+
+#[tokio::test]
+async fn a_bot_is_not_created_on_a_model_that_is_not_available() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let before = count(&h.app, "SELECT count(*) FROM bots WHERE id != ?1", &main).await;
+    let refused = tool(
+        &h.app,
+        &token,
+        "create_bot",
+        json!({ "name": "Grok", "purpose": "Answers with Grok.", "model": "Grok 4.7" }),
+    )
+    .await;
+    let text = refused.result.as_str().unwrap();
+    assert!(text.starts_with("MODEL_NOT_AVAILABLE"), "{}", refused.body);
+    assert!(
+        text.contains("gpt-6.1-sol"),
+        "the error lists the models: {text}"
+    );
+    assert_eq!(
+        count(&h.app, "SELECT count(*) FROM bots WHERE id != ?1", &main).await,
+        before,
+        "no bot was created"
+    );
+
+    let extras = tool(
+        &h.app,
+        &token,
+        "create_bot",
+        json!({ "name": "Fast", "purpose": "Answers fast.", "service_tier": "priority" }),
+    )
+    .await;
+    assert!(
+        extras
+            .result
+            .as_str()
+            .unwrap()
+            .starts_with("INVALID_ARGUMENTS"),
+        "{}",
+        extras.body
+    );
+    finish(&h, turn).await;
+}
