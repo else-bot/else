@@ -128,8 +128,29 @@ def draft_reply(turn, latest, packet, stopped):
     return True
 
 
+def handoff(turn, packet, stopped):
+    found = re.search(r'\[ui:(delegate|council)\]((?:\s+[0-9a-f-]{36})+)\s*$', packet)
+    if not found:
+        return False
+    targets = found.group(2).split()
+    if found.group(1) == 'delegate':
+        result = outgoing_tool('delegate', {'target_bot_id': targets[0],
+            'task': 'Find three coworking spaces in Lisbon under 300 EUR a month with fast Wi-Fi. [ui:slow]'})
+    else:
+        result = outgoing_tool('council', {'target_bot_ids': targets,
+            'task': 'Should the studio plan move from 29 to 39 EUR a month? [ui:slow]'})
+    if result['status'] != 'pending':
+        return False
+    event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+          'itemId': 'fixture-handoff', 'delta': 'Handing this off.'})
+    finish(turn, stopped, 'completed')
+    return True
+
+
 def stream(turn, latest, packet, stopped):
     try:
+        if handoff(turn, packet, stopped):
+            return
         if packet.rstrip().endswith('[ui:permission]') and '[else.bot owner answers]' not in packet:
             result = outgoing_tool('ask_permission', {
                 'kind': 'destructive',
@@ -164,12 +185,15 @@ def stream(turn, latest, packet, stopped):
             return
     except Exception as error:
         print('Outgoing draft fixture failed: ' + str(error), file=sys.stderr, flush=True)
+        event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+              'itemId': 'fixture-error', 'delta': 'Fixture tool call failed: ' + str(error)})
         finish(turn, stopped, 'failed')
         return
     if latest == '[ui:hang]':
         return
+    pause = 4.0 if '[ui:slow]' in packet else 1.0
     for text in ['Fixture ', 'reply ', '✓ ', 'from ', 'the ', 'desktop ', 'composer.']:
-        if stopped.wait(1.0):
+        if stopped.wait(pause):
             return
         event('item/agentMessage/delta', {'threadId':thread_id,'turnId':turn,'itemId':'fixture-message','delta':text})
     finish(turn, stopped, 'completed')

@@ -134,7 +134,32 @@ pub async fn turn_changed(
     });
     append(conn, bot_id, "turn.updated", data).await?;
     bot_updated(conn, bot_id).await?;
-    crate::db::delegations::publish_reply(conn, turn_id).await
+    crate::db::delegations::publish_reply(conn, turn_id).await?;
+    root_changed(conn, turn_id).await
+}
+
+/// Republish the delegating turn of `child_turn`, so its handoff card
+/// follows the child from queued to running to its outcome.
+async fn root_changed(conn: &mut SqliteConnection, child_turn: Uuid) -> Result<(), sqlx::Error> {
+    let root: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT d.parent_bot_id, d.root_turn_id FROM delegations d
+         JOIN bots p ON p.id = d.parent_bot_id
+         WHERE d.child_turn_id = ?1 AND p.status = 'active'",
+    )
+    .bind(child_turn)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((bot_id, root_turn)) = root else {
+        return Ok(());
+    };
+    let turn = turns::load_turn(conn, root_turn).await?;
+    let data = json!({
+        "bot_id": bot_id,
+        "conversation_id": turn.conversation_id,
+        "turn": turn_json(&turn),
+    });
+    append(conn, bot_id, "turn.updated", data).await?;
+    Ok(())
 }
 
 /// A new owner message: its item, its queued turn, and the bot's activity

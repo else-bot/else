@@ -9,6 +9,7 @@ mod create_bot;
 mod delete_dialog;
 mod dialogs;
 mod draft_card;
+mod handoff;
 mod images;
 mod layout;
 mod link_target;
