@@ -786,7 +786,7 @@ async fn capture_into(
         capture_finished_at: now(),
         encryption: encryption.clone(),
         application: Application {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: env!("ELSE_VERSION").to_owned(),
             migration_version,
         },
         sqlite: Sqlite {

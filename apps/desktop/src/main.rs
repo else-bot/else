@@ -147,7 +147,7 @@ fn main() {
         std::env::args().nth(1).as_deref(),
         Some("version" | "--version" | "-V")
     ) {
-        println!("else-desktop {}", env!("CARGO_PKG_VERSION"));
+        println!("else-desktop {}", env!("ELSE_VERSION"));
         return;
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()

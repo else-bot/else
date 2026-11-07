@@ -5,8 +5,9 @@ A release never adds commits to main. The release workflow picks a commit
 on main, and `prepare` adds one release commit on top of it that bumps the
 workspace version and pins the verified guest image. That commit is pushed
 to a candidate branch while it is built and tested, and `finalize` tags it
-and publishes its binaries. Main keeps the version it had, so the next
-version comes from the newest release tag.
+and publishes its binaries, and tags the main commit it was cut from as
+main/vX.Y.Z so builds from main report that version. Main keeps the version
+it had, so the next version comes from the newest release tag.
 
     release.py plan --bump patch|minor|major [--sha SHA]
     release.py prepare --version X.Y.Z --image IMAGE [--push]
@@ -181,6 +182,7 @@ def cmd_finalize(remote, main, version, rev, assets_dir):
         git("tag", "-f", "-a", tag, "-m", f"else.bot {version}\n\nGuest image: {data['image']}", rev)
         git("push", "-q", remote, f"refs/tags/{tag}")
         print(f"tagged {tag} at {rev} with guest image {data['image']}")
+    tag_release_base(remote, main_ref, tag, rev)
     release = github_release(tag)
     if not complete_release(release, version):
         publish(tag, version, release, assets)
@@ -190,6 +192,19 @@ def cmd_finalize(remote, main, version, rev, assets_dir):
     listed = git_out("ls-remote", "--heads", remote, f"refs/heads/{branch}").split()
     if listed and listed[0] == rev:
         git("push", "-q", remote, "--delete", f"refs/heads/{branch}")
+
+
+def tag_release_base(remote, main_ref, tag, rev):
+    """Tag the main commit TAG was cut from as main/TAG. Fetches follow tags
+    into the fetched history only, so this is the tag a checkout of main
+    receives, and builds read their version from it."""
+    base = rev if is_ancestor(rev, main_ref) else git_out("rev-parse", f"{rev}^")
+    ref = f"refs/tags/main/{tag}"
+    listed = git_out("ls-remote", remote, ref).split()
+    if not listed:
+        git("push", "-q", remote, f"{base}:{ref}")
+    elif listed[0] != base:
+        raise Fail(f"main/{tag} already exists at {listed[0]}, not {base}")
 
 
 def publish(tag, version, release, assets):

@@ -483,6 +483,7 @@ class Publication(unittest.TestCase):
         self.assertFalse(self.releases()["v0.0.2"]["isDraft"])
         self.assertEqual(self.latest.read_text(), "v0.0.2")
         self.assertIsNone(self.remote_ref("refs/heads/release/v0.0.2"))
+        self.assertEqual(self.remote_ref("refs/tags/main/v0.0.2"), self.git("rev-parse", f"{candidate}^"))
         self.finalize(candidate)
         self.gate.assert_called_once()
 
@@ -589,6 +590,13 @@ class Publication(unittest.TestCase):
         self.assertEqual((planned["state"], planned["candidate"]), ("resume", candidate))
         self.finalize(candidate)
         self.assertFalse(self.releases()["v0.0.2"]["isDraft"])
+        self.assertEqual(self.remote_ref("refs/tags/main/v0.0.2"), self.git("rev-parse", f"{candidate}^"))
+
+    def test_a_release_base_tag_is_never_moved(self):
+        candidate = self.prepare()
+        self.git("push", "-q", "origin", f"{candidate}:refs/tags/main/v0.0.2")
+        with self.assertRaisesRegex(release.Fail, "main/v0.0.2 already exists at"):
+            self.finalize(candidate)
 
     def older_draft_with_newer_tag(self):
         candidate = self.prepare()

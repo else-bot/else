@@ -474,7 +474,7 @@ impl Actor {
         match event {
             Event::Checked(result) => {
                 self.checking = false;
-                let running = env!("CARGO_PKG_VERSION").parse::<Version>().ok();
+                let running = env!("ELSE_VERSION").parse::<Version>().ok();
                 let awaiting_restart = result
                     .as_ref()
                     .ok()
@@ -1197,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn an_update_installed_elsewhere_still_offers_restart() {
         let home = Home::new("exit 1");
-        let major: u64 = env!("CARGO_PKG_VERSION")
+        let major: u64 = env!("ELSE_VERSION")
             .split('.')
             .next()
             .unwrap()

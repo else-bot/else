@@ -124,7 +124,7 @@ impl AppServer {
         server
             .request(
                 "initialize",
-                json!({ "clientInfo": { "name": "else_bot", "version": env!("CARGO_PKG_VERSION") } }),
+                json!({ "clientInfo": { "name": "else_bot", "version": env!("ELSE_VERSION") } }),
                 Duration::from_secs(30),
             )
             .await?;

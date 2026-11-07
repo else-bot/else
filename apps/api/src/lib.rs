@@ -1,8 +1,8 @@
 //! else.bot API library. The `else-api` binary composes these modules; the
 //! integration tests drive them directly against SQLite.
 
-/// This build's version (the workspace version; release tags are `v<VERSION>`).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// This build's version: the newest release it contains (see `build_support/release_version.rs`).
+pub const VERSION: &str = env!("ELSE_VERSION");
 
 mod actor;
 pub mod app;
