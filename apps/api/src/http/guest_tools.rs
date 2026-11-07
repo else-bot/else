@@ -229,9 +229,10 @@ pub fn tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "computer_secrets",
-            "description": "List the task secrets the owner gave you for scripts: each secret's \
-                name and the environment variable names it sets (never the values). Pass a \
-                name in the secrets argument of computer_run or computer_job_start.",
+            "description": "List the task secrets the owner stored on this server for scripts, shared \
+                by every bot: each secret's name and the environment variable names it sets \
+                (never the values). Pass a name in the secrets argument of computer_run or \
+                computer_job_start.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "readOnlyHint": true, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
@@ -562,11 +563,7 @@ async fn input(
     )
 }
 
-async fn secrets_for(
-    state: &AppState,
-    grant: &Grant,
-    args: &Value,
-) -> Result<(Env, Vec<String>), Outcome> {
+async fn secrets_for(state: &AppState, args: &Value) -> Result<(Env, Vec<String>), Outcome> {
     let names: Vec<String> = match &args["secrets"] {
         Value::Null => Vec::new(),
         Value::Array(items) => {
@@ -587,8 +584,7 @@ async fn secrets_for(
     if unique.len() != names.len() {
         return Err((tool_error("secrets names a secret twice."), None));
     }
-    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), grant.bot_id, &names).await
-    {
+    match task_secrets::resolve(&state.db, state.secret_key.as_deref(), &names).await {
         Ok(env) => Ok((env, names)),
         Err(task_secrets::SecretError::Unknown(name)) => Err((
             tool_error(&format!(
@@ -624,7 +620,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("command is required."), None);
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
-            let (env, _) = match secrets_for(state, grant, args).await {
+            let (env, _) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
@@ -698,7 +694,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     }
                 },
             };
-            let (env, names) = match secrets_for(state, grant, args).await {
+            let (env, names) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
@@ -898,7 +894,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
         }
         "computer_screenshot" => screenshot(state, grant, args, &computers).await,
         "computer_input" => input(state, grant, args, &computers).await,
-        "computer_secrets" => match task_secrets::list(&state.db, grant.bot_id).await {
+        "computer_secrets" => match task_secrets::list(&state.db).await {
             Ok(list) => {
                 let secrets: Vec<Value> = list
                     .iter()

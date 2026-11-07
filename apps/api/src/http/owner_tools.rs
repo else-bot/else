@@ -10,8 +10,8 @@ pub(super) fn secret_schema() -> Value {
         "description": "Ask the owner for credentials a task needs (an API key, a password, \
             a private key) when computer_secrets does not list them. The owner sees a private \
             form in the conversation for exactly these variables and types the values there; \
-            they are stored as the task secret `name`, never shown to you, and never belong \
-            in chat. Returns status pending at once. Then tell the owner briefly what you \
+            they are stored as the task secret `name` for every bot on this server, never \
+            shown to you, and never belong in chat. Returns status pending at once. Then tell the owner briefly what you \
             need and why, and end this attempt; you continue automatically once they answer. \
             Never ask the owner to paste credentials into the chat. At most one per attempt.",
         "inputSchema": {

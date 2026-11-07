@@ -1080,8 +1080,9 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             };
             let next = match bot.status {
                 bots::BotStatus::Active => {
-                    "It is registered. Delegate to this bot_id when it should work; it has no \
-                     credentials until the owner adds task secrets or other access."
+                    "It is registered. Delegate to this bot_id when it should work; it can use \
+                     the task secrets stored on this server but has no other access until \
+                     the owner grants it."
                 }
                 _ => "The owner deleted this bot; do not delegate to it or create it again.",
             };

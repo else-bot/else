@@ -274,7 +274,10 @@ impl ElseApp {
         let form = view.secret_forms.get(&id);
         let (Some(form), true) = (form, request.is_pending()) else {
             let text = match request.status.as_str() {
-                "stored" => format!("Saved the task secret {} for {bot_name}.", request.name),
+                "stored" => format!(
+                    "Saved the task secret {}. Every bot on this server can use it.",
+                    request.name
+                ),
                 "cancelled" => format!(
                     "The request for {} was declined or withdrawn.",
                     request.name
@@ -343,7 +346,8 @@ impl ElseApp {
             )
             .child(div().text_sm().child(request.reason.clone()))
             .child(note(format!(
-                "Stored encrypted as the task secret {} when you save. {bot_name} never sees the values, \
+                "Stored encrypted as the task secret {} for every bot on this server when you save, \
+                 replacing one with the same name. {bot_name} never sees the values, \
                  and they are not added to the conversation. A multi-line value such as a \
                  private key can be pasted whole.",
                 request.name

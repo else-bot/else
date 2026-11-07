@@ -1,5 +1,5 @@
-//! Owner routes for a bot's task secrets: credentials its guest
-//! scripts use, such as SMTP settings. Values are write-only: listing shows
+//! Owner routes for the installation's task secrets: credentials any bot's
+//! guest scripts use, such as SMTP settings. Values are write-only: listing shows
 //! names and variable names, never values. Task grants never reach these
 //! routes (everything under `/v1` needs the owner token).
 
@@ -16,17 +16,13 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiPath, SecretJson};
-use super::turns::active_bot;
 use crate::db::secret_requests::{self, SettleError, Settled};
 use crate::db::task_secrets::{self, SecretError};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/bots/{bot_id}/task-secrets", get(list))
-        .route(
-            "/bots/{bot_id}/task-secrets/{name}",
-            put(store).delete(remove),
-        )
+        .route("/task-secrets", get(list))
+        .route("/task-secrets/{name}", put(store).delete(remove))
         .route(
             "/bots/{bot_id}/secret-requests/{request_id}/fulfill",
             post(fulfill),
@@ -61,26 +57,21 @@ fn error(err: SecretError) -> ApiError {
     }
 }
 
-async fn list(
-    State(state): State<Arc<AppState>>,
-    ApiPath(bot_id): ApiPath<Uuid>,
-) -> Result<Json<Value>, ApiError> {
-    active_bot(&state, bot_id).await?;
-    let secrets = task_secrets::list(&state.db, bot_id).await?;
+async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let secrets = task_secrets::list(&state.db).await?;
     Ok(Json(json!({ "secrets": secrets })))
 }
 
 async fn store(
     State(state): State<Arc<AppState>>,
-    ApiPath((bot_id, name)): ApiPath<(Uuid, String)>,
+    ApiPath(name): ApiPath<String>,
     SecretJson(body): SecretJson<Body>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    active_bot(&state, bot_id).await?;
     let key = state
         .secret_key
         .as_deref()
         .ok_or_else(|| error(SecretError::NoKey))?;
-    let created = task_secrets::put(&state.db, key, bot_id, &name, &body.env)
+    let created = task_secrets::put(&state.db, key, &name, &body.env)
         .await
         .map_err(error)?;
     let short: Vec<&String> = body
@@ -105,10 +96,9 @@ async fn store(
 
 async fn remove(
     State(state): State<Arc<AppState>>,
-    ApiPath((bot_id, name)): ApiPath<(Uuid, String)>,
+    ApiPath(name): ApiPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    active_bot(&state, bot_id).await?;
-    if task_secrets::delete(&state.db, bot_id, &name).await? {
+    if task_secrets::delete(&state.db, &name).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found())
@@ -144,7 +134,7 @@ fn settled(state: &AppState, settled: Settled) -> Json<Value> {
 }
 
 /// Answer a bot's secret request: store exactly the requested variables as
-/// its task secret and continue the waiting turn. Values are never returned.
+/// a task secret every bot can use and continue the waiting turn. Values are never returned.
 async fn fulfill(
     State(state): State<Arc<AppState>>,
     ApiPath((bot_id, request_id)): ApiPath<(Uuid, Uuid)>,
