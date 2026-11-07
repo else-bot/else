@@ -624,6 +624,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
                     | "computer_read_file"
                     | "computer_secrets"
                     | "routine_list"
+                    | "webhook_list"
                     | "mail_accounts"
                     | "mail_action_status"
                     | "social_connections"
