@@ -15,10 +15,17 @@ use uuid::Uuid;
 
 const PASSWORD: &str = "s3cr3t-Pa55word";
 
+#[derive(Clone)]
+struct Exec {
+    program: String,
+    args: Vec<String>,
+    input: Vec<u8>,
+}
+
 #[derive(Default)]
 struct Guest {
     state: Mutex<std::collections::HashMap<String, RuntimeState>>,
-    execs: Mutex<Vec<(String, Vec<String>, Vec<u8>)>>,
+    execs: Mutex<Vec<Exec>>,
     killed: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     started: tokio::sync::Notify,
     stalled: Mutex<Vec<String>>,
@@ -34,7 +41,7 @@ impl Guest {
             .clone()
     }
 
-    fn execs(&self) -> Vec<(String, Vec<String>, Vec<u8>)> {
+    fn execs(&self) -> Vec<Exec> {
         self.execs.lock().unwrap().clone()
     }
 
@@ -112,11 +119,11 @@ impl ComputerRuntime for Guest {
         input: &[u8],
         _: Duration,
     ) -> Result<ExecOutput, RuntimeError> {
-        self.execs.lock().unwrap().push((
-            program.into(),
-            args.iter().map(|a| (*a).to_owned()).collect(),
-            input.to_vec(),
-        ));
+        self.execs.lock().unwrap().push(Exec {
+            program: program.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            input: input.to_vec(),
+        });
         let at = args.iter().position(|a| *a == "-c").map_or(0, |i| i + 1);
         let script = args.get(at).copied().unwrap_or_default();
         let stdout = if script.contains("wait $pg; c=$?") {
@@ -335,9 +342,13 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         "{ran}"
     );
     let execs = guest.execs();
-    let (program, args, input) = execs
+    let Exec {
+        program,
+        args,
+        input,
+    } = execs
         .iter()
-        .find(|(_, args, _)| args.iter().any(|a| a == "./send.sh"))
+        .find(|Exec { args, .. }| args.iter().any(|a| a == "./send.sh"))
         .unwrap();
     assert_eq!(program, "/usr/sbin/runuser");
     assert!(
@@ -369,10 +380,10 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     let launch = guest
         .execs()
         .into_iter()
-        .find(|(_, args, _)| args.iter().any(|a| a.contains("echo launched")))
+        .find(|Exec { args, .. }| args.iter().any(|a| a.contains("echo launched")))
         .unwrap();
-    assert!(launch.1.iter().all(|a| !a.contains(PASSWORD)));
-    assert!(String::from_utf8_lossy(&launch.2).contains(&encoded));
+    assert!(launch.args.iter().all(|a| !a.contains(PASSWORD)));
+    assert!(String::from_utf8_lossy(&launch.input).contains(&encoded));
     let failed = tool(
         &app,
         &token,
@@ -468,12 +479,15 @@ async fn stop_work_ends_a_running_foreground_command() {
     let kill = guest
         .execs()
         .into_iter()
-        .find(|(_, args, _)| args.iter().any(|a| a.contains("alive()")))
+        .find(|Exec { args, .. }| args.iter().any(|a| a.contains("alive()")))
         .unwrap();
     assert!(
-        kill.1.last().unwrap().starts_with("/var/lib/elsebot/runs/"),
+        kill.args
+            .last()
+            .unwrap()
+            .starts_with("/var/lib/elsebot/runs/"),
         "{:?}",
-        kill.1
+        kill.args
     );
     let ended: bool = sqlx::query_scalar("SELECT min(ended_at IS NOT NULL) FROM guest_runs")
         .fetch_one(&app.db.pool)
@@ -593,7 +607,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         guest
             .execs()
             .iter()
-            .filter(|(_, args, _)| args.iter().any(|a| a.contains("alive()")))
+            .filter(|Exec { args, .. }| args.iter().any(|a| a.contains("alive()")))
             .count()
     };
 
@@ -675,7 +689,7 @@ async fn owner_stop_dropped_requests_and_stopped_turns_end_or_refuse_commands() 
         guest
             .execs()
             .iter()
-            .all(|(_, args, _)| args.iter().all(|a| !a.contains("should-not-run"))),
+            .all(|Exec { args, .. }| args.iter().all(|a| !a.contains("should-not-run"))),
         "the queued command never reached the guest"
     );
 }

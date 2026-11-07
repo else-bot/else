@@ -2,6 +2,12 @@ use super::{ComputerError, ComputerManager, ExecOutput};
 use std::time::Duration;
 use uuid::Uuid;
 
+struct CheckedArtifact {
+    bytes: u64,
+    digest: Vec<u8>,
+    preview: Vec<u8>,
+}
+
 impl ComputerManager {
     /// Copy a regular guest file into the host artifact store (at most
     /// `max` bytes) and register it. Checked and copied under the bot's
@@ -65,7 +71,7 @@ impl ComputerManager {
             remove(&temp);
             return Err(err.into());
         }
-        let checked = (|| -> std::io::Result<Result<(u64, Vec<u8>, Vec<u8>), String>> {
+        let checked = (|| -> std::io::Result<Result<CheckedArtifact, String>> {
             let meta = std::fs::symlink_metadata(&temp)?;
             if !meta.is_file() {
                 return Ok(Err("the copy was not a regular file".into()));
@@ -95,9 +101,17 @@ impl ComputerManager {
                     preview.extend_from_slice(&chunk[..take]);
                 }
             }
-            Ok(Ok((total, hasher.finalize().to_vec(), preview)))
+            Ok(Ok(CheckedArtifact {
+                bytes: total,
+                digest: hasher.finalize().to_vec(),
+                preview,
+            }))
         })();
-        let (total, digest, preview) = match checked {
+        let CheckedArtifact {
+            bytes: total,
+            digest,
+            preview,
+        } = match checked {
             Ok(Ok(found)) => found,
             Ok(Err(reason)) => {
                 remove(&temp);

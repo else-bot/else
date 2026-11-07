@@ -189,7 +189,7 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
         .unwrap();
     let c = store::connection(&db.pool, c.id).await.unwrap();
     store::authorize(
-        &mut *db.pool.acquire().await.unwrap(),
+        &mut db.pool.acquire().await.unwrap(),
         &c,
         bot,
         owner,
@@ -207,7 +207,7 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
     let external = turn(&db, bot, "connector").await;
     sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id,status,turn_id) VALUES(?1,'e',?2,?3,'100','1','delivered',?4)").bind(c.id).bind(bot).bind(binding.id).bind(external).execute(&db.pool).await.unwrap();
     let scoped = store::authorize(
-        &mut *db.pool.acquire().await.unwrap(),
+        &mut db.pool.acquire().await.unwrap(),
         &c,
         bot,
         external,
@@ -219,7 +219,7 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
     .unwrap();
     assert_eq!(scoped.destinations, ["100"]);
     store::authorize(
-        &mut *db.pool.acquire().await.unwrap(),
+        &mut db.pool.acquire().await.unwrap(),
         &c,
         bot,
         external,
@@ -231,7 +231,7 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
     .unwrap();
     assert!(
         store::authorize(
-            &mut *db.pool.acquire().await.unwrap(),
+            &mut db.pool.acquire().await.unwrap(),
             &c,
             bot,
             external,
@@ -248,7 +248,7 @@ async fn grants_require_real_destinations_and_scope_external_turns() {
     let fresh = store::connection(&db.pool, c.id).await.unwrap();
     assert!(
         store::authorize(
-            &mut *db.pool.acquire().await.unwrap(),
+            &mut db.pool.acquire().await.unwrap(),
             &fresh,
             bot,
             external,
@@ -325,38 +325,73 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
     let id = Uuid::new_v4();
     let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
     assert!(
-        store::begin_action(&db.pool, &c, bot, turn, id, "100", &payload, false)
-            .await
-            .unwrap()
-            .is_none()
+        store::begin_action(
+            &db.pool,
+            &c,
+            store::Action {
+                bot,
+                turn,
+                id,
+                destination: "100",
+                payload: &payload,
+                send: false
+            }
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(
-        store::begin_action(&db.pool, &c, bot, turn, id, "100", &payload, false)
-            .await
-            .unwrap()
-            .unwrap()["status"],
+        store::begin_action(
+            &db.pool,
+            &c,
+            store::Action {
+                bot,
+                turn,
+                id,
+                destination: "100",
+                payload: &payload,
+                send: false
+            }
+        )
+        .await
+        .unwrap()
+        .unwrap()["status"],
         "dispatching"
     );
     assert!(matches!(
         store::begin_action(
             &db.pool,
             &c,
-            bot,
-            turn,
-            id,
-            "100",
-            &json!({"different":true}),
-            false
+            store::Action {
+                bot,
+                turn,
+                id,
+                destination: "100",
+                payload: &json!({"different":true}),
+                send: false,
+            }
         )
         .await,
         Err(Error::Conflict)
     ));
     store::recover(&db.pool).await.unwrap();
     assert_eq!(
-        store::begin_action(&db.pool, &c, bot, turn, id, "100", &payload, false)
-            .await
-            .unwrap()
-            .unwrap()["status"],
+        store::begin_action(
+            &db.pool,
+            &c,
+            store::Action {
+                bot,
+                turn,
+                id,
+                destination: "100",
+                payload: &payload,
+                send: false
+            }
+        )
+        .await
+        .unwrap()
+        .unwrap()["status"],
         "uncertain"
     );
 }
@@ -416,7 +451,7 @@ async fn incoming_delivery_is_deduplicated_and_telegram_history_pages_numericall
     .await
     .unwrap();
     assert_eq!(
-        else_api::db::delegations::origin(&mut *db.pool.acquire().await.unwrap(), turn)
+        else_api::db::delegations::origin(&mut db.pool.acquire().await.unwrap(), turn)
             .await
             .unwrap(),
         else_api::app::providers::Origin::SocialEvent
@@ -498,9 +533,11 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
                 bot,
                 turn,
                 id,
-                "100".into(),
-                "approved body".into(),
-                None,
+                SendMessage {
+                    destination: "100".into(),
+                    body: "approved body".into(),
+                    reply_to: None,
+                },
             )
             .await
     });
@@ -548,7 +585,17 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
     let id = Uuid::new_v4();
     let task = tokio::spawn(async move {
         running
-            .send(c.id, bot, turn, id, "100".into(), "body".into(), None)
+            .send(
+                c.id,
+                bot,
+                turn,
+                id,
+                SendMessage {
+                    destination: "100".into(),
+                    body: "body".into(),
+                    reply_to: None,
+                },
+            )
             .await
     });
     tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
@@ -574,7 +621,7 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
 async fn restored_connections_are_passive_and_credentials_are_removed_on_disconnect() {
     let db = TestDb::migrated().await;
     let c = account(&db, "restore").await;
-    store::restore_passive(&mut *db.pool.acquire().await.unwrap())
+    store::restore_passive(&mut db.pool.acquire().await.unwrap())
         .await
         .unwrap();
     let restored = store::connection(&db.pool, c.id).await.unwrap();

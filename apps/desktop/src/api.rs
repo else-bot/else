@@ -27,12 +27,23 @@ mod live;
 pub use live::{Live, LiveCommand, LiveCommands, LiveEvent, StreamMessage};
 mod desktop;
 pub mod socials;
-pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode, MAX_TEXT_CHARS};
+#[cfg(target_os = "macos")]
+pub use desktop::MAX_TEXT_CHARS;
+pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode};
 use serde_json::json;
 
 use crate::avatar::Avatar;
 use crate::config::{Origin, OwnerToken};
 use crate::model::{Item, Reaction, Routine, Snapshot, Turn};
+
+pub struct SendRequest {
+    pub request_id: Uuid,
+    pub text: String,
+    pub provider_id: Option<String>,
+    pub reaction: Option<Reaction>,
+    pub parts: Vec<crate::attachments::MessagePart>,
+    pub open_draft: Option<crate::model::DraftAttachment>,
+}
 
 /// The complete create payload, retained unchanged when delivery is uncertain.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -502,12 +513,14 @@ impl Client {
     pub async fn send(
         self: Arc<Self>,
         bot: Uuid,
-        request_id: Uuid,
-        text: String,
-        provider_id: Option<String>,
-        reaction: Option<Reaction>,
-        parts: Vec<crate::attachments::MessagePart>,
-        open_draft: Option<crate::model::DraftAttachment>,
+        SendRequest {
+            request_id,
+            text,
+            provider_id,
+            reaction,
+            parts,
+            open_draft,
+        }: SendRequest,
     ) -> Result<Sent, ClientError> {
         let mut body =
             json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
@@ -1089,6 +1102,10 @@ pub(crate) mod tests {
             for round in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let seen_tx = seen_tx.clone();
+                #[expect(
+                    clippy::result_large_err,
+                    reason = "Tungstenite fixes the callback error type to ErrorResponse."
+                )]
                 let mut socket = tokio_tungstenite::accept_hdr_async(
                     stream,
                     |request: &tokio_tungstenite::tungstenite::handshake::server::Request,

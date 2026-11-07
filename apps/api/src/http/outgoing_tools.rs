@@ -537,9 +537,11 @@ async fn send(state: &AppState, grant: &Grant, args: &Value) -> Result<Outcome, 
                             grant.bot_id,
                             grant.turn_id,
                             action_id,
-                            destination.to_owned(),
-                            message.body.clone(),
-                            message.reply_to.clone(),
+                            crate::socials::types::SendMessage {
+                                destination: destination.to_owned(),
+                                body: message.body.clone(),
+                                reply_to: message.reply_to.clone(),
+                            },
                         )
                         .await
                 }

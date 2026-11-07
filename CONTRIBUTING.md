@@ -121,9 +121,13 @@ The launcher disables incremental compilation to limit disk growth in developmen
 ```sh
 cargo fmt --all -- --check
 cargo check --workspace --locked
-cargo clippy --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
+
+Run `scripts/check-clippy.sh` for the strict Clippy gate alone. It runs the exact command above from the repository root and returns Clippy's exit status. It checks all workspace targets, including tests, without running the test suite. Reuse the same checkout and Cargo target directory to reuse compiled dependencies.
+
+Fix every finding before opening a PR, including findings in untouched files. Fix the cause instead of adding blanket lint suppressions. Justify targeted `#[allow]` and `#[expect]` attributes inline.
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 

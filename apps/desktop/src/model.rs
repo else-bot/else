@@ -450,10 +450,10 @@ impl Conversation {
     }
 
     fn upsert_item(&mut self, item: Item) {
-        if let Some(old_seq) = self.seq_of.insert(item.id, item.seq) {
-            if old_seq != item.seq {
-                self.items.remove(&old_seq);
-            }
+        if let Some(old_seq) = self.seq_of.insert(item.id, item.seq)
+            && old_seq != item.seq
+        {
+            self.items.remove(&old_seq);
         }
         self.items.insert(item.seq, item);
     }
@@ -660,8 +660,7 @@ impl Conversation {
         self.turns_in_order()
             .into_iter()
             .flat_map(|t| &t.outgoing_drafts)
-            .filter(|d| d.status.can_follow_up())
-            .last()
+            .rfind(|d| d.status.can_follow_up())
     }
 
     pub fn update_draft(&mut self, draft: OutgoingDraft) {

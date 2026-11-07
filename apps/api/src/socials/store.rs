@@ -277,15 +277,26 @@ pub async fn authorize(
     }
     Ok(access)
 }
+pub struct Action<'a> {
+    pub bot: Uuid,
+    pub turn: Uuid,
+    pub id: Uuid,
+    pub destination: &'a str,
+    pub payload: &'a Value,
+    pub send: bool,
+}
+
 pub async fn begin_action(
     pool: &SqlitePool,
     c: &Connection,
-    bot: Uuid,
-    turn: Uuid,
-    id: Uuid,
-    destination: &str,
-    payload: &Value,
-    send: bool,
+    Action {
+        bot,
+        turn,
+        id,
+        destination,
+        payload,
+        send,
+    }: Action<'_>,
 ) -> Result<Option<Value>, Error> {
     let mut h = Sha256::new();
     h.update(bot.as_bytes());

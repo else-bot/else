@@ -263,10 +263,7 @@ impl Target {
         let p = &self.params;
         format!(
             "sqlite://{}",
-            p.with_database(&format!("{database}"))
-                .options
-                .get_filename()
-                .display()
+            p.with_database(database).options.get_filename().display()
         )
     }
 }

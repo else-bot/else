@@ -386,7 +386,7 @@ async fn responses_stay_within_budget_even_with_escaped_text() {
         .as_array()
         .unwrap()
         .len();
-    assert!(hits >= 1 && hits <= 20);
+    assert!((1..=20).contains(&hits));
     let long = format!("é{}", "x".repeat(30_000));
     let seq = append(&app, bot_id, &entry("long", &long)).await.unwrap()[0];
     let mut offset = 1;

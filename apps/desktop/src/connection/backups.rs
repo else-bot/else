@@ -58,9 +58,7 @@ impl Shell {
             loop {
                 let result = poll_client.clone().backups().await;
                 let delay = this.update_in(cx, |shell, _, cx| {
-                    let Some(view) = shell.backups.as_mut().filter(|v| v.id == id) else {
-                        return None;
-                    };
+                    let view = shell.backups.as_mut().filter(|v| v.id == id)?;
                     if !view.busy() {
                         match result {
                             Ok(snapshot) => {

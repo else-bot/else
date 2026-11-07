@@ -207,9 +207,11 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
             bot,
             turn,
             Uuid::new_v4(),
-            "100".into(),
-            "approved message".into(),
-            None,
+            SendMessage {
+                destination: "100".into(),
+                body: "approved message".into(),
+                reply_to: None,
+            },
         )
         .await
         .unwrap();

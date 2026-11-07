@@ -43,7 +43,7 @@ async fn admission_snapshots_bot_override_before_installation_default() {
         .await
         .unwrap();
     let selected =
-        bot_profiles::for_admission(&mut *db.pool.acquire().await.unwrap(), &registry, bot)
+        bot_profiles::for_admission(&mut db.pool.acquire().await.unwrap(), &registry, bot)
             .await
             .unwrap()
             .unwrap();
@@ -62,7 +62,7 @@ async fn admission_snapshots_bot_override_before_installation_default() {
         .unwrap();
     default_provider(&db, "synthetic").await;
     let selected =
-        bot_profiles::for_admission(&mut *db.pool.acquire().await.unwrap(), &registry, bot)
+        bot_profiles::for_admission(&mut db.pool.acquire().await.unwrap(), &registry, bot)
             .await
             .unwrap()
             .unwrap();
@@ -82,7 +82,7 @@ async fn missing_or_unknown_choice_uses_registry_default_without_requiring_a_pro
             default_provider(&db, choice).await;
         }
         let selected =
-            bot_profiles::for_admission(&mut *db.pool.acquire().await.unwrap(), &registry, bot)
+            bot_profiles::for_admission(&mut db.pool.acquire().await.unwrap(), &registry, bot)
                 .await
                 .unwrap()
                 .unwrap();
@@ -91,7 +91,7 @@ async fn missing_or_unknown_choice_uses_registry_default_without_requiring_a_pro
     }
     assert!(
         bot_profiles::for_admission(
-            &mut *db.pool.acquire().await.unwrap(),
+            &mut db.pool.acquire().await.unwrap(),
             &Registry::new(vec![]),
             bot,
         )
@@ -110,7 +110,7 @@ async fn known_choice_waits_when_its_profile_or_provider_is_unavailable() {
     let unavailable = Registry::new(vec![synthetic(), Arc::new(Codex::detect(None, None, None))]);
     for registry in [missing_profile, unavailable] {
         assert!(
-            bot_profiles::for_admission(&mut *db.pool.acquire().await.unwrap(), &registry, bot,)
+            bot_profiles::for_admission(&mut db.pool.acquire().await.unwrap(), &registry, bot,)
                 .await
                 .unwrap()
                 .is_none(),

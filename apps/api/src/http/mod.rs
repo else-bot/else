@@ -258,10 +258,10 @@ async fn tools_gate(State(state): State<Arc<AppState>>, request: Request, next: 
 
 async fn fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let path = request.uri().path();
-    if path == "/v1" || path.starts_with("/v1/") {
-        if let Err(response) = auth::authenticate(&state, request.headers()).await {
-            return response;
-        }
+    if (path == "/v1" || path.starts_with("/v1/"))
+        && let Err(response) = auth::authenticate(&state, request.headers()).await
+    {
+        return *response;
     }
     ApiError::not_found().into_response()
 }

@@ -14,39 +14,35 @@ use uuid::Uuid;
 
 enum Operation {
     Command(Command),
-    Send {
-        destination: String,
-        body: String,
-        reply_to: Option<String>,
-    },
+    Send(SendMessage),
 }
 impl Operation {
     fn destination(&self) -> Option<&str> {
         match self {
             Self::Command(c) => c.destination(),
-            Self::Send { destination, .. } => Some(destination),
+            Self::Send(message) => Some(&message.destination),
         }
     }
     fn mutates(&self) -> bool {
         match self {
             Self::Command(c) => c.mutates(),
-            Self::Send { .. } => true,
+            Self::Send(_) => true,
         }
     }
     fn sends(&self) -> bool {
         match self {
             Self::Command(c) => c.sends(),
-            Self::Send { .. } => true,
+            Self::Send(_) => true,
         }
     }
     fn payload(&self) -> Value {
         match self {
             Self::Command(c) => serde_json::to_value(c).expect("command serializes"),
-            Self::Send {
+            Self::Send(SendMessage {
                 destination,
                 body,
                 reply_to,
-            } => json!({"send":destination,"body":body,"reply_to":reply_to}),
+            }) => json!({"send":destination,"body":body,"reply_to":reply_to}),
         }
     }
 }
@@ -251,22 +247,10 @@ impl Manager {
         bot: Uuid,
         turn: Uuid,
         action: Uuid,
-        destination: String,
-        body: String,
-        reply_to: Option<String>,
+        message: SendMessage,
     ) -> Result<Value, Error> {
-        self.request(
-            id,
-            bot,
-            turn,
-            Some(action),
-            Operation::Send {
-                destination,
-                body,
-                reply_to,
-            },
-        )
-        .await
+        self.request(id, bot, turn, Some(action), Operation::Send(message))
+            .await
     }
     async fn worker_loop(
         self: Arc<Self>,
@@ -412,12 +396,14 @@ impl Manager {
             if let Some(result) = store::begin_action(
                 &self.db,
                 c,
-                r.bot,
-                r.turn,
-                id,
-                r.operation.destination().ok_or(Error::Forbidden)?,
-                &r.operation.payload(),
-                r.operation.sends(),
+                store::Action {
+                    bot: r.bot,
+                    turn: r.turn,
+                    id,
+                    destination: r.operation.destination().ok_or(Error::Forbidden)?,
+                    payload: &r.operation.payload(),
+                    send: r.operation.sends(),
+                },
             )
             .await?
             {
@@ -455,11 +441,11 @@ impl Manager {
                     .ok_or(Error::NotFound)
             }
             Operation::Command(cmd) => self.transport.execute(session, cmd).await,
-            Operation::Send {
+            Operation::Send(SendMessage {
                 destination,
                 body,
                 reply_to,
-            } => {
+            }) => {
                 let result = self
                     .transport
                     .send(session, destination, body, reply_to.as_deref())

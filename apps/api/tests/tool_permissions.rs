@@ -429,7 +429,7 @@ async fn migration_preserves_existing_destructive_permissions() {
     );
     assert!(
         else_api::db::owner_questions::has_permission(
-            &mut *db.pool.acquire().await.unwrap(),
+            &mut db.pool.acquire().await.unwrap(),
             bot,
             "destructive",
         )

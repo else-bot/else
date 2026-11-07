@@ -372,12 +372,12 @@ impl SocialsView {
                         .disabled(self.busy || !self.available)
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.clear(window, cx);
-                            if let Some(form) = &mut view.form {
-                                if let Some(connection) = form.editor.connection().cloned() {
-                                    form.editor = Editor::Credential {
-                                        replacement: Some(connection),
-                                    };
-                                }
+                            if let Some(form) = &mut view.form
+                                && let Some(connection) = form.editor.connection().cloned()
+                            {
+                                form.editor = Editor::Credential {
+                                    replacement: Some(connection),
+                                };
                             }
                             cx.notify();
                         })),

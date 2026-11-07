@@ -75,7 +75,7 @@ async fn wrong_state_and_issuer_do_not_consume_an_active_flow_and_denial_is_one_
     let key = key();
     let mut session = Session {
         store: Store::for_bot(dir.path().into(), bot, Some(std::sync::Arc::new(key))),
-        state: State::Authorizing(pending),
+        state: State::Authorizing(Box::new(pending)),
         connection: None,
         client: None,
     };
@@ -111,7 +111,7 @@ fn cancellation_and_expiration_restore_an_existing_account_without_exposing_cred
             Uuid::new_v4(),
             Some(std::sync::Arc::new(key())),
         ),
-        state: State::Authorizing(flow),
+        state: State::Authorizing(Box::new(flow)),
         connection: None,
         client: None,
     };
@@ -122,13 +122,13 @@ fn cancellation_and_expiration_restore_an_existing_account_without_exposing_cred
     let safe = serde_json::to_string(&session.status()).unwrap();
     assert!(!safe.contains("private-access-token"));
     assert!(!safe.contains("private-refresh-token"));
-    session.state = State::Authorizing(pending(Some(credential())));
+    session.state = State::Authorizing(Box::new(pending(Some(credential()))));
     assert_eq!(session.cancel_pending().status, "connected");
-    session.state = State::Authorizing(pending(None));
+    session.state = State::Authorizing(Box::new(pending(None)));
     assert_eq!(session.cancel_pending().status, "disconnected");
     let mut pending = pending(None);
     pending.expires = Instant::now() - Duration::from_secs(1);
-    session.state = State::Authorizing(pending);
+    session.state = State::Authorizing(Box::new(pending));
     assert_eq!(session.status().status, "disconnected");
 }
 
@@ -203,7 +203,7 @@ async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
         });
         let mut session = Session {
             store: Store::for_bot(path, Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
-            state: State::Authorizing(flow),
+            state: State::Authorizing(Box::new(flow)),
             connection: None,
             client: None,
         };
@@ -250,17 +250,17 @@ fn github_credential(scopes: &[&str]) -> Credential {
 fn git_gets_only_a_github_token_with_repo_scope() {
     let dir = tempfile::tempdir().unwrap();
 
-    let mut github = github_session(github_credential(&["repo", "read:org"]), dir.path());
+    let github = github_session(github_credential(&["repo", "read:org"]), dir.path());
     let token = github.github_token().unwrap();
     assert_eq!(token.as_str(), "private-access-token");
 
-    let mut narrow = github_session(github_credential(&["read:org"]), dir.path());
+    let narrow = github_session(github_credential(&["read:org"]), dir.path());
     let error = narrow.github_token().unwrap_err();
     assert!(error.to_string().contains("repo scope"), "{error}");
 
     let mut other_app = github_credential(&["repo"]);
     other_app.client_id = "previous-id".into();
-    let mut other_app = github_session(other_app, dir.path());
+    let other_app = github_session(other_app, dir.path());
     assert!(other_app.github_token().is_err());
 
     let mut other_provider = github_session(credential(), dir.path());

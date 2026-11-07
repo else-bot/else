@@ -184,7 +184,7 @@ async fn chat_can_preapprove_a_routine_before_its_first_run() {
     let retry = tool(app, &token, "confirm_permission", args).await;
     assert_eq!(retry.result["question_id"], approved.result["question_id"]);
     assert_eq!(routine_grants(app).await, [(prune, 1)]);
-    let shown = else_api::db::turns::load_turn(&mut *app.db.pool.acquire().await.unwrap(), setup)
+    let shown = else_api::db::turns::load_turn(&mut app.db.pool.acquire().await.unwrap(), setup)
         .await
         .unwrap();
     assert_eq!(shown.questions.len(), 1);
@@ -717,7 +717,7 @@ async fn upgrading_removes_the_bot_grant_option_from_pending_routine_cards() {
         .bind(json!([{"id":"approve","label":"Approve once"}, {"id":"deny","label":"Deny"}, {"id":"approve_forever","label":"Always allow destructive actions"}]).to_string())
         .execute(&db.pool).await.unwrap();
     else_api::db::migrate(&db.pool).await.unwrap();
-    let shown = else_api::db::turns::load_turn(&mut *db.pool.acquire().await.unwrap(), turn)
+    let shown = else_api::db::turns::load_turn(&mut db.pool.acquire().await.unwrap(), turn)
         .await
         .unwrap();
     assert_eq!(

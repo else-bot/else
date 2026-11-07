@@ -246,12 +246,8 @@ impl ElseApp {
         };
         Some(match key {
             RowKey::Item(id) => {
-                let Some(conversation) = view.conversation.as_ref() else {
-                    return None;
-                };
-                let Some(item) = conversation.item(id) else {
-                    return None;
-                };
+                let conversation = view.conversation.as_ref()?;
+                let item = conversation.item(id)?;
                 if let Some(update) = &item.routine_update {
                     return Some(
                         h_flex()
@@ -271,9 +267,7 @@ impl ElseApp {
                 if let Some(created) = &item.bot_created {
                     return Some(self.render_bot_created(id, created, footer, cx));
                 }
-                let Some(text) = view.texts.get(&key) else {
-                    return None;
-                };
+                let text = view.texts.get(&key)?;
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);
                 let run = conversation.run(id);
@@ -288,18 +282,20 @@ impl ElseApp {
                     card = self
                         .render_bot_message(item, text, cx)?
                         .id(SharedString::from(format!("message-{id}")));
-                } else if !user && run.first && turn.and_then(|t| t.routine.as_ref()).is_none() {
-                    if let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id) {
-                        column = column.child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(bot_avatar("message-author", bot.avatar, px(18.)).still())
-                                .child(bot.name.clone()),
-                        );
-                    }
+                } else if !user
+                    && run.first
+                    && turn.and_then(|t| t.routine.as_ref()).is_none()
+                    && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id)
+                {
+                    column = column.child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(bot_avatar("message-author", bot.avatar, px(18.)).still())
+                            .child(bot.name.clone()),
+                    );
                 }
                 if grouped {
                     card = card
@@ -386,16 +382,11 @@ impl ElseApp {
             RowKey::SocialSetup(id) => self.render_social_card(id, cx),
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::Pending(request_id) => {
-                let Some(pending) = self
+                let pending = self
                     .selected
                     .and_then(|bot| self.pending.get(&bot))
-                    .and_then(|list| list.iter().find(|p| p.request_id == request_id))
-                else {
-                    return None;
-                };
-                let Some(text) = view.texts.get(&key) else {
-                    return None;
-                };
+                    .and_then(|list| list.iter().find(|p| p.request_id == request_id))?;
+                let text = view.texts.get(&key)?;
                 let mark = pending.reaction.map(|r| r.kind.mark());
                 let mut column = gpui_kit::component::v_flex().w_full().gap_1();
                 if mark.is_none() {

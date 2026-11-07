@@ -4,6 +4,8 @@
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
+- Before opening a PR, run `cargo clippy --workspace --all-targets --locked -- -D warnings` or `scripts/check-clippy.sh` and fix every finding, including findings in untouched files.
+- Fix lint causes instead of adding blanket suppressions; justify targeted `#[allow]` and `#[expect]` attributes inline.
 - Fetch `origin/main` before adding a migration in `apps/api/migrations`, choose the next contiguous `NNNN_` prefix, and run `python3 scripts/check_migrations.py` after rebasing; never renumber a shipped migration.
 - Use a pointer cursor for every enabled clickable control; keep text and resize cursors for text entry and resizing.
 - Do not draw focus rings or decorative outlines on controls; use outlines only to indicate a selected state.

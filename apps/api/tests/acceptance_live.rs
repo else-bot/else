@@ -1009,7 +1009,7 @@ async fn the_assistant_poc_works_end_to_end() {
     let restored_url = format!(
         "sqlite://{}",
         params
-            .with_database(&format!("{target}"))
+            .with_database(&target)
             .options
             .get_filename()
             .display()

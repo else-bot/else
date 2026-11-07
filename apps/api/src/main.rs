@@ -43,16 +43,16 @@ fn main() -> ExitCode {
         println!("else-api {}", else_api::VERSION);
         return ExitCode::SUCCESS;
     }
-    if let Err(err) = dotenvy::dotenv() {
-        if !err.not_found() {
-            let detail = match &err {
-                dotenvy::Error::LineParse(_, index) => format!("parse error near byte {index}"),
-                dotenvy::Error::Io(io) => io.to_string(),
-                _ => "unreadable".to_owned(),
-            };
-            eprintln!("error: invalid .env file: {detail}");
-            return ExitCode::FAILURE;
-        }
+    if let Err(err) = dotenvy::dotenv()
+        && !err.not_found()
+    {
+        let detail = match &err {
+            dotenvy::Error::LineParse(_, index) => format!("parse error near byte {index}"),
+            dotenvy::Error::Io(io) => io.to_string(),
+            _ => "unreadable".to_owned(),
+        };
+        eprintln!("error: invalid .env file: {detail}");
+        return ExitCode::FAILURE;
     }
     tracing_subscriber::registry()
         .with(
@@ -456,7 +456,7 @@ fn setup(config: &Config) -> anyhow::Result<()> {
     describe("secret key", key, location);
 
     runtime()?.block_on(async {
-        let pool = database(&config).await?;
+        let pool = database(config).await?;
         let report = db::installation::setup(&pool).await?;
         for provider in &report.seeded_profiles {
             println!("provider profile {provider}: created default");

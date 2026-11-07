@@ -204,12 +204,11 @@ async fn session(
             end("computer_unavailable", "The computer is not available now.")
         }
     };
-    if let Some(End { code, message }) = ended {
-        if let Err(mpsc::error::TrySendError::Full(message)) =
+    if let Some(End { code, message }) = ended
+        && let Err(mpsc::error::TrySendError::Full(message)) =
             out.try_send(error_message(code, &message))
-        {
-            let _ = stop.run_until_cancelled(out.send(message)).await;
-        }
+    {
+        let _ = stop.run_until_cancelled(out.send(message)).await;
     }
     drop(out);
     let mut writer = writer;

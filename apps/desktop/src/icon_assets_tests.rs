@@ -88,10 +88,10 @@ fn icon_type_names(sources: &[Vec<TokenTree>]) -> BTreeSet<String> {
                     TokenTree::Ident(keyword),
                     TokenTree::Ident(alias),
                 ] = window
+                    && types.contains(&name.to_string())
+                    && keyword == "as"
                 {
-                    if types.contains(&name.to_string()) && keyword == "as" {
-                        types.insert(alias.to_string());
-                    }
+                    types.insert(alias.to_string());
                 }
             }
             for (index, window) in source.windows(3).enumerate() {
@@ -100,9 +100,10 @@ fn icon_type_names(sources: &[Vec<TokenTree>]) -> BTreeSet<String> {
                     TokenTree::Ident(alias),
                     TokenTree::Punct(eq),
                 ] = window
+                    && keyword == "type"
+                    && eq.as_char() == '='
                 {
-                    if keyword == "type" && eq.as_char() == '=' {
-                        let target = source[index + 3..]
+                    let target = source[index + 3..]
                             .iter()
                             .take_while(|token| {
                                 !matches!(token, TokenTree::Punct(punct) if punct.as_char() == ';')
@@ -112,9 +113,8 @@ fn icon_type_names(sources: &[Vec<TokenTree>]) -> BTreeSet<String> {
                                 _ => None,
                             })
                             .last();
-                        if target.is_some_and(|target| types.contains(&target)) {
-                            types.insert(alias.to_string());
-                        }
+                    if target.is_some_and(|target| types.contains(&target)) {
+                        types.insert(alias.to_string());
                     }
                 }
             }
