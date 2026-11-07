@@ -124,12 +124,44 @@ cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 python3 scripts/check_migrations.py
 python3 scripts/test-migrations.py
-cargo test --workspace --locked
+scripts/dev.py test
 ```
 
 Run `scripts/check-clippy.sh` for the strict Clippy gate alone. It runs the exact command above from the repository root and returns Clippy's exit status. It checks all workspace targets, including tests, without running the test suite. Reuse the same checkout and Cargo target directory to reuse compiled dependencies.
 
 Fix every finding before opening a PR, including findings in untouched files. Fix the cause instead of adding blanket lint suppressions. Justify targeted `#[allow]` and `#[expect]` attributes inline.
+
+On Linux, read the installed omabox skill before running tests. `scripts/dev.py test`
+requires omabox. It builds the workspace test binaries on the host, then runs them in a new
+network-isolated omabox. Cargo registry sources and GPUI debug assets are
+mounted read-only. Tests use writable scratch storage in the box's private
+runtime directory instead of host `/tmp`. The runtime PATH excludes mise shims.
+
+Builds use this checkout's `.else-dev/.build` cache and honor `CARGO_BUILD_JOBS`.
+The default build limit is four jobs. Test binaries run sequentially with
+two test threads per binary. Use `--serial` for one test thread per binary.
+Set `CARGO_BUILD_JOBS=2` when other workspaces build concurrently.
+For focused checks:
+
+```sh
+scripts/dev.py test -p else-api --test bots
+scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_databases_never_produce_a_restore
+```
+
+Each invocation prints `.else-dev/tests/<run>/`. Read its `results.json`,
+`summary.txt`, build logs, and per-binary logs before repeating a run after an
+agent restart. The worker runs independently of the waiting terminal and
+records progress after each binary. Ctrl+C stops the owned worker and box.
+To follow an existing run or cancel its worker, use the printed run directory:
+
+```sh
+python3 scripts/dev_tests.py follow .else-dev/tests/RUN
+python3 scripts/dev_tests.py cancel .else-dev/tests/RUN
+```
+
+On macOS, use `cargo test --workspace --locked` inside the owned verification
+guest. The omabox test command is Linux only. Doctests remain a separate Cargo
+check.
 
 Database tests create temporary SQLite files. Live provider and VM tests require their explicit `ELSE_LIVE_*` gates and dependencies. Ordinary test runs do not need provider accounts or a running VM. Keep those gates off unless you intend to run the live scenarios.
 
@@ -158,7 +190,7 @@ CI caches Cargo downloads and compiled output by Rust version and lockfile, with
 Use a focused target while developing, for example:
 
 ```sh
-cargo test -p else-api --test bots --locked
+scripts/dev.py test -p else-api --test bots
 ```
 
 For public API journeys with fresh state and the Synthetic provider:

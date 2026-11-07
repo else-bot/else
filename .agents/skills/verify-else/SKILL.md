@@ -45,10 +45,22 @@ and Microsandbox paths are explicitly unavailable in those API instances.
 For the existing test coverage as well:
 
 ```sh
-.agents/skills/verify-else/verify.py --tests bots categories turns cancel ws
-.agents/skills/verify-else/verify.py --full
+scripts/dev.py test
+scripts/dev.py test -p else-api --test bots
+scripts/dev.py test -p else-api --serial -- wrong_keys_damage_and_existing_databases_never_produce_a_restore
 ```
 
+On Linux, use this shared command for Rust tests. It mounts Cargo dependency
+sources and GPUI debug assets, uses private scratch storage, and removes mise
+shims from the test PATH. Binaries run sequentially. Read `results.json`,
+`summary.txt`, and logs under the printed `.else-dev/tests/<run>/` directory
+after a runtime restart before starting another run.
+
+On macOS, use `cargo test --workspace --locked` inside the owned verification
+guest. With the process backend, the journey runner's
+`--tests bots categories turns cancel ws` and `--full` options remain available
+for combined API verification. On Linux with omabox, run Rust tests through
+`scripts/dev.py test` for the required dependency mounts.
 `--full` builds both workspace binaries and compiles unit/binary tests plus
 every offline integration target. It excludes `*_live` and `replication`;
 the report lists every excluded integration target. S3, real providers,
@@ -68,7 +80,7 @@ On Linux arm64, select `ubuntu-arm64` alone. Docker must be native arm64.
 Some existing tests internally skip when a provider or executable is
 unavailable. Read their logs before claiming those paths.
 
-Builds run sequentially in the checkout's private Cargo cache. A shared
+The API journey runner builds sequentially in the checkout's private Cargo cache. A shared
 `CARGO_TARGET_DIR` cannot replace another checkout's executables. After compilation, the runner
 uses Cargo's emitted executable paths and runs the test binaries directly in
 private lanes. No Cargo process competes for the build lock during driving. Up to

@@ -5,6 +5,7 @@ Host (manual development, real provider logins allowed):
   dev.py reset | api | desktop | status | curl ARGS... | sql QUERY | drop   [--session NAME] [--dir PATH]
 Agents (disposable omabox on Linux, Synthetic only, foreground until Ctrl-C):
   dev.py run [--api-only]
+  dev.py test [-p PACKAGE] [--test NAME] [--serial] [-- FILTER]
 """
 
 import argparse
@@ -517,6 +518,11 @@ def main(argv=None):
     commands.add_parser("sql", parents=[common], help="read-only SQL on the session database").add_argument("query")
     commands.add_parser("run", parents=[common], help="agent GUI testing in a new isolated omabox").add_argument(
         "--api-only", action="store_true")
+    tests = commands.add_parser("test", help="workspace tests in a new isolated omabox, with durable logs")
+    tests.add_argument("-p", "--package", help="test only this Cargo package")
+    tests.add_argument("--test", help="test only this integration target")
+    tests.add_argument("--serial", action="store_true", help="run one test thread per binary")
+    tests.add_argument("filter", nargs=argparse.REMAINDER, help="libtest filter after --")
     commands.add_parser("box-worker", help=argparse.SUPPRESS).add_argument("spec")
     args, extra = parser.parse_known_args(argv)
     require(args.command == "curl" or not extra, f"unrecognized arguments: {' '.join(extra)}")
@@ -530,6 +536,9 @@ def main(argv=None):
         return box_worker(json.loads(args.spec))
     if args.command == "run":
         return run_box(args)
+    if args.command == "test":
+        from dev_tests import run_tests
+        return run_tests(args)
     session = Session.resolve(args.session, args.dir)
     if args.command in ("reset", "drop"):
         fd = session.lock()
