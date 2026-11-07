@@ -83,6 +83,7 @@ pub fn turn_json(turn: &TurnRecord) -> Value {
         "questions": turn.questions,
         "routine": turn.routine,
         "outgoing_drafts": turn.outgoing_drafts,
+        "delegations": turn.delegations,
     })
 }
 

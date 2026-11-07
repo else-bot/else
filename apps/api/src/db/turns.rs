@@ -51,6 +51,9 @@ pub struct TurnRecord {
     /// The outgoing draft revisions shown under this turn.
     #[sqlx(skip)]
     pub outgoing_drafts: Vec<crate::db::outgoing_drafts::OutgoingDraft>,
+    /// The tasks this turn handed to other bots.
+    #[sqlx(skip)]
+    pub delegations: Vec<crate::db::delegations::Handoff>,
 }
 
 pub const TURN_COLUMNS: &str = "t.id, t.bot_id, t.conversation_id, t.request_id, t.turn_no,
@@ -419,7 +422,8 @@ pub async fn load_turn(
     Ok(turn)
 }
 
-/// Fill in each turn's secret requests and owner questions.
+/// Fill in each turn's secret requests, owner questions, drafts, social
+/// setups, and delegations.
 pub async fn attach_owner_requests(
     conn: &mut SqliteConnection,
     turns: &mut [TurnRecord],
@@ -429,11 +433,13 @@ pub async fn attach_owner_requests(
     let mut secrets = crate::db::secret_requests::for_turns(conn, &ids).await?;
     let mut questions = crate::db::owner_questions::for_turns(conn, &ids).await?;
     let mut drafts = crate::db::outgoing_drafts::for_turns(conn, &ids).await?;
+    let mut delegations = crate::db::delegations::for_turns(conn, &ids).await?;
     for turn in turns {
         turn.social_setups = socials.remove(&turn.id).unwrap_or_default();
         turn.secret_requests = secrets.remove(&turn.id).unwrap_or_default();
         turn.questions = questions.remove(&turn.id).unwrap_or_default();
         turn.outgoing_drafts = drafts.remove(&turn.id).unwrap_or_default();
+        turn.delegations = delegations.remove(&turn.id).unwrap_or_default();
     }
     Ok(())
 }
