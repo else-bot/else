@@ -2,11 +2,12 @@ use super::conversation::TranscriptRow;
 use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
-use crate::model::{BotReplyStatus, Conversation, Item};
+use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -354,4 +355,131 @@ fn exchange_sender(item: &Item) -> Option<(Uuid, &str, &str)> {
                 )
             })
         })
+}
+
+impl ElseApp {
+    pub(super) fn render_bot_created(
+        &self,
+        item: Uuid,
+        created: &BotCreated,
+        stamp: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let bot = |id: Uuid| self.bots.iter().find(|bot| bot.id == id);
+        let creator = bot(created.creator_bot_id);
+        let child = bot(created.bot_id);
+        let creator_name = creator.map_or(created.creator_name.clone(), |b| b.name.clone());
+        let name = child.map_or(created.name.clone(), |b| b.name.clone());
+        let identity = h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_2p5()
+            .children(child.map(|b| {
+                bot_avatar(
+                    SharedString::from(format!("created-{item}")),
+                    b.avatar,
+                    px(32.),
+                )
+                .still()
+            }))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(child.is_none(), |name| {
+                                name.text_color(theme.muted_foreground)
+                            })
+                            .child(name.clone()),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if child.is_some() {
+                            "New bot"
+                        } else {
+                            "Deleted bot"
+                        },
+                    )),
+            );
+        let open = child.map(|b| {
+            let id = b.id;
+            Button::new(SharedString::from(format!("open-created-{item}")))
+                .ghost()
+                .small()
+                .focus_ring(false)
+                .cursor_pointer()
+                .label("Open chat")
+                .accessibility_label(format!("Open chat with {name}"))
+                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(id, window, cx)))
+        });
+        let card = v_flex()
+            .id(SharedString::from(format!("message-{item}")))
+            .w_full()
+            .gap_3()
+            .p_3p5()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(theme.sidebar.opacity(0.6))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .children(creator.map(|b| {
+                        bot_avatar(
+                            SharedString::from(format!("creator-{item}")),
+                            b.avatar,
+                            px(16.),
+                        )
+                        .still()
+                    }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(creator_name),
+                    )
+                    .child(div().flex_none().child("created a bot")),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_3()
+                    .child(identity)
+                    .children(open),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Purpose"),
+                    )
+                    .child(div().w_full().text_sm().child(created.purpose.clone())),
+            );
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(div().w_full().pr(px(60.)).child(card))
+            .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
+            .into_any_element()
+    }
 }

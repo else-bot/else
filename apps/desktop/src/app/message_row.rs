@@ -268,6 +268,9 @@ impl ElseApp {
                             .into_any_element(),
                     );
                 }
+                if let Some(created) = &item.bot_created {
+                    return Some(self.render_bot_created(id, created, footer, cx));
+                }
                 let Some(text) = view.texts.get(&key) else {
                     return None;
                 };

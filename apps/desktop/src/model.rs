@@ -45,6 +45,18 @@ pub struct Item {
     pub bot_reply: Option<BotReply>,
     #[serde(default)]
     pub routine_update: Option<RoutineUpdate>,
+    #[serde(default)]
+    pub bot_created: Option<BotCreated>,
+}
+
+/// The main bot's notice that `creator_bot_id` created `bot_id`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct BotCreated {
+    pub bot_id: Uuid,
+    pub name: String,
+    pub creator_bot_id: Uuid,
+    pub creator_name: String,
+    pub purpose: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
