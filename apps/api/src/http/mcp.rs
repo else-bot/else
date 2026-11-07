@@ -79,15 +79,20 @@ pub async fn endpoint(
             tools.extend(super::connectors::tool_list());
             tools.extend(super::social_tools::schemas());
             tools.extend(super::shared_mcp::schemas());
+            tools.push(super::mcp_wait::schema());
             Ok(json!({ "tools": tools }))
         }
         "tools/call" => {
             let needs = match params["name"].as_str() {
                 Some("delegate" | "council" | "list_bots") => Tool::Delegate,
                 Some("mcp_install") => Tool::ManageMcp,
-                Some("mcp_list" | "mcp_request" | "mcp_connect" | "mcp_connection_status") => {
-                    Tool::Mcp
-                }
+                Some(
+                    "mcp_list"
+                    | "mcp_request"
+                    | "mcp_wait"
+                    | "mcp_connect"
+                    | "mcp_connection_status",
+                ) => Tool::Mcp,
                 Some("create_bot") => Tool::CreateBot,
                 Some("rename_bot") => Tool::RenameBot,
                 Some("request_secret") => Tool::RequestSecret,
@@ -439,6 +444,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "mcp_list" | "mcp_install" | "mcp_request" | "mcp_connect" | "mcp_connection_status" => {
             super::shared_mcp::call(state, grant, name, args).await
         }
+        super::mcp_wait::NAME => super::mcp_wait::call(state, grant, args).await,
         "memory_search" => search(state, grant, args).await,
         "memory_read" => read(state, grant, args).await,
         "memory_view" => view(state, grant, args).await,

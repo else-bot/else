@@ -153,6 +153,8 @@ pub struct TurnInput {
     /// and the draft open when the owner sent this turn's message.
     pub outgoing_drafts: Vec<super::outgoing::Note>,
     pub social_setups: Vec<crate::socials::store::Setup>,
+    /// Settled waits on MCP jobs that no attempt has received yet.
+    pub mcp_waits: Vec<McpWaitOutcome>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -220,6 +222,20 @@ pub struct SecretOutcome {
     pub name: String,
     pub env: Vec<String>,
     pub stored: bool,
+}
+
+/// How a wait on an MCP job ended, with the last status result, given to
+/// the continuation as remote data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpWaitOutcome {
+    pub id: Uuid,
+    pub mcp_id: String,
+    pub tool: String,
+    pub purpose: String,
+    /// `finished`, `failed`, or `expired`.
+    pub status: String,
+    pub checks: i64,
+    pub result: Option<String>,
 }
 
 pub use super::questions::{Choice as QuestionChoice, Outcome as QuestionOutcome};

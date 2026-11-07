@@ -580,12 +580,17 @@ fn run_serve() -> anyhow::Result<()> {
             .as_ref()
             .map(|m| tokio::spawn(m.clone().run(stop_scheduler.clone())));
         let state = Arc::new(state);
+        let mcp_waits = tokio::spawn(else_api::http::mcp_wait::run(
+            state.clone(),
+            stop_scheduler.clone(),
+        ));
         let published = lock.publish(config.bind)?;
         let result = serve(&config, listener, state).await;
         drop(published);
         stop_scheduler.cancel();
         let _ = tokio::join!(
             scheduler_task,
+            mcp_waits,
             async {
                 if let Some(task) = social_task {
                     let _ = task.await;

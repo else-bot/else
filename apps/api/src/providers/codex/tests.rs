@@ -53,6 +53,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         standing_permissions: Vec::new(),
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
+        mcp_waits: Vec::new(),
         handoff: None,
         jobs: Vec::new(),
         run: None,
@@ -862,12 +863,12 @@ fn fingerprints_keep_their_values() {
     input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
     assert_eq!(
         codex.fingerprint_of(&profile, &input, "chatgpt:me@example.com"),
-        "49e4cc82d036e8a15c339d3f2bbc2053"
+        "d2b114addcacbb728139feef3cf4d10d"
     );
     input.delegation.origin = crate::app::providers::Origin::ConnectorEvent;
     assert_eq!(
         codex.fingerprint_of(&profile, &input, "chatgpt:me@example.com"),
-        "9d453ecb30a97f38c6f23217620e044c"
+        "3c6c1298438988a5cf162a6c6de54fd9"
     );
 }
 
