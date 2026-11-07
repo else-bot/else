@@ -38,8 +38,9 @@ pub fn schema() -> Value {
             you and continues this request once the status leaves running_values, the checks \
             fail three times in a row, or the timeout passes. The continuation gets the last \
             status result. The status tool must be one its server declares read-only, or \
-            non-destructive and idempotent; any other tool is refused. One wait per attempt; \
-            delegated tasks cannot wait.",
+            non-destructive and idempotent; any other tool is refused. One wait per attempt. \
+            In a delegated task, the delegating bot gets your reply only when the task ends, \
+            so it keeps waiting while you do.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -284,8 +285,8 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         return (tool_error("The shared MCP library is unavailable."), None);
     };
     let log = format!("{} {} on {}", NAME, spec.tool, spec.mcp_id);
-    let attempt = match mcp_waits::caller_attempt(&state.db, grant.turn_id).await {
-        Ok(attempt) => attempt,
+    let caller = match mcp_waits::caller(&state.db, grant.turn_id).await {
+        Ok(caller) => caller,
         Err(error) => return refused(error, &log),
     };
     let note = match approval {
@@ -352,7 +353,16 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
         Some(Check::Running(result)) => result,
     };
-    match mcp_waits::create(&state.db, grant.turn_id, attempt, &spec, &first).await {
+    let next = if caller.owner_conversation {
+        "Tell the owner briefly what you are waiting for and end this attempt now. Do not \
+         poll or call more tools; else.bot checks the job and continues this request with \
+         its result."
+    } else {
+        "End this attempt now without a reply. Do not poll or call more tools; else.bot \
+         checks the job and continues this task with its result. The delegating bot keeps \
+         waiting and receives your reply only when the task ends."
+    };
+    match mcp_waits::create(&state.db, grant.turn_id, caller.attempt, &spec, &first).await {
         Ok(wait_id) => {
             state.scheduler.grants().park(grant.turn_id).await;
             (
@@ -360,9 +370,7 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
                     "status": "waiting",
                     "parked": true,
                     "wait_id": wait_id,
-                    "next": "Tell the owner briefly what you are waiting for and end this attempt \
-                             now. Do not poll or call more tools; else.bot checks the job and \
-                             continues this request with its result.",
+                    "next": next,
                 })),
                 Some(format!("{log} waiting {wait_id}{note}")),
             )
@@ -373,7 +381,6 @@ pub async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
 
 fn refused(error: CreateError, log: &str) -> Outcome {
     let code = match error {
-        CreateError::NotAllowed => "NOT_ALLOWED",
         CreateError::AttemptParked => "ATTEMPT_PARKED",
         CreateError::NotRunning => "NOT_RUNNING",
         CreateError::Db => "UNAVAILABLE",

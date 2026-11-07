@@ -561,14 +561,14 @@ pub async fn find_by_request(
 const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
                                  WHERE k.id = t.conversation_id AND k.kind = 'task')
           OR NOT EXISTS (SELECT 1 FROM turns w
-                         WHERE w.bot_id = t.bot_id AND w.status = 'waiting'))";
+                         WHERE w.conversation_id = t.conversation_id AND w.status = 'waiting'))";
 
 /// Claim the oldest queued turn of the next eligible bot, oldest first
 /// across bots. A bot is eligible when it is active, not stopping work, and
-/// has no turn in an active status. A waiting root holds only owner work. The
-/// claimed turn moves to `preparing` and is returned; the caller must start
-/// it before claiming again, so a later failure never strands an already
-/// committed claim.
+/// has no turn in an active status. A waiting owner turn holds only owner
+/// work, and a waiting task holds nothing. The claimed turn moves to
+/// `preparing` and is returned; the caller must start it before claiming
+/// again, so a later failure never strands an already committed claim.
 pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (

@@ -323,3 +323,119 @@ async fn an_external_first_call_waits_for_the_owner_and_a_tool_that_stops_qualif
         "a tool that no longer qualifies is not called again"
     );
 }
+
+async fn grant(app: &TestApp, turn: Uuid, tools: Vec<Tool>) -> String {
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.scheduler
+        .grants()
+        .issue(bot, conversation, turn, tools, DEFAULT_TTL)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegated_task_waits_on_a_job_and_its_delegator_resumes_only_when_it_finishes() {
+    let (app, synthetic) = harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("job");
+    std::fs::write(&state, "working").unwrap();
+    let main = app.main_bot().await;
+    let dev = app.create_bot("Dev").await;
+    sqlx::query("UPDATE bots SET selected_provider_id = 'synthetic' WHERE id = ?1")
+        .bind(dev.parse::<Uuid>().unwrap())
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let (root, token) = running(&app, &main).await;
+    text(&tool(&app, &token, "mcp_install", install(&state)).await);
+    let delegator = grant(&app, root, vec![Tool::Delegate]).await;
+    let task = "[synthetic:slow] Run WEB-284 in T3, review its PR, and report back.";
+    let accepted = text(
+        &tool(
+            &app,
+            &delegator,
+            "delegate",
+            json!({ "target_bot_id": dev, "task": task }),
+        )
+        .await,
+    );
+    assert_eq!(accepted["status"], "pending", "{accepted}");
+    let (delegation, child): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id, child_turn_id FROM delegations WHERE root_turn_id = ?1")
+            .bind(root)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.wait_turn(&child.to_string(), &["running"]).await;
+    let worker = grant(&app, child, vec![Tool::Mcp]).await;
+    let parked = text(&tool(&app, &worker, "mcp_wait", wait_args()).await);
+    assert_eq!(parked["parked"], true, "{parked}");
+    assert!(
+        parked["next"].as_str().unwrap().contains("without a reply"),
+        "{parked}"
+    );
+    settle(&app, child, "waiting").await;
+    settle(&app, root, "waiting").await;
+    let pending: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(delegation)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(pending, "running", "parking does not settle the delegation");
+
+    let owner = app
+        .send(
+            &dev,
+            Uuid::new_v4(),
+            "What is on your plate?",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(owner.status, StatusCode::ACCEPTED, "{}", owner.body);
+    app.wait_turn_for(
+        owner.body["turn"]["id"].as_str().unwrap(),
+        &["completed"],
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(
+        app.wait_turn(&child.to_string(), &["waiting"]).await,
+        "waiting",
+        "the owner's work ran while the task kept waiting"
+    );
+    assert_eq!(attempts(&app, root).await, 1);
+
+    std::fs::write(&state, "result_available").unwrap();
+    check_now(&app).await;
+    settle(&app, child, "completed").await;
+    assert_eq!(attempts(&app, child).await, 2, "the same task continued");
+    assert_eq!(wait_row(&app, child).await.0, "finished");
+    settle(&app, root, "completed").await;
+    assert_eq!(attempts(&app, root).await, 2, "the delegator resumed once");
+    let (status, delivered): (String, Option<i32>) =
+        sqlx::query_as("SELECT status, delivered_attempt FROM delegations WHERE id = ?1")
+            .bind(delegation)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), delivered), ("completed", Some(2)));
+    let packets = synthetic.packets().await;
+    assert!(
+        packets
+            .iter()
+            .any(|p| p.contains("[else.bot MCP waits]") && p.contains("Opened PR #775")),
+        "the task's continuation got the job's result"
+    );
+    assert!(
+        packets
+            .last()
+            .unwrap()
+            .contains("[else.bot delegation results]"),
+        "{:?}",
+        packets.last()
+    );
+}

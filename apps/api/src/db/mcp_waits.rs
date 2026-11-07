@@ -63,8 +63,6 @@ pub enum Check {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CreateError {
-    #[error("only the owner's own conversation can wait on an MCP job; delegated tasks cannot")]
-    NotAllowed,
     #[error("this attempt already waits or asked; end it and wait for the result")]
     AttemptParked,
     #[error("the request is no longer running")]
@@ -86,15 +84,14 @@ pub fn bounded(text: &str) -> String {
 
 /// The running attempt of `turn_id` that may wait, read before any remote
 /// call so a slow call cannot park a later attempt.
-pub async fn caller_attempt(pool: &SqlitePool, turn_id: Uuid) -> Result<i32, CreateError> {
+pub async fn caller(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+) -> Result<super::turns::AskingCaller, CreateError> {
     let mut conn = pool.acquire().await?;
-    let caller = super::turns::asking_caller(&mut conn, turn_id)
+    super::turns::asking_caller(&mut conn, turn_id)
         .await?
-        .ok_or(CreateError::NotRunning)?;
-    if !caller.owner_conversation {
-        return Err(CreateError::NotAllowed);
-    }
-    Ok(caller.attempt)
+        .ok_or(CreateError::NotRunning)
 }
 
 /// Park `attempt` of `turn_id` on `spec`, whose first check returned
@@ -112,9 +109,6 @@ pub async fn create(
         .await?
         .filter(|caller| caller.attempt == attempt)
         .ok_or(CreateError::NotRunning)?;
-    if !caller.owner_conversation {
-        return Err(CreateError::NotAllowed);
-    }
     let existing: Option<(Uuid, String, String, Json<Value>, String)> = sqlx::query_as(
         "SELECT id, mcp_id, tool, arguments, status_pointer FROM mcp_waits
          WHERE turn_id = ?1 AND attempt = ?2",
