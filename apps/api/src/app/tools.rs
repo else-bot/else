@@ -8,6 +8,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "mcp_install",
     "mcp_connection_status",
     "mcp_request",
+    "mcp_wait",
     "mcp_connect",
     "memory_bots",
     "memory_search",
@@ -62,6 +63,7 @@ pub const TOOL_NAMES: &[&str] = &[
 /// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
     "mcp_request",
+    "mcp_wait",
     "mcp_install",
     "mcp_connect",
     "social_connect",
@@ -127,6 +129,7 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
         "mcp_request" => {
             json!({"id":args["id"],"method":args["method"],"tool":args["params"]["name"],"effect":args["effect"]})
         }
+        "mcp_wait" => json!({"id":args["id"],"tool":args["tool"]}),
         "mail_accounts" | "social_connections" => json!({}),
         "social_connect" => json!({"provider":args["provider"],"reason":args["reason"]}),
         "social_action" | "social_action_status" => {
