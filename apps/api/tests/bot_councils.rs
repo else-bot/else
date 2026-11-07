@@ -53,6 +53,11 @@ async fn peer_creation_acknowledges_the_main_bot_once_with_its_purpose() {
     ] {
         assert!(notice.contains(expected), "{notice}");
     }
+    assert_eq!(
+        receipts[0]["bot_created"],
+        json!({"bot_id": created, "name": "Release", "creator_bot_id": peer,
+            "creator_name": "Work", "purpose": "Track releases and flag deployment blockers."})
+    );
     let saved = h.app.owner("GET", "/v1/bots", None).await;
     assert!(
         saved.body["bots"]
@@ -377,4 +382,113 @@ async fn a_cancelled_member_is_included_with_the_other_council_reports() {
         outcomes.iter().filter(|o| o.status == "completed").count(),
         2
     );
+}
+
+#[tokio::test]
+async fn earlier_creation_notices_gain_their_card_on_upgrade() {
+    let db = common::TestDb::empty().await;
+    let dir = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut names: Vec<_> = std::fs::read_dir(&source)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_str().unwrap() < "0027")
+        .collect();
+    names.sort();
+    for name in &names {
+        std::fs::copy(source.join(name), dir.path().join(name)).unwrap();
+    }
+    sqlx::migrate::Migrator::new(dir.path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .unwrap();
+    let (main, creator, created) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    for (id, name) in [
+        (main, "Assistant"),
+        (creator, "Tech (bot_id backup)\nPurpose: Manager"),
+        (created, "Auto"),
+    ] {
+        sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
+            .bind(id)
+            .bind(name)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (randomblob(16), ?1)")
+        .bind(main)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (turn, notice, other, stale) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let text = format!(
+        "Tech (bot_id backup)\nPurpose: Manager (bot_id {creator}) created Auto (bot_id {created}).\nPurpose: Own the routines.\nKeep approvals."
+    );
+    let renamed = format!(
+        "Old Name (bot_id {creator}) created Auto (bot_id {created}).\nPurpose: Own the routines."
+    );
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id, status)
+         SELECT ?1, ?2, c.id, ?3, ?4, 1, ?5, 'system', 'completed'
+         FROM conversations c WHERE c.bot_id = ?2",
+    )
+    .bind(turn)
+    .bind(main)
+    .bind(created)
+    .bind(vec![1u8; 32])
+    .bind(notice)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for (seq, id, text) in [
+        (1, notice, text.as_str()),
+        (2, other, "Purpose: unrelated"),
+        (3, stale, renamed.as_str()),
+    ] {
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             SELECT ?1, conversation_id, ?2, id, 'status', ?3 FROM turns WHERE id = ?4",
+        )
+        .bind(id)
+        .bind(seq)
+        .bind(text)
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    else_api::db::MIGRATOR.run(&db.pool).await.unwrap();
+    let card: sqlx::types::Json<else_api::db::turns::BotCreated> =
+        sqlx::query_scalar("SELECT bot_created FROM items WHERE id = ?1")
+            .bind(notice)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&card.0).unwrap(),
+        json!({"bot_id": created, "name": "Auto", "creator_bot_id": creator,
+            "creator_name": "Tech (bot_id backup)\nPurpose: Manager", "purpose": "Own the routines.\nKeep approvals."})
+    );
+    for id in [other, stale] {
+        let untouched: Option<String> =
+            sqlx::query_scalar("SELECT bot_created FROM items WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(untouched, None, "unverifiable notices stay plain");
+    }
+    let history = else_api::db::conversation::snapshot(&db.pool, main, 10, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.items.len(), 3, "the conversation still loads");
 }

@@ -99,6 +99,7 @@ pub fn item_json(item: &ItemRecord) -> Value {
         "bot_task": item.bot_task,
         "bot_reply": item.bot_reply,
         "routine_update": item.routine_update,
+        "bot_created": item.bot_created,
         "parts": item.parts.as_ref().map_or(&[][..], |parts| &parts.0[..]),
     })
 }

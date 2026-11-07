@@ -366,14 +366,21 @@ async fn creation_receipt(
     ).bind(receipt_turn).bind(main).bind(conversation).bind(bot_id).bind(hash)
         .bind(turn_no).bind(item).execute(&mut *conn).await?;
     sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-        VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text, bot_created)
+        VALUES (?1, ?2, ?3, ?4, 'status', ?5, ?6)",
     )
     .bind(item)
     .bind(conversation)
     .bind(seq)
     .bind(receipt_turn)
     .bind(text)
+    .bind(sqlx::types::Json(super::turns::BotCreated {
+        bot_id,
+        name: name.as_str().to_owned(),
+        creator_bot_id: creator,
+        creator_name,
+        purpose: purpose.as_str().to_owned(),
+    }))
     .execute(&mut *conn)
     .await?;
     super::events::item_upsert(conn, main, item).await?;
