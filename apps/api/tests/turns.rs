@@ -982,3 +982,70 @@ async fn a_reaction_must_target_an_assistant_message_of_the_same_bot() {
     assert_eq!(unknown_kind.body["error"]["code"], "invalid_body");
     assert_eq!(turn_count(&app).await, before, "nothing was accepted");
 }
+
+#[tokio::test]
+async fn a_turn_still_finishing_its_last_attempt_is_not_claimed_and_holds_its_bots_queue() {
+    let db = TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let mut queued = Vec::new();
+    for (bot, name) in [(Uuid::new_v4(), "First"), (Uuid::new_v4(), "Second")] {
+        sqlx::query("INSERT INTO bots (id, name) VALUES (?1, ?2)")
+            .bind(bot)
+            .bind(name)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let conversation = Uuid::new_v4();
+        sqlx::query("INSERT INTO conversations (id, bot_id) VALUES (?1, ?2)")
+            .bind(conversation)
+            .bind(bot)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        for turn_no in [1, 2] {
+            let turn = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                                    owner_item_id, provider_id, status, created_at)
+                 VALUES (?1, ?2, ?3, ?1, zeroblob(32), ?4, ?5, 'synthetic', 'queued', ?6)",
+            )
+            .bind(turn)
+            .bind(bot)
+            .bind(conversation)
+            .bind(turn_no)
+            .bind(Uuid::new_v4())
+            .bind(format!("2026-01-01T00:00:0{}.000+00:00", queued.len()))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            queued.push(turn);
+        }
+    }
+    let busy = [queued[0]];
+    assert_eq!(
+        else_api::db::turns::claim_next(&db.pool, &busy)
+            .await
+            .unwrap(),
+        Some(queued[2]),
+        "another bot's turn starts"
+    );
+    assert_eq!(
+        else_api::db::turns::claim_next(&db.pool, &busy)
+            .await
+            .unwrap(),
+        None,
+        "the finishing turn and the later turn of its bot both wait"
+    );
+    sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?1")
+        .bind(queued[2])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        else_api::db::turns::claim_next(&db.pool, &[])
+            .await
+            .unwrap(),
+        Some(queued[0]),
+        "once its task is gone the turn starts first in its bot's queue"
+    );
+}
