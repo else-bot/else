@@ -623,4 +623,55 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         connection.shutdown().await;
         server.abort();
     }
+    #[tokio::test]
+    async fn http_offers_a_protocol_version_that_keeps_the_initialize_session() {
+        let router = axum::Router::new().route(
+            "/mcp",
+            post(|headers: HeaderMap, Json(message): Json<Value>| async move {
+                let offered = message["params"]["protocolVersion"].as_str();
+                match message["method"].as_str() {
+                    Some("initialize") => (
+                        [(
+                            "mcp-session-id",
+                            if offered < Some("2026-07-28") { "kept" } else { "dropped" },
+                        )],
+                        Json(json!({
+                            "jsonrpc":"2.0","id":message["id"],
+                            "result":{
+                                "protocolVersion":"2025-11-25",
+                                "capabilities":{"tools":{}},
+                                "serverInfo":{"name":"github-like","version":"1"},
+                            }
+                        })),
+                    )
+                        .into_response(),
+                    _ if headers["mcp-session-id"] != "kept" => {
+                        (StatusCode::BAD_REQUEST, "invalid session").into_response()
+                    }
+                    Some("tools/list") => Json(json!({
+                        "jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}
+                    }))
+                    .into_response(),
+                    _ => StatusCode::ACCEPTED.into_response(),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let config = Transport::Http {
+            url: format!("http://{address}/mcp"),
+            headers: BTreeMap::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = connect(&config, dir.path(), dir.path()).await.unwrap();
+        assert!(
+            connection
+                .request("tools/list".into(), json!({}))
+                .await
+                .is_ok()
+        );
+        connection.shutdown().await;
+        server.abort();
+    }
 }
