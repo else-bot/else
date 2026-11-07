@@ -46,6 +46,32 @@ impl Drop for Cleanup {
     }
 }
 
+/// A private runtime home holding the local `else-guest:2` image.
+fn load_guest(dir: &std::path::Path) -> Cleanup {
+    let home = dir.join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let tar = dir.join("guest.tar");
+    assert!(
+        std::process::Command::new("docker")
+            .args(["save", "else-guest:2", "-o"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new(msb_bin())
+            .env("MSB_HOME", &home)
+            .args(["load", "-q", "-t", "else-guest:2", "-i"])
+            .arg(&tar)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::remove_file(&tar).unwrap();
+    Cleanup { home }
+}
+
 async fn run(
     manager: &ComputerManager,
     bot: Uuid,
@@ -251,28 +277,7 @@ async fn scripts_drive_the_visible_browser_safely() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("microsandbox");
-    std::fs::create_dir_all(&home).unwrap();
-    let _cleanup = Cleanup { home: home.clone() };
-    let tar = dir.path().join("guest.tar");
-    assert!(
-        std::process::Command::new("docker")
-            .args(["save", "else-guest:2", "-o"])
-            .arg(&tar)
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new(msb_bin())
-            .env("MSB_HOME", &home)
-            .args(["load", "-q", "-t", "else-guest:2", "-i"])
-            .arg(&tar)
-            .status()
-            .unwrap()
-            .success()
-    );
-    std::fs::remove_file(&tar).unwrap();
+    let cleanup = load_guest(dir.path());
     let app = TestApp::installed().await;
     let msb = Arc::new(Msb::detect(dir.path(), None).unwrap());
     let manager = Arc::new(ComputerManager::new(
@@ -301,7 +306,15 @@ async fn scripts_drive_the_visible_browser_safely() {
     let caps: Value =
         serde_json::from_str(&ok(&manager, bot, "else-capabilities", 30).await).unwrap();
     eprintln!("browser capabilities: {}", caps["browser"]);
-    assert_eq!(caps["browser"]["ready"], true);
+    assert_eq!(
+        caps["browser"]["ready"], false,
+        "the browser starts on first use"
+    );
+
+    write(&manager, bot, "cdp/node.mjs", NODE).await;
+    let node: Value =
+        serde_json::from_str(&ok(&manager, bot, "node cdp/node.mjs", 120).await).unwrap();
+    eprintln!("node: {node}");
     let version = ok(
         &manager,
         bot,
@@ -310,11 +323,6 @@ async fn scripts_drive_the_visible_browser_safely() {
     )
     .await;
     eprintln!("DevTools: {version}");
-
-    write(&manager, bot, "cdp/node.mjs", NODE).await;
-    let node: Value =
-        serde_json::from_str(&ok(&manager, bot, "node cdp/node.mjs", 120).await).unwrap();
-    eprintln!("node: {node}");
     assert_eq!(node["form_title"], "Fixture search");
     assert_eq!(node["title"], "Results for node-picnic");
     assert!(
@@ -547,7 +555,7 @@ async fn scripts_drive_the_visible_browser_safely() {
     .await;
     assert_eq!(listening, "0100007F:2406", "{listening}");
     let inspect = std::process::Command::new(msb_bin())
-        .env("MSB_HOME", &home)
+        .env("MSB_HOME", &cleanup.home)
         .args(["inspect", &name])
         .output()
         .unwrap();
@@ -567,8 +575,7 @@ async fn scripts_drive_the_visible_browser_safely() {
     assert!(chromium.contains("--remote-debugging-address=127.0.0.1"));
 
     let other: Uuid = app.create_bot("Other").await.parse().unwrap();
-    ok(&manager, other, "true", 120).await;
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(ok(&manager, other, "else-desktop", 120).await, "started");
     let mine: Value = serde_json::from_str(
         &ok(
             &manager,
@@ -599,3 +606,150 @@ async fn scripts_drive_the_visible_browser_safely() {
     .await;
     assert!(!their_tabs.contains("picnic"), "{their_tabs}");
 }
+
+/// Host memory the computer's VM process holds, in MiB.
+fn host_mib(runtime_name: &str) -> u64 {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "rss=,command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("machine") && l.contains(&format!("--name {runtime_name} ")))
+        .and_then(|l| l.split_whitespace().next()?.parse::<u64>().ok())
+        .map_or(0, |kib| kib / 1024)
+}
+
+/// Guest memory in MiB, vCPUs, and whether Chromium runs.
+async fn size(manager: &ComputerManager, bot: Uuid) -> (u64, u32, bool) {
+    let out = ok(
+        manager,
+        bot,
+        "echo $(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo) $(nproc) $(pgrep -c -x chromium || true)",
+        30,
+    )
+    .await;
+    let mut parts = out.split_whitespace();
+    let memory = parts.next().unwrap().parse().unwrap();
+    let cpus = parts.next().unwrap().parse().unwrap();
+    let chromium = parts.next().unwrap().parse::<u32>().unwrap() > 0;
+    (memory, cpus, chromium)
+}
+
+/// Commands and scripts run on a small computer with no desktop. A script's
+/// CDP helper starts the browser itself, within that size. A screen request
+/// grows the computer first and starts the desktop; a restart boots small
+/// again with no desktop.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_desktop_starts_on_demand_and_the_computer_grows_for_it() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let _cleanup = load_guest(dir.path());
+    let app = TestApp::installed().await;
+    let msb = Arc::new(Msb::detect(dir.path(), None).unwrap());
+    let manager = Arc::new(ComputerManager::new(
+        app.db.pool.clone(),
+        msb,
+        ComputerConfig {
+            image: "else-guest:2".into(),
+            desktop: true,
+            idle_after: Duration::from_secs(3600),
+            state_dir: dir.path().to_owned(),
+            ..ComputerConfig::default()
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let bot: Uuid = app.create_bot("Lazy").await.parse().unwrap();
+    let name = ComputerManager::runtime_name(bot);
+
+    ok(&manager, bot, "true", 120).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let (memory, cpus, chromium) = size(&manager, bot).await;
+    let idle = host_mib(&name);
+    eprintln!(
+        "commands only: guest {memory} MiB, {cpus} vCPU, chromium {chromium}, host {idle} MiB"
+    );
+    assert!(
+        memory < 1100 && cpus == 1 && !chromium,
+        "boots small, no desktop"
+    );
+    assert!(idle > 0 && idle < 600, "no desktop on the host: {idle} MiB");
+
+    write(&manager, bot, "probe.py", PROBE).await;
+    let title = ok(&manager, bot, "python3 probe.py", 120).await;
+    assert_eq!(title, "about:blank", "the helper started the browser");
+    let (memory, cpus, chromium) = size(&manager, bot).await;
+    eprintln!(
+        "script started the browser: guest {memory} MiB, {cpus} vCPU, host {} MiB",
+        host_mib(&name)
+    );
+    assert!(
+        memory < 1100 && cpus == 1 && chromium,
+        "within the boot size"
+    );
+
+    let Acquire::Ready { lease_id, .. } =
+        manager.acquire_desktop(bot, "test:screen").await.unwrap()
+    else {
+        panic!("no desktop")
+    };
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (memory, cpus, chromium) = size(&manager, bot).await;
+    eprintln!(
+        "screen requested: guest {memory} MiB, {cpus} vCPU, host {} MiB",
+        host_mib(&name)
+    );
+    assert!(
+        memory > 1900 && cpus == 2 && chromium,
+        "grown for the desktop"
+    );
+    let shot = manager
+        .capture_screen(lease_id, bot, None, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(shot.png.starts_with(b"\x89PNG"), "the screen answers");
+    manager.release(lease_id).await.unwrap();
+
+    manager.owner_stop(bot).await.unwrap();
+    manager.owner_resume(bot).await.unwrap();
+    ok(&manager, bot, "true", 120).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let (memory, cpus, chromium) = size(&manager, bot).await;
+    let restarted = host_mib(&name);
+    eprintln!(
+        "restarted: guest {memory} MiB, {cpus} vCPU, chromium {chromium}, host {restarted} MiB"
+    );
+    assert!(memory < 1100 && cpus == 1 && !chromium, "boots small again");
+
+    let Acquire::Ready { lease_id, .. } =
+        manager.acquire_desktop(bot, "test:screen2").await.unwrap()
+    else {
+        panic!("no desktop")
+    };
+    let (memory, cpus, chromium) = size(&manager, bot).await;
+    eprintln!(
+        "screen first: guest {memory} MiB, {cpus} vCPU, host {} MiB",
+        host_mib(&name)
+    );
+    assert!(
+        memory > 1900 && cpus == 2 && chromium,
+        "grown, then the desktop started"
+    );
+    let shot = manager
+        .capture_screen(lease_id, bot, None, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(shot.png.starts_with(b"\x89PNG"));
+}
+
+const PROBE: &str = r#"import sys
+sys.path.insert(0, "/usr/local/lib/elsebot/cdp")
+import elsecdp
+with elsecdp.connect() as browser:
+    print(browser.page().evaluate("location.href"))
+"#;

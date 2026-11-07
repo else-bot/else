@@ -93,7 +93,9 @@ pub fn tool_list() -> Vec<Value> {
                 runtimes your computer has (current images include Node.js and npm, Python 3 \
                 with venv for pip, Rust and Cargo, Git, gcc/g++, make, curl, and jq); if that \
                 command is missing, the computer uses an older image: check a tool with \
-                `command -v` before relying on it. Declare its effect: destructive or sensitive external \
+                `command -v` before relying on it. The screen and Chromium start on first use: \
+                the CDP helpers and the screen tools start them, and `else-desktop` starts them \
+                for anything else. Declare its effect: destructive or sensitive external \
                 commands need approval unless a saved permission applies. Routine reversible \
                 work, including remote ticket creation and updates, runs without a card.",
             "inputSchema": { "type": "object", "properties": {
@@ -347,7 +349,8 @@ async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, O
 /// Whether a command names the guest's browser or screen helpers, so its
 /// computer grows for the desktop before the command starts it.
 fn wants_desktop(command: &str) -> bool {
-    const HELPERS: [&str; 8] = [
+    const HELPERS: [&str; 9] = [
+        "else-desktop",
         "elsecdp",
         "cdp.mjs",
         "/usr/local/lib/elsebot/cdp",
