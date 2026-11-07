@@ -174,6 +174,8 @@ impl ComputerRuntime for Fake {
         } else if program == else_api::computers::GUEST_CHECKPOINT {
             self.log(format!("checkpoint {name}"));
         } else if program == else_api::computers::GUEST_INIT {
+            self.log(format!("init {name}"));
+        } else if program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP {
             self.log(format!("desktop {name}"));
         }
         let mut computers = self.computers.lock().unwrap();
@@ -1106,6 +1108,7 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
     let (lease_a, name_a) = ready(&manager, a, "test:a").await;
     let (lease_b, name_b) = ready(&manager, b, "test:b").await;
     assert_eq!(count("desktop"), 0, "commands start no desktop");
+    assert_eq!(count("init"), 2, "each boot runs the guest's setup");
     let spec = fake.specs.lock().unwrap()[0].clone();
     assert_eq!(
         (

@@ -1,6 +1,6 @@
 use super::{
-    Acquire, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Desktop, GUEST_INIT, RuntimeError,
-    bounded,
+    Acquire, ComputerError, ComputerManager, DESKTOP_GUEST_PORT, Desktop, GUEST_DESKTOP,
+    GUEST_INIT, RuntimeError, bounded,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -91,7 +91,7 @@ impl ComputerManager {
             return Ok(Err(acquired));
         };
         let (port, ready): (Option<i32>, bool) = sqlx::query_as(
-            "SELECT desktop_port, services_generation IS NOT DISTINCT FROM generation
+            "SELECT desktop_port, desktop_generation IS NOT DISTINCT FROM generation
              FROM bot_computers WHERE bot_id = ?1",
         )
         .bind(bot_id)
@@ -170,7 +170,7 @@ impl ComputerManager {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: Option<(String, i64, bool, bool)> = sqlx::query_as(
             "SELECT c.runtime_name, c.generation,
-                    c.services_generation IS NOT DISTINCT FROM c.generation,
+                    c.desktop_generation IS NOT DISTINCT FROM c.generation,
                     c.grown_generation IS NOT DISTINCT FROM c.generation
              FROM computer_leases l JOIN bot_computers c ON c.bot_id = l.bot_id
              WHERE l.id = ?1 AND l.bot_id = ?2 AND l.released_at IS NULL
@@ -211,10 +211,47 @@ impl ComputerManager {
             tracing::warn!(bot = %bot_id, error = %err, "the desktop runs at the boot size");
         }
         self.ensure_services(bot_id, &name).await?;
+        let started = self
+            .runtime
+            .exec(
+                &name,
+                "/bin/sh",
+                &["-c", GUEST_DESKTOP],
+                Duration::from_secs(60),
+            )
+            .await;
+        match started {
+            Ok(out) if out.status == Some(0) => {
+                sqlx::query(
+                    "UPDATE bot_computers SET desktop_generation = ?2 WHERE bot_id = ?1 AND generation = ?2",
+                )
+                .bind(bot_id)
+                .bind(generation)
+                .execute(&self.pool)
+                .await?;
+            }
+            other => {
+                let error = match other {
+                    Ok(out) => format!("the desktop did not start: {}", out.stderr.trim()),
+                    Err(err) => format!("the desktop did not start: {err}"),
+                };
+                tracing::warn!(bot = %bot_id, %error, "desktop");
+                sqlx::query("UPDATE bot_computers SET last_error = ?2 WHERE bot_id = ?1")
+                    .bind(bot_id)
+                    .bind(bounded(&error, 2000))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
         Ok(Ok(()))
     }
 
-    async fn ensure_services(&self, bot_id: Uuid, name: &str) -> Result<(), ComputerError> {
+    /// Run the guest's per-boot setup (`else-init`) once per boot.
+    pub(super) async fn ensure_services(
+        &self,
+        bot_id: Uuid,
+        name: &str,
+    ) -> Result<(), ComputerError> {
         if !self.config.desktop {
             return Ok(());
         }
@@ -331,7 +368,7 @@ impl ComputerManager {
                 Err(refusal) => return Ok(Err(refusal)),
             }
         };
-        let ready_query = "SELECT desktop_port, services_generation IS NOT DISTINCT FROM generation
+        let ready_query = "SELECT desktop_port, desktop_generation IS NOT DISTINCT FROM generation
              FROM bot_computers WHERE bot_id = ?1";
         let (mut port, mut ready): (Option<i32>, bool) = sqlx::query_as(ready_query)
             .bind(bot_id)

@@ -5,13 +5,14 @@ FROM $BASE
 COPY supervisord.conf /etc/elsebot/supervisord.conf
 COPY else-browser /usr/local/bin/else-browser
 COPY else-init /usr/local/bin/else-init
+COPY else-desktop /usr/local/bin/else-desktop
 COPY else-checkpoint /usr/local/bin/else-checkpoint
 COPY else-capabilities /usr/local/bin/else-capabilities
 COPY else-screenshot /usr/local/bin/else-screenshot
 COPY else-input /usr/local/bin/else-input
 COPY cdp/ /usr/local/lib/elsebot/cdp/
 COPY vnc/else_vnc_targets.py /usr/local/lib/elsebot/vnc/
-RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-checkpoint \
+RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/bin/else-desktop /usr/local/bin/else-checkpoint \
       /usr/local/bin/else-capabilities /usr/local/bin/else-screenshot /usr/local/bin/else-input \
  && chmod 0755 /usr/local/lib/elsebot/cdp /usr/local/lib/elsebot/vnc \
  && chmod 0644 /usr/local/lib/elsebot/cdp/* /usr/local/lib/elsebot/vnc/*

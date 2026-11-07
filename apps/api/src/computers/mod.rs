@@ -89,8 +89,13 @@ pub const ROOT_PROJECT: &str = "/root/work";
 
 /// Guest port of the desktop's noVNC (see infra/guest).
 pub const DESKTOP_GUEST_PORT: u16 = 6080;
-/// Starts the supervised desktop services; idempotent.
+/// Starts the guest's supervisor after each boot; idempotent. Images before
+/// else-desktop also start the whole desktop here.
 pub const GUEST_INIT: &str = "/usr/local/bin/else-init";
+/// Starts the desktop (screen, VNC, and Chromium) and waits for the browser;
+/// idempotent, and a no-op on images whose `else-init` started it.
+pub const GUEST_DESKTOP: &str =
+    "if [ -x /usr/local/bin/else-desktop ]; then exec /usr/local/bin/else-desktop; fi";
 /// Closes the browser cleanly before a stop.
 pub const GUEST_CHECKPOINT: &str = "/usr/local/bin/else-checkpoint";
 
@@ -414,6 +419,7 @@ impl ComputerManager {
                 "running" => {
                     let lease = self.lease(&mut tx, bot_id, holder, row.generation).await?;
                     tx.commit().await?;
+                    self.ensure_services(bot_id, &row.runtime_name).await?;
                     return Ok(Acquire::Ready {
                         lease_id: lease,
                         runtime_name: row.runtime_name,
@@ -570,6 +576,7 @@ impl ComputerManager {
             .await?;
         let lease = self.lease(&mut tx, bot_id, holder, next).await?;
         tx.commit().await?;
+        self.ensure_services(bot_id, &row.runtime_name).await?;
         Ok(Acquire::Ready {
             lease_id: lease,
             runtime_name: row.runtime_name,

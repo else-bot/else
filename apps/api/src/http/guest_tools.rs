@@ -57,10 +57,6 @@ pub fn tool_list() -> Vec<Value> {
     let guest = json!({ "readOnlyHint": false, "destructiveHint": true,
                         "idempotentHint": false, "openWorldHint": true });
     let job = json!({ "type": "string", "format": "uuid" });
-    let desktop = json!({ "type": "boolean",
-        "description": "Start the screen and Chromium first. They start on demand, so set this \
-            when the command drives the browser through the CDP helpers or opens a window; \
-            commands naming the helpers start them without it." });
     let secrets = json!({ "type": "array", "maxItems": 4, "uniqueItems": true,
         "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$" },
         "description": "Names of task secrets (see computer_secrets) whose variables the \
@@ -103,7 +99,6 @@ pub fn tool_list() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300 },
-                "desktop": desktop.clone(),
                 "secrets": secrets.clone(),
                 "github": github.clone(),
                 "effect": effect.clone(),
@@ -123,7 +118,6 @@ pub fn tool_list() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
-                "desktop": desktop,
                 "secrets": secrets,
                 "github": github,
                 "webhook_id": { "type": "string", "format": "uuid",
@@ -350,9 +344,9 @@ async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, O
     }
 }
 
-/// Whether a command needs the desktop: asked for, or naming the guest's
-/// browser or screen helpers.
-fn wants_desktop(args: &Value, command: &str) -> bool {
+/// Whether a command names the guest's browser or screen helpers, so its
+/// computer grows for the desktop before the command starts it.
+fn wants_desktop(command: &str) -> bool {
     const HELPERS: [&str; 8] = [
         "elsecdp",
         "cdp.mjs",
@@ -363,7 +357,7 @@ fn wants_desktop(args: &Value, command: &str) -> bool {
         "chromium",
         ":9222",
     ];
-    args["desktop"].as_bool().unwrap_or(false) || HELPERS.iter().any(|h| command.contains(h))
+    HELPERS.iter().any(|h| command.contains(h))
 }
 
 fn job_json(job: &crate::computers::jobs::JobState) -> Value {
@@ -735,7 +729,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("command is required."), None);
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
-            if wants_desktop(args, &command)
+            if wants_desktop(&command)
                 && let Err(outcome) = lease(state, grant, true).await
             {
                 return outcome;
@@ -817,7 +811,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     }
                 },
             };
-            if wants_desktop(args, &command)
+            if wants_desktop(&command)
                 && let Err(outcome) = lease(state, grant, true).await
             {
                 return outcome;
