@@ -580,21 +580,16 @@ impl ComputerManager {
     }
 
     async fn redact_job(&self, job_id: Uuid, output: &str) -> Result<String, ComputerError> {
-        let row: Option<(Uuid, sqlx::types::Json<Vec<String>>)> =
-            sqlx::query_as("SELECT bot_id, secrets FROM guest_jobs WHERE id = ?1")
+        let names: Option<sqlx::types::Json<Vec<String>>> =
+            sqlx::query_scalar("SELECT secrets FROM guest_jobs WHERE id = ?1")
                 .bind(job_id)
                 .fetch_optional(&self.pool)
                 .await?;
-        let Some((bot_id, names)) = row.filter(|(_, n)| !n.is_empty()) else {
+        let Some(names) = names.filter(|n| !n.is_empty()) else {
             return Ok(output.to_owned());
         };
-        match crate::db::task_secrets::resolve(
-            &self.pool,
-            self.secret_key.as_deref(),
-            bot_id,
-            &names.0,
-        )
-        .await
+        match crate::db::task_secrets::resolve(&self.pool, self.secret_key.as_deref(), &names.0)
+            .await
         {
             Ok(env) => Ok(redact(output, &env.redaction())),
             Err(err) => {

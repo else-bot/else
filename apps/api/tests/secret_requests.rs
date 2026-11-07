@@ -248,11 +248,10 @@ async fn assert_canary_absent_from_database(app: &TestApp) {
     }
 }
 
-async fn resolved(app: &TestApp, bot: &str, name: &str) -> Vec<(String, String)> {
+async fn resolved(app: &TestApp, name: &str) -> Vec<(String, String)> {
     let env = else_api::db::task_secrets::resolve(
         &app.db.pool,
         app.state.secret_key.as_deref(),
-        bot.parse().unwrap(),
         &[name.to_owned()],
     )
     .await
@@ -312,7 +311,7 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
         ("stored".into(), Some(2))
     );
 
-    let mut env = resolved(&app, &main, "deploy").await;
+    let mut env = resolved(&app, "deploy").await;
     env.sort();
     assert_eq!(
         env,
@@ -321,9 +320,7 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
             ("DEPLOY_USER".to_owned(), "deployer".to_owned()),
         ]
     );
-    let listed = app
-        .owner("GET", &format!("/v1/bots/{main}/task-secrets"), None)
-        .await;
+    let listed = app.owner("GET", "/v1/task-secrets", None).await;
     assert_eq!(listed.body["secrets"][0]["name"], "deploy");
     assert!(!listed.body.to_string().contains(CANARY));
 
@@ -336,9 +333,9 @@ async fn an_answer_after_the_attempt_ends_stores_the_secret_and_continues_the_tu
     .await;
     assert_eq!(replay.status, StatusCode::OK);
     assert_eq!(replay.body["requeued"], false);
-    assert_eq!(resolved(&app, &main, "deploy").await.len(), 2);
+    assert_eq!(resolved(&app, "deploy").await.len(), 2);
     assert!(
-        resolved(&app, &main, "deploy")
+        resolved(&app, "deploy")
             .await
             .contains(&("DEPLOY_KEY".to_owned(), PEM.to_owned()))
     );
@@ -401,9 +398,7 @@ async fn a_declined_request_continues_the_turn_without_a_secret() {
     let late = fulfill(&app, &main, request, values()).await;
     assert_eq!(late.status, StatusCode::CONFLICT);
     assert!(!late.body.to_string().contains(CANARY));
-    let listed = app
-        .owner("GET", &format!("/v1/bots/{main}/task-secrets"), None)
-        .await;
+    let listed = app.owner("GET", "/v1/task-secrets", None).await;
     assert_eq!(listed.body["secrets"], json!([]));
 
     let (next, token) = running(&app, &main, owner_tools()).await;
@@ -447,9 +442,7 @@ async fn stop_withdraws_the_request_before_the_provider_finishes_draining() {
         StatusCode::CONFLICT,
         "Stop must withdraw the form before the provider acknowledges it"
     );
-    let listed = app
-        .owner("GET", &format!("/v1/bots/{main}/task-secrets"), None)
-        .await;
+    let listed = app.owner("GET", "/v1/task-secrets", None).await;
     assert_eq!(listed.body["secrets"], json!([]));
     app.wait_turn_for(turn, &["interrupted", "uncertain"], Duration::from_secs(5))
         .await;
@@ -503,7 +496,7 @@ async fn stop_delete_and_restart_settle_waiting_requests() {
     assert_eq!(stored.status, StatusCode::OK, "{}", stored.body);
     wait(&app, turn, "completed").await;
     assert_eq!(
-        resolved(&app, &main, "deploy").await.len(),
+        resolved(&app, "deploy").await.len(),
         2,
         "stored after restart"
     );

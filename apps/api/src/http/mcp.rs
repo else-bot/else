@@ -251,8 +251,8 @@ fn tool_list() -> Value {
         {
             "name": "create_bot",
             "description": "Register a new else.bot specialist in your owner conversation for an owner request, with \
-                the installation's default provider and no credentials, shared memory, or \
-                other access. Returns its bot_id at once; you may delegate to it in this \
+                the installation's default provider, the task secrets stored on this server, and no \
+                shared memory or other access. Returns its bot_id at once; you may delegate to it in this \
                 attempt. Repeating the same name in this owner request returns the same bot. \
                 The bot learns its responsibilities from the tasks it receives, so give its \
                 first task with delegate. Supply its purpose, required for non-main bots. The server \
@@ -1080,8 +1080,9 @@ async fn create_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             };
             let next = match bot.status {
                 bots::BotStatus::Active => {
-                    "It is registered. Delegate to this bot_id when it should work; it has no \
-                     credentials until the owner adds task secrets or other access."
+                    "It is registered. Delegate to this bot_id when it should work; it can use \
+                     the task secrets stored on this server but has no other access until \
+                     the owner grants it."
                 }
                 _ => "The owner deleted this bot; do not delegate to it or create it again.",
             };

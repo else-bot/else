@@ -3,7 +3,7 @@
 //! The provider attempt names a task secret and the variables it needs
 //! (`request_secret`); only that metadata is stored and shown. The attempt
 //! then ends and its turn waits (`waiting`) with no provider process. The
-//! owner's values go through the owner API straight into `task_secrets`,
+//! owner's values go through the owner API straight into the shared `task_secrets`,
 //! encrypted, in the same transaction that marks the request stored and
 //! requeues the turn as a continuation. A continuation learns only the
 //! secret's name, variable names, and whether it was stored or declined.
@@ -332,8 +332,8 @@ async fn settle_in(
     })
 }
 
-/// Store the owner's values for a pending request as the bot's task secret
-/// and continue its turn, atomically. `env` must name exactly the requested
+/// Store the owner's values for a pending request as a task secret every
+/// bot can use, replacing one with the same name, and continue its turn, atomically. `env` must name exactly the requested
 /// variables. A retry after success changes nothing and never overwrites
 /// what was stored.
 pub async fn fulfill(
@@ -357,7 +357,7 @@ pub async fn fulfill(
     if request.status != Status::Pending {
         return answered(request, Status::Stored);
     }
-    task_secrets::write_in(&mut tx, bot_id, &request.name, &sealed).await?;
+    task_secrets::write_in(&mut tx, &request.name, &sealed).await?;
     let settled = settle_in(&mut tx, &request, Status::Stored).await?;
     tx.commit().await?;
     Ok(settled)

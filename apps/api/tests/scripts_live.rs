@@ -499,7 +499,7 @@ async fn a_codex_bot_writes_runs_and_stops_scripts_in_its_computer() {
         let (status, body) = api
             .call(
                 reqwest::Method::PUT,
-                &format!("/v1/bots/{bot}/task-secrets/{secret}"),
+                &format!("/v1/task-secrets/{secret}"),
                 Some(json!({ "env": {
                     "SMTP_HOST": "127.0.0.1", "SMTP_PORT": "2525", "SMTP_USER": "mailer",
                     "SMTP_PASSWORD": value, "SMTP_FROM": "owner@example.test" } })),

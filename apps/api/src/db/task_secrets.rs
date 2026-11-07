@@ -1,7 +1,8 @@
-//! Owner-provided credentials for a bot's guest scripts.
+//! Owner-provided credentials for guest scripts.
 //!
-//! A task secret is a named set of environment variables for one bot, for
-//! example the SMTP settings a mailing script needs. Values are encrypted at
+//! A task secret is a named set of environment variables that belongs to the
+//! installation, so every bot on this server can name it, for example the
+//! SMTP settings a mailing script needs. Values are encrypted at
 //! rest with an age identity derived from `SECRET_KEY` and a per-secret salt
 //! (purpose `else.bot/task-secrets/v1`); only the variable names are stored
 //! in the clear and shown to the bot. A value reaches the guest only as an
@@ -16,7 +17,6 @@ use std::io::{Read, Write};
 
 use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::credentials::SecretKey;
@@ -211,24 +211,20 @@ pub fn seal_env(
 /// Returns whether it was new.
 pub async fn write_in(
     conn: &mut SqliteConnection,
-    bot_id: Uuid,
     name: &str,
     sealed: &Sealed,
 ) -> Result<bool, sqlx::Error> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM task_secrets WHERE bot_id = ?1 AND name = ?2)",
-    )
-    .bind(bot_id)
-    .bind(name)
-    .fetch_one(&mut *conn)
-    .await?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_secrets WHERE name = ?1)")
+            .bind(name)
+            .fetch_one(&mut *conn)
+            .await?;
     sqlx::query(
-        "INSERT INTO task_secrets (bot_id, name, env_names, salt, ciphertext)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT (bot_id, name) DO UPDATE SET env_names = ?3, salt = ?4, ciphertext = ?5,
+        "INSERT INTO task_secrets (name, env_names, salt, ciphertext)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (name) DO UPDATE SET env_names = ?2, salt = ?3, ciphertext = ?4,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')",
     )
-    .bind(bot_id)
     .bind(name)
     .bind(sqlx::types::Json(&sealed.names))
     .bind(&sealed.salt[..])
@@ -242,28 +238,24 @@ pub async fn write_in(
 pub async fn put(
     pool: &SqlitePool,
     key: &SecretKey,
-    bot_id: Uuid,
     name: &str,
     env: &BTreeMap<String, String>,
 ) -> Result<bool, SecretError> {
     let sealed = seal_env(key, name, env)?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let created = write_in(&mut tx, bot_id, name, &sealed).await?;
+    let created = write_in(&mut tx, name, &sealed).await?;
     tx.commit().await?;
     Ok(created)
 }
 
-pub async fn list(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sqlx::Error> {
+pub async fn list(pool: &SqlitePool) -> Result<Vec<SecretInfo>, sqlx::Error> {
     let rows: Vec<(
         String,
         sqlx::types::Json<Vec<String>>,
         chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
-        "SELECT name, env_names, updated_at FROM task_secrets WHERE bot_id = ?1 ORDER BY name",
-    )
-    .bind(bot_id)
-    .fetch_all(pool)
-    .await?;
+    )> = sqlx::query_as("SELECT name, env_names, updated_at FROM task_secrets ORDER BY name")
+        .fetch_all(pool)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(name, env, updated_at)| SecretInfo {
@@ -274,25 +266,20 @@ pub async fn list(pool: &SqlitePool, bot_id: Uuid) -> Result<Vec<SecretInfo>, sq
         .collect())
 }
 
-pub async fn delete(pool: &SqlitePool, bot_id: Uuid, name: &str) -> Result<bool, sqlx::Error> {
-    Ok(
-        sqlx::query("DELETE FROM task_secrets WHERE bot_id = ?1 AND name = ?2")
-            .bind(bot_id)
-            .bind(name)
-            .execute(pool)
-            .await?
-            .rows_affected()
-            == 1,
-    )
+pub async fn delete(pool: &SqlitePool, name: &str) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM task_secrets WHERE name = ?1")
+        .bind(name)
+        .execute(pool)
+        .await?
+        .rows_affected()
+        == 1)
 }
 
-/// Decrypt the named secrets of one bot into environment variables. A name
-/// that is not this bot's is `Unknown`, the same as a missing one. Two
-/// secrets setting the same variable are refused.
+/// Decrypt the named secrets into environment variables. A missing name is
+/// `Unknown`. Two secrets setting the same variable are refused.
 pub async fn resolve(
     pool: &SqlitePool,
     key: Option<&SecretKey>,
-    bot_id: Uuid,
     names: &[String],
 ) -> Result<Env, SecretError> {
     let mut env = Env::default();
@@ -306,13 +293,11 @@ pub async fn resolve(
     }
     let key = key.ok_or(SecretError::NoKey)?;
     for name in names {
-        let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-            "SELECT salt, ciphertext FROM task_secrets WHERE bot_id = ?1 AND name = ?2",
-        )
-        .bind(bot_id)
-        .bind(name)
-        .fetch_optional(pool)
-        .await?;
+        let row: Option<(Vec<u8>, Vec<u8>)> =
+            sqlx::query_as("SELECT salt, ciphertext FROM task_secrets WHERE name = ?1")
+                .bind(name)
+                .fetch_optional(pool)
+                .await?;
         let Some((salt, cipher)) = row else {
             return Err(SecretError::Unknown(name.clone()));
         };

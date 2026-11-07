@@ -225,21 +225,19 @@ async fn tool(app: &TestApp, token: &str, name: &str, arguments: Value) -> Value
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
+async fn secrets_are_write_only_encrypted_and_shared_by_every_bot() {
     let Setup { app, .. } = setup().await;
     let bot = app.create_bot("Mailer").await;
     let other = app.create_bot("Other").await;
-    let path = format!("/v1/bots/{bot}/task-secrets/smtp");
+    let path = "/v1/task-secrets/smtp";
     let body = json!({ "env": { "SMTP_USER": "bot", "SMTP_PASSWORD": PASSWORD } });
-    let created = app.owner("PUT", &path, Some(body.clone())).await;
+    let created = app.owner("PUT", path, Some(body.clone())).await;
     assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
     assert_eq!(
-        app.owner("PUT", &path, Some(body)).await.status,
+        app.owner("PUT", path, Some(body)).await.status,
         StatusCode::OK
     );
-    let listed = app
-        .owner("GET", &format!("/v1/bots/{bot}/task-secrets"), None)
-        .await;
+    let listed = app.owner("GET", "/v1/task-secrets", None).await;
     assert_eq!(listed.body["secrets"][0]["name"], "smtp");
     assert_eq!(
         listed.body["secrets"][0]["env"],
@@ -252,40 +250,33 @@ async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&stored).contains(PASSWORD));
     assert!(stored.starts_with(b"age-encryption.org/v1"));
-    let none = app
-        .owner("GET", &format!("/v1/bots/{other}/task-secrets"), None)
-        .await;
-    assert_eq!(none.body["secrets"], json!([]));
+    let (_, other_token) = grant(&app, &other).await;
+    assert_eq!(
+        tool(&app, &other_token, "computer_secrets", json!({})).await,
+        json!({ "secrets": [{ "name": "smtp", "env": ["SMTP_PASSWORD", "SMTP_USER"] }] }),
+        "another bot sees the same secret"
+    );
     for env in [
         json!({ "PATH": "/tmp" }),
         json!({ "LD_PRELOAD": "x" }),
         json!({}),
     ] {
         let refused = app
-            .owner(
-                "PUT",
-                &format!("/v1/bots/{bot}/task-secrets/bad"),
-                Some(json!({ "env": env })),
-            )
+            .owner("PUT", "/v1/task-secrets/bad", Some(json!({ "env": env })))
             .await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{env}");
     }
     let (_, token) = grant(&app, &bot).await;
     let as_task = app
-        .call(
-            "GET",
-            &format!("/v1/bots/{bot}/task-secrets"),
-            None,
-            Some(&token),
-        )
+        .call("GET", "/v1/task-secrets", None, Some(&token))
         .await;
     assert_eq!(as_task.status, StatusCode::FORBIDDEN);
     assert_eq!(
-        app.owner("DELETE", &path, None).await.status,
+        app.owner("DELETE", path, None).await.status,
         StatusCode::NO_CONTENT
     );
     assert_eq!(
-        app.owner("DELETE", &path, None).await.status,
+        app.owner("DELETE", path, None).await.status,
         StatusCode::NOT_FOUND
     );
 }
@@ -294,17 +285,14 @@ async fn secrets_are_write_only_encrypted_and_scoped_to_their_bot() {
 async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
     let Setup { app, guest, .. } = setup().await;
     let bot = app.create_bot("Mailer").await;
-    let other = app.create_bot("Other").await;
-    for (who, name) in [(&bot, "smtp"), (&other, "theirs")] {
-        let put = app
-            .owner(
-                "PUT",
-                &format!("/v1/bots/{who}/task-secrets/{name}"),
-                Some(json!({ "env": { "SMTP_PASSWORD": PASSWORD } })),
-            )
-            .await;
-        assert_eq!(put.status, StatusCode::CREATED);
-    }
+    let put = app
+        .owner(
+            "PUT",
+            "/v1/task-secrets/smtp",
+            Some(json!({ "env": { "SMTP_PASSWORD": PASSWORD } })),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::CREATED);
     let (_, token) = grant(&app, &bot).await;
 
     let listed = tool(&app, &token, "computer_secrets", json!({})).await;
@@ -316,7 +304,7 @@ async fn secrets_reach_the_guest_only_on_stdin_and_are_redacted_from_output() {
         &app,
         &token,
         "computer_run",
-        json!({ "command": "true", "secrets": ["theirs"], "effect": "local" }),
+        json!({ "command": "true", "secrets": ["missing"], "effect": "local" }),
     )
     .await;
     assert!(
@@ -735,4 +723,115 @@ async fn input_allowances_survive_counter_cleanup() {
         manager.count_input(Uuid::new_v4()).await.unwrap();
     }
     assert_eq!(manager.count_input(turn).await.unwrap(), 42);
+}
+
+#[tokio::test]
+async fn upgrading_keeps_every_bots_secrets_under_distinct_shared_names() {
+    let db = common::TestDb::empty().await;
+    let old = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_str().unwrap() < "0026" {
+            std::fs::copy(entry.path(), old.path().join(entry.file_name())).unwrap();
+        }
+    }
+    sqlx::migrate::Migrator::new(old.path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .unwrap();
+    let older = Uuid::parse_str("0badc0de-0000-4000-8000-000000000000").unwrap();
+    let alike = Uuid::parse_str("0badc0de-1111-4000-8000-000000000000").unwrap();
+    let newer = Uuid::new_v4();
+    let long = "a".repeat(40);
+    let (jan, feb, mar) = (
+        "2026-01-01T00:00:00.000+00:00",
+        "2026-02-01T00:00:00.000+00:00",
+        "2026-03-01T00:00:00.000+00:00",
+    );
+    for (bot, bot_name, secret, updated) in [
+        (older, "Older", "kaneo", jan),
+        (alike, "Alike", "kaneo", feb),
+        (newer, "Newer", "kaneo", mar),
+        (newer, "Newer", "kaneo-0badc0de", mar),
+        (older, "Older", long.as_str(), jan),
+        (newer, "Newer", long.as_str(), mar),
+        (older, "Older", "smtp", jan),
+    ] {
+        sqlx::query("INSERT OR IGNORE INTO bots (id, name) VALUES (?1, ?2)")
+            .bind(bot)
+            .bind(bot_name)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO task_secrets (bot_id, name, env_names, salt, ciphertext, updated_at)
+             VALUES (?1, ?2, '[\"KANEO_API_KEY\"]', zeroblob(32), ?3, ?4)",
+        )
+        .bind(bot)
+        .bind(secret)
+        .bind(format!("{bot_name}:{secret}").into_bytes())
+        .bind(updated)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO bot_computers (bot_id, runtime_name, image, cpus, memory_mib)
+         VALUES (?1, 'older', 'image', 1, 512)",
+    )
+    .bind(older)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO guest_jobs (id, bot_id, command, deadline, status, secrets)
+         VALUES (?1, ?2, './sync.sh', '2030-01-01T00:00:00Z', 'running', '[\"kaneo\",\"smtp\"]')",
+    )
+    .bind(job)
+    .bind(older)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    else_api::db::migrate(&db.pool).await.unwrap();
+    else_api::db::migrate(&db.pool).await.unwrap();
+
+    let rows: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT name, ciphertext FROM task_secrets ORDER BY name")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let rows: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|(n, c)| (n, String::from_utf8(c).unwrap()))
+        .collect();
+    let short = "a".repeat(31);
+    let expected: Vec<(String, String)> = [
+        (format!("{short}-0badc0de"), format!("Older:{long}")),
+        (long.clone(), format!("Newer:{long}")),
+        ("kaneo".into(), "Newer:kaneo".into()),
+        ("kaneo-0badc0de".into(), "Newer:kaneo-0badc0de".into()),
+        ("kaneo-0badc0de-2".into(), "Older:kaneo".into()),
+        ("kaneo-0badc0de-3".into(), "Alike:kaneo".into()),
+        ("smtp".into(), "Older:smtp".into()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        rows, expected,
+        "the newest copy keeps the name and no stored secret is lost"
+    );
+    let secrets: String = sqlx::query_scalar("SELECT secrets FROM guest_jobs WHERE id = ?1")
+        .bind(job)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        secrets, r#"["kaneo-0badc0de-2","smtp"]"#,
+        "a running job still names its own bot's copy"
+    );
 }
