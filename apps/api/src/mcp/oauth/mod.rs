@@ -213,18 +213,20 @@ impl Session {
     }
 
     /// The access token of a GitHub sign-in made through the server's
-    /// registered GitHub app, for authenticating git over HTTPS. Any other
-    /// provider's token is refused, so it can never be sent to github.com.
+    /// registered GitHub app, for authenticating git over HTTPS. GitHub's
+    /// tokens do not expire, so a read first proves the token still works and
+    /// turns a revoked one into `AuthRequired`.
     pub(super) async fn git_token(
         &mut self,
         config: &Transport,
     ) -> Result<Zeroizing<String>, Error> {
-        self.status();
-        if !matches!(self.state, State::Authorized(_)) {
-            self.request(config, "tools/list".into(), serde_json::json!({}))
-                .await?;
-        }
-        self.refresh(false).await?;
+        self.request(config, "tools/list".into(), serde_json::json!({}))
+            .await?;
+        self.github_token()
+    }
+
+    /// Any other provider's token is refused, so it can never reach github.com.
+    fn github_token(&self) -> Result<Zeroizing<String>, Error> {
         let State::Authorized(credential) = &self.state else {
             return Err(Error::Invalid(
                 "This MCP has no GitHub sign-in. Use the GitHub MCP's id.",

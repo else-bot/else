@@ -642,8 +642,9 @@ fn github_env(token: zeroize::Zeroizing<String>) -> Vec<(String, zeroize::Zeroiz
 }
 
 /// Adds the GitHub MCP's sign-in to a command's environment when the call
-/// names one. It reaches the guest like a task secret and is redacted the
-/// same way. Sign-in uses the owner's connection card, as `mcp_request` does.
+/// names one. It reaches the guest like a task secret. Its output is filtered
+/// in the guest, but only a foreground command's output is redacted again on
+/// the host. Sign-in uses the owner's connection card, as `mcp_request` does.
 async fn add_github(
     state: &AppState,
     grant: &Grant,

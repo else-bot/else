@@ -246,29 +246,25 @@ fn github_credential(scopes: &[&str]) -> Credential {
     credential
 }
 
-#[tokio::test]
-async fn git_gets_only_a_github_token_with_repo_scope() {
-    let config = Transport::Http {
-        url: "https://api.githubcopilot.com/mcp/".into(),
-        headers: Default::default(),
-    };
+#[test]
+fn git_gets_only_a_github_token_with_repo_scope() {
     let dir = tempfile::tempdir().unwrap();
 
     let mut github = github_session(github_credential(&["repo", "read:org"]), dir.path());
-    let token = github.git_token(&config).await.unwrap();
+    let token = github.github_token().unwrap();
     assert_eq!(token.as_str(), "private-access-token");
 
     let mut narrow = github_session(github_credential(&["read:org"]), dir.path());
-    let error = narrow.git_token(&config).await.unwrap_err();
+    let error = narrow.github_token().unwrap_err();
     assert!(error.to_string().contains("repo scope"), "{error}");
 
     let mut other_app = github_credential(&["repo"]);
     other_app.client_id = "previous-id".into();
     let mut other_app = github_session(other_app, dir.path());
-    assert!(other_app.git_token(&config).await.is_err());
+    assert!(other_app.github_token().is_err());
 
     let mut other_provider = github_session(credential(), dir.path());
     other_provider.client = None;
-    let error = other_provider.git_token(&config).await.unwrap_err();
+    let error = other_provider.github_token().unwrap_err();
     assert!(error.to_string().contains("no GitHub sign-in"), "{error}");
 }
