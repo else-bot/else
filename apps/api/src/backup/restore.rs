@@ -613,6 +613,8 @@ async fn restore_runtime(
                 image: entry.image.clone(),
                 cpus: entry.cpus,
                 memory_mib: entry.memory_mib,
+                max_cpus: entry.cpus,
+                max_memory_mib: entry.memory_mib,
                 network: entry.network.clone(),
                 ports: entry
                     .desktop_port

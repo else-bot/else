@@ -428,6 +428,8 @@ async fn toolchain_projects_persist_and_restore() {
             image: "else-guest:2".into(),
             cpus: 1,
             memory_mib: 2048,
+            max_cpus: 1,
+            max_memory_mib: 2048,
             network: "public".into(),
             ports: Vec::new(),
             files: Vec::new(),

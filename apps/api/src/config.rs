@@ -221,6 +221,21 @@ impl Config {
             65_536,
         )?;
         let vm_cpus = parse_number(source, "ELSE_VM_CPUS", defaults.cpus as u64, 1, 16)?;
+        let desktop_memory = parse_number(
+            source,
+            "ELSE_VM_DESKTOP_MEMORY_MIB",
+            (defaults.desktop_memory_mib as u64).max(vm_memory),
+            256,
+            65_536,
+        )?;
+        let desktop_cpus = parse_number(
+            source,
+            "ELSE_VM_DESKTOP_CPUS",
+            (defaults.desktop_cpus as u64).max(vm_cpus),
+            1,
+            16,
+        )?;
+        let (host_cpus, host_memory) = host_budget(&defaults);
         let image = source.get("ELSE_VM_IMAGE").unwrap_or(defaults.image);
         if !crate::computers::runtime::valid_image(&image) {
             return Err(invalid("ELSE_VM_IMAGE", "not a valid image reference"));
@@ -229,6 +244,8 @@ impl Config {
             image,
             cpus: vm_cpus as u32,
             memory_mib: vm_memory as u32,
+            desktop_cpus: desktop_cpus as u32,
+            desktop_memory_mib: desktop_memory as u32,
             overhead_mib: parse_number(
                 source,
                 "ELSE_VM_OVERHEAD_MIB",
@@ -236,12 +253,11 @@ impl Config {
                 0,
                 8192,
             )? as u32,
-            max_cpus: parse_number(source, "ELSE_VM_MAX_CPUS", defaults.max_cpus as u64, 1, 256)?
-                as u32,
+            max_cpus: parse_number(source, "ELSE_VM_MAX_CPUS", host_cpus, 1, 256)? as u32,
             max_memory_mib: parse_number(
                 source,
                 "ELSE_VM_MAX_MEMORY_MIB",
-                defaults.max_memory_mib,
+                host_memory,
                 256,
                 1 << 22,
             )?,
@@ -372,6 +388,29 @@ fn parse_bool(source: &dyn Source, name: &'static str) -> Result<bool, ConfigErr
         Some("0" | "false") => Ok(false),
         Some(_) => Err(invalid(name, "expected 1, 0, true, or false")),
     }
+}
+
+/// The default computer budget: every host CPU, and half its memory, never
+/// less than the fixed defaults. Computers reserve their size but use host
+/// memory only as their guests touch it.
+fn host_budget(defaults: &crate::computers::ComputerConfig) -> (u64, u64) {
+    let cpus = std::thread::available_parallelism().map_or(0, |n| n.get() as u64);
+    // SAFETY: sysconf reads system constants and has no preconditions.
+    let (pages, page_size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    let memory_mib = if pages > 0 && page_size > 0 {
+        (pages as u64).saturating_mul(page_size as u64) >> 20
+    } else {
+        0
+    };
+    (
+        cpus.clamp(defaults.max_cpus as u64, 256),
+        (memory_mib / 2).clamp(defaults.max_memory_mib, 1 << 22),
+    )
 }
 
 fn parse_number(

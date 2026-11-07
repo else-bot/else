@@ -84,7 +84,9 @@ impl ComputerManager {
                 reason: "this installation's computers have no desktop".into(),
             }));
         }
-        let acquired = self.acquire(bot_id, &format!("desktop:{bot_id}")).await?;
+        let acquired = self
+            .acquire_desktop(bot_id, &format!("desktop:{bot_id}"))
+            .await?;
         let Acquire::Ready { lease_id, .. } = acquired else {
             return Ok(Err(acquired));
         };
@@ -135,11 +137,84 @@ impl ComputerManager {
         Ok(())
     }
 
-    pub(super) async fn ensure_services(
+    /// Hold the bot's computer for `holder`, as [`Self::acquire`] does, with
+    /// its desktop (screen, browser, and VNC) running. Without a desktop
+    /// image this is the same as `acquire`.
+    pub async fn acquire_desktop(
         &self,
         bot_id: Uuid,
-        name: &str,
-    ) -> Result<(), ComputerError> {
+        holder: &str,
+    ) -> Result<Acquire, ComputerError> {
+        let acquired = self.acquire(bot_id, holder).await?;
+        if let Acquire::Ready { lease_id, .. } = &acquired
+            && let Err(waiting) = self.ensure_desktop(bot_id, *lease_id).await?
+        {
+            return Ok(waiting);
+        }
+        Ok(acquired)
+    }
+
+    /// Start the desktop of the computer `lease` holds, once per boot. The
+    /// first start grows the computer to its desktop size, admitted against
+    /// the budget first; it keeps that size, and its reservation, until it
+    /// stops. A lease from an earlier boot starts nothing.
+    pub(super) async fn ensure_desktop(
+        &self,
+        bot_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<Result<(), Acquire>, ComputerError> {
+        if !self.config.desktop {
+            return Ok(Ok(()));
+        }
+        let _op = self.op(bot_id).await;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: Option<(String, i64, bool, bool)> = sqlx::query_as(
+            "SELECT c.runtime_name, c.generation,
+                    c.services_generation IS NOT DISTINCT FROM c.generation,
+                    c.grown_generation IS NOT DISTINCT FROM c.generation
+             FROM computer_leases l JOIN bot_computers c ON c.bot_id = l.bot_id
+             WHERE l.id = ?1 AND l.bot_id = ?2 AND l.released_at IS NULL
+               AND c.observed_state = 'running' AND c.desired_state = 'auto'
+               AND c.generation = l.generation",
+        )
+        .bind(lease_id)
+        .bind(bot_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((name, generation, started, grown)) = current else {
+            return Ok(Err(Acquire::Queued {
+                reason: "the computer restarted; try again".into(),
+            }));
+        };
+        if started {
+            return Ok(Ok(()));
+        }
+        let row = Self::row(&mut tx, bot_id).await?.expect("leased");
+        let (max_cpus, max_memory) = row.max();
+        let grows = !grown && (max_cpus, max_memory) != (row.cpus as u32, row.memory_mib as u32);
+        if grows {
+            if !self.admits(&mut tx, bot_id, max_cpus, max_memory).await? {
+                return Ok(Err(Acquire::Queued {
+                    reason: "the computer budget has no room for the desktop yet; waiting for \
+                             capacity"
+                        .into(),
+                }));
+            }
+            sqlx::query("UPDATE bot_computers SET grown_generation = ?2 WHERE bot_id = ?1")
+                .bind(bot_id)
+                .bind(generation)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        if grows && let Err(err) = self.runtime.grow(&name, max_cpus, max_memory).await {
+            tracing::warn!(bot = %bot_id, error = %err, "the desktop runs at the boot size");
+        }
+        self.ensure_services(bot_id, &name).await?;
+        Ok(Ok(()))
+    }
+
+    async fn ensure_services(&self, bot_id: Uuid, name: &str) -> Result<(), ComputerError> {
         if !self.config.desktop {
             return Ok(());
         }
@@ -242,7 +317,7 @@ impl ComputerManager {
             return Ok(Err(ViewerRefusal::NoDesktop));
         }
         let lease_id = if wake {
-            match self.acquire(bot_id, holder).await? {
+            match self.acquire_desktop(bot_id, holder).await? {
                 Acquire::Ready { lease_id, .. } => lease_id,
                 Acquire::OwnerStopped => return Ok(Err(ViewerRefusal::OwnerStopped)),
                 Acquire::BotInactive => return Ok(Err(ViewerRefusal::BotInactive)),
@@ -263,7 +338,10 @@ impl ComputerManager {
             .fetch_one(&self.pool)
             .await?;
         if !ready && port.is_some() {
-            self.ensure_viewer_services(bot_id, lease_id).await?;
+            if let Err(Acquire::Queued { reason }) = self.ensure_desktop(bot_id, lease_id).await? {
+                self.release(lease_id).await?;
+                return Ok(Err(ViewerRefusal::Unavailable(reason)));
+            }
             (port, ready) = sqlx::query_as(ready_query)
                 .bind(bot_id)
                 .fetch_one(&self.pool)
@@ -285,26 +363,6 @@ impl ComputerManager {
         };
         self.release(lease_id).await?;
         Ok(Err(refusal))
-    }
-
-    async fn ensure_viewer_services(
-        &self,
-        bot_id: Uuid,
-        lease_id: Uuid,
-    ) -> Result<(), ComputerError> {
-        let _op = self.op(bot_id).await;
-        let same_boot: Option<String> = sqlx::query_scalar(
-            "SELECT c.runtime_name FROM computer_leases l JOIN bot_computers c ON c.bot_id = l.bot_id
-             WHERE l.id = ?1 AND l.released_at IS NULL AND c.observed_state = 'running'
-               AND c.desired_state = 'auto' AND c.generation = l.generation",
-        )
-        .bind(lease_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(name) = same_boot {
-            self.ensure_services(bot_id, &name).await?;
-        }
-        Ok(())
     }
 
     async fn attach(

@@ -216,7 +216,9 @@ impl ComputerManager {
 
     async fn admit(&self, bot_id: Uuid, row: &super::Row) -> Result<(), ComputerError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let admitted = self.admits(&mut tx, bot_id, row).await?;
+        let admitted = self
+            .admits(&mut tx, bot_id, row.cpus as u32, row.memory_mib as u32)
+            .await?;
         tx.commit().await?;
         if admitted {
             Ok(())
@@ -558,6 +560,8 @@ impl ComputerManager {
                 image: image.to_owned(),
                 cpus: row.cpus as u32,
                 memory_mib: row.memory_mib as u32,
+                max_cpus: row.max().0,
+                max_memory_mib: row.max().1,
                 network: network.to_owned(),
                 ports,
                 files,
