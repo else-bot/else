@@ -473,7 +473,7 @@ async fn chat_can_record_a_task_grant_from_the_owner_words_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_work_cannot_use_or_record_a_task_grant() {
+async fn work_delegated_for_an_owner_request_uses_but_never_records_a_task_grant() {
     let h = recorder::harness(8).await;
     let app = &h.app;
     let main = app.main_bot().await;
@@ -511,10 +511,7 @@ async fn delegated_work_cannot_use_or_record_a_task_grant() {
         .await
         .unwrap();
     let (_, child_token) = h.started(child).await;
-    let mut action = tailscale("up");
-    action["authorization"] = json!(authorization);
-    let blocked = tool(app, &child_token, "ask_permission", action).await;
-    assert_ne!(blocked.result["status"], "approved", "{}", blocked.body);
+    runs_by_task_grant(app, &child_token, tailscale("up")).await;
     let recorded = tool(
         app,
         &child_token,
@@ -523,12 +520,13 @@ async fn delegated_work_cannot_use_or_record_a_task_grant() {
     )
     .await;
     assert_ne!(recorded.result["status"], "approved", "{}", recorded.body);
-    let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM owner_questions WHERE turn_id = ?1")
-        .bind(child)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    assert_eq!(cards, 0, "delegated work neither asks nor records");
+    let (_, choices) = pending(
+        app,
+        &child_token,
+        scoped("destructive", "up", TASK, "other-host"),
+    )
+    .await;
+    assert_eq!(choices, ONCE, "another target asks once, offering no grant");
     assert_eq!(permissions(app, &worker).await.len(), 1);
     for turn in [turn, child] {
         h.release(turn).await;
