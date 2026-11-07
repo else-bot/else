@@ -329,4 +329,4 @@ impl Provider for Codex {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

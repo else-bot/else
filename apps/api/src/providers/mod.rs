@@ -8,6 +8,8 @@ pub mod codex_rpc;
 mod default_skills;
 pub mod definitions;
 pub mod executable;
+#[cfg(test)]
+mod fingerprints;
 pub mod grok;
 pub mod grok_home;
 pub mod host;

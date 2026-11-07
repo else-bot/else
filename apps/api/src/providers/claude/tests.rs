@@ -750,8 +750,9 @@ fn a_connector_event_never_resumes_a_session_with_host_tools() {
     );
 }
 
-#[test]
-fn fingerprints_keep_their_values() {
+pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static str, String); 2] {
+    use crate::app::providers::Origin;
+
     let claude = Claude::offline("acct:org");
     let mut input = specialist_turn(None);
     input.bot_id = Uuid::nil();
@@ -763,14 +764,16 @@ fn fingerprints_keep_their_values() {
         service_tier: "default".into(),
     };
     let ready = claude.ready.as_ref().unwrap();
-    input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
-    assert_eq!(
-        claude.fingerprint(ready, &profile, &input),
-        "d5bafc1dac9ec6d1a57b1f0e8b5caacb"
-    );
-    input.delegation.origin = crate::app::providers::Origin::ConnectorEvent;
-    assert_eq!(
-        claude.fingerprint(ready, &profile, &input),
-        "d45137cf868ffc0c78cc9977c44e68c5"
-    );
+    [
+        (Origin::OwnerRequest, "d5bafc1dac9ec6d1a57b1f0e8b5caacb"),
+        (Origin::ConnectorEvent, "d45137cf868ffc0c78cc9977c44e68c5"),
+    ]
+    .map(|(origin, expected)| {
+        input.delegation.origin = origin;
+        (
+            origin,
+            expected,
+            claude.fingerprint(ready, &profile, &input),
+        )
+    })
 }
