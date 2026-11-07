@@ -66,7 +66,8 @@ actions!(
         HideOthers,
         ShowAll,
         Minimize,
-        Zoom
+        Zoom,
+        About
     ]
 );
 
@@ -136,10 +137,19 @@ pub fn install_menus(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &Minimize, cx| with_active_window(cx, Window::minimize_window));
-    cx.on_action(|_: &Zoom, cx| with_active_window(cx, Window::zoom_window));
+    cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window, _| window.minimize_window()));
+    cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window, _| window.zoom_window()));
+    cx.on_action(|_: &About, cx| {
+        if let Some(window) = cx.windows().into_iter().next() {
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| open_about(window, cx));
+            });
+        }
+    });
     cx.set_menus(vec![
         Menu::new("else.bot").items([
+            MenuItem::action("About else.bot", About),
+            MenuItem::separator(),
             MenuItem::action("Settings…", crate::connection::OpenAppSettings),
             MenuItem::action("Bot details", ToggleSettings),
             MenuItem::separator(),
@@ -180,12 +190,43 @@ pub fn install_menus(cx: &mut App) {
 }
 
 /// Deferred because a key binding dispatches while its window is updating.
-fn with_active_window(cx: &mut App, f: fn(&Window)) {
+fn with_active_window(cx: &mut App, f: fn(&mut Window, &mut App)) {
     if let Some(window) = cx.active_window() {
         cx.defer(move |cx| {
-            let _ = window.update(cx, |_, window, _| f(window));
+            let _ = window.update(cx, |_, window, cx| f(window, cx));
         });
     }
+}
+
+fn open_about(window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
+    cx.activate(true);
+    window.activate_window();
+    if window.has_active_dialog(cx) {
+        return;
+    }
+    window.open_dialog(cx, |dialog, _, cx| {
+        let theme = cx.theme();
+        dialog.w(px(300.)).close_button(false).child(
+            v_flex()
+                .items_center()
+                .gap_3()
+                .py_4()
+                .child(crate::connection::brand_mark(theme))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("else.bot"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                ),
+        )
+    });
 }
 
 /// What the window knows about its API connection.

@@ -9,6 +9,7 @@ mod servers;
 mod settings;
 mod updates;
 mod view;
+pub(crate) use view::brand_mark;
 
 use settings::Presentation;
 
