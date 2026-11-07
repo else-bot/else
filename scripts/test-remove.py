@@ -209,7 +209,7 @@ esac
         self.env.pop('ELSE_HOME')
         result = subprocess.run([str(self.link), 'paths'], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f'home:        {self.installation}', result.stdout)
+        self.assertIn(f'home:        {self.installation.resolve()}', result.stdout)
 
     def test_foreign_launchers_and_links_are_preserved(self):
         self.desktop.write_text('Exec=/another/elsebot desktop\n')
@@ -266,13 +266,25 @@ esac
 
     def test_matching_desktop_process_is_stopped(self):
         binary = self.installation / 'versions/app/bin/else-desktop'
-        shutil.copy2('/bin/sleep', binary)
+        shutil.copy('/bin/sleep', binary)
         process = subprocess.Popen([str(binary), '60'])
         self.addCleanup(lambda: process.poll() is None and process.kill())
         reaper = threading.Thread(target=process.wait)
         reaper.start()
         result = self.run_cli('remove', '--yes')
         self.assert_removed(result)
+        reaper.join(timeout=5)
+        self.assertIsNotNone(process.returncode)
+
+    def test_desktop_launched_through_a_symlinked_home_is_stopped(self):
+        shutil.copy('/bin/sleep', self.installation / 'versions/app/bin/else-desktop')
+        alias = self.root / 'alias'
+        alias.symlink_to(self.home)
+        process = subprocess.Popen([str(alias / self.installation.name / 'versions/app/bin/else-desktop'), '60'])
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        reaper = threading.Thread(target=process.wait)
+        reaper.start()
+        self.assert_removed(self.run_cli('remove', '--yes'))
         reaper.join(timeout=5)
         self.assertIsNotNone(process.returncode)
 
