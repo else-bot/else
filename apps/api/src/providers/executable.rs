@@ -1,6 +1,19 @@
+//! Where a provider CLI lives. Turns run under [`super::host::Host`], which
+//! replaces the environment and the working directory, so a version
+//! manager's shim would pick a different version or none there. Shims are
+//! resolved here, with this process's environment, to the executable they
+//! select now.
+
 use std::ffi::OsStr;
+use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+/// The executable for the CLI `name`: the configured path, else the first
+/// executable `name` on `PATH`, with a mise or asdf shim resolved through
+/// its manager's `which`. `Ok(None)` means it is not on `PATH`. An error
+/// says why the found or configured file cannot be used; a configured path
+/// never falls back to `PATH`.
 pub fn executable(configured: Option<&Path>, name: &str) -> Result<Option<PathBuf>, String> {
     resolve(configured, name, std::env::var_os("PATH").as_deref())
 }
@@ -10,27 +23,138 @@ fn resolve(
     name: &str,
     path: Option<&OsStr>,
 ) -> Result<Option<PathBuf>, String> {
-    Ok(match configured {
-        Some(p) => Some(resolve_native(p, name).unwrap_or_else(|| p.to_path_buf())),
-        None => std::env::split_paths(path.unwrap_or_default())
-            .map(|dir| dir.join(name))
-            .find(|p| p.is_file())
-            .and_then(|p| resolve_native(&p, name)),
+    let setting = format!("ELSE_{}_BIN", name.to_uppercase());
+    let found = match configured {
+        Some(found) if is_executable(found) => found.to_path_buf(),
+        Some(found) => {
+            return Err(format!(
+                "{setting} ({}) is not an executable file",
+                found.display()
+            ));
+        }
+        None => match search(path, name) {
+            Some(found) => found,
+            None => return Ok(None),
+        },
+    };
+    native(&found, name, path).map(Some).map_err(|why| {
+        format!(
+            "`{name}` at {} {why}; set {setting} to the {name} executable itself",
+            found.display()
+        )
     })
 }
 
-fn resolve_native(path: &Path, name: &str) -> Option<PathBuf> {
-    let found = std::fs::canonicalize(path).ok()?;
-    if found.file_name().is_some_and(|f| f == "mise") {
-        let out = std::process::Command::new(&found)
-            .args(["which", name])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())?;
-        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-        return std::fs::canonicalize(path).ok().filter(|p| p.is_file());
+#[derive(Clone, Copy)]
+enum Manager {
+    Mise,
+    Asdf,
+}
+
+impl Manager {
+    const ALL: [Self; 2] = [Self::Mise, Self::Asdf];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mise => "mise",
+            Self::Asdf => "asdf",
+        }
     }
-    Some(found)
+}
+
+enum Found {
+    Native(PathBuf),
+    Link(Manager, PathBuf),
+    Script(Manager),
+}
+
+fn classify(path: &Path) -> Result<Found, String> {
+    let file = std::fs::canonicalize(path).map_err(|e| format!("cannot be read ({e})"))?;
+    let named = |m: &Manager| file.file_name().is_some_and(|f| f == m.name());
+    if let Some(manager) = Manager::ALL.into_iter().find(named) {
+        return Ok(Found::Link(manager, file));
+    }
+    let mut head = Vec::new();
+    std::fs::File::open(&file)
+        .and_then(|f| f.take(4096).read_to_end(&mut head))
+        .map_err(|e| format!("cannot be read ({e})"))?;
+    if head.starts_with(b"#!") {
+        let text = String::from_utf8_lossy(&head);
+        let words: Vec<_> = text.split_whitespace().collect();
+        let execs = |m: &Manager| {
+            words.windows(2).any(|pair| {
+                matches!(pair[1], "exec" | "x")
+                    && Path::new(pair[0].trim_matches(['\'', '"']))
+                        .file_name()
+                        .is_some_and(|file| file == m.name())
+            })
+        };
+        if let Some(manager) = Manager::ALL.into_iter().find(execs) {
+            return Ok(Found::Script(manager));
+        }
+    }
+    Ok(Found::Native(file))
+}
+
+fn native(found: &Path, name: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
+    let (manager, binary) = match classify(found)? {
+        Found::Native(file) => return Ok(file),
+        Found::Link(manager, binary) => (manager, binary),
+        Found::Script(manager) => {
+            let binary = search(path, manager.name())
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .filter(|p| p.file_name().is_some_and(|f| f == manager.name()))
+                .ok_or(format!(
+                    "is a {0} shim and `{0}` is not on PATH",
+                    manager.name()
+                ))?;
+            (manager, binary)
+        }
+    };
+    let which = format!("`{} which {name}`", manager.name());
+    let out = std::process::Command::new(&binary)
+        .args(["which", name])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("is a shim and {which} did not run ({e})"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("is a shim and {which} failed ({reason})"));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let target = match stdout.trim().lines().collect::<Vec<_>>()[..] {
+        [line] if Path::new(line).is_absolute() => PathBuf::from(line),
+        _ => {
+            return Err(format!(
+                "is a shim and {which} printed no absolute path ({:?})",
+                stdout.trim()
+            ));
+        }
+    };
+    if !is_executable(&target) {
+        return Err(format!(
+            "is a shim and {which} printed {}, which is not an executable file",
+            target.display()
+        ));
+    }
+    match classify(&target)? {
+        Found::Native(file) => Ok(file),
+        Found::Link(..) | Found::Script(_) => Err(format!(
+            "is a shim and {which} printed {}, another shim",
+            target.display()
+        )),
+    }
+}
+
+fn search(path: Option<&OsStr>, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .map(|dir| dir.join(name))
+        .find(|p| is_executable(p))
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]
@@ -66,7 +190,6 @@ mod tests {
             path
         }
 
-        /// A version manager whose `which <name>` prints `body`'s output.
         fn manager(&self, rel: &str, body: &str) -> PathBuf {
             self.file(
                 rel,
@@ -126,6 +249,41 @@ mod tests {
     }
 
     #[test]
+    fn quoted_manager_paths_are_resolved_and_never_returned_as_native() {
+        for manager in ["mise", "asdf"] {
+            let tree = Tree::new();
+            let native = tree.native("codex");
+            let binary = tree.manager(&format!("bin/{manager}"), &installs_answer(&tree));
+            let path = tree.path(&["shims", "bin"]);
+            for quote in ['\"', '\''] {
+                let shim = tree.file(
+                    "shims/codex",
+                    &format!(
+                        "#!/bin/sh\nexec {quote}/opt/tool manager/bin/{manager}{quote} exec codex \"$@\"\n"
+                    ),
+                    0o755,
+                );
+                tree.manager(&format!("bin/{manager}"), &installs_answer(&tree));
+                assert_eq!(
+                    resolve(None, "codex", Some(&path)),
+                    Ok(Some(native.clone()))
+                );
+                assert_eq!(
+                    resolve(Some(&shim), "codex", Some(&path)),
+                    Ok(Some(native.clone()))
+                );
+                tree.manager(
+                    &format!("bin/{manager}"),
+                    &format!("echo '{}'", shim.display()),
+                );
+                let link = tree.link(&format!("links/{quote}/codex"), &binary);
+                let err = resolve(Some(&link), "codex", Some(&path)).unwrap_err();
+                assert!(err.contains("another shim"), "{err}");
+            }
+        }
+    }
+
+    #[test]
     fn a_link_to_a_native_binary_is_kept() {
         let tree = Tree::new();
         let native = tree.native("claude");
@@ -177,8 +335,6 @@ mod tests {
         assert_eq!(resolve(Some(&shim), "grok", None), Ok(Some(native)));
     }
 
-    /// Every shim that does not lead to an executable is reported with the
-    /// setting that bypasses it, configured or found on `PATH`.
     #[test]
     fn an_unresolved_shim_is_an_error_naming_the_setting() {
         let tree = Tree::new();

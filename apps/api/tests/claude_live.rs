@@ -20,21 +20,11 @@ fn live() -> bool {
 const MODEL: &str = "claude-haiku-5-5";
 
 fn installed(name: &str) -> PathBuf {
-    let path = std::env::var("PATH").unwrap();
-    let found = path
-        .split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("{name} on PATH"));
-    let real = std::fs::canonicalize(found).unwrap();
-    if real.file_name().is_some_and(|f| f == "mise") {
-        let out = std::process::Command::new(&real)
-            .args(["which", name])
-            .output()
-            .unwrap();
-        return std::fs::canonicalize(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
-    }
-    real
+    let setting = format!("ELSE_{}_BIN", name.to_uppercase());
+    let configured = std::env::var_os(&setting).map(PathBuf::from);
+    else_api::providers::executable::executable(configured.as_deref(), name)
+        .unwrap_or_else(|reason| panic!("{reason}"))
+        .unwrap_or_else(|| panic!("{name} on PATH or {setting}"))
 }
 
 fn claude(data: &Path, tool_url: &str) -> Claude {

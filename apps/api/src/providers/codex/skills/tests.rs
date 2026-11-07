@@ -40,6 +40,9 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
         eprintln!("SKIPPED: set ELSE_CODEX_BIN to check installed Codex without inference");
         return;
     };
+    let program = crate::providers::executable::executable(Some(Path::new(&program)), "codex")
+        .expect("resolve Codex CLI")
+        .expect("configured Codex CLI");
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("owner-home");
     let projects = dir.path().join("projects");
@@ -74,7 +77,7 @@ async fn only_bot_project_skills_reach_new_and_resumed_model_context() {
     std::fs::write(config_path, text).unwrap();
     let spec = LaunchSpec {
         turn_id: uuid::Uuid::new_v4(),
-        program: program.into(),
+        program,
         args: vec![OsString::from("app-server")],
         env: vec![
             ("HOME".into(), home.to_string_lossy().into_owned()),

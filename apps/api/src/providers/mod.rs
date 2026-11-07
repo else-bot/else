@@ -17,6 +17,8 @@ pub mod synthetic;
 
 use std::sync::Arc;
 
+use executable::executable;
+
 use crate::app::providers::{Availability, Provider};
 use crate::config::Config;
 use crate::memory_worker::Summarizer;
@@ -68,10 +70,6 @@ pub fn build(config: &Config) -> (Registry, Option<Arc<dyn Summarizer>>) {
         )));
     }
     (Registry::new(providers), summarizer)
-}
-
-fn executable(configured: Option<&std::path::Path>, name: &str) -> Option<std::path::PathBuf> {
-    executable::executable(configured, name).ok().flatten()
 }
 
 /// How long an outgoing provider may take to produce a checkpoint.
@@ -173,7 +171,12 @@ mod registration_tests {
                 format!("{:?}", provider.catalog()),
                 format!("{:?}", definition.catalog)
             );
-            assert!(provider.availability() != Availability::Available);
+            let setting = format!("ELSE_{}_BIN", definition.id.to_uppercase());
+            assert!(
+                matches!(provider.availability(), Availability::Unavailable(why) if why.contains(&setting)),
+                "{setting} is named in {:?}",
+                provider.availability()
+            );
             assert_eq!(
                 provider.validate_profile(&rejected),
                 definitions::validate_restored(definition.id, &rejected)

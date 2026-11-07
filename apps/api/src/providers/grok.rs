@@ -49,11 +49,14 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build(wiring: &super::Wiring) -> super::Built {
-    let grok = Grok::detect(
-        Some(wiring.host.clone()),
-        super::executable(wiring.config.grok_bin.as_deref(), "grok"),
-        grok_home::host_home(),
-    )
+    let grok = Grok {
+        ready: Grok::ready(
+            Some(wiring.host.clone()),
+            super::executable(wiring.config.grok_bin.as_deref(), "grok"),
+            grok_home::host_home(),
+        ),
+        tool_url: None,
+    }
     .with_tools(wiring.tool_url.clone());
     super::Built {
         provider: std::sync::Arc::new(grok),
@@ -77,18 +80,18 @@ pub struct Grok {
 impl Grok {
     pub fn detect(host: Option<Host>, program: Option<PathBuf>, login: Option<PathBuf>) -> Self {
         Self {
-            ready: Self::ready(host, program, login),
+            ready: Self::ready(host, Ok(program), login),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Option<PathBuf>,
+        program: Result<Option<PathBuf>, String>,
         login: Option<PathBuf>,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Grok CLI is not configured on this host.")?;
-        let program = program.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
+        let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
         let version = host
             .probe(&program, &["--version"], &[])
             .ok_or("Grok CLI does not run (`grok --version` failed).")?;

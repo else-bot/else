@@ -86,12 +86,15 @@ pub static DEFINITION: Definition = Definition {
 fn build(wiring: &super::Wiring) -> super::Built {
     let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     let home = std::env::var("HOME").ok();
-    let claude = Claude::detect(
-        Some(wiring.host.clone()),
-        super::executable(wiring.config.claude_bin.as_deref(), "claude"),
-        claude_home::host_config(config_dir.as_deref(), home.as_deref()),
-        claude_home::host_account(config_dir.as_deref(), home.as_deref()),
-    )
+    let claude = Claude {
+        ready: Claude::ready(
+            Some(wiring.host.clone()),
+            super::executable(wiring.config.claude_bin.as_deref(), "claude"),
+            claude_home::host_config(config_dir.as_deref(), home.as_deref()),
+            claude_home::host_account(config_dir.as_deref(), home.as_deref()),
+        ),
+        tool_url: None,
+    }
     .with_tools(wiring.tool_url.clone());
     super::Built {
         provider: std::sync::Arc::new(claude),
@@ -147,19 +150,19 @@ impl Claude {
         account: String,
     ) -> Self {
         Self {
-            ready: Self::ready(host, program, config, account),
+            ready: Self::ready(host, Ok(program), config, account),
             tool_url: None,
         }
     }
 
     fn ready(
         host: Option<Host>,
-        program: Option<PathBuf>,
+        program: Result<Option<PathBuf>, String>,
         config: Option<claude_home::HostConfig>,
         account: String,
     ) -> Result<Ready, String> {
         let host = host.ok_or("Claude Code is not configured on this host.")?;
-        let program = program.ok_or("Claude Code (`claude`) was not found on PATH.")?;
+        let program = program?.ok_or("Claude Code (`claude`) was not found on PATH.")?;
         let env = config
             .as_ref()
             .map(claude_home::HostConfig::env)
