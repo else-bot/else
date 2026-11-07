@@ -298,7 +298,11 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          same tool with the exact same arguments once. Do not split an action to avoid a card. \
          Host shell and file tools cannot be gated by the API: use ask_permission first for \
          destructive or sensitive external actions, then act only after approval. Routine \
-         reversible host work authorized by the owner needs no card.\n\n\
+         reversible host work authorized by the owner needs no card. When the current owner \
+         message explicitly asks for that exact action, such as enabling one named setting \
+         on one named repository, pass authorization with their exact words: the action is \
+         approved for this request without a card, and nothing is saved. Do not use it for \
+         a method you chose toward a broader goal, extra side effects, or another target.\n\n\
          For recurring host work, include task_scope in ask_permission: a short task category \
          and its specific target, including the access method. For example task Manage Tailscale \
          and target SSH host omarchy-m1 lets the owner choose Always allow for that work. \

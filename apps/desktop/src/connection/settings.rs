@@ -233,6 +233,10 @@ impl Shell {
                 .toggled(section == target)
                 .w_full()
                 .on_click(cx.listener(move |shell, _, window, cx| {
+                    if target == SettingsSection::Server {
+                        shell.close_server_update(window, cx);
+                        shell.close_server_editor(window, cx);
+                    }
                     shell.select_settings(target, window, cx)
                 }))
         };
