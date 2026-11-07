@@ -188,6 +188,15 @@ pub async fn effective(
     {
         return Ok(Some((own.revision, Json(own.profile))));
     }
+    installation(conn, provider_id).await
+}
+
+/// The provider's saved installation profile, which a bot without its own
+/// profile for that provider uses.
+pub async fn installation(
+    conn: &mut SqliteConnection,
+    provider_id: &str,
+) -> Result<Option<(i64, Json<Profile>)>, sqlx::Error> {
     let row: Option<(i64, String, String, String)> = sqlx::query_as(
         "SELECT revision, model, reasoning_effort, service_tier
          FROM provider_profiles WHERE provider_id = ?1",

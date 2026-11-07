@@ -173,12 +173,13 @@ pub async fn create(
 
 /// Create a bot while an owner-request turn is running. Retries of the
 /// same name, including continuation attempts, return the same bot even if
-/// it was deleted. The bot uses installation defaults.
+/// it was deleted. Without a profile the bot uses installation defaults.
 pub async fn create_for_turn(
     pool: &SqlitePool,
     turn_id: Uuid,
     name: &BotName,
     purpose: Option<&BotPurpose>,
+    profile: Option<(&str, &Profile)>,
     category_id: Option<Uuid>,
 ) -> Result<Created, BotError> {
     let mut hasher = Sha256::new();
@@ -190,7 +191,7 @@ pub async fn create_for_turn(
         uuid::Builder::from_custom_bytes(digest[..16].try_into().expect("16 bytes")).into_uuid();
     let bot = NewBot {
         name,
-        profile: None,
+        profile,
         category_id,
         avatar: None,
     };
