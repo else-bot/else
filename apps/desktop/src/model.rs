@@ -187,6 +187,10 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QuestionAction {
     #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub args: serde_json::Value,
+    #[serde(default)]
     pub mcp_connection: Option<crate::api::McpConsent>,
     #[serde(default)]
     pub task_scope: Option<TaskScope>,
@@ -203,6 +207,8 @@ pub struct TaskScope {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "scope", rename_all = "lowercase")]
 pub enum QuestionPermission {
+    #[serde(rename = "mcp_tool")]
+    McpTool { mcp_id: String, tool: String },
     Task {
         #[serde(flatten)]
         task_scope: TaskScope,
@@ -212,6 +218,17 @@ pub enum QuestionPermission {
 }
 
 impl Question {
+    pub fn mcp_tool_scope(&self) -> Option<(&str, &str)> {
+        let action = self.action.as_ref()?;
+        if action.tool.as_deref() == Some("mcp_request") {
+            return Some((action.args["id"].as_str()?, action.args["tool"].as_str()?));
+        }
+        match &action.permission {
+            Some(QuestionPermission::McpTool { mcp_id, tool }) => Some((mcp_id, tool)),
+            _ => None,
+        }
+    }
+
     pub fn task_scope(&self) -> Option<&TaskScope> {
         let action = self.action.as_ref()?;
         action.task_scope.as_ref().or(match &action.permission {

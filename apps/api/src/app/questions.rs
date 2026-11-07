@@ -416,6 +416,14 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The owner's exact words in this request that ask for the host action,
+/// quoted by the bot in `ask_permission`. The gate checks it against the
+/// request's own owner message; it never grants standing permission.
+pub fn permission_authorization(args: &Value) -> Result<Option<&str>, &'static str> {
+    text_arg(args, "authorization", MAX_CONTEXT)
+        .map_err(|_| "authorization is 1 to 4000 bytes: the owner's exact words")
+}
+
 impl Spec {
     pub fn mcp_connection(connection: McpConnection, title: String, context: String) -> Self {
         let encoded = serde_json::to_vec(&connection).expect("MCP consent serialization");
@@ -531,10 +539,15 @@ impl Spec {
 
     /// Parse `ask_permission` arguments: the kind, the exact action the bot
     /// will take on the host, why, and optionally the recurring task and
-    /// target it belongs to, which a card may offer to always allow.
+    /// target it belongs to, which a card may offer to always allow. The
+    /// optional authorization quote is read by [`permission_authorization`]
+    /// and is not part of the action's identity, so a denial still matches.
     pub fn permission(args: &Value) -> Result<Self, &'static str> {
-        only_keys(args, &["kind", "action", "reason", "task_scope"])
-            .map_err(|_| "use kind, action, and optionally reason and task_scope")?;
+        only_keys(
+            args,
+            &["kind", "action", "reason", "task_scope", "authorization"],
+        )
+        .map_err(|_| "use kind, action, and optionally reason, task_scope, and authorization")?;
         let kind = args["kind"]
             .as_str()
             .and_then(Kind::approval)

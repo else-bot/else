@@ -349,6 +349,21 @@ pub enum Gate {
     Denied(QuestionInfo),
 }
 
+async fn owner_message_quotes(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    quote: &str,
+) -> Result<bool, sqlx::Error> {
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT i.text FROM turns t JOIN items i ON i.id = t.owner_item_id
+         WHERE t.id = ?1 AND i.kind = 'user'",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(source.is_some_and(|text| text.contains(quote)))
+}
+
 /// Decide a destructive or external action, atomically: a broad or routine
 /// grant of the turn's scope runs a destructive call; a denial of exactly
 /// this action in this request stands; an approval for exactly these
@@ -357,6 +372,22 @@ pub enum Gate {
 /// card offering only the grant this turn's scope can receive. A host action
 /// without a task scope is offered no standing grant.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
+    gate_host(pool, turn_id, spec, None).await
+}
+
+/// [`gate`] for a host action the bot may say the owner asked for, quoting
+/// `authorization` from the request's owner message. A quote found in this
+/// turn's own owner chat message runs the action without a card, in this
+/// request only: it records nothing, offers no standing grant, and never
+/// overrides a pending or denied card for the same action. Whether the quote
+/// asks for exactly this action is the bot's judgment, as with any host
+/// command; the gate enforces only its source and lifetime.
+pub async fn gate_host(
+    pool: &SqlitePool,
+    turn_id: Uuid,
+    spec: &Spec,
+    authorization: Option<&str>,
+) -> Result<Gate, RequestError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = turns::asking_caller(&mut tx, turn_id)
         .await?
@@ -426,6 +457,16 @@ pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate,
         spec.approval.as_ref().map(|a| &a.action),
         Some(Action::Host { .. })
     );
+    if let Some(quote) = authorization.filter(|_| host)
+        && matches!(scope, Scope::Bot)
+        && caller.owner_conversation
+        && owner_message_quotes(&mut tx, turn_id, quote).await?
+    {
+        if turns::attempt_parked(&mut tx, turn_id, caller.attempt).await? {
+            return Err(RequestError::AttemptParked);
+        }
+        return Ok(Gate::Run { standing: None });
+    }
     let offer = match (scope, &target) {
         (Scope::Bot, Some(target)) => Some(target.standing()),
         (Scope::Bot, None) if host => None,
