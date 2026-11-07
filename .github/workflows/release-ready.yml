@@ -1,35 +1,32 @@
 name: release-ready
 
+# Checks the release tooling and installers. Pull requests must also keep
+# the workspace version, which only the release workflow changes.
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check
+        type: string
+        required: true
 
 permissions:
   contents: read
-  statuses: write
 
-env:
-  VERIFIED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+concurrency:
+  group: release-ready-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  verify-release:
-    name: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && 'release-ready' || 'verify-release' }}
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'release/v')
+  release-ready:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - name: Mark readiness pending
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$VERIFIED_SHA" \
-            -f state=pending -f context=release-ready \
-            -f description="Verifying the release and pinned guest image" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
       - uses: useblacksmith/checkout@v1 # v7.0.1
         with:
-          ref: ${{ env.VERIFIED_SHA }}
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: Test release packaging and publication
@@ -38,25 +35,12 @@ jobs:
         run: python3 scripts/test-remove.py
       - name: Test prebuilt installer
         run: python3 scripts/test-install-downloads.py
-      - env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
+      - name: Check shell syntax
         run: |
-          git fetch -q --tags origin +refs/heads/main:refs/remotes/origin/main
           bash -n install.sh scripts/elsebot scripts/release.sh scripts/build-guest-image.sh scripts/build-guest-base.sh \
             scripts/test-install.sh scripts/e2e/install-scenario.sh
-          python3 scripts/guest_release.py gate --branch "$BRANCH" --main-ref origin/main
-      - name: Report readiness
-        if: always() && github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ job.status }}
+      - name: Keep the workspace version
+        if: github.event_name == 'pull_request'
         run: |
-          case "$RESULT" in
-            success) state=success ;;
-            cancelled) state=error ;;
-            *) state=failure ;;
-          esac
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$VERIFIED_SHA" \
-            -f state="$state" -f context=release-ready \
-            -f description="Release verification: $RESULT" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          git fetch -q origin +refs/heads/main:refs/remotes/origin/main
+          python3 scripts/guest_release.py gate --main-ref origin/main

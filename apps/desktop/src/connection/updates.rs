@@ -467,7 +467,7 @@ impl Shell {
                             .map(|s| s.name.clone())
                             .unwrap_or_default()
                     } else {
-                        format!("Running v{}", env!("CARGO_PKG_VERSION"))
+                        format!("Running v{}", env!("ELSE_VERSION"))
                     })
                     .when_some(view.latest(), |row, version| {
                         row.child(Icon::new(IconName::ArrowRight).size_3())
