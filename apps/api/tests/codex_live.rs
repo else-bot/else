@@ -247,7 +247,9 @@ fn codex_app(db: Arc<TestDb>, data: &Path) -> TestApp {
     TestApp::with_registry(db, 4, registry)
 }
 
-async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
+const FINISHED: &[&str] = &["completed", "failed", "interrupted", "uncertain"];
+
+async fn send_codex(app: &TestApp, bot: &str, text: &str) -> String {
     let reply = app.send(bot, Uuid::new_v4(), text, Some("codex")).await;
     assert_eq!(
         reply.status,
@@ -255,14 +257,79 @@ async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
         "{:?}",
         reply.body
     );
-    let turn = reply.body["turn"]["id"].as_str().unwrap().to_owned();
+    reply.body["turn"]["id"].as_str().unwrap().to_owned()
+}
+
+async fn ask(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
+    let turn = send_codex(app, bot, text).await;
     let status = app
-        .wait_turn_for(
-            &turn,
-            &["completed", "failed", "interrupted", "uncertain"],
-            Duration::from_secs(150),
-        )
+        .wait_turn_for(&turn, FINISHED, Duration::from_secs(150))
         .await;
+    reply_text(app, bot, turn, status).await
+}
+
+async fn ask_answering_the_owner(app: &TestApp, bot: &str, text: &str) -> (String, String, String) {
+    let turn = send_codex(app, bot, text).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut answered = 0;
+    let mut statuses = FINISHED.to_vec();
+    statuses.push("waiting");
+    let status = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let status = app.wait_turn_for(&turn, &statuses, remaining).await;
+        if status != "waiting" {
+            break status;
+        }
+        answered += answer_pending_questions(app).await;
+        assert!(answered <= 4, "the bots kept asking the owner");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    reply_text(app, bot, turn, status).await
+}
+
+async fn answer_pending_questions(app: &TestApp) -> usize {
+    let bots = app.owner("GET", "/v1/bots", None).await.body["bots"].clone();
+    let mut answered = 0;
+    for bot in bots.as_array().unwrap() {
+        let bot = bot["id"].as_str().unwrap();
+        let snapshot = app
+            .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+            .await;
+        for turn in snapshot.body["turns"].as_array().unwrap() {
+            for question in turn["questions"].as_array().into_iter().flatten() {
+                if question["status"] != "pending" {
+                    continue;
+                }
+                let choice = if question["kind"] == "choice" {
+                    question["choices"][0]["id"].clone()
+                } else {
+                    json!("deny")
+                };
+                let body = if question["multiple"] == true {
+                    json!({ "choices": [choice] })
+                } else {
+                    json!({ "choice": choice })
+                };
+                eprintln!("owner answers {} with {choice}", question["title"]);
+                let path = format!(
+                    "/v1/bots/{bot}/questions/{}/answer",
+                    question["id"].as_str().unwrap()
+                );
+                let reply = app.owner("POST", &path, Some(body)).await;
+                assert_eq!(reply.status, axum::http::StatusCode::OK, "{:?}", reply.body);
+                answered += 1;
+            }
+        }
+    }
+    answered
+}
+
+async fn reply_text(
+    app: &TestApp,
+    bot: &str,
+    turn: String,
+    status: String,
+) -> (String, String, String) {
     let text: String = sqlx::query_scalar(
         "SELECT coalesce(group_concat(text, ''), '') FROM items WHERE turn_id = ?1 AND kind = 'assistant'",
     )
@@ -892,7 +959,7 @@ async fn main_bot_creates_a_github_specialist_on_request() {
         )
         .await;
     assert_eq!(updated.status, axum::http::StatusCode::OK);
-    let (turn, status, text) = ask(
+    let (turn, status, text) = ask_answering_the_owner(
         &app,
         &main,
         "Ok first of all can you create a Github bot that will have access to the \
