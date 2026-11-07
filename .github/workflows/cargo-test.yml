@@ -1,7 +1,5 @@
 name: cargo-test
 
-# Pull requests skip the suite (the pre-commit hook runs it); the release
-# workflow calls it on the release commit, and anyone can dispatch it.
 on:
   pull_request:
     branches: [main]
@@ -24,8 +22,66 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  cargo-check:
+    if: inputs.ref == ''
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: useblacksmith/checkout@v1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check migration numbering
+        run: python3 scripts/check_migrations.py
+      - name: Test migration numbering check
+        run: python3 scripts/test-migrations.py
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config sqlite3 libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+            libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev
+      - name: Install stable Rust
+        id: rust
+        run: |
+          rustup set profile minimal
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Restore Cargo build cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ steps.rust.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-${{ steps.rust.outputs.version }}-
+      - name: Check workspace and test targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Check strict Clippy
+        run: scripts/check-clippy.sh
+      - name: Build bundled-icon tests
+        run: cargo test -p else-desktop --bin else-desktop --locked icon_assets_tests --no-run
+      - name: Save Cargo build cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Check bundled-icon coverage
+        run: cargo test -p else-desktop --bin else-desktop --locked icon_assets_tests
   cargo-test:
-    if: github.event_name != 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
