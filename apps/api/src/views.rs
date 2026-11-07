@@ -34,6 +34,7 @@ pub fn bot_json(bot: &BotRecord) -> Value {
         "deleted_at": null,
         "selected_provider_id": bot.selected_provider_id,
         "category_id": bot.category_id,
+        "muted": bot.muted,
         "activity": activity_json(bot),
         "sidebar_status": bot.sidebar.status(bot.active_turn_id.is_some() || bot.queued_count > 0),
         "read_state": bot.read.state(),
