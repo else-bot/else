@@ -472,7 +472,10 @@ async fn muting_persists_journals_once_and_keeps_the_name() {
     assert_eq!(updated_events(&app, &id).await.len(), journaled + 1);
 
     let renamed = update(&app, &id, json!({ "name": "Watch" })).await;
-    assert_eq!(renamed.body["bot"]["muted"], true, "a rename keeps the mute");
+    assert_eq!(
+        renamed.body["bot"]["muted"], true,
+        "a rename keeps the mute"
+    );
 
     let unmuted = update(&app, &id, json!({ "muted": false })).await;
     assert_eq!(unmuted.body["bot"]["muted"], false);
