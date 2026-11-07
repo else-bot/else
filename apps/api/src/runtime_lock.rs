@@ -85,20 +85,26 @@ fn canonical_database(url: &DatabaseUrl) -> Result<Option<PathBuf>, LockError> {
 /// reads credentials, opens SQLite, or changes either. A manifest left by a
 /// process that held these locks earlier is stale and removed.
 pub fn acquire(data_dir: &Path, database: &DatabaseUrl) -> Result<RuntimeLock, LockError> {
+    acquire_with(data_dir, database, lock)
+}
+
+fn acquire_with(
+    data_dir: &Path,
+    database: &DatabaseUrl,
+    lock: impl Fn(&Path, LockError) -> Result<File, LockError>,
+) -> Result<RuntimeLock, LockError> {
     ensure_private_dir(data_dir)?;
-    let mut files = vec![lock(
-        &data_dir.join("api.lock"),
-        LockError::StorageInUse(data_dir.display().to_string()),
-    )?];
-    let database = canonical_database(database)?;
-    if let Some(path) = database {
-        let db_lock = PathBuf::from(format!("{}.api.lock", path.display()));
-        files.push(lock(&db_lock, LockError::DatabaseInUse)?);
-    }
-    let held = RuntimeLock {
+    let mut held = RuntimeLock {
         data_dir: data_dir.to_owned(),
-        files,
+        files: vec![lock(
+            &data_dir.join("api.lock"),
+            LockError::StorageInUse(data_dir.display().to_string()),
+        )?],
     };
+    if let Some(path) = canonical_database(database)? {
+        let db_lock = PathBuf::from(format!("{}.api.lock", path.display()));
+        held.files.push(lock(&db_lock, LockError::DatabaseInUse)?);
+    }
     let manifest = held.data_dir.join(MANIFEST);
     match std::fs::remove_file(&manifest) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -171,6 +177,23 @@ mod tests {
         let _inherited: Vec<File> = guard.files.iter().map(|f| f.try_clone().unwrap()).collect();
         drop(guard);
         acquire(&data, &database).unwrap();
+    }
+
+    #[test]
+    fn a_refused_database_releases_the_data_directory_despite_an_inherited_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let busy = url(&dir.path().join("busy.sqlite3"));
+        let _other = acquire(&dir.path().join("other"), &busy).unwrap();
+        let inherited = std::cell::RefCell::new(Vec::new());
+        let refused = acquire_with(&data, &busy, |path, in_use| {
+            let file = lock(path, in_use)?;
+            inherited.borrow_mut().push(file.try_clone().unwrap());
+            Ok(file)
+        });
+        assert!(matches!(refused, Err(LockError::DatabaseInUse)));
+        assert_eq!(inherited.borrow().len(), 1);
+        acquire(&data, &url(&dir.path().join("else.sqlite3"))).unwrap();
     }
 
     #[test]
