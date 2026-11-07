@@ -62,6 +62,12 @@ pub fn tool_list() -> Vec<Value> {
         "description": "Names of task secrets (see computer_secrets) whose variables the \
             command gets in its environment. Read them from the environment; never print \
             them, pass them as arguments, or write them into files or source." });
+    let github = json!({ "type": "string", "maxLength": 64,
+        "description": "Id of the connected GitHub MCP (see mcp_list). Its sign-in authenticates \
+            git over HTTPS to github.com for this command only, so clone, fetch, pull, and push \
+            work, including from scripts, without credentials in URLs or arguments. Pushing a \
+            release, a tag, or to the default branch publishes it: declare effect external. \
+            Deleting a remote branch or tag is destructive." });
     let effect = json!({ "type": "string", "enum": ["local", "destructive", "external"],
         "description": EFFECT_DESCRIPTION });
     let purpose = json!({ "type": "string", "maxLength": MAX_PURPOSE,
@@ -92,6 +98,7 @@ pub fn tool_list() -> Vec<Value> {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300 },
                 "secrets": secrets.clone(),
+                "github": github.clone(),
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
                 "approved_draft": approved_draft.clone() },
@@ -110,6 +117,7 @@ pub fn tool_list() -> Vec<Value> {
                 "command": { "type": "string", "minLength": 1, "maxLength": 8000 },
                 "max_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
                 "secrets": secrets,
+                "github": github,
                 "webhook_id": { "type": "string", "format": "uuid",
                                 "description": "One of your webhooks, fired when this job exits 0." },
                 "effect": effect.clone(),
@@ -606,6 +614,79 @@ async fn secrets_for(state: &AppState, args: &Value) -> Result<(Env, Vec<String>
     }
 }
 
+/// Git reads these through `GIT_CONFIG_COUNT`: the first value clears any
+/// helper configured for github.com, the second answers from the token
+/// variable, so the token is in neither a command line nor a file.
+const GIT_HELPER: [(&str, &str); 2] = [
+    ("credential.https://github.com.helper", ""),
+    (
+        "credential.https://github.com.helper",
+        "!f() { test \"$1\" = get && echo username=x-access-token && echo \"password=$ELSE_GITHUB_TOKEN\"; }; f",
+    ),
+];
+
+fn github_env(token: zeroize::Zeroizing<String>) -> Vec<(String, zeroize::Zeroizing<String>)> {
+    let mut vars = vec![
+        ("ELSE_GITHUB_TOKEN".to_owned(), token),
+        ("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned().into()),
+        (
+            "GIT_CONFIG_COUNT".to_owned(),
+            GIT_HELPER.len().to_string().into(),
+        ),
+    ];
+    for (i, (key, value)) in GIT_HELPER.iter().enumerate() {
+        vars.push((format!("GIT_CONFIG_KEY_{i}"), (*key).to_owned().into()));
+        vars.push((format!("GIT_CONFIG_VALUE_{i}"), (*value).to_owned().into()));
+    }
+    vars
+}
+
+/// Adds the GitHub MCP's sign-in to a command's environment when the call
+/// names one. It reaches the guest like a task secret and is redacted the
+/// same way. Sign-in uses the owner's connection card, as `mcp_request` does.
+async fn add_github(
+    state: &AppState,
+    grant: &Grant,
+    args: &Value,
+    env: &mut Env,
+) -> Result<(), Outcome> {
+    let id = match &args["github"] {
+        Value::Null => return Ok(()),
+        Value::String(id) => match crate::mcp::PackageId::try_from(id.clone()) {
+            Ok(id) => id,
+            Err(_) => return Err((tool_error("github must be an installed MCP id."), None)),
+        },
+        _ => return Err((tool_error("github must be an installed MCP id."), None)),
+    };
+    if !grant.allows(crate::grants::Tool::Mcp) {
+        return Err((
+            tool_error(
+                "GITHUB_UNAVAILABLE: this request cannot use shared sign-ins. Nothing was run.",
+            ),
+            None,
+        ));
+    }
+    match super::shared_mcp::library(state).git_token(&id).await {
+        Ok(token) => {
+            env.vars.extend(github_env(token));
+            Ok(())
+        }
+        Err(crate::mcp::Error::AuthRequired(connection)) => Err(super::shared_mcp::auth_required(
+            state,
+            grant,
+            &id,
+            Some("Authenticate git with GitHub in this bot's computer."),
+            *connection,
+            "auth_required",
+        )
+        .await),
+        Err(error) => Err((
+            tool_error(&format!("GITHUB_UNAVAILABLE: {error} Nothing was run.")),
+            None,
+        )),
+    }
+}
+
 async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
     let Some(computers) = state.computers.clone() else {
         return (
@@ -620,10 +701,13 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("command is required."), None);
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
-            let (env, _) = match secrets_for(state, args).await {
+            let (mut env, _) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
+            if let Err(outcome) = add_github(state, grant, args, &mut env).await {
+                return outcome;
+            }
             let run = {
                 let computers = computers.clone();
                 let (bot, holder) = (grant.bot_id, holder(grant));
@@ -694,10 +778,13 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     }
                 },
             };
-            let (env, names) = match secrets_for(state, args).await {
+            let (mut env, names) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
             };
+            if let Err(outcome) = add_github(state, grant, args, &mut env).await {
+                return outcome;
+            }
             match computers
                 .start_job_with(
                     grant.bot_id,
@@ -928,5 +1015,42 @@ mod tests {
         assert_eq!(fitted["stderr"], "ok");
         let small = json!({ "text": "hello" });
         assert_eq!(fit(small.clone()), small);
+    }
+
+    fn credential(token: &str, host: &str) -> std::process::Output {
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let mut git = std::process::Command::new("git");
+        git.args(["credential", "fill"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (name, value) in github_env(zeroize::Zeroizing::new(token.to_owned())) {
+            git.env(name, value.as_str());
+        }
+        let mut child = git.spawn().unwrap();
+        write!(
+            child.stdin.take().unwrap(),
+            "protocol=https\nhost={host}\n\n"
+        )
+        .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn git_answers_github_with_the_token_and_prompts_for_nothing_else() {
+        let github = credential("gho_example-token", "github.com");
+        assert!(github.status.success(), "{github:?}");
+        let answer = String::from_utf8(github.stdout).unwrap();
+        assert!(answer.contains("username=x-access-token\n"), "{answer}");
+        assert!(answer.contains("password=gho_example-token\n"), "{answer}");
+
+        let other = credential("gho_example-token", "gitlab.com");
+        assert!(!other.status.success(), "{other:?}");
+        assert!(!String::from_utf8_lossy(&other.stdout).contains("gho_example-token"));
     }
 }

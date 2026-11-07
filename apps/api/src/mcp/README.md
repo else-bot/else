@@ -70,6 +70,16 @@ Owner-only routes are `GET` and `DELETE /v1/bots/{bot_id}/mcp/{id}/connection`, 
 
 Coordinated backups include the shared library in one encrypted `mcp.tar.age` artifact. Restore recreates its package files under the destination data directory. An empty library is captured too, so restoring a later backup preserves removals. Older backups without a library artifact remain restorable.
 
+## Git in bot computers
+
+The GitHub MCP's sign-in also authenticates git over HTTPS in a bot's computer. `computer_run` and `computer_job_start` take an optional `github` argument naming the installed GitHub MCP. That command then runs with ordinary `git clone`, `fetch`, `pull`, and `push` authenticated for `https://github.com`, including inside scripts such as a release script, which need no changes.
+
+The token reaches the guest like a task secret. It is sent over the runtime's stdin as `ELSE_GITHUB_TOKEN`, an environment variable of that one command or job. `GIT_CONFIG_COUNT` variables clear any other github.com credential helper and add one that answers from that variable, with username `x-access-token`. The token is never in a command line, a remote URL, a file, or the repository's `.git` directory. Output that shows it is filtered inside the guest. A foreground command's output is redacted again on the host. A job's stored tail relies on the guest filter alone, because the host redacts jobs only by task secret name. `GIT_TERMINAL_PROMPT=0` turns a missing or rejected credential into an error instead of a hang.
+
+Only a sign-in made through the server's registered GitHub app qualifies, so no other provider's token is ever sent to github.com. It needs the `repo` scope, which GitHub's MCP requests by default. An expired token refreshes first. A disconnected or revoked sign-in shows the owner the same connection card `mcp_request` does and runs nothing. Only work that may use shared MCPs may name it. Incoming email and social events cannot. GitHub still enforces the account's repository permissions. An organization that restricts OAuth apps must approve else.bot's app before its private repositories clone. GitHub's `403` names that organization.
+
+Pushes keep the existing effect classification. The `github` description tells the bot that pushing a release, a tag, or the default branch publishes it, so the call declares `external` and shows the owner an approval card. Deleting a remote branch or tag is `destructive`. else.bot cannot tell a push from a fetch at the credential helper, so this rests on the declared effect, as every other command does.
+
 ## Set up GitHub sign-in
 
 Official API releases embed a dedicated GitHub OAuth App registration. The owner clicks **Connect in browser** without configuring credentials. GitHub's remote MCP server does not support dynamic client registration and requires a client secret for token exchange. See [GitHub's host integration guide](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md).

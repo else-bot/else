@@ -223,3 +223,52 @@ async fn failed_reconnect_exchange_or_storage_keeps_the_existing_account() {
         server.abort();
     }
 }
+
+fn github_session(credential: Credential, dir: &std::path::Path) -> Session {
+    Session {
+        store: Store::for_bot(dir.into(), Uuid::new_v4(), Some(std::sync::Arc::new(key()))),
+        state: State::Authorized(credential),
+        connection: None,
+        client: Some(std::sync::Arc::new(
+            RegisteredClient::github("registered-id".into(), "registered-secret".into()).unwrap(),
+        )),
+    }
+}
+
+fn github_credential(scopes: &[&str]) -> Credential {
+    let mut credential = credential();
+    credential.discovery.resource = "https://api.githubcopilot.com/mcp/".into();
+    credential.discovery.issuer = "https://github.com/login/oauth".into();
+    credential.discovery.authorization_endpoint = "https://github.com/login/oauth/authorize".into();
+    credential.discovery.token_endpoint = "https://github.com/login/oauth/access_token".into();
+    credential.discovery.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
+    credential.client_id = "registered-id".into();
+    credential
+}
+
+#[tokio::test]
+async fn git_gets_only_a_github_token_with_repo_scope() {
+    let config = Transport::Http {
+        url: "https://api.githubcopilot.com/mcp/".into(),
+        headers: Default::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut github = github_session(github_credential(&["repo", "read:org"]), dir.path());
+    let token = github.git_token(&config).await.unwrap();
+    assert_eq!(token.as_str(), "private-access-token");
+
+    let mut narrow = github_session(github_credential(&["read:org"]), dir.path());
+    let error = narrow.git_token(&config).await.unwrap_err();
+    assert!(error.to_string().contains("repo scope"), "{error}");
+
+    let mut other_app = github_credential(&["repo"]);
+    other_app.client_id = "previous-id".into();
+    let mut other_app = github_session(other_app, dir.path());
+    assert!(other_app.git_token(&config).await.is_err());
+
+    let mut other_provider = github_session(credential(), dir.path());
+    other_provider.client = None;
+    let error = other_provider.git_token(&config).await.unwrap_err();
+    assert!(error.to_string().contains("no GitHub sign-in"), "{error}");
+}

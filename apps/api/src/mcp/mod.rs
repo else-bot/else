@@ -635,6 +635,21 @@ impl Library {
             .map_err(missing)
     }
 
+    pub async fn git_token(&self, id: &PackageId) -> Result<zeroize::Zeroizing<String>, Error> {
+        self.installed_slot(id)
+            .await?
+            .actor
+            .call_async(move |slot| {
+                Box::pin(async move {
+                    let _admission = slot.gate.enter().ok_or(Error::Paused)?;
+                    let package = slot.package().await?;
+                    slot.session().await?.git_token(&package.config).await
+                })
+            })
+            .await
+            .map_err(missing)
+    }
+
     pub async fn connection_status(
         &self,
         id: &PackageId,

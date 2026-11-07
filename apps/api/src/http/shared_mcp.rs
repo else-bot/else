@@ -34,7 +34,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-fn library(state: &AppState) -> &Library {
+pub(super) fn library(state: &AppState) -> &Library {
     state.mcps.get().expect("MCP library initialized by router")
 }
 
@@ -347,7 +347,7 @@ struct ConnectArgs {
     purpose: Option<String>,
 }
 
-async fn auth_required(
+pub(super) async fn auth_required(
     state: &AppState,
     grant: &Grant,
     id: &PackageId,

@@ -212,6 +212,45 @@ impl Session {
         }
     }
 
+    /// The access token of a GitHub sign-in made through the server's
+    /// registered GitHub app, for authenticating git over HTTPS. Any other
+    /// provider's token is refused, so it can never be sent to github.com.
+    pub(super) async fn git_token(
+        &mut self,
+        config: &Transport,
+    ) -> Result<Zeroizing<String>, Error> {
+        self.status();
+        if !matches!(self.state, State::Authorized(_)) {
+            self.request(config, "tools/list".into(), serde_json::json!({}))
+                .await?;
+        }
+        self.refresh(false).await?;
+        let State::Authorized(credential) = &self.state else {
+            return Err(Error::Invalid(
+                "This MCP has no GitHub sign-in. Use the GitHub MCP's id.",
+            ));
+        };
+        match self.registered_client(&credential.discovery) {
+            Ok(Some(client)) if client.client_id == credential.client_id => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "This MCP has no GitHub sign-in. Use the GitHub MCP's id.",
+                ));
+            }
+        }
+        if !credential
+            .discovery
+            .scopes
+            .iter()
+            .any(|scope| scope == "repo")
+        {
+            return Err(Error::Invalid(
+                "This GitHub sign-in lacks the repo scope git needs. The owner must disconnect it and sign in again.",
+            ));
+        }
+        Ok(Zeroizing::new(credential.access_token.clone()))
+    }
+
     async fn ensure_connection(&mut self, config: &Transport) -> Result<(), Error> {
         if self.connection.is_none() {
             let mut config = config.clone();
