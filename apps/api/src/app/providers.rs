@@ -281,6 +281,13 @@ impl DelegationContext {
         !self.delegated_task && !matches!(self.origin, Origin::ConnectorEvent | Origin::SocialEvent)
     }
 
+    /// Work done for the owner: the bot's own conversation, or a task another
+    /// bot delegated for an owner request. It may use mail and social tools
+    /// and show the owner cards, which a task shows in its own bot's chat.
+    pub fn acts_for_owner(&self) -> bool {
+        !self.delegated_task || self.origin == Origin::OwnerRequest
+    }
+
     /// A bot manages its own routines only for work rooted in an owner
     /// message, never for a routine run or a task one delegated.
     pub fn can_manage_routines(&self) -> bool {

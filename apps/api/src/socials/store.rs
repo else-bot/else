@@ -453,7 +453,7 @@ pub async fn request_setup(
     let caller = crate::db::turns::asking_caller(&mut tx, turn)
         .await?
         .ok_or(Error::Forbidden)?;
-    if !caller.owner_conversation {
+    if !crate::db::turns::may_ask_owner(&mut tx, turn, &caller).await? {
         return Err(Error::Forbidden);
     }
     let external:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items i JOIN turns t ON t.owner_item_id=i.id WHERE t.id=?1 AND i.kind='connector')").bind(turn).fetch_one(&mut *tx).await?;

@@ -146,7 +146,9 @@ fn info(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RequestError {
-    #[error("only the owner's own conversation can ask for secrets; delegated tasks cannot")]
+    #[error(
+        "only the owner's own conversation or a task delegated for an owner request can ask for secrets"
+    )]
     NotAllowed,
     #[error("this attempt already asked or delegated; end it and wait for the answer")]
     AttemptParked,
@@ -178,7 +180,7 @@ pub async fn create(
     let caller = super::turns::asking_caller(&mut tx, turn_id)
         .await?
         .ok_or(RequestError::NotRunning)?;
-    if !caller.owner_conversation {
+    if !super::turns::may_ask_owner(&mut tx, turn_id, &caller).await? {
         return Err(RequestError::NotAllowed);
     }
     let (bot_id, attempt) = (caller.bot_id, caller.attempt);

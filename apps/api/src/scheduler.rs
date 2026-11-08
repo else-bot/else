@@ -445,11 +445,16 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
         Tool::Mcp,
         Tool::AskPermission,
     ];
-    if !delegation.delegated_task {
-        tools.extend([Tool::Mail, Tool::Social]);
+    if delegation.acts_for_owner() {
+        tools.extend([
+            Tool::Mail,
+            Tool::Social,
+            Tool::RequestSecret,
+            Tool::AskOwner,
+        ]);
     }
     if delegation.can_delegate() {
-        tools.extend([Tool::RequestSecret, Tool::AskOwner, Tool::Delegate]);
+        tools.push(Tool::Delegate);
     }
     if delegation.can_create_bot {
         tools.push(Tool::CreateBot);

@@ -489,6 +489,19 @@ pub async fn asking_caller(
     .await
 }
 
+/// Whether `caller` may show the owner a card: from the owner's own chat, or
+/// from a task another bot delegated for an owner request, whose cards
+/// appear in its own bot's chat.
+pub async fn may_ask_owner(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    caller: &AskingCaller,
+) -> Result<bool, sqlx::Error> {
+    Ok(caller.owner_conversation
+        || super::delegations::origin(conn, turn_id).await?
+            == crate::app::providers::Origin::OwnerRequest)
+}
+
 /// Whether the current `attempt` of `turn_id` already delegated, asked for
 /// a secret, or asked the owner: it must end, and asks nothing more.
 pub async fn attempt_parked(
