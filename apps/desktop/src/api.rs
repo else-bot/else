@@ -794,16 +794,18 @@ impl Client {
     }
 
     /// Restore an earlier rules version as a new one; 0 is the empty file.
-    /// Restoring the current text is a no-op.
+    /// Restoring the current text is a no-op. The server refuses when the
+    /// rules moved past `expected`, the version the owner was looking at.
     pub async fn restore_rules(
         self: Arc<Self>,
         bot: Uuid,
         version: i64,
+        expected: i64,
     ) -> Result<(), ClientError> {
         self.call::<serde_json::Value>(
             Method::POST,
             format!("/v1/bots/{bot}/rules/restore"),
-            Some(json!({ "version": version })),
+            Some(json!({ "version": version, "expected_version": expected })),
         )
         .await
         .map(drop)

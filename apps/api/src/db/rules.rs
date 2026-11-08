@@ -24,6 +24,8 @@ pub enum RulesError {
     BotDeleted,
     #[error("no such rules version")]
     NoSuchVersion,
+    #[error("the rules changed since this view; reload them first")]
+    Stale,
     #[error(transparent)]
     Invalid(#[from] InvalidRules),
     #[error(transparent)]
@@ -232,7 +234,14 @@ pub async fn update_for_turn(
 /// The owner restores an earlier version as a new one; version 0 is the
 /// empty file before the first rule. Restoring the current text saves
 /// nothing.
-pub async fn restore(pool: &SqlitePool, bot_id: Uuid, version: i64) -> Result<i64, RulesError> {
+/// `expected` is the version the owner was looking at; a newer version
+/// refuses the restore instead of discarding changes they have not seen.
+pub async fn restore(
+    pool: &SqlitePool,
+    bot_id: Uuid,
+    version: i64,
+    expected: Option<i64>,
+) -> Result<i64, RulesError> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM bots WHERE id = ?1")
         .bind(bot_id)
@@ -256,6 +265,9 @@ pub async fn restore(pool: &SqlitePool, bot_id: Uuid, version: i64) -> Result<i6
         return Err(RulesError::NoSuchVersion);
     };
     let (current_version, markdown) = current(&mut tx, bot_id).await?.unwrap_or_default();
+    if expected.is_some_and(|expected| expected != current_version) {
+        return Err(RulesError::Stale);
+    }
     if markdown == target {
         return Ok(current_version);
     }

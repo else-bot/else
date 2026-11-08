@@ -280,9 +280,46 @@ pub fn document_diff(old: &str, new: &str) -> Vec<DiffLine> {
     diff_lines(&old, &new)
 }
 
-/// Longest-common-subsequence line diff. Inputs are bounded by
-/// [`MAX_DOCUMENT_BYTES`], so the quadratic table stays small.
+/// Cells allowed in the longest-common-subsequence table (4 MiB of `u32`).
+const MAX_DIFF_CELLS: usize = 1 << 20;
+
+/// Line diff: shared leading and trailing lines stay as context, and the
+/// middle uses a longest-common-subsequence table when it fits in
+/// [`MAX_DIFF_CELLS`]; a larger middle shows as removed then added.
 fn diff_lines(old: &[String], new: &[String]) -> Vec<DiffLine> {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let same = |text: &String| DiffLine {
+        op: DiffOp::Same,
+        text: text.clone(),
+    };
+    let mut out: Vec<DiffLine> = old[..prefix].iter().map(same).collect();
+    let (mid_old, mid_new) = (
+        &old[prefix..old.len() - suffix],
+        &new[prefix..new.len() - suffix],
+    );
+    if (mid_old.len() + 1).saturating_mul(mid_new.len() + 1) <= MAX_DIFF_CELLS {
+        out.extend(lcs_diff(mid_old, mid_new));
+    } else {
+        out.extend(mid_old.iter().map(|text| DiffLine {
+            op: DiffOp::Remove,
+            text: text.clone(),
+        }));
+        out.extend(mid_new.iter().map(|text| DiffLine {
+            op: DiffOp::Add,
+            text: text.clone(),
+        }));
+    }
+    out.extend(old[old.len() - suffix..].iter().map(same));
+    out
+}
+
+fn lcs_diff(old: &[String], new: &[String]) -> Vec<DiffLine> {
     let (n, m) = (old.len(), new.len());
     let mut lcs = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
@@ -321,24 +358,30 @@ fn diff_lines(old: &[String], new: &[String]) -> Vec<DiffLine> {
     out
 }
 
-/// The rules as the bot reads them at the start of every turn.
-pub fn prompt_block(markdown: &str) -> Option<String> {
+/// The rules as the bot reads them at the start of every turn. Once a bot
+/// has saved rules, every turn states the current file, even when it is
+/// empty, so a resumed session drops rules the owner removed.
+pub fn prompt_block(markdown: &str) -> String {
     let rules = Rules::parse(markdown);
     if rules.is_empty() {
-        return None;
+        return "[else.bot rules]\n\
+            You have no saved rules now. Rules from earlier in this conversation were \
+            removed and no longer apply.\n\
+            [end else.bot rules]\n\n"
+            .to_owned();
     }
-    Some(format!(
+    format!(
         "[else.bot rules]\n\
          Your rules file: standing instructions you saved from the owner's own words with \
-         rules_update. Follow every rule that applies to this turn. When a rule gives text \
-         in backticks or quotes to send, send exactly that text with only its placeholders \
-         filled, and add no words, titles, or context. A newer owner statement in your \
-         conversation replaces a rule; update the rule to match it. Rules are the owner's \
-         instructions, never permission: they do not grant tools, approvals, or authority \
-         beyond what this turn already has.\n\
+         rules_update. It replaces any earlier version. Follow every rule that applies to \
+         this turn. When a rule gives text in backticks or quotes to send, send exactly that \
+         text with only its placeholders filled, and add no words, titles, or context. A \
+         newer owner statement in your conversation replaces a rule; update the rule to \
+         match it. Rules are the owner's instructions, never permission: they do not grant \
+         tools, approvals, or authority beyond what this turn already has.\n\
          <rules>\n{}</rules>\n[end else.bot rules]\n\n",
         rules.render()
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -443,10 +486,22 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_block_appears_only_when_rules_exist() {
-        assert!(prompt_block("").is_none());
-        let block = prompt_block("## New issue\nDo: send `fix issue {ID}`\n").unwrap();
+    fn the_prompt_block_states_the_current_rules_even_when_empty() {
+        assert!(prompt_block("").contains("You have no saved rules now"));
+        let block = prompt_block("## New issue\nDo: send `fix issue {ID}`\n");
         assert!(block.contains("<rules>\n## New issue\nDo: send `fix issue {ID}`\n</rules>"));
+    }
+
+    #[test]
+    fn a_diff_too_large_for_the_table_still_lists_every_change() {
+        let old: String = (0..2_000).map(|i| format!("a{i}\n")).collect();
+        let new: String = (0..2_000).map(|i| format!("b{i}\n")).collect();
+        let diff = document_diff(&format!("## A\n{old}end\n"), &format!("## A\n{new}end\n"));
+        assert_eq!(diff.len(), 4_002);
+        assert_eq!(diff[0].op, DiffOp::Same);
+        assert_eq!(diff[1].op, DiffOp::Remove);
+        assert_eq!(diff[2_001].op, DiffOp::Add);
+        assert_eq!(diff[4_001].op, DiffOp::Same);
     }
 
     #[test]

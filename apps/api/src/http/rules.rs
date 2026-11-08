@@ -194,6 +194,8 @@ async fn show(
 #[serde(deny_unknown_fields)]
 struct RestoreBody {
     version: i64,
+    /// The current version the owner saw; omit to restore unconditionally.
+    expected_version: Option<i64>,
 }
 
 async fn restore(
@@ -207,6 +209,6 @@ async fn restore(
             "version must not be negative",
         ));
     }
-    let version = rules::restore(&state.db, bot_id, body.version).await?;
+    let version = rules::restore(&state.db, bot_id, body.version, body.expected_version).await?;
     Ok(Json(json!({ "version": version })))
 }

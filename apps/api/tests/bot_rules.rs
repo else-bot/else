@@ -186,6 +186,59 @@ async fn the_owner_restores_an_earlier_version_or_the_empty_file() {
         .owner("POST", &path, Some(json!({ "version": 99 })))
         .await;
     assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+
+    let stale = h
+        .app
+        .owner(
+            "POST",
+            &path,
+            Some(json!({ "version": 1, "expected_version": 3 })),
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+    assert_eq!(rules(&h.app, &main).await["version"], 4);
+    let current = h
+        .app
+        .owner(
+            "POST",
+            &path,
+            Some(json!({ "version": 1, "expected_version": 4 })),
+        )
+        .await;
+    assert_eq!(current.body["version"], 5);
+}
+
+#[tokio::test]
+async fn a_cleared_file_still_tells_the_next_turn_that_no_rules_apply() {
+    let h = harness(2).await;
+    let main = h.app.main_bot().await;
+    let (turn, token) = h.running(&main, GATE).await;
+    let saved = tool(
+        &h.app,
+        &token,
+        "rules_update",
+        update("New Linear issue", NEW_RULE, "send it"),
+    )
+    .await;
+    assert!(!saved.error, "{}", saved.body);
+    h.release(turn).await;
+    h.app.wait_turn(&turn.to_string(), &["completed"]).await;
+    let cleared = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/rules/restore"),
+            Some(json!({ "version": 0 })),
+        )
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+
+    let (next, _) = h.running(&main, GATE).await;
+    let packets = h.packets().await;
+    let packet = packets.last().unwrap();
+    assert!(packet.contains("You have no saved rules now"), "{packet}");
+    assert!(!packet.contains("fix issue {ISSUE_ID}`\nNever"), "{packet}");
+    h.release(next).await;
 }
 
 #[tokio::test]

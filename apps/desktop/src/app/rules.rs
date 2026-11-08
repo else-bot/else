@@ -349,6 +349,7 @@ impl ElseApp {
         &mut self,
         bot: Uuid,
         version: i64,
+        expected: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -358,7 +359,7 @@ impl ElseApp {
         }
         cache.restoring = true;
         cache.problem = None;
-        let request = self.client.clone().restore_rules(bot, version);
+        let request = self.client.clone().restore_rules(bot, version, expected);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
@@ -403,8 +404,7 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let author = self.bots.iter().find(|b| b.id == bot);
         let name = author.map_or_else(|| "Bot".to_owned(), |b| b.name.clone());
-        let file = self.rules_file(bot);
-        let current = file.is_some_and(|file| file.version == update.version);
+        let current = self.rules_version_of(bot) == Some(update.version);
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
         let section = update.section.clone();
         let header = h_flex()
@@ -471,6 +471,7 @@ impl ElseApp {
                 app.open_rules(bot, Some(section.clone()), RulesTab::Rules, window, cx)
             }));
         let previous = update.version - 1;
+        let shown = update.version;
         let undo = current.then(|| {
             Button::new(SharedString::from(format!("rules-undo-{item}")))
                 .ghost()
@@ -482,7 +483,7 @@ impl ElseApp {
                 .disabled(restoring)
                 .accessibility_label(format!("Undo the change to {}", update.section))
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    app.restore_rules(bot, previous, window, cx)
+                    app.restore_rules(bot, previous, shown, window, cx)
                 }))
         });
         let card = v_flex()
@@ -530,7 +531,7 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let cache = self.rules.get(&bot);
         let file = cache.and_then(|cache| cache.file.as_ref());
-        let has_rules = file.is_some_and(|file| !file.sections.is_empty());
+        let has_rules = file.is_some_and(|file| !file.history.is_empty());
         let open = Button::new("rules-open")
             .ghost()
             .xsmall()
@@ -567,6 +568,15 @@ impl ElseApp {
                 .unwrap_or_else(|| "Loading…".to_owned());
             return body.child(muted(text)).into_any_element();
         };
+        if file.sections.is_empty() && !file.history.is_empty() {
+            return body
+                .child(muted(
+                    "No rules right now. Open shows the history of earlier rules, and you can \
+                     restore any version from there."
+                        .to_owned(),
+                ))
+                .into_any_element();
+        }
         if file.sections.is_empty() {
             return body
                 .child(muted(
@@ -775,7 +785,7 @@ impl ElseApp {
             return div()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child("No rules yet.")
+                .child("No rules right now. Earlier versions are in History.")
                 .into_any_element();
         }
         let seen = self.preferences.rules_seen.get(&bot).copied().unwrap_or(0);
@@ -981,8 +991,10 @@ impl ElseApp {
                             ),
                     )
             }));
-        let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
+        let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring)
+            || self.rules_version_of(bot) != Some(file.version);
         let target = picked.version - 1;
+        let expected = file.version;
         let restore = (picked.version == file.version && target >= 0).then(|| {
             Button::new("rules-restore")
                 .ghost()
@@ -998,7 +1010,7 @@ impl ElseApp {
                 .loading(restoring)
                 .disabled(restoring)
                 .on_click(on(owner, move |app, window, cx| {
-                    app.restore_rules(bot, target, window, cx)
+                    app.restore_rules(bot, target, expected, window, cx)
                 }))
         });
         let restore_this = (picked.version != file.version).then(|| {
@@ -1013,7 +1025,7 @@ impl ElseApp {
                 .loading(restoring)
                 .disabled(restoring)
                 .on_click(on(owner, move |app, window, cx| {
-                    app.restore_rules(bot, version, window, cx)
+                    app.restore_rules(bot, version, expected, window, cx)
                 }))
         });
         let detail = v_flex()
