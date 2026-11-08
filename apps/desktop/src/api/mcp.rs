@@ -142,11 +142,14 @@ fn icon_candidates(website: &str) -> Vec<String> {
     let Ok(url) = reqwest::Url::parse(website) else {
         return Vec::new();
     };
-    let Some(host) = url.domain().filter(|host| *host != "localhost") else {
+    if !public_url(&url) {
         return Vec::new();
-    };
+    }
     let origin = url.origin().ascii_serialization();
     let mut candidates = vec![format!("{origin}/favicon.ico")];
+    let Some(host) = url.domain() else {
+        return candidates;
+    };
     let alias = |domain: &str| {
         ICON_ALIASES
             .iter()
@@ -167,9 +170,34 @@ fn icon_candidates(website: &str) -> Vec<String> {
     candidates
 }
 
+/// The largest PNG image inside an ICO file. `image` decodes an ICO's
+/// embedded PNG without the reader's limits, so a compressed chunk could
+/// expand far beyond the download cap. Decoding the PNG directly keeps the
+/// limits. BMP entries stay with the ICO decoder; their size is bounded by
+/// the 256px ICO format.
+fn ico_png_entry(bytes: &[u8]) -> Option<&[u8]> {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.get(..4)? != [0, 0, 1, 0] {
+        return None;
+    }
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    (0..count)
+        .filter_map(|ix| {
+            let entry = bytes.get(6 + ix * 16..6 + (ix + 1) * 16)?;
+            let width = if entry[0] == 0 { 256 } else { entry[0] as u32 };
+            let size = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
+            let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
+            let data = bytes.get(offset..offset.checked_add(size)?)?;
+            data.starts_with(PNG).then_some((width, data))
+        })
+        .max_by_key(|(width, _)| *width)
+        .map(|(_, data)| data)
+}
+
 /// Decodes a favicon (ICO, PNG, GIF, JPEG or WebP) and re-encodes it as a
 /// small PNG.
 fn icon_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let bytes = ico_png_entry(bytes).unwrap_or(bytes);
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -211,6 +239,10 @@ mod icon_tests {
             icon_candidates("http://kaneo.internal:8080"),
             ["http://kaneo.internal:8080/favicon.ico"]
         );
+        assert_eq!(
+            icon_candidates("http://100.102.228.67:7878"),
+            ["http://100.102.228.67:7878/favicon.ico"]
+        );
         assert!(icon_candidates("http://127.0.0.1:3000").is_empty());
         assert!(icon_candidates("http://localhost:3000").is_empty());
     }
@@ -238,6 +270,20 @@ mod icon_tests {
         ] {
             assert!(public_url(&url(public)), "{public}");
         }
+    }
+
+    #[test]
+    fn an_icos_embedded_png_is_found_and_decoded_with_limits() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(32, 32)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut ico = vec![0, 0, 1, 0, 1, 0, 32, 32, 0, 0, 1, 0, 32, 0];
+        ico.extend((png.len() as u32).to_le_bytes());
+        ico.extend(22u32.to_le_bytes());
+        ico.extend(&png);
+        assert_eq!(super::ico_png_entry(&ico), Some(png.as_slice()));
+        assert!(super::icon_png(&ico).is_some());
     }
 
     #[test]

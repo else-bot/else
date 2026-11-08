@@ -3,9 +3,7 @@
 //! carries the task it answers, so the task shows as this bot's bubble just
 //! before the reply.
 
-use super::reply::Author;
 use super::{ElseApp, RowKey};
-use gpui_kit::component::menu::ContextMenuExt as _;
 use crate::avatar::bot_avatar;
 use crate::model::{Conversation, Item};
 use chrono::{DateTime, Utc};
@@ -121,7 +119,7 @@ impl ElseApp {
             let messages = bubbles
                 .iter()
                 .enumerate()
-                .map(|(ix, bubble)| app.render_bubble(ix, me, bubble, &prompts.borrow(), &owner, cx));
+                .map(|(ix, bubble)| app.render_bubble(ix, me, bubble, &prompts.borrow(), cx));
             dialog.child(
                 v_flex()
                     .id("bot-exchange")
@@ -164,7 +162,6 @@ impl ElseApp {
         me: Uuid,
         bubble: &Bubble,
         prompts: &HashMap<Uuid, Entity<TextViewState>>,
-        owner: &WeakEntity<ElseApp>,
         cx: &App,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -214,12 +211,7 @@ impl ElseApp {
             )
             .child(bubble.kind)
             .children(bubble.at.map(super::message_row::stamp));
-        let item = match bubble.body {
-            Body::Item(id) => Some(id),
-            _ => None,
-        };
         let card = div()
-            .id(SharedString::from(format!("exchange-bubble-{ix}")))
             .w_full()
             .px_3p5()
             .py_2()
@@ -234,16 +226,6 @@ impl ElseApp {
                 }
             })
             .child(body);
-        let card = match item {
-            Some(item) => {
-                let owner = owner.clone();
-                card.context_menu(move |menu, window, cx| {
-                    ElseApp::message_menu(owner.clone(), me, item, Author::Bot, menu, window, cx)
-                })
-                .into_any_element()
-            }
-            None => card.into_any_element(),
-        };
         h_flex()
             .w_full()
             .items_start()

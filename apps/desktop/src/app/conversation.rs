@@ -2,7 +2,7 @@ use super::ElseApp;
 use super::bot_activity::{BotActivity, group_activity};
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
-use super::task_reply::state::{TaskReply, task_replies};
+use super::task_reply::state::{ReplyState, TaskReply, task_replies};
 use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
@@ -433,7 +433,10 @@ impl ElseApp {
         {
             let row = &view.rows[ix];
             if let Some(task) = &row.task
-                && task.history.contains(&target)
+                && (task.history.contains(&target)
+                    || (task.latest == Some(target)
+                        && !task.latest_kept
+                        && matches!(task.state, ReplyState::Queued | ReplyState::Working)))
             {
                 view.expanded_tasks.insert(task.turn);
                 view.list.remeasure_items(ix..ix + 1);
