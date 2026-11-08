@@ -190,6 +190,14 @@ saved_channel() {
 	esac
 }
 
+installed_dev_build() {
+	local pointer
+	for pointer in "$APP_CURRENT" "$SERVER_CURRENT"; do
+		if dev_build "$(basename "$(readlink "$pointer" 2>/dev/null || true)")"; then return 0; fi
+	done
+	return 1
+}
+
 remember_channel() {
 	[ -n "$CHANNEL_FLAG" ] || return 0
 	mkdir -p "$CONFIG"
@@ -297,6 +305,7 @@ ensure_bootstrap_tools() {
 apt_packages() {
 	local list="curl ca-certificates git jq tar gzip sqlite3"
 	if [ "$FROM_SOURCE" = 1 ]; then list="$list build-essential pkg-config"; fi
+	if dev_build "$WANT_VERSION" && want_server; then list="$list python3"; fi
 	if want_app; then
 		if [ "$FROM_SOURCE" = 1 ]; then
 			list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
@@ -310,6 +319,7 @@ apt_packages() {
 pacman_packages() {
 	local list="curl ca-certificates git jq tar gzip sqlite"
 	if [ "$FROM_SOURCE" = 1 ]; then list="$list base-devel pkgconf"; fi
+	if dev_build "$WANT_VERSION" && want_server; then list="$list python"; fi
 	if want_app; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
@@ -496,9 +506,11 @@ resolve_release() {
 	if dev_build "$WANT_VERSION"; then FROM_SOURCE=1; fi
 }
 
+PREVIOUS_SOURCE=""
 fetch_source() {
 	local ref
 	ref="$(source_ref "$WANT_VERSION")"
+	PREVIOUS_SOURCE="$(git -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null || true)"
 	step "Source $(release_name "$WANT_VERSION") ($SRC)"
 	mkdir -p "$ELSE_HOME"
 	if [ -d "$SRC/.git" ]; then
@@ -1429,9 +1441,25 @@ main() {
 		lock_installation
 		resolve_release
 		fetch_source
-		local installer_help inventory
+		local installer_help inventory remember_here=0
 		installer_help="$(bash "$SRC/install.sh" --help 2>/dev/null)"
 		inventory="$(installed_components)"
+		if ! printf '%s' "$installer_help" | grep -q -- '--channel'; then
+			# Releases before the dev channel mistake a dev build of the same
+			# version for themselves and skip the server's restart and rollback.
+			if installed_dev_build; then
+				[ -z "$PREVIOUS_SOURCE" ] || git -C "$SRC" -c advice.detachedHead=false checkout -q --force "$PREVIOUS_SOURCE"
+				die "v$WANT_VERSION predates the dev channel and cannot replace a dev build; after the next release, run: elsebot update --channel stable"
+			fi
+			local argument skip=0 forwarded=()
+			for argument in ${ARGS[@]+"${ARGS[@]}"}; do
+				if [ "$skip" = 1 ]; then skip=0; continue; fi
+				if [ "$argument" = --channel ]; then skip=1; continue; fi
+				forwarded+=("$argument")
+			done
+			ARGS=(${forwarded[@]+"${forwarded[@]}"})
+			remember_here=1
+		fi
 		if ! printf '%s' "$installer_help" | grep -q -- 'app-current'; then
 			if [ -L "$APP_CURRENT" ] || [ -L "$SERVER_CURRENT" ]; then
 				die "this release's installer predates component pointers; choose a release that supports component updates"
@@ -1466,6 +1494,7 @@ main() {
 		fi
 		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
 		bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		if [ "$remember_here" = 1 ]; then remember_channel; fi
 		return
 	fi
 

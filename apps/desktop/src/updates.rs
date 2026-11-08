@@ -307,6 +307,33 @@ struct Settings {
     work_limit: Duration,
     relaunch: Relaunch,
     parent_pid: u32,
+    running: Running,
+}
+
+/// The build this app runs, to notice an app installed from a terminal.
+#[derive(Debug, Clone)]
+struct Running {
+    version: Option<Version>,
+    commit: Option<release::Commit>,
+}
+
+impl Running {
+    fn current() -> Self {
+        Self {
+            version: env!("ELSE_VERSION").parse().ok(),
+            commit: env!("ELSE_COMMIT").parse().ok(),
+        }
+    }
+
+    fn replaced_by(&self, installed: &Release) -> bool {
+        match installed {
+            Release::Stable(installed) => self.version.is_some_and(|running| *installed > running),
+            Release::Dev(installed) => self
+                .commit
+                .as_ref()
+                .is_some_and(|running| running != installed),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -325,6 +352,7 @@ impl Default for Settings {
             check_limit: Duration::from_secs(30),
             work_limit: Duration::from_secs(10),
             parent_pid: std::process::id(),
+            running: Running::current(),
             relaunch: if cfg!(target_os = "macos") {
                 Relaunch::Bundle
             } else {
@@ -487,17 +515,12 @@ impl Actor {
         match event {
             Event::Checked(result) => {
                 self.checking = false;
-                // The running app's commit is unknown, so only a newer stable
-                // release installed elsewhere is known to need a restart.
-                let running = env!("ELSE_VERSION").parse::<Version>().ok();
                 let awaiting_restart = result
                     .as_ref()
                     .ok()
                     .map(|checked| checked.installed.clone())
                     .filter(|_| self.component == Component::App)
-                    .filter(|installed| {
-                        matches!((installed, running), (Release::Stable(installed), Some(running)) if *installed > running)
-                    })
+                    .filter(|installed| self.settings.running.replaced_by(installed))
                     .filter(|_| matches!(self.state.borrow().operation, Operation::Idle));
                 if let Some(installed) = &awaiting_restart {
                     self.ready = Some(installed.clone());
@@ -1346,6 +1369,20 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn a_build_installed_from_a_terminal_needs_a_restart() {
+        let a: release::Commit = "a".repeat(40).parse().unwrap();
+        let b: Release = format!("dev-{}", "b".repeat(40)).parse().unwrap();
+        let running = Running {
+            version: "0.0.20".parse().ok(),
+            commit: Some(a.clone()),
+        };
+        assert!(running.replaced_by(&b));
+        assert!(!running.replaced_by(&Release::Dev(a)));
+        assert!(running.replaced_by(&"0.0.21".parse().unwrap()));
+        assert!(!running.replaced_by(&"0.0.20".parse().unwrap()));
     }
 
     #[tokio::test]

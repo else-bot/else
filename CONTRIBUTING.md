@@ -224,7 +224,7 @@ The dev update channel installs every commit of `main` instead of tagged release
 curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash -s -- --channel dev
 ```
 
-After that, `elsebot update` and the app's Updates screen offer each new commit of `main`. The installer saves the channel in `~/.else/config/update-channel` and keeps each build in `~/.else/versions/dev-<commit>`. Builds reuse `~/.else/build`, so only the first one compiles everything. When a commit changes `infra/guest` and Docker is running, the installer builds that guest image locally and points bot computers at it; otherwise they keep the published image. Return to tagged releases with `elsebot update --channel stable`. A server that applied database migrations from `main` cannot start an older release until a release includes those migrations; the installer then rolls back to the dev build.
+After that, `elsebot update` and the app's Updates screen offer each new commit of `main`. The installer saves the channel in `~/.else/config/update-channel` and keeps each build in `~/.else/versions/dev-<commit>`. Builds reuse `~/.else/build`, so only the first one compiles everything. When a commit changes `infra/guest` and Docker is running, the installer builds that guest image locally and points bot computers at it; otherwise they keep the published image. Return to tagged releases with `elsebot update --channel stable`. Releases older than the dev channel refuse to replace a dev build, so the first return works once a release includes it. A server that applied database migrations from `main` cannot start an older release until a release includes those migrations; the installer then rolls back to the dev build.
 
 ## Work on bot computers
 
