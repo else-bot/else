@@ -23,11 +23,25 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 
 export const ENDPOINT = "http://127.0.0.1:9222";
 const DESKTOP = "/usr/local/bin/else-desktop";
+const SCREEN = "/tmp/.X11-unix/X99";
+
+function startDesktop(timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(DESKTOP, [], { stdio: "ignore" });
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    child.on("error", done);
+    child.on("exit", done);
+  });
+}
 
 function canRun(path) {
   try {
@@ -86,7 +100,9 @@ function getJson(path, timeoutMs = 2000) {
 export async function ready({ timeoutMs = 30000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last;
-  let started = !canRun(DESKTOP);
+  // Only a desktop that never started is started here; a browser that is
+  // restarting comes back by itself.
+  let started = fs.existsSync(SCREEN) || !canRun(DESKTOP);
   while (Date.now() < deadline) {
     try {
       return await getJson("/json/version");
@@ -95,7 +111,7 @@ export async function ready({ timeoutMs = 30000 } = {}) {
       if (!started) {
         // The desktop starts on first use.
         started = true;
-        spawnSync(DESKTOP, [], { stdio: "ignore", timeout: Math.max(1000, deadline - Date.now()) });
+        await startDesktop(Math.max(1000, deadline - Date.now()));
         continue;
       }
       await sleep(250);
