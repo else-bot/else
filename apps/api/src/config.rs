@@ -61,7 +61,8 @@ pub struct Config {
     pub codex_bin: Option<PathBuf>,
     /// The Claude Code CLI (`ELSE_CLAUDE_BIN`), else `claude` on `PATH`.
     pub claude_bin: Option<PathBuf>,
-    /// Explicit Grok CLI path; otherwise `grok` on `PATH`.
+    /// Grok CLI path; otherwise `grok` on `PATH`. A script in either place
+    /// gives way to the binary installed in `GROK_HOME`.
     pub grok_bin: Option<PathBuf>,
     /// Explicit `msb` path; otherwise `PATH` or `~/.microsandbox/bin`.
     pub msb_bin: Option<PathBuf>,
