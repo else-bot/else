@@ -31,28 +31,21 @@ impl Client {
     pub async fn service_icon(self: Arc<Self>, website: String) -> Option<Vec<u8>> {
         let http = reqwest::Client::builder()
             .tls_backend_preconfigured((*self.tls).clone())
-            .redirect(reqwest::redirect::Policy::limited(3))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 3 || !public_url(attempt.url()) {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .dns_resolver(Arc::new(PublicResolver))
             .no_proxy()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .ok()?;
         self.run(async move {
             for url in icon_candidates(&website) {
-                let Ok(response) = http.get(url).send().await else {
-                    continue;
-                };
-                if !response.status().is_success()
-                    || response.content_length().is_some_and(|len| len > MAX_ICON_BYTES)
-                {
-                    continue;
-                }
-                let Ok(bytes) = response.bytes().await else {
-                    continue;
-                };
-                if let Some(png) = (bytes.len() as u64 <= MAX_ICON_BYTES)
-                    .then(|| icon_png(&bytes))
-                    .flatten()
-                {
+                if let Some(png) = fetch_icon(&http, url).await {
                     return Some(png);
                 }
             }
@@ -68,7 +61,75 @@ impl Client {
     }
 }
 
-const MAX_ICON_BYTES: u64 = 256 * 1024;
+const MAX_ICON_BYTES: usize = 256 * 1024;
+
+/// Bot-installed MCPs choose these origins, so the fetch must not reach this
+/// computer's own services: loopback, link-local (cloud metadata),
+/// unspecified and multicast addresses are refused at every redirect and DNS
+/// answer. Tailnet and LAN addresses stay reachable for self-hosted services.
+fn blocked(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    };
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || match ip {
+            IpAddr::V4(v4) => v4.is_link_local() || v4.is_broadcast(),
+            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        }
+}
+
+fn public_url(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && match url.host() {
+            Some(url::Host::Domain(domain)) => {
+                domain != "localhost" && !domain.ends_with(".localhost")
+            }
+            Some(url::Host::Ipv4(ip)) => !blocked(ip.into()),
+            Some(url::Host::Ipv6(ip)) => !blocked(ip.into()),
+            None => false,
+        }
+}
+
+struct PublicResolver;
+
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<_> = tokio::net::lookup_host((host, 0))
+                .await?
+                .filter(|addr| !blocked(addr.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err("the host resolves only to local addresses".into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+async fn fetch_icon(http: &reqwest::Client, url: String) -> Option<Vec<u8>> {
+    let mut response = http.get(url).send().await.ok()?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|len| len > MAX_ICON_BYTES as u64)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > MAX_ICON_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    icon_png(&bytes)
+}
 
 /// Hosts whose MCP endpoint serves no favicon, mapped to the site that
 /// carries the service's icon.
@@ -109,7 +170,15 @@ fn icon_candidates(website: &str) -> Vec<String> {
 /// Decodes a favicon (ICO, PNG, GIF, JPEG or WebP) and re-encodes it as a
 /// small PNG.
 fn icon_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    let image = image::load_from_memory(bytes).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1024);
+    limits.max_image_height = Some(1024);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
     if image.width() < 16 || image.height() < 16 {
         return None;
     }
@@ -144,6 +213,40 @@ mod icon_tests {
         );
         assert!(icon_candidates("http://127.0.0.1:3000").is_empty());
         assert!(icon_candidates("http://localhost:3000").is_empty());
+    }
+
+    #[test]
+    fn redirects_cannot_reach_this_computer_or_cloud_metadata() {
+        use super::public_url;
+        let url = |text: &str| reqwest::Url::parse(text).unwrap();
+        for local in [
+            "http://127.0.0.1:8080/x",
+            "http://[::1]/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/x",
+            "http://localhost/x",
+            "http://app.localhost/x",
+            "file:///etc/passwd",
+        ] {
+            assert!(!public_url(&url(local)), "{local}");
+        }
+        for public in [
+            "https://sentry.io/favicon.ico",
+            "http://100.102.228.67:7878/favicon.ico",
+            "http://192.168.1.4/favicon.ico",
+        ] {
+            assert!(public_url(&url(public)), "{public}");
+        }
+    }
+
+    #[test]
+    fn oversized_images_are_refused_before_decoding() {
+        let mut png = Vec::new();
+        image::RgbImage::new(4096, 4096)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(super::icon_png(&png).is_none());
     }
 }
 

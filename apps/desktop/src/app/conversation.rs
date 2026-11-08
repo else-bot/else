@@ -411,6 +411,7 @@ impl ElseApp {
         let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
             return;
         };
+        view.pending_reveal = None;
         let Some(conversation) = view.conversation.as_ref() else {
             return;
         };
@@ -422,16 +423,26 @@ impl ElseApp {
             .items()
             .rev()
             .filter(|item| before.is_none_or(|seq| item.seq < seq))
-            .find(|item| Author::of(&item.kind) == Some(author) && item.text.trim_end() == original)
-            .map(|item| RowKey::Item(item.id));
+            .find(|item| {
+                Author::of(&item.kind) == Some(author)
+                    && item.text.trim_end().lines().eq(original.lines())
+            })
+            .map(|item| item.id);
         if let Some(target) = target
-            && let Some(ix) = view.row_index(target)
+            && let Some(ix) = view.row_index(RowKey::Item(target))
         {
+            let row = &view.rows[ix];
+            if let Some(task) = &row.task
+                && task.history.contains(&target)
+            {
+                view.expanded_tasks.insert(task.turn);
+                view.list.remeasure_items(ix..ix + 1);
+            }
             view.list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(0.),
             });
-            view.revealed = Some((target, std::time::Instant::now()));
+            view.revealed = Some((row.key, std::time::Instant::now()));
             cx.notify();
         } else if conversation.older_before_seq.is_some() {
             view.pending_reveal = Some((from, author, original.to_owned()));
