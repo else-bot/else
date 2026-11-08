@@ -6,5 +6,6 @@ pub mod providers;
 pub mod questions;
 pub mod routine_failures;
 pub mod routines;
+pub mod rules;
 pub mod tools;
 pub mod webhooks;

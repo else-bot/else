@@ -15,6 +15,7 @@ pub mod owner_questions;
 pub mod profiles;
 pub mod reads;
 pub mod routines;
+pub mod rules;
 pub mod secret_requests;
 pub mod stop;
 pub mod task_secrets;

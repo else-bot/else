@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ pub struct Preferences {
     pub details_width: f32,
     pub category_order: Vec<Uuid>,
     pub collapsed: HashSet<Option<Uuid>>,
+    /// The rules version the owner last opened, per bot.
+    pub rules_seen: HashMap<Uuid, i64>,
 }
 
 impl Default for Preferences {
@@ -23,6 +25,7 @@ impl Default for Preferences {
             details_width: 336.,
             category_order: Vec::new(),
             collapsed: HashSet::new(),
+            rules_seen: HashMap::new(),
         }
     }
 }

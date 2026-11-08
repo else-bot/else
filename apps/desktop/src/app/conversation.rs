@@ -329,6 +329,7 @@ impl ElseApp {
                 view.conversation = Some(conversation);
                 view.stream_problem = None;
                 self.sync_rows(window, cx);
+                self.ensure_rules(bot, window, cx);
                 Some(cursor)
             }
             Ok(Err(_)) => {
@@ -385,6 +386,7 @@ impl ElseApp {
                             entry.activity = activity;
                         }
                         self.sync_rows(window, cx);
+                        self.ensure_rules(bot, window, cx);
                     }
                     Err(_) => {
                         self.live_command(LiveCommand::Unsubscribe { bot });

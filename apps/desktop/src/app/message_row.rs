@@ -287,6 +287,9 @@ impl ElseApp {
                 if let Some(created) = &item.bot_created {
                     return Some(self.render_bot_created(id, created, footer, cx));
                 }
+                if let Some(update) = &item.rules_update {
+                    return Some(self.render_rules_update(id, view.bot_id, update, footer, cx));
+                }
                 let text = view.texts.get(&key)?;
                 let user = item.kind == "user";
                 let turn = conversation.turn(item.turn_id);

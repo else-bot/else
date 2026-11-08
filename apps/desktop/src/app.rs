@@ -21,6 +21,7 @@ mod question_card;
 mod reading;
 mod reply;
 mod row_text;
+mod rules;
 mod secret_card;
 mod settings;
 mod social_card;
@@ -289,6 +290,8 @@ pub struct ElseApp {
     image_viewer: Option<Entity<images::ImageViewer>>,
     _computer_layout: Option<Subscription>,
     settings: HashMap<Uuid, BotSettings>,
+    rules: rules::RulesState,
+    rules_dialog: Option<rules::RulesDialog>,
     sidebar_focus: FocusHandle,
     live: Option<crate::api::LiveCommands>,
     _live: Option<Task<()>>,
@@ -380,6 +383,8 @@ impl ElseApp {
             image_viewer: None,
             _computer_layout: None,
             settings: HashMap::new(),
+            rules: HashMap::new(),
+            rules_dialog: None,
             sidebar_focus,
             live: None,
             _live: None,

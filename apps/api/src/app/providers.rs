@@ -163,6 +163,8 @@ pub struct TurnInput {
     /// Set when this turn runs a saved routine or webhook wake: `text` is
     /// its prompt, not an owner message.
     pub run: Option<SavedRun>,
+    /// The bot's current rules file, given at the start of every turn.
+    pub rules: Option<String>,
 }
 
 /// The saved task a turn runs instead of an owner message.
@@ -292,6 +294,12 @@ impl DelegationContext {
     /// message, never for a routine run or a task one delegated.
     pub fn can_manage_routines(&self) -> bool {
         self.origin == Origin::OwnerRequest
+    }
+
+    /// A bot edits its rules only while answering the owner directly in its
+    /// own conversation: never for a routine, event, or delegated task.
+    pub fn can_edit_rules(&self) -> bool {
+        self.origin == Origin::OwnerRequest && !self.delegated_task
     }
 
     /// The provider's own host shell, file, and web tools. Never for work an

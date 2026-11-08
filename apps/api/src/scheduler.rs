@@ -466,6 +466,9 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
     if delegation.can_manage_routines() {
         tools.extend([Tool::Routines, Tool::ManageMcp]);
     }
+    if delegation.can_edit_rules() {
+        tools.push(Tool::Rules);
+    }
     tools
 }
 
@@ -516,6 +519,33 @@ mod tests {
         }
         assert!(!tools.contains(&Tool::Delegate), "a task stays one hop");
         assert!(!tools.contains(&Tool::CreateBot));
+    }
+
+    #[test]
+    fn only_a_turn_answering_the_owner_directly_can_edit_rules() {
+        let direct = turn_tools(&DelegationContext {
+            origin: Origin::OwnerRequest,
+            ..DelegationContext::default()
+        });
+        assert!(direct.contains(&Tool::Rules));
+        for origin in [
+            Origin::OwnerRequest,
+            Origin::RoutineRun,
+            Origin::SocialEvent,
+            Origin::ConnectorEvent,
+            Origin::Other,
+        ] {
+            assert!(!task(origin).contains(&Tool::Rules), "delegated {origin:?}");
+            let own = turn_tools(&DelegationContext {
+                origin,
+                ..DelegationContext::default()
+            });
+            assert_eq!(
+                own.contains(&Tool::Rules),
+                origin == Origin::OwnerRequest,
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]

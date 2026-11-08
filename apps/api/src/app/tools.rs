@@ -37,6 +37,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_run",
+    "rules_update",
     "webhook_create",
     "webhook_list",
     "webhook_update",

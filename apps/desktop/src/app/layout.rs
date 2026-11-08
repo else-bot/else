@@ -136,7 +136,7 @@ impl ElseApp {
         }
     }
 
-    fn save_preferences(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_preferences(&mut self, cx: &mut Context<Self>) {
         self._save_preferences = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(200))

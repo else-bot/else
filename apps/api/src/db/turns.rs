@@ -99,6 +99,7 @@ pub struct ItemRecord {
     pub bot_reply: Option<Json<BotReply>>,
     pub routine_update: Option<Json<RoutineUpdate>>,
     pub bot_created: Option<Json<BotCreated>>,
+    pub rules_update: Option<Json<crate::app::rules::RulesUpdate>>,
     /// Ordered text and file parts; `None` for plain text.
     pub parts: Option<Json<Vec<MessagePart>>>,
 }
@@ -130,7 +131,7 @@ pub const ITEM_COLUMNS: &str = "i.id, i.conversation_id, i.seq, i.turn_id, i.kin
         (SELECT json_object('sender_bot_id', lower(hex(d.target_bot_id)), 'sender_name', b.name, 'prompt', d.task, 'status', d.status)
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id WHERE d.id = i.id)
     END AS bot_reply, coalesce(i.parts, i.assistant_parts) AS parts, i.routine_update,
-    i.bot_created";
+    i.bot_created, i.rules_update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptError {
@@ -803,6 +804,9 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
                 .await?
                 .map(crate::app::providers::SavedRun::Webhook),
         },
+        rules: crate::db::rules::current(&mut conn, turn.bot_id)
+            .await?
+            .map(|(_, markdown)| markdown),
     };
     drop(conn);
     let (memory, permissions) = tokio::join!(

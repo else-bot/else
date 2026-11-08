@@ -40,3 +40,13 @@ and confirm both fields through `GET /v1/bots/{id}`. Collapse and reopen the
 sidebar without changing the selection. The default `bots` lane checks the
 public metadata update and rejects an empty name. Native input proves the
 controls and focus.
+
+## Rules
+
+Send `[ui:rule]` to a bot backed by the offline Codex fixture. The fixture
+calls `rules_update` and the chat shows a rules card with the owner's words
+and a line diff. Send `[ui:rule-change]` to change the same rule. Open Bot
+details and confirm the Rules section lists **New Linear issue**. Click it
+and check the dialog's Rules, History, and Markdown tabs. Use **Undo change**
+on the newest card and confirm `GET /v1/bots/{id}/rules` reports a restored
+version. `cargo test -p else-api --test bot_rules` covers the API side.
