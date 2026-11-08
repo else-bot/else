@@ -6,6 +6,9 @@ pub struct SidebarRow {
     question_title: Option<String>,
     credential_reason: Option<String>,
     latest_turn_status: Option<String>,
+    /// The owner read the latest turn's last reply in full, such as its
+    /// failure notice.
+    latest_turn_read: bool,
 }
 
 #[derive(Serialize)]
@@ -34,7 +37,7 @@ impl SidebarRow {
                 preview: super::super::reads::preview(reason),
             });
         }
-        if busy {
+        if busy || self.latest_turn_read {
             return None;
         }
         match self.latest_turn_status.as_deref() {

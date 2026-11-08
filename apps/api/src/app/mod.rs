@@ -4,6 +4,7 @@ pub mod messages;
 pub mod outgoing;
 pub mod providers;
 pub mod questions;
+pub mod routine_failures;
 pub mod routines;
 pub mod tools;
 pub mod webhooks;

@@ -97,6 +97,9 @@ struct OwnerPatch {
     /// A complete choice, or `null` to inherit the bot's model again.
     #[serde(default, deserialize_with = "present")]
     model: Option<Option<super::settings::ProfileChoice>>,
+    /// Forget the routine's failed runs.
+    #[serde(default)]
+    dismiss_failures: bool,
 }
 
 async fn owner_update(
@@ -118,6 +121,7 @@ async fn owner_update(
     let patch = Patch {
         enabled: body.enabled,
         model,
+        dismiss_failures: body.dismiss_failures,
         ..Patch::default()
     };
     let routine = routines::update(
@@ -609,6 +613,7 @@ fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
         timezone: args.timezone.clone(),
         enabled: args.enabled,
         model: None,
+        dismiss_failures: false,
     })
 }
 

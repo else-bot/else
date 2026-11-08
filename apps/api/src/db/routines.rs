@@ -114,6 +114,11 @@ pub struct Routine {
     pub updated_at: DateTime<Utc>,
     pub deleted: bool,
     pub last_run: Option<LastRun>,
+    /// Consecutive failed occurrences since the last success, re-enable, or
+    /// dismissal.
+    pub failed_runs: i64,
+    /// Why else.bot switched the routine off, if it did.
+    pub paused_reason: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -132,6 +137,8 @@ struct Row {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     deleted_at: Option<DateTime<Utc>>,
+    failed_runs: i64,
+    paused_reason: Option<String>,
     run_due_at: Option<DateTime<Utc>>,
     skip_reason: Option<String>,
     turn_id: Option<Uuid>,
@@ -174,6 +181,8 @@ impl From<Row> for Routine {
             updated_at: row.updated_at,
             deleted: row.deleted_at.is_some(),
             last_run,
+            failed_runs: row.failed_runs,
+            paused_reason: row.paused_reason,
         }
     }
 }
@@ -195,7 +204,7 @@ fn columns(model: &ModelSetting) -> (Option<Json<&RoutineModel>>, Option<&str>) 
 const SELECT: &str =
     "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
-        lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
+        r.failed_runs, r.paused_reason, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
     FROM routines r
     LEFT JOIN routine_runs lr ON lr.id = (SELECT x.id FROM routine_runs x
@@ -379,6 +388,8 @@ pub struct Patch {
     pub timezone: Option<String>,
     pub enabled: Option<bool>,
     pub model: Option<ModelSetting>,
+    /// Forget the routine's failed runs (the owner saw them).
+    pub dismiss_failures: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -397,7 +408,7 @@ struct RoutineSettings {
 /// a retry never postpones its schedule. A new prompt is a new prompt
 /// revision, which ends the routine's destructive grant. Disabling stops
 /// future runs (one already admitted finishes); enabling or a new schedule
-/// counts from `now`.
+/// counts from `now`, and forgets earlier failed runs.
 pub async fn update(
     pool: &SqlitePool,
     by: By,
@@ -466,10 +477,13 @@ pub async fn update(
         "UPDATE routines SET name = ?2, prompt = ?3, cron = ?4, timezone = ?5, enabled = ?6,
              next_due_at = ?7, prompt_revision = prompt_revision + (prompt IS NOT ?3),
              model = ?8, requested_model = ?9,
+             failed_runs = CASE WHEN ?10 OR (?6 AND NOT enabled) THEN 0 ELSE failed_runs END,
+             paused_reason = CASE WHEN ?10 OR ?6 THEN NULL ELSE paused_reason END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND (name IS NOT ?2 OR prompt IS NOT ?3 OR cron IS NOT ?4
              OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7
-             OR model IS NOT ?8 OR requested_model IS NOT ?9)",
+             OR model IS NOT ?8 OR requested_model IS NOT ?9
+             OR (?10 AND (failed_runs <> 0 OR paused_reason IS NOT NULL)))",
     )
     .bind(id)
     .bind(&new_name)
@@ -480,6 +494,7 @@ pub async fn update(
     .bind(&next_due)
     .bind(model)
     .bind(requested_model)
+    .bind(patch.dismiss_failures)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -567,8 +582,252 @@ pub async fn run_of(
     }))
 }
 
-/// Admit up to `limit` routines due at `now`. Returns how many turns were
+/// Ended routine runs reviewed per scheduler scan.
+pub const REVIEW_BATCH: i64 = 8;
+
+/// Handle up to `limit` routine runs whose turns have ended, per
+/// [`routine_failures::react`]: forget failures after a success, retry a
+/// transient failure once, or count the failure and tell the owner in the
+/// failed turn, pausing the routine when retrying cannot help or its runs
+/// keep failing. Each run is reviewed once, in one transaction with all it
+/// causes, whichever path ended its turn. Returns how many retries were
 /// queued. The caller holds a maintenance admission.
+pub async fn review_ended(
+    pool: &SqlitePool,
+    registry: &Registry,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> Result<usize, sqlx::Error> {
+    let ended: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT rr.id FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+         WHERE NOT rr.reviewed AND rr.turn_id IS NOT NULL
+           AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain')
+         ORDER BY rr.due_at, rr.id LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let mut retried = 0;
+    for id in ended {
+        if review(pool, registry, id, now).await? {
+            retried += 1;
+        }
+    }
+    Ok(retried)
+}
+
+#[derive(sqlx::FromRow)]
+struct EndedRun {
+    routine_id: Uuid,
+    turn_id: Uuid,
+    turn_no: i64,
+    due_at: DateTime<Utc>,
+    retry: bool,
+    status: String,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    name: String,
+    prompt: String,
+    prompt_revision: i64,
+    timezone: String,
+    enabled: bool,
+    next_due_at: Option<DateTime<Utc>>,
+    model: Option<Json<RoutineModel>>,
+    failed_runs: i64,
+    live: bool,
+    may_retry: bool,
+}
+
+async fn review(
+    pool: &SqlitePool,
+    registry: &Registry,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    use crate::app::routine_failures::{self, Ended, Notice, Pause, Reaction, Run};
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<EndedRun> = sqlx::query_as(
+        "SELECT rr.routine_id, rr.turn_id, t.turn_no, rr.due_at, rr.retry_of IS NOT NULL AS retry,
+                t.status, t.error_code, t.error_message,
+                r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
+                r.enabled, r.next_due_at, r.model, r.failed_runs,
+                r.deleted_at IS NULL AND b.status = 'active' AS live,
+                NOT b.cancel_pending AND NOT EXISTS (
+                    SELECT 1 FROM request_receipts s WHERE s.operation = 'cancel'
+                      AND s.bot_id = r.bot_id AND s.boundary_turn_no >= t.turn_no)
+                AND NOT EXISTS (
+                    SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                    WHERE x.routine_id = r.id AND x.id <> rr.id
+                      AND u.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
+                    AS may_retry
+         FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+         JOIN routines r ON r.id = rr.routine_id JOIN bots b ON b.id = r.bot_id
+         WHERE rr.id = ?1 AND NOT rr.reviewed",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    let Some(ended) = Ended::of(&run.status, run.error_code.as_deref()) else {
+        return Ok(false);
+    };
+    sqlx::query("UPDATE routine_runs SET reviewed = true WHERE id = ?1")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+    if !run.live {
+        tx.commit().await?;
+        return Ok(false);
+    }
+    let state = Run {
+        retry: run.retry,
+        enabled: run.enabled,
+        failed_runs: run.failed_runs,
+    };
+    let mut reaction = routine_failures::react(ended, state);
+    if reaction == Reaction::Retry {
+        let retry_id = Uuid::new_v4();
+        let run_on = match &run.model {
+            Some(Json(own)) => RunOn::Own(own, run.routine_id),
+            None => RunOn::Bot,
+        };
+        let queued = if run.may_retry {
+            queue_saved_task(
+                &mut tx,
+                registry,
+                run.bot_id,
+                run.conversation_id,
+                retry_id,
+                b"routine-retry\0",
+                &run.prompt,
+                run_on,
+            )
+            .await?
+            .ok()
+        } else {
+            None
+        };
+        if let Some(turn_id) = queued {
+            // Later than the run it repeats, so it is the routine's last run.
+            let due = now.max(run.due_at + chrono::Duration::milliseconds(1));
+            sqlx::query(
+                "INSERT INTO routine_runs
+                     (id, routine_id, due_at, name, turn_id, prompt_revision, retry_of)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(retry_id)
+            .bind(run.routine_id)
+            .bind(ts(due))
+            .bind(&run.name)
+            .bind(turn_id)
+            .bind(run.prompt_revision)
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+            events::turn_accepted(&mut tx, run.bot_id, turn_id).await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        reaction = routine_failures::react(
+            ended,
+            Run {
+                retry: true,
+                ..state
+            },
+        );
+    }
+    let paused = match reaction {
+        Reaction::Retry | Reaction::Ignore => None,
+        Reaction::Reset => {
+            let reset = sqlx::query(
+                "UPDATE routines SET failed_runs = 0, paused_reason = NULL
+                 WHERE id = ?1 AND (failed_runs <> 0 OR paused_reason IS NOT NULL)",
+            )
+            .bind(run.routine_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if reset > 0 {
+                events::bot_updated(&mut tx, run.bot_id).await?;
+            }
+            None
+        }
+        Reaction::Report => Some(None),
+        Reaction::Pause(Pause::NeedsAction) => Some(Some("needs_action")),
+        Reaction::Pause(Pause::Repeated) => Some(Some("repeated")),
+    };
+    if let Some(paused) = paused {
+        let failed_runs = run.failed_runs + 1;
+        let enabled = run.enabled && paused.is_none();
+        sqlx::query(
+            "UPDATE routines SET failed_runs = ?2, paused_reason = coalesce(?3, paused_reason),
+                 enabled = ?4, next_due_at = CASE WHEN ?4 THEN next_due_at END,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+             WHERE id = ?1",
+        )
+        .bind(run.routine_id)
+        .bind(failed_runs)
+        .bind(paused)
+        .bind(enabled)
+        .execute(&mut *tx)
+        .await?;
+        let text = routine_failures::notice(
+            &Notice {
+                name: &run.name,
+                ended,
+                message: run.error_message.as_deref(),
+                retried: run.retry,
+                enabled,
+                failed_runs,
+                next: run
+                    .next_due_at
+                    .map(|at| routine_failures::local_time(at, &run.timezone)),
+            },
+            reaction,
+        );
+        let (seq,): (i64,) = sqlx::query_as(
+            "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
+             RETURNING last_item_seq",
+        )
+        .bind(run.conversation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let item_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             VALUES (?1, ?2, ?3, ?4, 'assistant', ?5)",
+        )
+        .bind(item_id)
+        .bind(run.conversation_id)
+        .bind(seq)
+        .bind(run.turn_id)
+        .bind(&text)
+        .execute(&mut *tx)
+        .await?;
+        // Warm sessions already considered this turn; rewind them so their
+        // next turn sees the notice.
+        sqlx::query(
+            "UPDATE provider_sessions SET considered_through_turn = ?2 - 1
+             WHERE conversation_id = ?1 AND status = 'active' AND considered_through_turn >= ?2",
+        )
+        .bind(run.conversation_id)
+        .bind(run.turn_no)
+        .execute(&mut *tx)
+        .await?;
+        events::item_upsert(&mut tx, run.bot_id, item_id).await?;
+        events::bot_updated(&mut tx, run.bot_id).await?;
+    }
+    tx.commit().await?;
+    Ok(false)
+}
+
+/// Admit up to `limit` routines due at `now`. A routine whose ended run
+/// awaits [`review_ended`] waits for it, so a retry precedes the next
+/// occurrence. Returns how many turns were queued. The caller holds a maintenance admission.
 pub async fn admit_due(
     pool: &SqlitePool,
     registry: &Registry,
@@ -579,6 +838,9 @@ pub async fn admit_due(
         "SELECT r.id FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.next_due_at IS NOT NULL AND r.next_due_at <= ?1
            AND b.status = 'active' AND NOT b.cancel_pending
+           AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                           WHERE x.routine_id = r.id AND NOT x.reviewed
+                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))
          ORDER BY r.next_due_at, r.id LIMIT ?2",
     )
     .bind(ts(now))
@@ -760,7 +1022,10 @@ async fn admit(
                 r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
-           AND b.status = 'active' AND NOT b.cancel_pending",
+           AND b.status = 'active' AND NOT b.cancel_pending
+           AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                           WHERE x.routine_id = r.id AND NOT x.reviewed
+                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
     )
     .bind(id)
     .bind(ts(now))

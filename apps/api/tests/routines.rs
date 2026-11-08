@@ -829,34 +829,285 @@ async fn rebuilt_history_labels_a_run_as_a_routine() {
     assert!(packet.ends_with("Owner's latest message:\nDid it run?"));
 }
 
-#[tokio::test]
-async fn a_failure_before_any_text_shows_in_the_last_run() {
-    let h = harness().await;
-    let main = h.app.main_bot().await;
-    let (setup, token) = h.owner_turn(&main).await;
+async fn wait_routine(app: &TestApp, bot: &str, done: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..400 {
+        let listed = owner_routines(app, bot).await;
+        if done(&listed[0]) {
+            return listed[0].clone();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "routine never reached the state: {}",
+        owner_routines(app, bot).await[0]
+    );
+}
+
+async fn replies(app: &TestApp, turn: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT text FROM items WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq",
+    )
+    .bind(turn)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap()
+}
+
+async fn sidebar(app: &TestApp, bot: &str) -> Value {
+    app.owner("GET", &format!("/v1/bots/{bot}"), None)
+        .await
+        .body["bot"]["sidebar_status"]
+        .clone()
+}
+
+async fn failing_routine(h: &Harness, bot: &str, prompt: &str) -> (String, DateTime<Utc>) {
+    let (setup, token) = h.owner_turn(bot).await;
     let routine = create(
         &h.app,
         &token,
-        digest("[synthetic:refuse] check the servers"),
+        json!({ "name": "Tickets", "prompt": prompt, "cron": "0 * * * *" }),
     )
     .await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
-    fire(&h.app, at(&routine["next_run_at"])).await;
-    let run = runs(&h.app, routine["id"].as_str().unwrap()).await[0]
-        .0
+    (
+        routine["id"].as_str().unwrap().to_owned(),
+        at(&routine["next_run_at"]),
+    )
+}
+
+async fn set_failed_runs(app: &TestApp, routine: &str, failed_runs: i64) {
+    sqlx::query("UPDATE routines SET failed_runs = ?2 WHERE id = ?1")
+        .bind(routine.parse::<Uuid>().unwrap())
+        .bind(failed_runs)
+        .execute(&app.db.pool)
+        .await
         .unwrap();
-    h.app.wait_turn(&run.to_string(), &["failed"]).await;
-    let listed = owner_routines(&h.app, &main).await;
-    let last = &listed[0]["last_run"];
-    assert_eq!(last["status"], "failed");
-    assert_eq!(last["error"]["code"], "provider_refused");
-    let texts: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM items WHERE turn_id = ?1 AND kind <> 'routine'")
-            .bind(run)
+}
+
+#[tokio::test]
+async fn a_transient_failure_is_retried_once_then_reported_until_dismissed() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 1).await;
+    assert_eq!(routine["enabled"], true);
+    assert_eq!(routine["paused_reason"], Value::Null);
+    assert_eq!(
+        at(&routine["next_run_at"]),
+        due + chrono::Duration::hours(1)
+    );
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 2, "one automatic retry");
+    let (first, retry) = (all[0].0.unwrap(), all[1].0.unwrap());
+    let retry_of: Option<Uuid> =
+        sqlx::query_scalar("SELECT retry_of FROM routine_runs WHERE turn_id = ?1")
+            .bind(retry)
             .fetch_one(&h.app.db.pool)
             .await
             .unwrap();
-    assert_eq!(texts, 0, "nothing in the transcript");
+    let first_run: Uuid = sqlx::query_scalar("SELECT id FROM routine_runs WHERE turn_id = ?1")
+        .bind(first)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(retry_of, Some(first_run));
+    assert_eq!(routine["last_run"]["turn_id"], retry.to_string());
+    assert_eq!(routine["last_run"]["status"], "failed");
+    assert_eq!(
+        replies(&h.app, first).await,
+        ["Partial output before failure. "],
+        "the retried failure is not reported"
+    );
+    let notice = replies(&h.app, retry).await.pop().unwrap();
+    assert!(
+        notice.starts_with(
+            "The routine **Tickets** failed because the AI provider reported an error. I retried \
+             it right away and it failed again. I'll try again at the next scheduled run, "
+        ),
+        "{notice}"
+    );
+    assert!(notice.ends_with("Error: `provider_failed`: The synthetic provider failed."));
+
+    assert_eq!(sidebar(&h.app, &main).await, json!({ "kind": "failed" }));
+    let considered: i64 = sqlx::query_scalar(
+        "SELECT max(considered_through_turn) FROM provider_sessions s
+         JOIN turns t ON t.conversation_id = s.conversation_id WHERE t.id = ?1",
+    )
+    .bind(retry)
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    let retry_no: i64 = sqlx::query_scalar("SELECT turn_no FROM turns WHERE id = ?1")
+        .bind(retry)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert!(considered < retry_no, "warm sessions replay the notice");
+    let (partial_seq, partial_bytes): (i64, i64) = sqlx::query_as(
+        "SELECT seq, length(CAST(text AS BLOB)) FROM items
+         WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq LIMIT 1",
+    )
+    .bind(retry)
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    h.app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/read"),
+            Some(json!({ "action": "through",
+                         "position": { "item_seq": partial_seq, "text_bytes": partial_bytes } })),
+        )
+        .await;
+    assert_eq!(
+        sidebar(&h.app, &main).await,
+        json!({ "kind": "failed" }),
+        "reading partial output leaves the notice unseen"
+    );
+    let state = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}"), None)
+        .await
+        .body["bot"]["read_state"]
+        .clone();
+    assert_eq!(state["unread"], true, "the notice is a new reply");
+    let read = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/read"),
+            Some(json!({ "action": "through", "position": state["latest"]["position"] })),
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(
+        sidebar(&h.app, &main).await,
+        Value::Null,
+        "read failures clear"
+    );
+
+    let dismissed = h
+        .app
+        .owner(
+            "PATCH",
+            &format!("/v1/bots/{main}/routines/{id}"),
+            Some(json!({ "dismiss_failures": true })),
+        )
+        .await;
+    assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
+    assert_eq!(dismissed.body["routine"]["failed_runs"], 0);
+    assert_eq!(dismissed.body["routine"]["enabled"], true);
+}
+
+#[tokio::test]
+async fn a_failure_covered_by_a_stop_is_reported_but_never_retried() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
+    sqlx::query(
+        "INSERT INTO request_receipts
+             (request_id, operation, bot_id, payload_hash, state, boundary_turn_no)
+         SELECT randomblob(16), 'cancel', bot_id, randomblob(32), 'done', last_turn_no + 1
+         FROM conversations WHERE bot_id = ?1 AND kind = 'owner'",
+    )
+    .bind(main.parse::<Uuid>().unwrap())
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 1).await;
+    assert_eq!(routine["enabled"], true);
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 1, "the owner's Stop is not undone by a retry");
+    let notice = replies(&h.app, all[0].0.unwrap()).await.pop().unwrap();
+    assert!(
+        notice.contains("I couldn't retry it right away."),
+        "{notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_routine_that_keeps_failing_is_paused_until_turned_back_on() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
+    let limit = else_api::app::routine_failures::MAX_FAILED_RUNS;
+    set_failed_runs(&h.app, &id, limit - 1).await;
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["paused_reason"] == "repeated").await;
+    assert_eq!(routine["enabled"], false);
+    assert_eq!(routine["next_run_at"], Value::Null);
+    assert_eq!(routine["failed_runs"], limit);
+    assert_eq!(runs(&h.app, &id).await.len(), 2, "retried before pausing");
+    let retry = runs(&h.app, &id).await[1].0.unwrap();
+    let notice = replies(&h.app, retry).await.pop().unwrap();
+    assert!(
+        notice.starts_with(&format!(
+            "I paused the routine **Tickets** after {limit} failed runs in a row. The last one \
+             failed because the AI provider reported an error."
+        )),
+        "{notice}"
+    );
+    let far = Utc::now() + chrono::Duration::days(3650);
+    assert_eq!(fire(&h.app, far).await, 0, "paused routines never run");
+
+    let resumed = set_enabled(&h.app, &main, &id, true).await;
+    assert_eq!(resumed.status, StatusCode::OK, "{}", resumed.body);
+    assert_eq!(resumed.body["routine"]["failed_runs"], 0);
+    assert_eq!(resumed.body["routine"]["paused_reason"], Value::Null);
+    assert!(at(&resumed.body["routine"]["next_run_at"]) > Utc::now());
+}
+
+#[tokio::test]
+async fn a_failure_retrying_cannot_fix_pauses_at_once_and_says_why() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:policy] check the servers").await;
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["paused_reason"] == "needs_action").await;
+    assert_eq!(routine["enabled"], false);
+    assert_eq!(routine["failed_runs"], 1);
+    assert_eq!(routine["last_run"]["status"], "failed");
+    assert_eq!(routine["last_run"]["error"]["code"], "policy_violation");
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 1, "never retried");
+    let notice = replies(&h.app, all[0].0.unwrap()).await;
+    assert_eq!(notice.len(), 1);
+    assert!(
+        notice[0].starts_with(
+            "I paused the routine **Tickets** because it tried to use a tool it is not allowed \
+             to use. Retrying won't fix this"
+        ),
+        "{}",
+        notice[0]
+    );
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await
+        .body;
+    assert!(
+        snapshot["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "assistant" && i["text"] == notice[0].as_str()),
+        "the notice is in the transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_successful_run_forgets_earlier_failures() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "Collect the build results.").await;
+    set_failed_runs(&h.app, &id, 2).await;
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 0).await;
+    assert_eq!(routine["last_run"]["status"], "completed");
+    assert_eq!(routine["enabled"], true);
+    assert_eq!(runs(&h.app, &id).await.len(), 1);
 }
 
 #[tokio::test]
@@ -911,7 +1162,8 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     for _ in 0..200 {
         let busy: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
-             OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)",
+             OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)
+             OR EXISTS (SELECT 1 FROM routine_runs WHERE turn_id IS NOT NULL AND NOT reviewed)",
         )
         .fetch_one(&h.app.db.pool)
         .await
@@ -1375,4 +1627,115 @@ async fn the_routines_migration_preserves_existing_data() {
         .execute(&db.pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn the_failures_migration_keeps_a_failed_last_run_visible_and_never_reviews_history() {
+    let db = TestDb::empty().await;
+    let dir = tempfile::tempdir().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let migrate = |dir: &std::path::Path| {
+        let dir = dir.to_owned();
+        let pool = db.pool.clone();
+        async move {
+            sqlx::migrate::Migrator::new(dir.as_path())
+                .await
+                .unwrap()
+                .run(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let mut names: Vec<_> = std::fs::read_dir(&source)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".sql") && name.as_str() < "0031")
+        .collect();
+    names.sort();
+    for name in &names {
+        std::fs::copy(source.join(name), dir.path().join(name)).unwrap();
+    }
+    migrate(dir.path()).await;
+    let bot = Uuid::new_v4();
+    for sql in [
+        "INSERT INTO bots (id, name) VALUES (?1, 'Assistant')",
+        "INSERT INTO conversations (id, bot_id) VALUES (randomblob(16), ?1)",
+    ] {
+        sqlx::query(sql).bind(bot).execute(&db.pool).await.unwrap();
+    }
+    for (turn_no, status, routine) in [
+        (1, "completed", "Fine"),
+        (2, "failed", "Broken"),
+        (3, "queued", "Pending"),
+    ] {
+        let turn = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+                 owner_item_id, provider_id, status)
+             SELECT ?1, ?2, c.id, ?1, ?3, ?4, randomblob(16), 'synthetic', ?5
+             FROM conversations c WHERE c.bot_id = ?2",
+        )
+        .bind(turn)
+        .bind(bot)
+        .bind(vec![1u8; 32])
+        .bind(turn_no)
+        .bind(status)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
+                 created_turn_id, created_name, request_hash)
+             SELECT ?1, ?2, c.id, ?3, 'do it', '0 * * * *', 'UTC', ?4, ?3, ?5
+             FROM conversations c WHERE c.bot_id = ?2",
+        )
+        .bind(id)
+        .bind(bot)
+        .bind(routine)
+        .bind(turn)
+        .bind(vec![2u8; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id)
+             VALUES (randomblob(16), ?1, '2026-11-08T03:00:00.000+00:00', ?2, ?3)",
+        )
+        .bind(id)
+        .bind(routine)
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    std::fs::copy(
+        source.join("0031_routine_failures.sql"),
+        dir.path().join("0031_routine_failures.sql"),
+    )
+    .unwrap();
+    migrate(dir.path()).await;
+    let failed: Vec<(String, i64)> =
+        sqlx::query_as("SELECT name, failed_runs FROM routines ORDER BY name")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        failed,
+        [
+            ("Broken".into(), 1),
+            ("Fine".into(), 0),
+            ("Pending".into(), 0)
+        ]
+    );
+    let unreviewed: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM routine_runs WHERE NOT reviewed")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        unreviewed,
+        ["Pending"],
+        "an unfinished run is reviewed when it ends"
+    );
 }

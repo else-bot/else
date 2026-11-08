@@ -13,6 +13,7 @@
 //! - `[synthetic:stall-send]` marks delivery as started, then waits until
 //!   cancelled without acknowledging (a crash here leaves delivery unknown).
 //! - `[synthetic:refuse]` fails before delivery (nothing was sent).
+//! - `[synthetic:policy]` fails before delivery with a policy violation.
 //! - `[synthetic:messages]` follows the reply with a second message.
 //!
 //! Like a host adapter it keeps a native session per conversation (resumed
@@ -153,6 +154,12 @@ impl Provider for Synthetic {
 
     async fn run(&self, input: TurnInput, sink: &dyn TurnSink, stop: Stop) -> TurnOutcome {
         let cancel = stop.token();
+        if input.text.contains("[synthetic:policy]") {
+            return TurnOutcome::Failed {
+                code: "policy_violation".into(),
+                message: "The synthetic provider attempted a forbidden tool.".into(),
+            };
+        }
         if input.text.contains("[synthetic:refuse]") {
             return TurnOutcome::Failed {
                 code: "provider_refused".into(),

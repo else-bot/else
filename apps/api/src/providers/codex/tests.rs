@@ -365,6 +365,7 @@ fn fake_codex_with(
     let export_fails = dir.join("export-fails");
     let ignore_catalog = dir.join("ignore-catalog");
     let one_model = dir.join("one-model");
+    let long_history = dir.join("long-history");
     let catalog = json!({
         "models": MODELS.iter().chain(&["hidden-model"]).map(|slug| json!({
             "slug": slug,
@@ -413,7 +414,8 @@ for line in sys.stdin:
     elif method == "model/list": r = {{"data": [{{"id": s, "model": s}} for s in models], "nextCursor": None}}
     elif method in ("thread/start", "thread/resume"):
         with open({threads:?}, "a") as f: f.write(json.dumps(p) + "\n")
-        r = {{"thread": {{"id": p.get("threadId", "fresh-thread")}}}}
+        turns = [{{"id": "old", "items": [{{"type": "agentMessage", "text": "x" * (9 << 20)}}]}}] if method == "thread/resume" and os.path.exists({long_history:?}) and not p.get("excludeTurns") else []
+        r = {{"thread": {{"id": p.get("threadId", "fresh-thread"), "turns": turns}}}}
     elif method == "turn/start":
         with open({received:?}, "a") as f: f.write(json.dumps(p["input"][0]["text"]) + "\n")
         with open({inputs:?}, "a") as f: f.write(json.dumps(p["input"]) + "\n")
@@ -740,6 +742,30 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
         assert_eq!(state.native_id, native);
         assert_eq!(state.memory_revision, Some(7));
     }
+}
+
+#[tokio::test]
+async fn a_thread_whose_history_outgrew_the_line_limit_still_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (codex, _) = fake_codex(dir.path());
+    std::fs::write(dir.path().join("long-history"), "").unwrap();
+    let mut turn = turn_from(crate::app::providers::Origin::RoutineRun);
+    let fingerprint = codex.fingerprint_of(
+        turn.profile.as_ref().unwrap(),
+        &turn,
+        "chatgpt:o@example.test",
+    );
+    turn.session = Some(SessionState {
+        native_id: "warm-thread".into(),
+        fingerprint,
+        considered_through_turn: 2,
+        memory_revision: None,
+        default_skills: Default::default(),
+    });
+    let sink = super::super::recording::Recorded::default();
+    let outcome = codex.run(turn, &sink, Stop::default()).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(sink.last_session().native_id, "warm-thread");
 }
 
 #[tokio::test]
