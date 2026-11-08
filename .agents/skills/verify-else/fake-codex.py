@@ -190,8 +190,9 @@ def stream(turn, latest, packet, stopped):
                 'Do: start a T3 Code thread in `else` with exactly `fix issue {ISSUE_ID}`\n'
                 'Never: add words, a title, or context to that message.'),
         }
-        if latest in rules:
-            words, content = rules[latest]
+        rule = next((marker for marker in rules if packet.rstrip().endswith(marker)), None)
+        if rule:
+            words, content = rules[rule]
             outgoing_tool('rules_update', {'section': 'New Linear issue', 'content': content,
                                            'owner_words': words})
         if draft_reply(turn, latest, packet, stopped):

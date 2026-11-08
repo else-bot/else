@@ -13,8 +13,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, Size, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -111,8 +111,8 @@ fn chip(text: impl Into<SharedString>, cx: &App) -> Div {
 fn accent_chip(text: impl Into<SharedString>, cx: &App) -> Div {
     let theme = cx.theme();
     chip(text, cx)
-        .bg(theme.accent.opacity(0.14))
-        .text_color(theme.accent)
+        .bg(theme.primary.opacity(0.14))
+        .text_color(theme.primary)
 }
 
 fn dot(cx: &App) -> Div {
@@ -120,7 +120,7 @@ fn dot(cx: &App) -> Div {
         .flex_none()
         .size(px(6.))
         .rounded_full()
-        .bg(cx.theme().accent)
+        .bg(cx.theme().primary)
 }
 
 /// One line of a rule: a leading `Label:` reads as a small caps label and
@@ -587,40 +587,53 @@ impl ElseApp {
         let rows = file.sections.iter().enumerate().map(|(ix, section)| {
             let title = section.title.clone();
             let fresh = changed.contains(&section.title.to_lowercase());
-            v_flex()
-                .id(("rule", ix))
+            div()
                 .w_full()
-                .px_2p5()
-                .py_2()
-                .gap_0p5()
                 .rounded(theme.radius)
                 .bg(theme.secondary)
-                .cursor_pointer()
-                .hover(|row| row.bg(theme.secondary_hover))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.open_rules(bot, Some(title.clone()), RulesTab::Rules, window, cx)
-                }))
                 .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .when(fresh, |row| row.child(dot(cx)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(section.title.clone()),
-                        ),
-                )
-                .child(
-                    div()
+                    Button::new(("rule", ix))
+                        .ghost()
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .with_size(Size::Size(px(16.)))
                         .w_full()
-                        .truncate()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(summary(section)),
+                        .px_2p5()
+                        .py_2()
+                        .accessibility_label(format!("Open rule {}", section.title))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.open_rules(bot, Some(title.clone()), RulesTab::Rules, window, cx)
+                        }))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .items_start()
+                                .text_left()
+                                .child(
+                                    h_flex()
+                                        .gap_1p5()
+                                        .items_center()
+                                        .when(fresh, |row| row.child(dot(cx)))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(section.title.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(summary(section)),
+                                ),
+                        ),
                 )
         });
         let latest = file.history.first().map(|v| {
@@ -725,7 +738,8 @@ impl ElseApp {
                     .small()
                     .focus_ring(false)
                     .cursor_pointer()
-                    .label(format!("Ask {name} to edit"))
+                    .label("Ask to edit")
+                    .accessibility_label(format!("Ask {name} to edit a rule"))
                     .on_click(on(owner, move |app, window, cx| {
                         app.ask_to_edit(focus.clone(), window, cx)
                     })),
@@ -784,29 +798,28 @@ impl ElseApp {
             .children(file.sections.iter().enumerate().map(|(ix, section)| {
                 let title = section.title.clone();
                 let selected = focus.as_deref() == Some(section.title.to_lowercase().as_str());
-                h_flex()
-                    .id(("rules-outline", ix))
-                    .gap_1p5()
-                    .items_center()
-                    .px_2()
-                    .py_1()
-                    .rounded(theme.radius)
+                let fresh = changed.contains(&section.title.to_lowercase());
+                Button::new(("rules-outline", ix))
+                    .ghost()
+                    .small()
+                    .focus_ring(false)
                     .cursor_pointer()
-                    .text_xs()
-                    .when(selected, |row| {
-                        row.bg(theme.secondary)
-                            .text_color(theme.foreground)
-                            .font_weight(FontWeight::SEMIBOLD)
-                    })
-                    .when(!selected, |row| row.text_color(theme.muted_foreground))
-                    .hover(|row| row.bg(theme.secondary))
+                    .w_full()
+                    .selected(selected)
+                    .accessibility_label(format!("Show rule {}", section.title))
                     .on_click(on(owner, move |app, _, cx| {
                         app.focus_rule(title.clone(), cx)
                     }))
-                    .when(changed.contains(&section.title.to_lowercase()), |row| {
-                        row.child(dot(cx))
-                    })
-                    .child(div().min_w_0().truncate().child(section.title.clone()))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1p5()
+                            .items_center()
+                            .text_xs()
+                            .when(fresh, |row| row.child(dot(cx)))
+                            .child(div().min_w_0().truncate().child(section.title.clone())),
+                    )
             }));
         let sections = file.sections.iter().map(|section| {
             let focused = focus.as_deref() == Some(section.title.to_lowercase().as_str());
@@ -824,9 +837,9 @@ impl ElseApp {
                 .rounded(theme.radius)
                 .when(focused, |block| {
                     block
-                        .bg(theme.accent.opacity(0.08))
+                        .bg(theme.primary.opacity(0.08))
                         .border_1()
-                        .border_color(theme.accent.opacity(0.25))
+                        .border_color(theme.primary.opacity(0.25))
                 })
                 .child(
                     h_flex()
@@ -930,33 +943,42 @@ impl ElseApp {
                 let (title, meta) = describe(v);
                 let selected = v.version == picked.version;
                 let version = v.version;
-                v_flex()
-                    .id(("rules-version", version as u64))
+                Button::new(("rules-version", version as usize))
+                    .ghost()
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .with_size(Size::Size(px(16.)))
+                    .w_full()
                     .px_2()
                     .py_1p5()
-                    .rounded(theme.radius)
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(theme.secondary))
-                    .hover(|row| row.bg(theme.secondary))
+                    .selected(selected)
+                    .accessibility_label(format!("Show version {version}"))
                     .on_click(on(owner, move |app, _, cx| {
                         app.pick_rules_version(version, cx)
                     }))
                     .child(
-                        h_flex()
-                            .gap_1p5()
-                            .text_xs()
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_start()
+                            .text_left()
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(format!("v{version}")),
+                                    )
+                                    .child(div().min_w_0().truncate().child(title)),
+                            )
                             .child(
                                 div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("v{version}")),
-                            )
-                            .child(div().min_w_0().truncate().child(title)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(meta),
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(meta),
+                            ),
                     )
             }));
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
@@ -1039,7 +1061,7 @@ impl ElseApp {
                 div()
                     .min_h(px(16.))
                     .whitespace_normal()
-                    .when(heading, |line| line.text_color(theme.accent))
+                    .when(heading, |line| line.text_color(theme.primary))
                     .child(line.to_owned())
             }))
             .into_any_element()
