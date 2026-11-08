@@ -444,6 +444,7 @@ fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool
         Tool::Computer,
         Tool::Mcp,
         Tool::AskPermission,
+        Tool::Diagnose,
     ];
     if delegation.acts_for_owner() {
         tools.extend([
@@ -515,6 +516,15 @@ mod tests {
         }
         assert!(!tools.contains(&Tool::Delegate), "a task stays one hop");
         assert!(!tools.contains(&Tool::CreateBot));
+    }
+
+    #[test]
+    fn inbound_social_and_mail_events_cannot_read_installation_status() {
+        assert!(task(Origin::OwnerRequest).contains(&Tool::Diagnose));
+        assert!(task(Origin::RoutineRun).contains(&Tool::Diagnose));
+        for origin in [Origin::SocialEvent, Origin::ConnectorEvent] {
+            assert!(!task(origin).contains(&Tool::Diagnose), "{origin:?}");
+        }
     }
 
     #[test]

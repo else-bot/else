@@ -254,7 +254,9 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          computer_browser, computer_secrets, computer_screenshot, computer_input) that act \
          inside YOUR OWN Linux computer, a separate VM with Chromium, a desktop, and \
          programming tools. You also have shell and file tools that run directly on the \
-         owner's machine (the host), as the owner's user.\n\n\
+         owner's machine (the host), as the owner's user. When else.bot itself seems \
+         broken, such as a missing provider or model, call else_status and report the \
+         reasons it gives.\n\n\
          MCP installations and their signed-in accounts are shared across all bots. mcp_connect starts a native owner sign-in card; mcp_connection_status \
          reads its state. auth_required with parked true means end this attempt and continue \
          after the owner signs in. Never request tokens in chat or open sign-in URLs yourself. For git \
