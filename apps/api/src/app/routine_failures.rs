@@ -3,8 +3,8 @@
 //! A run that fails for a reason that may pass (the provider was briefly
 //! unreachable, else.bot restarted) is retried once at once. If the retry
 //! fails too, the owner is told and the next scheduled run tries again. A
-//! run that fails for a reason retrying cannot fix (a refused request, a
-//! policy violation, invalid model settings), or a routine whose scheduled
+//! run that fails for a reason retrying cannot fix (a policy violation,
+//! invalid model settings, a reply else.bot cannot read), or a routine whose scheduled
 //! runs keep failing, is paused and the owner is told why. An uncertain run
 //! may have done part of its work, so it is never retried automatically.
 
@@ -86,7 +86,8 @@ const CODES: &[Code] = &[
     },
     Code {
         code: "provider_refused",
-        cause: Cause::NeedsAction,
+        // Covers overload and usage-limit rejections as well as refusals.
+        cause: Cause::Transient,
         explanation: "the AI provider refused the request",
     },
     Code {
@@ -302,7 +303,7 @@ mod tests {
 
     #[test]
     fn an_error_retrying_cannot_fix_pauses_at_once() {
-        for code in ["provider_refused", "policy_violation", "invalid_profile"] {
+        for code in ["provider_protocol", "policy_violation", "invalid_profile"] {
             assert_eq!(
                 react(Ended::Failed { code }, FRESH),
                 Reaction::Pause(Pause::NeedsAction),

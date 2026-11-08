@@ -1680,8 +1680,6 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     }
 }
 
-/// The routine's last run, and whether it needs the owner's attention: a
-/// pause, or failures not yet dismissed.
 fn last_run(routine: &Routine) -> Option<(String, bool)> {
     let run = routine.last_run.as_ref()?;
     let when = local_time(run.due_at, &routine.timezone);

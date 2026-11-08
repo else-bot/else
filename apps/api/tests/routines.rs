@@ -930,6 +930,41 @@ async fn a_transient_failure_is_retried_once_then_reported_until_dismissed() {
     assert!(notice.ends_with("Error: `provider_failed`: The synthetic provider failed."));
 
     assert_eq!(sidebar(&h.app, &main).await, json!({ "kind": "failed" }));
+    let considered: i64 = sqlx::query_scalar(
+        "SELECT max(considered_through_turn) FROM provider_sessions s
+         JOIN turns t ON t.conversation_id = s.conversation_id WHERE t.id = ?1",
+    )
+    .bind(retry)
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    let retry_no: i64 = sqlx::query_scalar("SELECT turn_no FROM turns WHERE id = ?1")
+        .bind(retry)
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert!(considered < retry_no, "warm sessions replay the notice");
+    let (partial_seq, partial_bytes): (i64, i64) = sqlx::query_as(
+        "SELECT seq, length(CAST(text AS BLOB)) FROM items
+         WHERE turn_id = ?1 AND kind = 'assistant' ORDER BY seq LIMIT 1",
+    )
+    .bind(retry)
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    h.app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/read"),
+            Some(json!({ "action": "through",
+                         "position": { "item_seq": partial_seq, "text_bytes": partial_bytes } })),
+        )
+        .await;
+    assert_eq!(
+        sidebar(&h.app, &main).await,
+        json!({ "kind": "failed" }),
+        "reading partial output leaves the notice unseen"
+    );
     let state = h
         .app
         .owner("GET", &format!("/v1/bots/{main}"), None)
@@ -963,6 +998,33 @@ async fn a_transient_failure_is_retried_once_then_reported_until_dismissed() {
     assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
     assert_eq!(dismissed.body["routine"]["failed_runs"], 0);
     assert_eq!(dismissed.body["routine"]["enabled"], true);
+}
+
+#[tokio::test]
+async fn a_failure_covered_by_a_stop_is_reported_but_never_retried() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:fail] update the tickets").await;
+    sqlx::query(
+        "INSERT INTO request_receipts
+             (request_id, operation, bot_id, payload_hash, state, boundary_turn_no)
+         SELECT randomblob(16), 'cancel', bot_id, randomblob(32), 'done', last_turn_no + 1
+         FROM conversations WHERE bot_id = ?1 AND kind = 'owner'",
+    )
+    .bind(main.parse::<Uuid>().unwrap())
+    .execute(&h.app.db.pool)
+    .await
+    .unwrap();
+    fire(&h.app, due).await;
+    let routine = wait_routine(&h.app, &main, |r| r["failed_runs"] == 1).await;
+    assert_eq!(routine["enabled"], true);
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 1, "the owner's Stop is not undone by a retry");
+    let notice = replies(&h.app, all[0].0.unwrap()).await.pop().unwrap();
+    assert!(
+        notice.contains("I couldn't retry it right away."),
+        "{notice}"
+    );
 }
 
 #[tokio::test]
@@ -1001,21 +1063,21 @@ async fn a_routine_that_keeps_failing_is_paused_until_turned_back_on() {
 async fn a_failure_retrying_cannot_fix_pauses_at_once_and_says_why() {
     let h = harness().await;
     let main = h.app.main_bot().await;
-    let (id, due) = failing_routine(&h, &main, "[synthetic:refuse] check the servers").await;
+    let (id, due) = failing_routine(&h, &main, "[synthetic:policy] check the servers").await;
     fire(&h.app, due).await;
     let routine = wait_routine(&h.app, &main, |r| r["paused_reason"] == "needs_action").await;
     assert_eq!(routine["enabled"], false);
     assert_eq!(routine["failed_runs"], 1);
     assert_eq!(routine["last_run"]["status"], "failed");
-    assert_eq!(routine["last_run"]["error"]["code"], "provider_refused");
+    assert_eq!(routine["last_run"]["error"]["code"], "policy_violation");
     let all = runs(&h.app, &id).await;
     assert_eq!(all.len(), 1, "never retried");
     let notice = replies(&h.app, all[0].0.unwrap()).await;
     assert_eq!(notice.len(), 1);
     assert!(
         notice[0].starts_with(
-            "I paused the routine **Tickets** because the AI provider refused the request. \
-             Retrying won't fix this"
+            "I paused the routine **Tickets** because it tried to use a tool it is not allowed \
+             to use. Retrying won't fix this"
         ),
         "{}",
         notice[0]
@@ -1100,7 +1162,8 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
     for _ in 0..200 {
         let busy: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM turns WHERE status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
-             OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)",
+             OR EXISTS (SELECT 1 FROM bots WHERE cancel_pending)
+             OR EXISTS (SELECT 1 FROM routine_runs WHERE turn_id IS NOT NULL AND NOT reviewed)",
         )
         .fetch_one(&h.app.db.pool)
         .await
@@ -1600,7 +1663,11 @@ async fn the_failures_migration_keeps_a_failed_last_run_visible_and_never_review
     ] {
         sqlx::query(sql).bind(bot).execute(&db.pool).await.unwrap();
     }
-    for (turn_no, status, routine) in [(1, "completed", "Fine"), (2, "failed", "Broken")] {
+    for (turn_no, status, routine) in [
+        (1, "completed", "Fine"),
+        (2, "failed", "Broken"),
+        (3, "queued", "Pending"),
+    ] {
         let turn = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
@@ -1653,11 +1720,22 @@ async fn the_failures_migration_keeps_a_failed_last_run_visible_and_never_review
             .fetch_all(&db.pool)
             .await
             .unwrap();
-    assert_eq!(failed, [("Broken".into(), 1), ("Fine".into(), 0)]);
-    let unreviewed: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM routine_runs WHERE NOT reviewed")
-            .fetch_one(&db.pool)
+    assert_eq!(
+        failed,
+        [
+            ("Broken".into(), 1),
+            ("Fine".into(), 0),
+            ("Pending".into(), 0)
+        ]
+    );
+    let unreviewed: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM routine_runs WHERE NOT reviewed")
+            .fetch_all(&db.pool)
             .await
             .unwrap();
-    assert_eq!(unreviewed, 0);
+    assert_eq!(
+        unreviewed,
+        ["Pending"],
+        "an unfinished run is reviewed when it ends"
+    );
 }

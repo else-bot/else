@@ -9,8 +9,11 @@ ALTER TABLE routines ADD COLUMN paused_reason TEXT
 ALTER TABLE routine_runs ADD COLUMN retry_of BLOB REFERENCES routine_runs (id);
 ALTER TABLE routine_runs ADD COLUMN reviewed INTEGER NOT NULL DEFAULT false;
 
--- Runs that ended before this release are history: never retried or reported.
-UPDATE routine_runs SET reviewed = true;
+-- Runs that ended before this release are history: never retried or
+-- reported. Runs still queued or running are reviewed when they end.
+UPDATE routine_runs SET reviewed = true
+WHERE turn_id IS NULL OR turn_id IN (
+    SELECT id FROM turns WHERE status IN ('completed', 'interrupted', 'failed', 'uncertain'));
 
 -- A routine whose last run already failed shows that failure until it is
 -- dismissed, re-enabled, or a run succeeds.

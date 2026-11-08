@@ -49,6 +49,20 @@ async fn create(
 }
 
 async fn fire(app: &TestApp, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
+    for _ in 0..400 {
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+                            WHERE NOT rr.reviewed
+                              AND t.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
+        )
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if !pending {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     routines::admit_due(&app.db.pool, app.scheduler.registry(), now, 8)
         .await
         .unwrap();

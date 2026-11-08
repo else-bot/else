@@ -620,6 +620,7 @@ pub async fn review_ended(
 struct EndedRun {
     routine_id: Uuid,
     turn_id: Uuid,
+    turn_no: i64,
     due_at: DateTime<Utc>,
     retry: bool,
     status: String,
@@ -648,12 +649,19 @@ async fn review(
     use crate::app::routine_failures::{self, Ended, Notice, Pause, Reaction, Run};
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<EndedRun> = sqlx::query_as(
-        "SELECT rr.routine_id, rr.turn_id, rr.due_at, rr.retry_of IS NOT NULL AS retry,
+        "SELECT rr.routine_id, rr.turn_id, t.turn_no, rr.due_at, rr.retry_of IS NOT NULL AS retry,
                 t.status, t.error_code, t.error_message,
                 r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
                 r.enabled, r.next_due_at, r.model, r.failed_runs,
                 r.deleted_at IS NULL AND b.status = 'active' AS live,
-                NOT b.cancel_pending AS may_retry
+                NOT b.cancel_pending AND NOT EXISTS (
+                    SELECT 1 FROM request_receipts s WHERE s.operation = 'cancel'
+                      AND s.bot_id = r.bot_id AND s.boundary_turn_no >= t.turn_no)
+                AND NOT EXISTS (
+                    SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                    WHERE x.routine_id = r.id AND x.id <> rr.id
+                      AND u.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain'))
+                    AS may_retry
          FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
          JOIN routines r ON r.id = rr.routine_id JOIN bots b ON b.id = r.bot_id
          WHERE rr.id = ?1 AND NOT rr.reviewed",
@@ -800,6 +808,16 @@ async fn review(
         .bind(&text)
         .execute(&mut *tx)
         .await?;
+        // Warm sessions already considered this turn; rewind them so their
+        // next turn sees the notice.
+        sqlx::query(
+            "UPDATE provider_sessions SET considered_through_turn = ?2 - 1
+             WHERE conversation_id = ?1 AND status = 'active' AND considered_through_turn >= ?2",
+        )
+        .bind(run.conversation_id)
+        .bind(run.turn_no)
+        .execute(&mut *tx)
+        .await?;
         events::item_upsert(&mut tx, run.bot_id, item_id).await?;
         events::bot_updated(&mut tx, run.bot_id).await?;
     }
@@ -807,8 +825,9 @@ async fn review(
     Ok(false)
 }
 
-/// Admit up to `limit` routines due at `now`. Returns how many turns were
-/// queued. The caller holds a maintenance admission.
+/// Admit up to `limit` routines due at `now`. A routine whose ended run
+/// awaits [`review_ended`] waits for it, so a retry precedes the next
+/// occurrence. Returns how many turns were queued. The caller holds a maintenance admission.
 pub async fn admit_due(
     pool: &SqlitePool,
     registry: &Registry,
@@ -819,6 +838,9 @@ pub async fn admit_due(
         "SELECT r.id FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.next_due_at IS NOT NULL AND r.next_due_at <= ?1
            AND b.status = 'active' AND NOT b.cancel_pending
+           AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                           WHERE x.routine_id = r.id AND NOT x.reviewed
+                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))
          ORDER BY r.next_due_at, r.id LIMIT ?2",
     )
     .bind(ts(now))
@@ -1000,7 +1022,10 @@ async fn admit(
                 r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
-           AND b.status = 'active' AND NOT b.cancel_pending",
+           AND b.status = 'active' AND NOT b.cancel_pending
+           AND NOT EXISTS (SELECT 1 FROM routine_runs x JOIN turns u ON u.id = x.turn_id
+                           WHERE x.routine_id = r.id AND NOT x.reviewed
+                             AND u.status IN ('completed', 'interrupted', 'failed', 'uncertain'))",
     )
     .bind(id)
     .bind(ts(now))
