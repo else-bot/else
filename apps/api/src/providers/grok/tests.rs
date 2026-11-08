@@ -182,6 +182,11 @@ fn a_grok_that_fails_before_opening_a_session_reports_its_own_error() {
     let mut t = tracker(true);
     assert_eq!(t.on(&unopened), Ok(vec![]));
     assert!(t.on(&output).is_err(), "no output without a session");
+    let tool_call = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"run_terminal_command","id":"c1","input":{}}]}});
+    assert!(
+        t.on(&tool_call).is_err(),
+        "no tool call after Grok reported no session"
+    );
     let Some(Event::Finished(terminal)) = t.on(&failed).unwrap().pop() else {
         panic!("terminal");
     };
