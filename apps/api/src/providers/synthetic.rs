@@ -176,6 +176,7 @@ impl Provider for Synthetic {
             })
             .await;
         let skills = super::default_skills::for_session(resumed.as_ref());
+        let context = super::context::for_session(&input, resumed.as_ref());
         let mut state = match resumed {
             Some(session) => session.clone(),
             None => SessionState {
@@ -184,13 +185,19 @@ impl Provider for Synthetic {
                 considered_through_turn: 0,
                 memory_revision: None,
                 default_skills: Default::default(),
+                context: Default::default(),
             },
         };
         if sink.session(&state).await.is_err() {
             return TurnOutcome::Interrupted;
         }
-        let (packet, selection) =
-            super::prompt::turn_packet(&input, state.considered_through_turn, None, &skills);
+        let (packet, selection) = super::prompt::turn_packet(
+            &input,
+            state.considered_through_turn,
+            None,
+            &skills,
+            &context,
+        );
         if sink.packet(&selection, &packet).await.is_err() {
             return TurnOutcome::Interrupted;
         }
@@ -215,6 +222,7 @@ impl Provider for Synthetic {
             return TurnOutcome::Interrupted;
         }
         state.default_skills = skills.applied;
+        state.context = context.applied;
         state.considered_through_turn = input.turn_no;
         let _ = sink.session(&state).await;
         if input.text.contains("[synthetic:fail]") {

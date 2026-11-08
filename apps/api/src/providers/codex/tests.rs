@@ -75,26 +75,52 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
         text: None,
         applied: Default::default(),
     };
-    let recorded = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+    let recorded = prompt::turn_packet(
+        &turn,
+        turn.turn_no,
+        None,
+        &skills,
+        &crate::providers::context::for_session(&turn, None),
+    )
+    .0;
     assert!(recorded.contains("Manage Tailscale"));
     assert!(recorded.contains("SSH host omarchy-m1"));
     assert!(!recorded.contains("Continue the owner's request with these results."));
     turn.standing_permissions.clear();
-    let revoked = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+    let revoked = prompt::turn_packet(
+        &turn,
+        turn.turn_no,
+        None,
+        &skills,
+        &crate::providers::context::for_session(&turn, None),
+    )
+    .0;
     assert!(revoked.contains("Current saved scopes that apply to this request: []"));
     assert!(!revoked.contains("Manage Tailscale"));
     turn.delegation.delegated_task = true;
     assert!(
-        prompt::turn_packet(&turn, turn.turn_no, None, &skills)
-            .0
-            .contains("[else.bot saved permissions]"),
+        prompt::turn_packet(
+            &turn,
+            turn.turn_no,
+            None,
+            &skills,
+            &crate::providers::context::for_session(&turn, None)
+        )
+        .0
+        .contains("[else.bot saved permissions]"),
         "work delegated for an owner request sees its task scopes"
     );
     turn.delegation.origin = crate::app::providers::Origin::RoutineRun;
     assert!(
-        !prompt::turn_packet(&turn, turn.turn_no, None, &skills)
-            .0
-            .contains("[else.bot saved permissions]")
+        !prompt::turn_packet(
+            &turn,
+            turn.turn_no,
+            None,
+            &skills,
+            &crate::providers::context::for_session(&turn, None)
+        )
+        .0
+        .contains("[else.bot saved permissions]")
     );
 }
 
@@ -707,6 +733,7 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
         considered_through_turn: 2,
         memory_revision,
         default_skills: Default::default(),
+        context: Default::default(),
     };
     let current = super::super::default_skills::for_session(None).applied;
     let mut up_to_date = warm(Some(7));
@@ -762,6 +789,7 @@ async fn a_thread_whose_history_outgrew_the_line_limit_still_resumes() {
         considered_through_turn: 2,
         memory_revision: None,
         default_skills: Default::default(),
+        context: Default::default(),
     });
     let sink = super::super::recording::Recorded::default();
     let outcome = codex.run(turn, &sink, Stop::default()).await;
@@ -834,6 +862,8 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
         .split_once("[end else.bot default skills]\n\n")
         .unwrap();
     assert!(skills.contains("Default skill `unslop`"));
+    let (context, message) = message.rsplit_once("\n\n").unwrap();
+    assert!(context.starts_with("[else.bot bot registry]"));
     assert_eq!(
         message,
         format!("Compare {}", prompt::file_reference(&image.attachment))
@@ -889,7 +919,7 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
         service_tier: "priority".into(),
     };
     [
-        (Origin::OwnerRequest, "8c9d677d127dc8fb8c9f51ad2355ce67"),
+        (Origin::OwnerRequest, "b8476016bc2f50017afa59f34bc59319"),
         (Origin::ConnectorEvent, "1d6526df992b7acc30250c1342056776"),
     ]
     .map(|(origin, expected)| {

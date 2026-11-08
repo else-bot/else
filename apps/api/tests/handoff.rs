@@ -90,8 +90,8 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         "a resumed session gets no history"
     );
     assert!(
-        resumed.contains("[else.bot saved permissions]"),
-        "{resumed}"
+        !resumed.contains("[else.bot saved permissions]"),
+        "a resumed session already holds the unchanged permissions: {resumed}"
     );
 
     let (t3, status) = say(&app, &bot, B, "Third, on B: what is the code word?").await;
@@ -127,8 +127,8 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     assert!(resumed.ends_with("Fourth, still B."), "{resumed}");
     assert!(!resumed.contains("Third, on B:"), "{resumed}");
     assert!(
-        resumed.contains("[else.bot saved permissions]"),
-        "{resumed}"
+        !resumed.contains("[else.bot saved permissions]"),
+        "a resumed session already holds the unchanged permissions: {resumed}"
     );
 
     let a_before = a.packets().await.len();

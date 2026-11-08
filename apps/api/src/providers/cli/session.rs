@@ -7,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::app::providers::{Fenced, Profile, Selection, SessionState, TurnInput, TurnSink};
-use crate::providers::{default_skills, prompt};
+use crate::providers::{context, default_skills, prompt};
 
 /// The native session a turn uses.
 pub enum Opened<'s> {
@@ -22,6 +22,7 @@ struct Advance {
     through: i64,
     memory_revision: Option<i64>,
     default_skills: BTreeMap<String, String>,
+    context: BTreeMap<String, String>,
 }
 
 /// A turn ready to send: the session to record, and the packet with only
@@ -53,17 +54,25 @@ impl<'a> PreparedTurn<'a> {
                 considered_through_turn: 0,
                 memory_revision: None,
                 default_skills: BTreeMap::new(),
+                context: BTreeMap::new(),
             },
         };
         let memory = prompt::memory_for(input.memory.as_ref(), resumed);
         let skills = default_skills::for_session(resumed);
-        let (segments, selection) =
-            prompt::turn_content(input, session.considered_through_turn, memory, &skills);
+        let context = context::for_session(input, resumed);
+        let (segments, selection) = prompt::turn_content(
+            input,
+            session.considered_through_turn,
+            memory,
+            &skills,
+            &context,
+        );
         let packet = prompt::segments_text(&segments);
         let advance = Advance {
             through: input.turn_no,
             memory_revision: memory.map(|m| m.revision).or(session.memory_revision),
             default_skills: skills.applied,
+            context: context.applied,
         };
         Self {
             session,
@@ -109,6 +118,7 @@ impl<'a> PreparedTurn<'a> {
         self.session.considered_through_turn = advance.through;
         self.session.memory_revision = advance.memory_revision;
         self.session.default_skills = advance.default_skills;
+        self.session.context = advance.context;
         sink.session(&self.session).await?;
         sink.reported(reported, native_turn).await
     }
@@ -126,13 +136,15 @@ pub struct Identity<'a> {
 }
 
 /// The session compatibility fingerprint: a native session is resumed only
-/// under the same else.bot tools, bot registry, identity, and profile.
+/// under the same else.bot tools, delegation mode, identity, and profile.
 pub fn fingerprint(input: &TurnInput, profile: &Profile, identity: &Identity<'_>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(crate::app::tools::TOOL_NAMES.join("\0").as_bytes());
+    // The registry's mode line only: the bot list rides in the packet.
     let registry = prompt::registry_text(input);
+    let mode = registry.lines().next().unwrap_or_default();
     let head = [
-        registry.as_str(),
+        mode,
         identity.prompt_version,
         identity.version,
         identity.runtime,

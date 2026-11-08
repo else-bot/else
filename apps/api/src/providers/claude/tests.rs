@@ -502,6 +502,7 @@ async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
         considered_through_turn: 2,
         memory_revision,
         default_skills: Default::default(),
+        context: Default::default(),
     };
     let current = super::super::default_skills::for_session(None).applied;
     let mut up_to_date = warm(Some(7));
@@ -784,7 +785,7 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
     };
     let ready = claude.ready.as_ref().unwrap();
     [
-        (Origin::OwnerRequest, "6daab69bac5ec9cf1f352ae0792b1943"),
+        (Origin::OwnerRequest, "223671c7548c5140aef4cf83ffe92918"),
         (Origin::ConnectorEvent, "46bc6d639fdfc294629ceee544f98d87"),
     ]
     .map(|(origin, expected)| {

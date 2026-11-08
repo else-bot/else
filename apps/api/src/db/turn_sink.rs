@@ -599,13 +599,15 @@ impl SinkState {
                 Some(id) => {
                     sqlx::query(
                         "UPDATE provider_sessions SET considered_through_turn = ?2,
-                             memory_revision = coalesce(?3, memory_revision), default_skills = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                             memory_revision = coalesce(?3, memory_revision), default_skills = ?4,
+                             context_receipts = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE id = ?1",
                     )
                     .bind(id)
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
                     .bind(sqlx::types::Json(&state.default_skills))
+                    .bind(sqlx::types::Json(&state.context))
                     .execute(&mut *tx)
                     .await?;
                     id
@@ -624,9 +626,10 @@ impl SinkState {
                     let id = Uuid::new_v4();
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
-                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills, lane)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                             (SELECT session_lane FROM turns WHERE id = ?10))",
+                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills,
+                             context_receipts, lane)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                             (SELECT session_lane FROM turns WHERE id = ?11))",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -637,6 +640,7 @@ impl SinkState {
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
                     .bind(sqlx::types::Json(&state.default_skills))
+                    .bind(sqlx::types::Json(&state.context))
                     .bind(self.turn_id)
                     .execute(&mut *tx)
                     .await?;

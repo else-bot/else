@@ -201,6 +201,8 @@ pub struct SessionState {
     pub memory_revision: Option<i64>,
     /// Content hashes of the bundled default skills acknowledged by this session.
     pub default_skills: std::collections::BTreeMap<String, String>,
+    /// Content hashes of the context blocks (registry, permissions) it holds.
+    pub context: std::collections::BTreeMap<String, String>,
 }
 
 /// The recorded outcome of a delegated child, given to the parent's
