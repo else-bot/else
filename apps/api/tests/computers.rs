@@ -184,7 +184,7 @@ impl ComputerRuntime for Fake {
         } else if program == else_api::computers::GUEST_CHECKPOINT {
             self.log(format!("checkpoint {name}"));
         } else if program == else_api::computers::GUEST_INIT {
-            self.log(format!("init {name}"));
+            self.log(format!("init {name} {}", args.join(" ")));
         } else if program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP {
             self.log(format!("desktop {name}"));
         }
@@ -1079,6 +1079,32 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
         "{calls:?}"
     );
     assert_eq!(closes(&fake), 1, "only the old computer's browser closes");
+}
+
+/// Each boot sets the guest's clock to the owner's time zone, so the
+/// browser the owner takes over reports the zone they live in.
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_boots_use_the_owners_time_zone() {
+    let app = TestApp::installed().await;
+    sqlx::query("UPDATE installation SET owner_timezone = 'Indian/Reunion'")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let desktop = ComputerConfig {
+        desktop: true,
+        state_dir: dir.path().to_owned(),
+        ..config(2)
+    };
+    let manager = manager(&app, &fake, desktop).await;
+    let bot: Uuid = app.create_bot("Desk").await.parse().unwrap();
+    let (_lease, name) = ready(&manager, bot, "test:zone").await;
+    let calls = fake.calls();
+    assert!(
+        calls.contains(&format!("init {name} Indian/Reunion")),
+        "{calls:?}"
+    );
 }
 
 /// A desktop computer boots at its small size for commands. Its screen

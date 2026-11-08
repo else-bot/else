@@ -2081,6 +2081,7 @@ dependencies = [
  "hkdf 0.12.4",
  "hmac 0.12.1",
  "http-body-util",
+ "iana-time-zone",
  "image",
  "io-imap",
  "io-sasl",

@@ -4,7 +4,7 @@ FROM $BASE AS runtime
 COPY apt-downloads.conf /etc/apt/apt.conf.d/80elsebot-downloads
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates chromium curl fonts-dejavu-core fonts-noto-cjk novnc openbox procps \
+      ca-certificates chromium curl fonts-dejavu-core fonts-noto-cjk fonts-noto-core novnc openbox procps \
       python3 python3-websocket supervisor websockify x11vnc xterm xvfb \
       bzip2 cargo g++ gcc git jq libc6-dev make nodejs npm pkg-config \
       python3-pip python3-venv rustc time unzip xz-utils zip \

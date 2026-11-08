@@ -24,6 +24,7 @@ getrandom = "0.4.3"
 hkdf = "=0.12.4"
 hex = "0.4.3"
 hmac = "=0.12.1"
+iana-time-zone = "0.1.65"
 io-imap = { version = "=0.8.1", default-features = false, features = ["client"] }
 io-smtp = { version = "=0.7.1", default-features = false, features = ["client"] }
 io-sasl = { version = "=0.1.1", default-features = false }
