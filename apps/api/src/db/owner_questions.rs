@@ -159,7 +159,7 @@ fn info(
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RequestError {
     #[error(
-        "only the owner's own conversation can ask the owner; a task delegated from an owner request can only ask for approvals and sign-ins"
+        "only the owner's own conversation or a task delegated for an owner request can ask the owner"
     )]
     NotAllowed,
     #[error("this attempt already asked or delegated; end it and wait for the answer")]
@@ -218,13 +218,7 @@ async fn insert(
     caller: &Caller,
     spec: &Spec,
 ) -> Result<QuestionInfo, RequestError> {
-    // A task delegated from an owner request shows its approval and sign-in
-    // cards in the target bot's chat; only the owner's conversation asks
-    // open questions.
-    if !caller.owner_conversation
-        && (spec.approval.is_none()
-            || super::delegations::origin(conn, turn_id).await? != Origin::OwnerRequest)
-    {
+    if !turns::may_ask_owner(conn, turn_id, caller).await? {
         return Err(RequestError::NotAllowed);
     }
     if turns::attempt_parked(conn, turn_id, caller.attempt).await? {

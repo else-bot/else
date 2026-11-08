@@ -109,8 +109,12 @@ async fn connections(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
                 })
             })
             .collect::<Vec<_>>();
+        let pending_chats = destinations.is_empty().then_some(
+            "No chats are allowed yet. Ask the owner to add this bot to the channel or group, then choose it in this connection's access settings.",
+        );
         list.push(json!({
-            "connection": c, "destinations": destinations, "permissions": access.permissions,
+            "connection": c, "destinations": destinations, "no_destinations": pending_chats,
+            "permissions": access.permissions,
             "instructions": access.instructions, "wake_policy": access.wake_policy,
             "capabilities": capabilities, "limitations": c.provider.limitations(),
             "sending": "draft_message with account_id then exact approved send_draft"

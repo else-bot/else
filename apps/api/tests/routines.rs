@@ -596,10 +596,6 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
             json!({ "target_bot_id": main, "task": "loop back" }),
         ),
         ("create_bot", json!({ "name": "Another" })),
-        (
-            "request_secret",
-            json!({ "name": "x", "reason": "y", "env": ["X"] }),
-        ),
     ] {
         let refused = tool(&h.app, &child_token, name, args).await;
         assert_eq!(

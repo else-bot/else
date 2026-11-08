@@ -10,7 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_bindings sb WHERE sb.connection_id=social_connections.id AND json_extract(sb.access,'$.wake_policy')='all') AS message_content";
+const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_bindings sb WHERE sb.connection_id=social_connections.id AND json_extract(sb.access,'$.wake_policy')='all' AND json_array_length(sb.access,'$.destinations')>0) AS message_content";
 fn identity(
     key: &SecretKey,
     id: Uuid,
@@ -266,9 +266,11 @@ pub async fn authorize(
         .fetch_all(&mut *conn)
         .await?;
         access.destinations.retain(|d| scoped.contains(d));
+        if access.destinations.is_empty() {
+            return Err(Error::Forbidden);
+        }
     }
     if !access.permissions.read
-        || access.destinations.is_empty()
         || write && !access.permissions.write
         || send && !access.permissions.send
         || destination.is_some_and(|d| !access.destinations.iter().any(|x| x == d))
@@ -453,7 +455,7 @@ pub async fn request_setup(
     let caller = crate::db::turns::asking_caller(&mut tx, turn)
         .await?
         .ok_or(Error::Forbidden)?;
-    if !caller.owner_conversation {
+    if !crate::db::turns::may_ask_owner(&mut tx, turn, &caller).await? {
         return Err(Error::Forbidden);
     }
     let external:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items i JOIN turns t ON t.owner_item_id=i.id WHERE t.id=?1 AND i.kind='connector')").bind(turn).fetch_one(&mut *tx).await?;
@@ -521,10 +523,8 @@ pub async fn settle_setup(
         };
     }
     if let Some((cid, access)) = completion {
-        if !access.permissions.read || access.destinations.is_empty() {
-            return Err(Error::Invalid(
-                "Choose at least one destination and enable reading to complete setup.",
-            ));
+        if !access.permissions.read {
+            return Err(Error::Invalid("Enable reading to complete setup."));
         }
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM social_connections WHERE id=?1 AND provider=?2 AND state='active')",

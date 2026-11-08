@@ -152,10 +152,9 @@ impl BindingInput {
             || (p.send && !p.write)
             || (p.wake && self.wake_policy == WakePolicy::Never)
             || (!p.wake && self.wake_policy != WakePolicy::Never)
-            || (p.read && self.destinations.is_empty())
         {
             return Err(Error::Invalid(
-                "Read requires selected destinations. Write, send and wake require read; send requires write. Wake must match its policy.",
+                "Write, send and wake require read; send requires write. Wake must match its policy.",
             ));
         }
         Ok(())
@@ -346,6 +345,10 @@ pub enum Error {
     Uncertain,
     #[error("The connection is busy. Retry later.")]
     Busy,
+    #[error(
+        "Another webhook, app, or server receives this bot's messages. Telegram delivers them to only one receiver."
+    )]
+    ReceiverConflict,
     #[error("Encrypted credentials are unavailable.")]
     Crypto,
     #[error("The connector database operation failed.")]

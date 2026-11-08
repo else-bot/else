@@ -81,6 +81,9 @@ struct Worker {
     stop: CancellationToken,
     done: watch::Receiver<bool>,
 }
+/// How long a listener must stay up before its connection counts as connected.
+const LISTEN_SETTLE: Duration = Duration::from_secs(3);
+
 pub struct Manager {
     pub db: SqlitePool,
     pub key: Arc<SecretKey>,
@@ -514,11 +517,14 @@ impl Manager {
             if stop.is_cancelled() {
                 return;
             }
-            let health = if result.is_ok() {
-                "connected"
-            } else {
-                "reconnecting"
+            let health = match &result {
+                Ok(()) => "connected",
+                Err(Error::ReceiverConflict) => "receiver_conflict",
+                Err(_) => "reconnecting",
             };
+            if let Err(error) = &result {
+                tracing::warn!(connection = %c.id, provider = c.provider.name(), %error, "social inbox stopped; retrying");
+            }
             let _ = sqlx::query(
                 "UPDATE social_connections SET health=?3 WHERE id=?1 AND generation=?2",
             )
@@ -544,15 +550,36 @@ impl Manager {
         let (tx, mut rx) = mpsc::channel::<Envelope>(16);
         let listen = self.transport.listen(c, session, offset, tx, stop.clone());
         tokio::pin!(listen);
-        sqlx::query(
-            "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
-        )
-        .bind(c.id)
-        .bind(c.generation)
-        .execute(&self.db)
-        .await?;
+        // A refused poll fails at once; one that stays open or delivers a
+        // message is connected.
+        let settled = tokio::time::sleep(LISTEN_SETTLE);
+        tokio::pin!(settled);
+        let mut connected = false;
         loop {
-            tokio::select! {biased;_=stop.cancelled()=>return Ok(()),r=&mut listen=>return r,event=rx.recv()=>{let Some(event)=event else{return Ok(())};store::record(&self.db,c,&event.incoming,event.next_offset).await?;let _=event.ack.send(());}}
+            let event = tokio::select! {
+                biased;
+                _ = stop.cancelled() => return Ok(()),
+                r = &mut listen => return r,
+                () = &mut settled, if !connected => None,
+                event = rx.recv() => match event {
+                    Some(event) => Some(event),
+                    None => return Ok(()),
+                },
+            };
+            if !connected {
+                connected = true;
+                sqlx::query(
+                    "UPDATE social_connections SET health='connected' WHERE id=?1 AND generation=?2",
+                )
+                .bind(c.id)
+                .bind(c.generation)
+                .execute(&self.db)
+                .await?;
+            }
+            if let Some(event) = event {
+                store::record(&self.db, c, &event.incoming, event.next_offset).await?;
+                let _ = event.ack.send(());
+            }
         }
     }
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {

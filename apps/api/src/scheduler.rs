@@ -348,7 +348,7 @@ impl Scheduler {
                     input.bot_id,
                     input.conversation_id,
                     turn_id,
-                    turn_tools(&input),
+                    turn_tools(&input.delegation),
                     memory_scope,
                     TOOL_GRANT_TTL,
                 )
@@ -431,8 +431,7 @@ impl Scheduler {
     }
 }
 
-fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
-    let delegation = &input.delegation;
+fn turn_tools(delegation: &crate::app::providers::DelegationContext) -> Vec<Tool> {
     if delegation.origin == crate::app::providers::Origin::SocialEvent {
         return vec![Tool::ReadHistory, Tool::ReadMemory, Tool::Social];
     }
@@ -446,11 +445,16 @@ fn turn_tools(input: &crate::app::providers::TurnInput) -> Vec<Tool> {
         Tool::Mcp,
         Tool::AskPermission,
     ];
-    if !delegation.delegated_task {
-        tools.extend([Tool::Mail, Tool::Social]);
+    if delegation.acts_for_owner() {
+        tools.extend([
+            Tool::Mail,
+            Tool::Social,
+            Tool::RequestSecret,
+            Tool::AskOwner,
+        ]);
     }
     if delegation.can_delegate() {
-        tools.extend([Tool::RequestSecret, Tool::AskOwner, Tool::Delegate]);
+        tools.push(Tool::Delegate);
     }
     if delegation.can_create_bot {
         tools.push(Tool::CreateBot);
@@ -483,4 +487,46 @@ pub async fn delegated_scope(
         }
     }
     Ok(scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::providers::{DelegationContext, Origin};
+
+    fn task(origin: Origin) -> Vec<Tool> {
+        turn_tools(&DelegationContext {
+            origin,
+            delegated_task: true,
+            ..DelegationContext::default()
+        })
+    }
+
+    #[test]
+    fn a_task_delegated_for_an_owner_request_can_ask_the_owner() {
+        let tools = task(Origin::OwnerRequest);
+        for tool in [
+            Tool::Social,
+            Tool::Mail,
+            Tool::RequestSecret,
+            Tool::AskOwner,
+        ] {
+            assert!(tools.contains(&tool), "{tool:?} missing from {tools:?}");
+        }
+        assert!(!tools.contains(&Tool::Delegate), "a task stays one hop");
+        assert!(!tools.contains(&Tool::CreateBot));
+    }
+
+    #[test]
+    fn a_task_delegated_by_a_routine_run_cannot_ask_the_owner() {
+        let tools = task(Origin::RoutineRun);
+        for tool in [
+            Tool::Social,
+            Tool::Mail,
+            Tool::RequestSecret,
+            Tool::AskOwner,
+        ] {
+            assert!(!tools.contains(&tool), "{tool:?} granted in {tools:?}");
+        }
+    }
 }

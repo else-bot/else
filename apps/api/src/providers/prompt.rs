@@ -81,15 +81,18 @@ fn delegation_rules(input: &TurnInput) -> String {
             " This task is not rooted in an owner request, so the routine tools are refused for you."
         };
         let approvals = if delegation.origin == crate::app::providers::Origin::OwnerRequest {
-            "You cannot delegate further, ask the owner questions, or request secrets. Unless \
-             a tool result says standing permission applies, a gated destructive or external \
-             tool call, or an MCP sign-in, shows the owner an approval card in your own chat \
-             and returns parked: end this attempt; you continue after the answer, then retry \
-             the exact call once if approved. Your saved task permissions apply to host \
-             actions here: call ask_permission before each sensitive host action, with the \
-             saved task and target when the work fits. If it returns pending, end this \
-             attempt; if the continuation says it was approved, do exactly that host action \
-             once without asking again. Report other actions that need approval instead."
+            "You cannot delegate further. You act for the owner request that started this \
+             task, so when the work needs the owner, ask the owner yourself instead of \
+             reporting back: social_connect, request_secret, ask_owner, drafts, and gated \
+             tool calls show their cards in your own chat with the owner and return parked. \
+             End the attempt then; you continue after the owner answers, and retry an \
+             approved call exactly once. Unless a tool result says standing permission \
+             applies, a gated destructive or external tool call, or an MCP sign-in, asks \
+             this way. Your saved task permissions apply to host actions here: call \
+             ask_permission before each sensitive host action, with the saved task and \
+             target when the work fits. If it returns pending, end this attempt; if the \
+             continuation says it was approved, do exactly that host action once without \
+             asking again."
         } else {
             "You cannot delegate further or ask the owner anything (no secrets, questions, or \
              approvals), so you cannot get approval here: take no destructive or external \
@@ -128,9 +131,9 @@ fn delegation_rules(input: &TurnInput) -> String {
          receives and the owner's messages. When the owner said what the new bot is for, \
          delegate its first task to it at once: a self-contained task that states that purpose \
          and the context it needs. Do this even when the credentials or external access its \
-         work will need do not exist yet. A new bot can use the task secrets already stored \
-         on this server and has no other access, so tell the owner what to configure for it \
-         later (for example a missing task secret). Do not substitute a script \
+         work will need do not exist yet: include that setup in the task, and the new bot \
+         asks the owner in its own chat (connection cards, secrets, questions). Do not open \
+         those cards in your own chat for it. Do not substitute a script \
          or external integration for creating the else.bot. If the owner explicitly asks to \
          build a bot application or register a GitHub App, follow that request instead. \
          create_bot returns the new bot_id, which you can delegate to at once even though it \

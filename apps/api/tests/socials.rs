@@ -312,6 +312,93 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
 }
 
 #[tokio::test]
+async fn setup_completes_before_any_chat_is_chosen_and_grants_no_chat() {
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Post updates")
+        .await
+        .unwrap();
+    let c = account(&db, "no-chats-yet").await;
+    let done = store::settle_setup(&db.pool, request.id, Some((c.id, access(&[]))))
+        .await
+        .unwrap();
+    assert_eq!(done.status, "connected");
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    let granted = store::authorize(
+        &mut db.pool.acquire().await.unwrap(),
+        &c,
+        bot,
+        turn,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("the bot discovers the connection");
+    assert!(granted.destinations.is_empty());
+    destinations(&db, c.id).await;
+    assert!(
+        store::authorize(
+            &mut db.pool.acquire().await.unwrap(),
+            &c,
+            bot,
+            turn,
+            Some("100"),
+            false,
+            false
+        )
+        .await
+        .is_err(),
+        "a chat that arrives later stays excluded until the owner chooses it"
+    );
+}
+
+#[tokio::test]
+async fn an_external_turn_sees_no_connection_it_was_not_delivered_from() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "unrelated").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    store::bind(&db.pool, c.id, bot, access(&["100"]))
+        .await
+        .unwrap();
+    let external = turn(&db, bot, "connector").await;
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    assert!(
+        store::authorize(
+            &mut db.pool.acquire().await.unwrap(),
+            &c,
+            bot,
+            external,
+            None,
+            false,
+            false
+        )
+        .await
+        .is_err(),
+        "an incoming message elsewhere cannot read this connection's instructions"
+    );
+}
+
+#[tokio::test]
+async fn a_binding_without_chats_does_not_request_message_content() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "no-chats-wake-all").await;
+    let bot = bot(&db).await;
+    let mut empty = access(&[]);
+    empty.wake_policy = WakePolicy::All;
+    store::bind(&db.pool, c.id, bot, empty).await.unwrap();
+    assert!(
+        !store::connection(&db.pool, c.id)
+            .await
+            .unwrap()
+            .message_content,
+        "no chat can wake the bot, so the shared connection keeps its intents"
+    );
+}
+
+#[tokio::test]
 async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain() {
     let db = TestDb::migrated().await;
     let c = account(&db, "actions").await;
@@ -464,6 +551,7 @@ struct Fake {
     release: Notify,
     blocked: AtomicBool,
     sends: AtomicUsize,
+    refused: AtomicBool,
 }
 #[async_trait]
 impl Transport for Fake {
@@ -502,9 +590,37 @@ impl Transport for Fake {
         _: mpsc::Sender<Envelope>,
         stop: CancellationToken,
     ) -> Result<(), Error> {
+        if self.refused.load(Ordering::SeqCst) {
+            return Err(Error::ReceiverConflict);
+        }
         stop.cancelled().await;
         Ok(())
     }
+}
+
+async fn health_after_listening(refused: bool) -> String {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "listener").await;
+    let fake = Arc::new(Fake::default());
+    fake.refused.store(refused, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake,
+    ));
+    manager.changed(c.id).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    store::connection(&db.pool, c.id).await.unwrap().health
+}
+
+#[tokio::test]
+async fn a_bot_whose_updates_go_elsewhere_shows_the_conflict_instead_of_connected() {
+    assert_eq!(health_after_listening(true).await, "receiver_conflict");
+}
+
+#[tokio::test]
+async fn a_listener_that_stays_open_is_connected() {
+    assert_eq!(health_after_listening(false).await, "connected");
 }
 
 #[tokio::test]

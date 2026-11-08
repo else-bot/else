@@ -66,6 +66,13 @@ impl Access {
         self.destinations = result?;
         Ok(())
     }
+
+    /// The connection's current state and health, keeping unsaved edits.
+    fn reloaded(&mut self, connection: Connection) {
+        if connection.id == self.connection.id {
+            self.connection = connection;
+        }
+    }
 }
 
 enum Editor {
@@ -485,16 +492,20 @@ impl SocialsView {
         let revision = self.begin(window, cx);
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = client.social_destinations(id).await;
+            let (result, detail) = tokio::join!(
+                client.clone().social_destinations(id),
+                client.social_connection(id),
+            );
             let _ = this.update_in(cx, |view, _, cx| {
                 if view.revision != revision {
                     return;
                 }
                 view.busy = false;
-                if let Some(access) = view.form.as_mut().and_then(|form| form.editor.access_mut())
-                    && let Err(error) = access.discovered(result)
-                {
-                    view.error = Some(error.to_string());
+                if let Some(access) = view.form.as_mut().and_then(|form| form.editor.access_mut()) {
+                    let reloaded = detail.map(|detail| access.reloaded(detail.connection));
+                    if let Err(error) = access.discovered(result).and(reloaded) {
+                        view.error = Some(error.to_string());
+                    }
                 }
                 cx.notify();
             });
@@ -512,11 +523,6 @@ impl SocialsView {
         let connection = &access.connection;
         if self.setup.is_some() && !access.draft.permissions.read {
             self.error = Some("Enable reading to complete this connection.".into());
-            cx.notify();
-            return;
-        }
-        if access.draft.permissions.read && access.draft.destinations.is_empty() {
-            self.error = Some("Choose at least one destination.".into());
             cx.notify();
             return;
         }

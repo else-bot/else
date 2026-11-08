@@ -161,9 +161,10 @@ pub struct Accepted {
     pub created: bool,
     pub turn: TurnRecord,
     pub item: ItemRecord,
-    /// The conversation's active turn this message preempted; it is
+    /// Active turns this message preempted: the conversation's own, and
+    /// delegated tasks it took over before they parked. Each is
     /// `cancelling` and must be interrupted.
-    pub preempted: Option<Uuid>,
+    pub preempted: Vec<Uuid>,
 }
 
 pub struct SendRequest<'a> {
@@ -254,7 +255,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
             created: false,
             turn,
             item,
-            preempted: None,
+            preempted: Vec::new(),
         });
     }
     if let Some(reaction) = req.reaction {
@@ -405,16 +406,19 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         crate::db::events::turn_changed(&mut tx, req.bot_id, superseded).await?;
         crate::db::delegations::cancel_for_root(&mut tx, superseded).await?;
     }
-    let preempted: Option<Uuid> = sqlx::query_scalar(
+    let preempted: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'cancelling', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE conversation_id = ?1 AND turn_no < ?2 AND status IN ('preparing', 'sending', 'running')
+         WHERE status IN ('preparing', 'sending', 'running')
+           AND ((conversation_id = ?1 AND turn_no < ?2)
+                OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
          RETURNING id",
     )
     .bind(conversation_id)
     .bind(turn_no)
-    .fetch_optional(&mut *tx)
+    .bind(turn_id)
+    .fetch_all(&mut *tx)
     .await?;
-    if let Some(active) = preempted {
+    for &active in &preempted {
         crate::db::events::turn_changed(&mut tx, req.bot_id, active).await?;
     }
     crate::db::memory::log_item(&mut tx, item_id).await?;
@@ -487,6 +491,19 @@ pub async fn asking_caller(
     .bind(turn_id)
     .fetch_optional(conn)
     .await
+}
+
+/// Whether `caller` may show the owner a card: from the owner's own chat, or
+/// from a task another bot delegated for an owner request, whose cards
+/// appear in its own bot's chat.
+pub async fn may_ask_owner(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    caller: &AskingCaller,
+) -> Result<bool, sqlx::Error> {
+    Ok(caller.owner_conversation
+        || super::delegations::origin(conn, turn_id).await?
+            == crate::app::providers::Origin::OwnerRequest)
 }
 
 /// Whether the current `attempt` of `turn_id` already delegated, asked for
@@ -571,7 +588,7 @@ pub async fn existing_send(
                 created: false,
                 turn,
                 item,
-                preempted: None,
+                preempted: Vec::new(),
             }))
         }
     }

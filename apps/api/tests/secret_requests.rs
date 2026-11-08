@@ -577,7 +577,7 @@ async fn only_the_owner_answers_and_only_for_the_requesting_bot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
+async fn arguments_carry_metadata_only() {
     let Harness { app, .. } = harness().await;
     let main = app.main_bot().await;
     let (_, token) = running(&app, &main, owner_tools()).await;
@@ -596,14 +596,91 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
         .await
         .unwrap();
     assert_eq!(none, 0);
+}
 
-    let leaf = app.create_bot("Ops").await;
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_delegated_for_an_owner_request_asks_for_a_secret_in_its_own_chat() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
+    let child_token = grant(&app, child, owner_tools()).await;
+    let asked = tool_text(&ask(&app, &child_token, deploy_args()).await);
+    assert_eq!(asked["parked"], true, "{asked}");
+    let shown = shown_turn(&app, &leaf, child).await;
+    assert_eq!(shown["secret_requests"][0]["name"], "deploy", "{shown}");
+    assert_eq!(shown["secret_requests"][0]["status"], "pending", "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_delegated_for_an_owner_request_opens_a_social_connection_card_in_its_own_chat() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
+    let child_token = grant(&app, child, vec![Tool::AskOwner]).await;
+    let opened = app
+        .call(
+            "POST",
+            "/tools/v1/mcp",
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "social_connect",
+                                     "arguments": { "provider": "telegram",
+                                                    "reason": "Post approved updates to the team channel." } } })),
+            Some(&child_token),
+        )
+        .await;
+    let opened = tool_text(&opened);
+    assert_eq!(opened["parked"], true, "{opened}");
+    let shown = shown_turn(&app, &leaf, child).await;
+    assert_eq!(shown["social_setups"][0]["provider"], "telegram", "{shown}");
+    assert_eq!(shown["social_setups"][0]["status"], "pending", "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_reply_in_the_bot_chat_takes_over_a_task_waiting_on_its_connection_card() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
+    let child_token = grant(&app, child, vec![Tool::AskOwner]).await;
+    app.call(
+        "POST",
+        "/tools/v1/mcp",
+        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": { "name": "social_connect",
+                                 "arguments": { "provider": "telegram", "reason": "Post updates." } } })),
+        Some(&child_token),
+    )
+    .await;
+    app.wait_turn_for(&child.to_string(), &["waiting"], Duration::from_secs(30))
+        .await;
+    let reply = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "Never mind, skip Telegram for now.",
+            Some("synthetic"),
+        )
+        .await;
+    let reply: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let (takeover, setup): (Option<Uuid>, String) = sqlx::query_as(
+        "SELECT d.takeover_turn_id, s.status FROM delegations d
+         JOIN social_setups s ON s.turn_id = d.child_turn_id WHERE d.child_turn_id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(takeover, Some(reply), "the owner's reply answers the task");
+    assert_eq!(setup, "cancelled");
+}
+
+/// A running task the main bot delegated to a new bot while serving an owner
+/// message: the new bot's ID and the task's turn.
+async fn delegated_task(app: &TestApp) -> (String, Uuid) {
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Telegram").await;
     let warm = app
         .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let parent = grant_with_delegate(&app, &main).await;
+    let parent = grant_with_delegate(app, &main).await;
     let delegated = app
         .call(
             "POST",
@@ -611,7 +688,7 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
             Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                          "params": { "name": "delegate",
                                      "arguments": { "target_bot_id": leaf,
-                                                    "task": "[synthetic:slow] check the server disk usage now" } } })),
+                                                    "task": "[synthetic:slow] set up the Telegram connection" } } })),
             Some(&parent),
         )
         .await;
@@ -627,12 +704,20 @@ async fn arguments_carry_metadata_only_and_task_conversations_cannot_ask() {
         .unwrap();
     app.wait_turn_for(&child.to_string(), &["running"], Duration::from_secs(30))
         .await;
-    let child_token = grant(&app, child, owner_tools()).await;
-    let refused = tool_text(&ask(&app, &child_token, deploy_args()).await);
-    assert!(
-        refused.as_str().unwrap().starts_with("NOT_ALLOWED"),
-        "{refused}"
-    );
+    (leaf, child)
+}
+
+async fn shown_turn(app: &TestApp, bot: &str, turn: Uuid) -> Value {
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await;
+    snapshot.body["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.to_string())
+        .unwrap_or_else(|| panic!("the task turn is in the bot's chat: {}", snapshot.body))
+        .clone()
 }
 
 async fn grant_with_delegate(app: &TestApp, main: &str) -> String {

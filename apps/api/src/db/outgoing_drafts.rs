@@ -86,7 +86,9 @@ pub enum DraftError {
     Inactive,
     #[error("{0}")]
     Invalid(&'static str),
-    #[error("only the owner's own conversation can draft for approval")]
+    #[error(
+        "only the owner's own conversation or a task delegated for an owner request can draft for approval"
+    )]
     NotAllowed,
     #[error("a revision keeps its draft's channel ({0})")]
     ChannelChanged(&'static str),
@@ -193,7 +195,7 @@ async fn caller(
     let caller = turns::asking_caller(conn, turn_id)
         .await?
         .ok_or(DraftError::NotRunning)?;
-    if !caller.owner_conversation {
+    if !turns::may_ask_owner(conn, turn_id, &caller).await? {
         return Err(DraftError::NotAllowed);
     }
     Ok(caller)
