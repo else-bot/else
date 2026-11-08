@@ -155,6 +155,9 @@ pub struct TurnInput {
     pub social_setups: Vec<crate::socials::store::Setup>,
     /// Settled waits on MCP jobs that no attempt has received yet.
     pub mcp_waits: Vec<McpWaitOutcome>,
+    /// The shared MCPs installed for every bot, for a turn that may use
+    /// them; `None` when it may not or the library could not be read.
+    pub mcps: Option<Vec<InstalledMcp>>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -165,6 +168,14 @@ pub struct TurnInput {
     pub run: Option<SavedRun>,
     /// The bot's current rules file, given at the start of every turn.
     pub rules: Option<String>,
+}
+
+/// One shared MCP as a turn lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledMcp {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 
 /// The saved task a turn runs instead of an owner message.
@@ -201,6 +212,8 @@ pub struct SessionState {
     pub memory_revision: Option<i64>,
     /// Content hashes of the bundled default skills acknowledged by this session.
     pub default_skills: std::collections::BTreeMap<String, String>,
+    /// Content hashes of the context blocks (registry, permissions) it holds.
+    pub context: std::collections::BTreeMap<String, String>,
 }
 
 /// The recorded outcome of a delegated child, given to the parent's
@@ -339,6 +352,17 @@ pub enum TurnOutcome {
 #[error("turn is no longer active")]
 pub struct Fenced;
 
+/// Tokens one provider report counted. `input` is every prompt token,
+/// cached ones included, so providers that count cache reads separately
+/// (Claude) and those that count them inside input (Codex) compare.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: i64,
+    pub cached_input: i64,
+    pub cache_write: i64,
+    pub output: i64,
+}
+
 /// Durable progress reporting for one turn. Lifecycle transitions persist
 /// before returning; assistant text is batched in a bounded buffer.
 /// Adapters must await each call to completion and never race it in a
@@ -365,6 +389,10 @@ pub trait TurnSink: Send + Sync {
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
     /// End the current agent message: later text starts a new assistant item.
     async fn end_message(&self) -> Result<(), Fenced>;
+    /// Add the tokens a provider reported for this turn. Bookkeeping only.
+    async fn usage(&self, usage: Usage) {
+        let _ = usage;
+    }
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.
     async fn session(&self, state: &SessionState) -> Result<(), Fenced>;

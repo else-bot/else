@@ -191,6 +191,10 @@ impl Protocol for TurnEvents<'_> {
                 events.push(Event::Parked);
             }
             "item/started" => self.check_item(&params["item"])?,
+            "thread/compacted" => events.push(Event::Compacted),
+            "item/completed" if params["item"]["type"] == "contextCompaction" => {
+                events.push(Event::Compacted);
+            }
             "model/rerouted" => {
                 let to = params["toModel"].as_str().unwrap_or_default();
                 if to != self.profile.model {
@@ -214,6 +218,17 @@ impl Protocol for TurnEvents<'_> {
                 if let Some(delta) = params["delta"].as_str() {
                     events.push(Event::Text(delta.to_owned()));
                 }
+            }
+            "thread/tokenUsage/updated" => {
+                // `last` is one model request; a turn sums its requests.
+                let last = &params["tokenUsage"]["last"];
+                let count = |key: &str| last[key].as_i64().unwrap_or(0).max(0);
+                events.push(Event::Usage(crate::app::providers::Usage {
+                    input: count("inputTokens"),
+                    cached_input: count("cachedInputTokens"),
+                    cache_write: count("cacheWriteInputTokens"),
+                    output: count("outputTokens"),
+                }));
             }
             "turn/completed" => {
                 let turn = &params["turn"];

@@ -198,11 +198,9 @@ fn fields() -> Value {
                           such as Europe/Paris. Omit it to use the time zone of the owner's \
                           desktop app (UTC if it never reported one)." },
         "active_hours": {
-            "description": "When runs may start; occurrences outside are skipped. Omit it on \
-                create for the owner's working hours: Monday to Friday, 08:00 to 18:00. Pass \
-                \"always\" only when the owner asks for nights or weekends (24/7, every day, a \
-                Saturday or late-evening time), or set the days and hours they asked for. End \
-                is excluded and must be after start.",
+            "description": "When runs may start; omit it for weekdays 08:00 to 18:00. Pass \"always\" only when \
+                the owner asks for nights or weekends; otherwise the days and hours asked. End is \
+                excluded, after start.",
             "oneOf": [
                 { "type": "string", "enum": ["always"] },
                 { "type": "object",
@@ -218,12 +216,9 @@ fn fields() -> Value {
             ],
         },
         "model": { "type": "string", "maxLength": MAX_MODEL_CHARS,
-                   "description": "Only when the owner asks for this routine to run on a \
-                       specific model: its ID or name, such as gpt-6.1-sol, GPT 6.1 Sol, or \
-                       Claude Opus 5.5. Omit it to run on your own model at each run. Runs on \
-                       it never change your own model. A name that matches no single model \
-                       never blocks saving: the routine uses your model and the result says \
-                       so." },
+                   "description": "Only when the owner asks for a specific model: its ID or name, such as gpt-6.1-sol \
+                       or Claude Opus 5.5. Omit it to use your model. An unmatched name still saves on your \
+                       model, and the result says so." },
         "provider_id": { "type": "string",
                          "description": format!(
                              "With model, only when the owner named the provider ({}).",
@@ -452,15 +447,14 @@ pub fn update_schema() -> Value {
     properties["routine_id"] = json!({ "type": "string", "format": "uuid" });
     properties["model"]["type"] = json!(["string", "null"]);
     properties["model"]["description"] = json!(
-        "Only when the owner asks to change which model this routine runs on: its ID or name, \
-         such as gpt-6.1-sol, GPT 6.1 Sol, or Claude Opus 5.5, or null to run on your own model \
-         again. Omit it to keep the routine's model. A name that matches no single model is \
-         not guessed: the routine uses your model and the result says so."
+        "Only when the owner asks to change the model: its ID or name, or null for your own \
+         model. Omit it to keep the current one. An unmatched name is not guessed: your model \
+         is used, and the result says so."
     );
     properties["active_hours"]["description"] = json!(
-        "When runs may start; omit it to keep the current hours. Pass \"always\" when the \
-         owner asks for nights or weekends (24/7, every day), or the days and hours they asked \
-         for. End is excluded and must be after start."
+        "When runs may start; omit it to keep the current hours. Pass \"always\" only when \
+         the owner asks for nights or weekends; otherwise the days and hours asked. End is \
+         excluded, after start."
     );
     properties["enabled"] = json!({ "type": "boolean",
         "description": "False pauses future runs; true resumes counting from now." });

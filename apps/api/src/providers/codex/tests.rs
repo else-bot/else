@@ -54,6 +54,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),
+        mcps: None,
         handoff: None,
         jobs: Vec::new(),
         run: None,
@@ -75,26 +76,52 @@ fn saved_task_permissions_are_refreshed_even_in_resumed_sessions() {
         text: None,
         applied: Default::default(),
     };
-    let recorded = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+    let recorded = prompt::turn_packet(
+        &turn,
+        turn.turn_no,
+        None,
+        &skills,
+        &crate::providers::context::for_session(&turn, None),
+    )
+    .0;
     assert!(recorded.contains("Manage Tailscale"));
     assert!(recorded.contains("SSH host omarchy-m1"));
     assert!(!recorded.contains("Continue the owner's request with these results."));
     turn.standing_permissions.clear();
-    let revoked = prompt::turn_packet(&turn, turn.turn_no, None, &skills).0;
+    let revoked = prompt::turn_packet(
+        &turn,
+        turn.turn_no,
+        None,
+        &skills,
+        &crate::providers::context::for_session(&turn, None),
+    )
+    .0;
     assert!(revoked.contains("Current saved scopes that apply to this request: []"));
     assert!(!revoked.contains("Manage Tailscale"));
     turn.delegation.delegated_task = true;
     assert!(
-        prompt::turn_packet(&turn, turn.turn_no, None, &skills)
-            .0
-            .contains("[else.bot saved permissions]"),
+        prompt::turn_packet(
+            &turn,
+            turn.turn_no,
+            None,
+            &skills,
+            &crate::providers::context::for_session(&turn, None)
+        )
+        .0
+        .contains("[else.bot saved permissions]"),
         "work delegated for an owner request sees its task scopes"
     );
     turn.delegation.origin = crate::app::providers::Origin::RoutineRun;
     assert!(
-        !prompt::turn_packet(&turn, turn.turn_no, None, &skills)
-            .0
-            .contains("[else.bot saved permissions]")
+        !prompt::turn_packet(
+            &turn,
+            turn.turn_no,
+            None,
+            &skills,
+            &crate::providers::context::for_session(&turn, None)
+        )
+        .0
+        .contains("[else.bot saved permissions]")
     );
 }
 
@@ -707,6 +734,7 @@ async fn a_warm_thread_receives_only_changed_memory_and_default_skills() {
         considered_through_turn: 2,
         memory_revision,
         default_skills: Default::default(),
+        context: Default::default(),
     };
     let current = super::super::default_skills::for_session(None).applied;
     let mut up_to_date = warm(Some(7));
@@ -762,6 +790,7 @@ async fn a_thread_whose_history_outgrew_the_line_limit_still_resumes() {
         considered_through_turn: 2,
         memory_revision: None,
         default_skills: Default::default(),
+        context: Default::default(),
     });
     let sink = super::super::recording::Recorded::default();
     let outcome = codex.run(turn, &sink, Stop::default()).await;
@@ -834,6 +863,8 @@ async fn files_reach_codex_in_order_with_images_as_local_images() {
         .split_once("[end else.bot default skills]\n\n")
         .unwrap();
     assert!(skills.contains("Default skill `unslop`"));
+    let (context, message) = message.rsplit_once("\n\n").unwrap();
+    assert!(context.starts_with("[else.bot bot registry]"));
     assert_eq!(
         message,
         format!("Compare {}", prompt::file_reference(&image.attachment))
@@ -889,8 +920,8 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
         service_tier: "priority".into(),
     };
     [
-        (Origin::OwnerRequest, "8c9d677d127dc8fb8c9f51ad2355ce67"),
-        (Origin::ConnectorEvent, "1d6526df992b7acc30250c1342056776"),
+        (Origin::OwnerRequest, "782f2a68047a306e89d0d995ab295e98"),
+        (Origin::ConnectorEvent, "63fe381fb7cb86f6fc55ecd32a884540"),
     ]
     .map(|(origin, expected)| {
         input.delegation.origin = origin;
@@ -939,4 +970,81 @@ for line in sys.stdin:
     );
     let host = &codex.ready.as_ref().unwrap().host;
     assert!(host.live_processes(turn_id).is_empty());
+}
+
+#[test]
+fn token_usage_of_this_turn_is_reported_per_model_request() {
+    use crate::app::providers::Usage;
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+    };
+    let update = |turn: &str| crate::providers::codex_rpc::Incoming::Notification {
+        method: "thread/tokenUsage/updated".into(),
+        params: json!({ "threadId": "th", "turnId": turn, "tokenUsage": {
+            "total": { "inputTokens": 900, "cachedInputTokens": 800, "outputTokens": 90,
+                       "reasoningOutputTokens": 9, "totalTokens": 990 },
+            "last": { "inputTokens": 300, "cachedInputTokens": 200, "outputTokens": 30,
+                      "reasoningOutputTokens": 3, "totalTokens": 330 } } }),
+    };
+    let usage = Usage {
+        input: 300,
+        cached_input: 200,
+        cache_write: 0,
+        output: 30,
+    };
+    let reported = events.on(&update("tu")).unwrap();
+    assert!(matches!(reported.as_slice(), [Event::Usage(u)] if *u == usage));
+    assert!(events.on(&update("other")).unwrap().is_empty());
+}
+
+#[test]
+fn context_compaction_is_reported_once_per_signal() {
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+    };
+    let note = |method: &str, params: Value| crate::providers::codex_rpc::Incoming::Notification {
+        method: method.into(),
+        params,
+    };
+    let item = note(
+        "item/completed",
+        json!({ "threadId": "th", "turnId": "tu",
+        "item": { "id": "c1", "type": "contextCompaction" } }),
+    );
+    assert!(matches!(
+        events.on(&item).unwrap().as_slice(),
+        [Event::Compacted]
+    ));
+    let thread = note(
+        "thread/compacted",
+        json!({ "threadId": "th", "turnId": "tu" }),
+    );
+    assert!(matches!(
+        events.on(&thread).unwrap().as_slice(),
+        [Event::Compacted]
+    ));
+    let other = note("thread/compacted", json!({ "threadId": "elsewhere" }));
+    assert!(events.on(&other).unwrap().is_empty());
 }

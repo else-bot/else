@@ -388,6 +388,50 @@ async fn a_bot_manages_its_own_routines_over_mcp() {
         .map(|r| r["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["Morning digest", "Paris"]);
+    let found = tool(
+        &h.app,
+        &token,
+        "find_tool",
+        json!({ "query": "routine_list" }),
+    )
+    .await;
+    assert_eq!(found.result["tools"][0]["name"], "routine_list");
+    let used = tool(
+        &h.app,
+        &token,
+        "use_tool",
+        json!({ "name": "routine_list", "arguments": {} }),
+    )
+    .await;
+    assert_eq!(
+        used.result, listed.result,
+        "use_tool runs the tool as called directly"
+    );
+    let parking = tool(
+        &h.app,
+        &token,
+        "use_tool",
+        json!({ "name": "ask_owner", "arguments": {} }),
+    )
+    .await;
+    assert!(
+        parking.error,
+        "a listed tool is called directly: {}",
+        parking.body
+    );
+    let undeclared = tool(
+        &h.app,
+        &token,
+        "use_tool",
+        json!({ "name": "computer_job_cancel",
+                "arguments": { "job_id": "j", "effect": "destructive" } }),
+    )
+    .await;
+    assert!(undeclared.error, "{}", undeclared.body);
+    assert_ne!(
+        undeclared.result["parked"], true,
+        "a deferred tool never parks"
+    );
     assert_eq!(owner_routines(&h.app, &main).await.len(), 2);
 
     let updated = tool(
@@ -748,6 +792,18 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
     let (_, child_token) = h.started(child).await;
     let refused = tool(&h.app, &child_token, "routine_list", json!({})).await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let bridged = tool(
+        &h.app,
+        &child_token,
+        "use_tool",
+        json!({ "name": "routine_list", "arguments": {} }),
+    )
+    .await;
+    assert_eq!(
+        bridged.status,
+        StatusCode::FORBIDDEN,
+        "use_tool keeps the grant check"
+    );
     let rules = else_api::providers::prompt::instructions(&h.inputs(child).await[0], "/p");
     assert!(
         rules.contains("the routine tools are refused for you"),

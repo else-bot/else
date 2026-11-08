@@ -88,6 +88,22 @@ async fn one_bot_installs_another_discovers_and_uses_it_then_owner_removes_it() 
         .await,
     );
     assert_eq!(listed["result"]["tools"][0]["name"], "echo");
+    assert_eq!(listed["result"]["tools"][0]["description"], "Echo input");
+    assert!(listed["result"]["tools"][0].get("inputSchema").is_none());
+    let schemas = result(
+        &tool(
+            &app,
+            &consumer,
+            "mcp_request",
+            json!({"id":"t3-code","method":"tools/list","params":{"names":["echo","nope"]}}),
+        )
+        .await,
+    );
+    assert_eq!(
+        schemas["result"]["tools"][0]["inputSchema"]["type"],
+        "object"
+    );
+    assert_eq!(schemas["result"]["missing"], json!(["nope"]));
     for (token, counter) in [(&installer, 1), (&consumer, 2)] {
         let called=result(&tool(&app,token,"mcp_request",json!({"id":"t3-code","method":"tools/call","params":{"name":"echo","arguments":{"hello":"world"}},"effect":"local"})).await);
         let body: Value =

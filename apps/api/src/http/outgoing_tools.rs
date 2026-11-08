@@ -30,13 +30,6 @@ fn draft_id() -> Value {
     json!({ "type": "string", "format": "uuid", "description": "The draft's id." })
 }
 
-const REVIEW: &str = "The owner reviews it in a native card where they can edit it, approve, or \
-    discard it. To revise a draft after the owner's feedback, pass its id as replaces: the old \
-    card is replaced by the new revision, which keeps the same channel. Returns status pending at \
-    once: tell the owner briefly that the draft is ready, end this attempt, and you continue \
-    automatically when they decide. A draft is approved only on its card or by the owner's own \
-    message sent while it was open; it is never sent before that. At most one per attempt.";
-
 pub(super) fn schemas() -> Vec<Value> {
     let write = json!({ "readOnlyHint": false, "destructiveHint": false,
                         "idempotentHint": true, "openWorldHint": false });
@@ -52,12 +45,11 @@ pub(super) fn schemas() -> Vec<Value> {
     vec![
         json!({
             "name": "draft_email",
-            "description": format!("Show the owner an email you drafted. Use this whenever the \
-                owner asks to draft, write, revise, or send an email you would send for the \
-                owner, instead of ask_permission or an approval card. To send from a connected \
-                account (mail_accounts with send permission), pass its account_id instead of \
-                from, and reply_to to answer a message in its thread; else.bot then sends it \
-                with send_draft. They may edit its subject and body. {REVIEW}"),
+            "description": "Draft an email for the owner to review, edit, and approve in a card; use it, not \
+                ask_permission, for any email you would send. For a connected account, pass \
+                account_id instead of from, and reply_to to answer one of its messages; send_draft \
+                sends it once approved. To revise, pass replaces with the draft's id. At most one \
+                per attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,12 +84,11 @@ pub(super) fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "draft_message",
-            "description": format!("Show the owner a message or post you drafted for a \
-                messaging or social platform: x for a post on X (Twitter), telegram for a \
-                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections or a public Telegram @username or t.me link; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
-                send one you would send for the owner, instead of ask_permission or an approval \
-                card. It has no subject or addresses; use draft_email for email. They may edit \
-                its text. {REVIEW}"),
+            "description": "Draft a message or post (x, telegram, discord) for the owner to review, edit, and \
+                approve in a card; use it, not ask_permission, for anything you would send. With a \
+                native connection, pass account_id and the destination from social_connections or a \
+                public Telegram @username or t.me link; send_draft sends it once approved. To \
+                revise, pass replaces. At most one per attempt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -119,14 +110,11 @@ pub(super) fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "confirm_draft_approval",
-            "description": "Record that the owner's latest message approves sending the draft \
-                that was open when they sent it, exactly as it now reads. Call it only when the \
-                [else.bot outgoing drafts] context marks the draft in_context=\"true\" and the \
-                owner's own words clearly say to send it as it is (for example \"looks good, send \
-                it\"). Not for a request to change it (revise with draft_email or draft_message \
-                and replaces), a question, or a hesitation. With a connected account, send \
-                it with send_draft. Otherwise send it once (see start_draft_send and the \
-                approved_draft argument of computer tools), then report with report_draft_send.",
+            "description": "Record that the owner's latest message approves the open draft exactly as it reads: \
+                only when [else.bot outgoing drafts] marks it in_context=\"true\" and their words \
+                clearly say to send it as is. A change request means revising with replaces. Then \
+                send it: send_draft for a connected account, otherwise once through start_draft_send \
+                or approved_draft, then report_draft_send.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "draft_id": draft_id() },
@@ -153,12 +141,10 @@ pub(super) fn schemas() -> Vec<Value> {
         }),
         json!({
             "name": "send_draft",
-            "description": "Send an approved email or Telegram/Discord message from a connected account \
-                (drafted with account_id). else.bot sends exactly the approved revision once \
-                through that account and records the receipt on the card; do not call \
-                report_draft_send for it. Calling it again in this request returns the same \
-                send, never a second one. Status sending means the result is not known yet: \
-                call it again later in this request, never mail_action.",
+            "description": "Send an approved draft from its connected account: exactly the approved revision, \
+                once, with the receipt on its card, so no report_draft_send. Calling it again in \
+                this request returns the same send. Status sending means the outcome is not known \
+                yet: call it again later, never mail_action.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "draft_id": draft_id() },

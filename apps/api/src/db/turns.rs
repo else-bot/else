@@ -749,8 +749,10 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
             parts,
         })
         .collect();
-    let session = sqlx::query_as::<_, (String, String, i64, Option<i64>, Json<std::collections::BTreeMap<String, String>>)>(
-        "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills
+    type Receipts = Json<std::collections::BTreeMap<String, String>>;
+    let session = sqlx::query_as::<_, (String, String, i64, Option<i64>, Receipts, Receipts)>(
+        "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills,
+                context_receipts
          FROM provider_sessions s
          WHERE conversation_id = ?1 AND provider_id = ?2 AND status = 'active'
            AND lane = (SELECT session_lane FROM turns WHERE id = ?3)
@@ -764,12 +766,15 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     .fetch_optional(&mut *conn)
     .await?
     .map(
-        |(native_id, fingerprint, considered_through_turn, memory_revision, Json(default_skills))| SessionState {
-            native_id,
-            fingerprint,
-            considered_through_turn,
-            memory_revision,
-            default_skills,
+        |(native_id, fingerprint, considered_through_turn, memory_revision, Json(default_skills), Json(context))| {
+            SessionState {
+                native_id,
+                fingerprint,
+                considered_through_turn,
+                memory_revision,
+                default_skills,
+                context,
+            }
         },
     );
     let considered = session.as_ref().map_or(0, |s| s.considered_through_turn);
@@ -796,6 +801,7 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
+        mcps: None,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         run: match crate::db::routines::run_of(&mut conn, turn_id).await? {

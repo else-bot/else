@@ -43,15 +43,11 @@ impl From<RulesError> for ApiError {
 pub(super) fn schema() -> Value {
     json!({
         "name": "rules_update",
-        "description": "Save one rule in your rules file: a standing instruction from the owner, \
-            such as what to do when an event happens, text to send verbatim, or a lasting \
-            preference. Your rules reach you at the start of every turn, including routine, \
-            webhook, and event turns. Use it when the owner says what should happen from now \
-            on, always, never, or whenever something occurs, and when they change or cancel a \
-            rule. Pass the whole new text of one section; it replaces that section only. Keep \
-            the owner's exact text for anything they want sent or typed, in backticks, with \
-            placeholders like {ISSUE_ID}. Empty content removes the section. The owner sees \
-            the change as a card.",
+        "description": "Set one section of your rules file, which reaches you at the start of \
+            every turn, routine, webhook, and event turns included. Pass the section's whole new \
+            text; other sections stay. Keep text the owner wants sent or typed exactly as they \
+            wrote it, in backticks, with placeholders such as {ISSUE_ID}. Empty content removes \
+            the section. The owner sees each change as a card.",
         "inputSchema": {
             "type": "object",
             "properties": {

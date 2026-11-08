@@ -83,6 +83,31 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
 }
 
 #[test]
+fn the_result_reports_token_usage_with_cache_reads_and_writes_in_input() {
+    let events = tracker().on(
+        &json!({"type":"result","subtype":"success","is_error":false,
+        "result":"ok","usage":{"input_tokens":5,"cache_read_input_tokens":1000,
+        "cache_creation_input_tokens":200,"output_tokens":40}}),
+    );
+    assert_eq!(
+        events.unwrap()[0],
+        Event::Usage(crate::app::providers::Usage {
+            input: 1205,
+            cached_input: 1000,
+            cache_write: 200,
+            output: 40,
+        })
+    );
+}
+
+#[test]
+fn a_compact_boundary_reports_compaction() {
+    let events = tracker().on(&json!({"type":"system","subtype":"compact_boundary",
+        "compact_metadata":{"trigger":"auto","pre_tokens":150000}}));
+    assert_eq!(events, Ok(vec![Event::Compacted]));
+}
+
+#[test]
 fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     let mut tools = claude_home::tool_names();
     tools.push("Agent".into());
@@ -447,6 +472,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),
+        mcps: None,
         handoff: None,
         jobs: Vec::new(),
         run: None,
@@ -484,6 +510,7 @@ async fn a_warm_session_receives_only_changed_memory_and_default_skills() {
         considered_through_turn: 2,
         memory_revision,
         default_skills: Default::default(),
+        context: Default::default(),
     };
     let current = super::super::default_skills::for_session(None).applied;
     let mut up_to_date = warm(Some(7));
@@ -766,8 +793,8 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
     };
     let ready = claude.ready.as_ref().unwrap();
     [
-        (Origin::OwnerRequest, "6daab69bac5ec9cf1f352ae0792b1943"),
-        (Origin::ConnectorEvent, "46bc6d639fdfc294629ceee544f98d87"),
+        (Origin::OwnerRequest, "1b3e8313496e22aaec07c7e932306c3f"),
+        (Origin::ConnectorEvent, "06396a82d97f089ba55e64b836e32c20"),
     ]
     .map(|(origin, expected)| {
         input.delegation.origin = origin;

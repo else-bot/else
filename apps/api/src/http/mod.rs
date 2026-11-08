@@ -5,12 +5,14 @@ pub mod bots;
 pub mod categories;
 pub mod computers;
 pub mod connectors;
+pub mod context;
 pub mod conversation;
 mod desktop_stream;
 pub mod error;
 pub mod guest_tools;
 pub mod maintenance;
 pub mod mcp;
+mod mcp_result;
 pub mod mcp_wait;
 pub mod memory;
 pub mod onboarding;
@@ -25,6 +27,7 @@ mod shared_mcp;
 mod social_tools;
 pub mod socials;
 pub mod task_secrets;
+mod tool_search;
 pub mod tools;
 pub mod turns;
 pub mod webhooks;
@@ -151,6 +154,7 @@ impl AppState {
 }
 
 pub fn router(config: &Config, state: Arc<AppState>) -> Router {
+    state.scheduler.use_mcp_library(config.data_dir.join("mcp"));
     state.mcps.get_or_init(|| {
         crate::mcp::Library::new(config.data_dir.join("mcp"), state.scheduler.gate().clone())
             .with_oauth_key(state.secret_key.clone())

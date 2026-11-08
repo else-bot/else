@@ -181,6 +181,11 @@ pub enum Event<T> {
     EndMessage,
     /// An else.bot tool parked the turn.
     Parked,
+    /// Tokens the provider reported, added to the turn's totals.
+    Usage(crate::app::providers::Usage),
+    /// The provider compacted the native session's context, which may drop
+    /// the memory, skills, and context blocks it was given.
+    Compacted,
     Finished(T),
 }
 
@@ -297,6 +302,11 @@ where
                     life.parked();
                     Ok(())
                 }
+                Event::Usage(usage) => {
+                    sink.usage(usage).await;
+                    Ok(())
+                }
+                Event::Compacted => turn.compacted(sink).await,
                 Event::Finished(terminal) => {
                     let outcome =
                         life.settled(protocol.outcome(terminal, life.cause(), turn.accepted()));

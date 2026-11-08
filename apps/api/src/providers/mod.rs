@@ -5,6 +5,7 @@ pub mod cli;
 pub mod codex;
 pub mod codex_home;
 pub mod codex_rpc;
+pub(crate) mod context;
 mod default_skills;
 pub mod definitions;
 pub mod executable;

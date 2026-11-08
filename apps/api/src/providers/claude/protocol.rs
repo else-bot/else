@@ -231,6 +231,21 @@ fn result_info(event: &Value) -> ResultInfo {
     }
 }
 
+/// The turn's token totals from the result event. Claude counts cache
+/// reads and writes apart from `input_tokens`.
+fn result_usage(event: &Value) -> Option<crate::app::providers::Usage> {
+    let usage = event.get("usage")?;
+    let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0);
+    let cached_input = count("cache_read_input_tokens");
+    let cache_write = count("cache_creation_input_tokens");
+    Some(crate::app::providers::Usage {
+        input: count("input_tokens") + cached_input + cache_write,
+        cached_input,
+        cache_write,
+        output: count("output_tokens"),
+    })
+}
+
 impl Protocol for Tracker {
     type Message = Value;
     type Terminal = ResultInfo;
@@ -243,6 +258,7 @@ impl Protocol for Tracker {
         match required(&event["type"], "event")? {
             "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
                 "init" => self.on_init(event)?,
+                "compact_boundary" => events.push(Event::Compacted),
                 sub if sub.starts_with("task_") || sub.contains("agent") => {
                     return Err(Violation::policy(format!(
                         "Claude reported native agent activity ({sub})"
@@ -263,7 +279,10 @@ impl Protocol for Tracker {
                     "Claude asked for permission: {what}"
                 )));
             }
-            "result" => events.push(Event::Finished(result_info(event))),
+            "result" => {
+                events.extend(result_usage(event).map(Event::Usage));
+                events.push(Event::Finished(result_info(event)));
+            }
             _ => {}
         }
         Ok(events)

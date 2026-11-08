@@ -2,11 +2,12 @@
 //! Adapters verify this exact allowlist before running a turn.
 
 pub const SERVER_NAME: &str = "elsebot";
-/// The tools this server offers. Adapters allow exactly these.
+/// The tools this server lists. Adapters allow exactly these. The else.bot
+/// tools a turn lists directly. Rarely used tools are reached
+/// through `find_tool` and `use_tool` instead (see [`DEFERRED_TOOLS`]).
 pub const TOOL_NAMES: &[&str] = &[
     "mcp_list",
     "mcp_install",
-    "mcp_connection_status",
     "mcp_request",
     "mcp_wait",
     "mcp_connect",
@@ -14,20 +15,48 @@ pub const TOOL_NAMES: &[&str] = &[
     "memory_search",
     "memory_read",
     "memory_view",
-    "memory_zoom",
-    "memory_date",
-    "else_status",
     "delegate",
     "council",
-    "list_bots",
-    "create_bot",
-    "rename_bot",
     "request_secret",
     "ask_owner",
     "ask_permission",
-    "confirm_permission",
     "draft_email",
     "draft_message",
+    "webhook_create",
+    "webhook_update",
+    "social_connect",
+    "social_action",
+    "computer_run",
+    "computer_job_start",
+    "computer_job",
+    "computer_write_file",
+    "computer_read_file",
+    "computer_fetch",
+    "computer_browser",
+    "computer_screenshot",
+    "computer_input",
+    "mail_accounts",
+    "mail_action",
+    "mail_action_status",
+    "social_connections",
+    "social_action_status",
+    "rules_update",
+    "find_tool",
+    "use_tool",
+];
+/// Tools reached only through `use_tool`, after `find_tool` returns their
+/// schema. The mail and social tools an incoming event turn works with stay
+/// listed. None may park a turn: providers recognize parking by the name
+/// of the tool they called, which for these is `use_tool`.
+pub const DEFERRED_TOOLS: &[&str] = &[
+    "mcp_connection_status",
+    "memory_zoom",
+    "memory_date",
+    "else_status",
+    "list_bots",
+    "create_bot",
+    "rename_bot",
+    "confirm_permission",
     "confirm_draft_approval",
     "start_draft_send",
     "send_draft",
@@ -37,36 +66,14 @@ pub const TOOL_NAMES: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_run",
-    "rules_update",
-    "webhook_create",
     "webhook_list",
-    "webhook_update",
     "webhook_delete",
-    "social_connect",
-    "social_connections",
-    "social_action",
-    "social_action_status",
     "social_trigger_set",
     "social_trigger_list",
     "social_trigger_delete",
-    "mail_accounts",
-    "mail_action",
-    "mail_action_status",
-    "computer_run",
-    "computer_job_start",
-    "computer_job",
     "computer_job_cancel",
-    "computer_write_file",
-    "computer_read_file",
-    "computer_fetch",
-    "computer_browser",
     "computer_secrets",
-    "computer_screenshot",
-    "computer_input",
 ];
-/// Tools whose pending result means the attempt must end: the turn waits
-/// for the outcome and continues in a new attempt. The computer tools park
-/// only when a destructive or external call awaits the owner's approval.
 pub const PARKING_TOOLS: &[&str] = &[
     "mcp_request",
     "mcp_wait",

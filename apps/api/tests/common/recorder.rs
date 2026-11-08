@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use else_api::app::providers::{
     Availability, CheckpointRequest, Fenced, Profile, Provider, Selection, SessionState, TurnInput,
-    TurnOutcome, TurnSink,
+    TurnOutcome, TurnSink, Usage,
 };
 use else_api::providers::synthetic::Synthetic;
 use serde_json::{Value, json};
@@ -122,6 +122,9 @@ impl TurnSink for Gated<'_> {
     }
     async fn end_message(&self) -> Result<(), Fenced> {
         self.inner.end_message().await
+    }
+    async fn usage(&self, usage: Usage) {
+        self.inner.usage(usage).await
     }
     async fn session(&self, state: &SessionState) -> Result<(), Fenced> {
         self.inner.session(state).await

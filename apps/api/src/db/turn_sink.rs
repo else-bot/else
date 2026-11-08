@@ -599,13 +599,15 @@ impl SinkState {
                 Some(id) => {
                     sqlx::query(
                         "UPDATE provider_sessions SET considered_through_turn = ?2,
-                             memory_revision = coalesce(?3, memory_revision), default_skills = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                             memory_revision = ?3, default_skills = ?4,
+                             context_receipts = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE id = ?1",
                     )
                     .bind(id)
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
                     .bind(sqlx::types::Json(&state.default_skills))
+                    .bind(sqlx::types::Json(&state.context))
                     .execute(&mut *tx)
                     .await?;
                     id
@@ -624,9 +626,10 @@ impl SinkState {
                     let id = Uuid::new_v4();
                     sqlx::query(
                         "INSERT INTO provider_sessions (id, bot_id, conversation_id, provider_id,
-                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills, lane)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                             (SELECT session_lane FROM turns WHERE id = ?10))",
+                             native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills,
+                             context_receipts, lane)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                             (SELECT session_lane FROM turns WHERE id = ?11))",
                     )
                     .bind(id)
                     .bind(self.bot_id)
@@ -637,6 +640,7 @@ impl SinkState {
                     .bind(state.considered_through_turn)
                     .bind(state.memory_revision)
                     .bind(sqlx::types::Json(&state.default_skills))
+                    .bind(sqlx::types::Json(&state.context))
                     .bind(self.turn_id)
                     .execute(&mut *tx)
                     .await?;
@@ -681,6 +685,27 @@ impl SinkState {
             tracing::warn!(turn = %self.turn_id, error = %err, "recording reported settings failed");
         }
         Ok(())
+    }
+
+    /// Recorded even after fencing: the provider spent the tokens either way.
+    async fn usage(&mut self, usage: crate::app::providers::Usage) {
+        let added = sqlx::query(
+            "UPDATE turns SET input_tokens = coalesce(input_tokens, 0) + ?2,
+                 cached_input_tokens = coalesce(cached_input_tokens, 0) + ?3,
+                 cache_write_tokens = coalesce(cache_write_tokens, 0) + ?4,
+                 output_tokens = coalesce(output_tokens, 0) + ?5
+             WHERE id = ?1",
+        )
+        .bind(self.turn_id)
+        .bind(usage.input)
+        .bind(usage.cached_input)
+        .bind(usage.cache_write)
+        .bind(usage.output)
+        .execute(&self.pool)
+        .await;
+        if let Err(err) = added {
+            tracing::warn!(turn = %self.turn_id, error = %err, "recording token usage failed");
+        }
     }
 
     async fn text(&mut self, chunk: &str) -> Result<(), Fenced> {
@@ -778,6 +803,11 @@ impl TurnSink for SqliteSink {
                 Box::pin(async move { state.reported(&settings, &native_turn_id).await })
             })
             .await
+    }
+    async fn usage(&self, usage: crate::app::providers::Usage) {
+        self.state
+            .call_async(move |state| Box::pin(state.usage(usage)))
+            .await;
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
         let mut remaining = chunk;
