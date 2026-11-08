@@ -172,7 +172,7 @@ impl ComputerManager {
         let current: Option<(String, i64, bool, bool)> = sqlx::query_as(
             "SELECT c.runtime_name, c.generation,
                     c.desktop_generation IS NOT DISTINCT FROM c.generation,
-                    c.grown_generation IS NOT DISTINCT FROM c.generation
+                    c.grown
              FROM computer_leases l JOIN bot_computers c ON c.bot_id = l.bot_id
              WHERE l.id = ?1 AND l.bot_id = ?2 AND l.released_at IS NULL
                AND c.observed_state = 'running' AND c.desired_state = 'auto'
@@ -196,9 +196,8 @@ impl ComputerManager {
             return Ok(Ok(()));
         }
         if grows {
-            sqlx::query("UPDATE bot_computers SET grown_generation = ?2 WHERE bot_id = ?1")
+            sqlx::query("UPDATE bot_computers SET grown = 1 WHERE bot_id = ?1")
                 .bind(bot_id)
-                .bind(generation)
                 .execute(&mut *tx)
                 .await?;
         }

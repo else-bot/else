@@ -27,6 +27,7 @@ struct Fake {
     create_delay: Mutex<Duration>,
     fail_unpack: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
+    fail_configure: std::sync::atomic::AtomicBool,
     specs: Mutex<Vec<Spec>>,
 }
 
@@ -142,6 +143,15 @@ impl ComputerRuntime for Fake {
         self.log(format!(
             "configure {name} {cpus}cpu {memory_mib}MiB up to {max_cpus}cpu {max_memory_mib}MiB"
         ));
+        if self
+            .fail_configure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(RuntimeError::Failed {
+                operation: "modify".into(),
+                message: "busy".into(),
+            });
+        }
         Ok(())
     }
     async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
@@ -1187,4 +1197,70 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
         1,
         "a restart starts no desktop"
     );
+}
+
+/// A computer that grew is counted at its maximum until a reset of its boot
+/// size succeeds: through a failed stop, and on a restart whose reset failed,
+/// which waits for room for its maximum.
+#[tokio::test(flavor = "multi_thread")]
+async fn grown_computers_stay_counted_until_their_size_is_reset() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let base = ComputerConfig::default();
+    let (small_cpus, small_memory) = (base.cpus, base.memory_mib + base.overhead_mib);
+    let (big_cpus, big_memory) = (
+        base.desktop_cpus,
+        base.desktop_memory_mib + base.overhead_mib,
+    );
+    let manager = manager(
+        &app,
+        &fake,
+        ComputerConfig {
+            desktop: true,
+            state_dir: dir.path().to_owned(),
+            max_cpus: big_cpus + small_cpus,
+            max_memory_mib: (big_memory + small_memory) as u64,
+            ..config(2)
+        },
+    )
+    .await;
+    let a: Uuid = app.create_bot("Grown").await.parse().unwrap();
+    let b: Uuid = app.create_bot("Other").await.parse().unwrap();
+    let grows = |name: &str| {
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with(&format!("grow {name}")))
+            .count()
+    };
+    let (_, name_a) = ready(&manager, a, "test:a").await;
+    manager.acquire_desktop(a, "test:a").await.unwrap();
+    assert_eq!(grows(&name_a), 1);
+
+    fake.fail_stop.store(true, SeqCst);
+    let _ = manager.owner_stop(a).await;
+    assert_ne!(observed(&app, a).await, "stopped", "the stop failed");
+    fake.fail_stop.store(false, SeqCst);
+    let (_, name_b) = ready(&manager, b, "test:b").await;
+    manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert_eq!(
+        grows(&name_b),
+        0,
+        "a failed stop still holds the grown size"
+    );
+
+    manager.owner_stop(a).await.unwrap();
+    manager.owner_resume(a).await.unwrap();
+    manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert_eq!(grows(&name_b), 1, "room once it stopped");
+
+    fake.fail_configure.store(true, SeqCst);
+    let waiting = manager.acquire(a, "test:a2").await.unwrap();
+    assert!(
+        matches!(&waiting, Acquire::Queued { .. }),
+        "an unreset restart needs room for its maximum: {waiting:?}"
+    );
+    fake.fail_configure.store(false, SeqCst);
+    let (_, _) = ready(&manager, a, "test:a2").await;
 }

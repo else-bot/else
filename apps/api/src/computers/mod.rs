@@ -199,7 +199,7 @@ pub enum DiskCapture {
 const RESERVING: &str = "('creating', 'starting', 'running', 'pausing', 'paused', 'resuming', \
                          'stopping', 'error')";
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 struct Row {
     runtime_name: String,
     image: String,
@@ -207,6 +207,9 @@ struct Row {
     memory_mib: i32,
     max_cpus: Option<i32>,
     max_memory_mib: Option<i32>,
+    /// The runtime holds the computer at its maximum: it grew, and no reset
+    /// of its boot size has been confirmed since.
+    grown: bool,
     desired_state: String,
     observed_state: String,
     generation: i64,
@@ -223,16 +226,25 @@ impl Row {
                 .max(self.memory_mib) as u32,
         )
     }
+
+    /// What it needs of the budget to run (see `RESERVED_CPUS`).
+    fn reserved(&self) -> (u32, u32) {
+        if self.grown {
+            self.max()
+        } else {
+            (self.cpus as u32, self.memory_mib as u32)
+        }
+    }
 }
 
-const ROW: &str = "runtime_name, image, cpus, memory_mib, max_cpus, max_memory_mib, desired_state, \
-                   observed_state, generation, network";
+const ROW: &str = "runtime_name, image, cpus, memory_mib, max_cpus, max_memory_mib, grown, \
+                   desired_state, observed_state, generation, network";
 
-/// What an active computer holds of the budget: its maximum once it grew
-/// during this boot, its boot size otherwise.
-const RESERVED_CPUS: &str = "CASE WHEN grown_generation = generation THEN max(cpus, coalesce(max_cpus, cpus)) ELSE cpus END";
-const RESERVED_MEMORY: &str = "CASE WHEN grown_generation = generation \
-     THEN max(memory_mib, coalesce(max_memory_mib, memory_mib)) ELSE memory_mib END";
+/// What an active computer holds of the budget: its maximum once it grew,
+/// until a reset of its boot size is confirmed; its boot size otherwise.
+const RESERVED_CPUS: &str =
+    "CASE WHEN grown THEN max(cpus, coalesce(max_cpus, cpus)) ELSE cpus END";
+const RESERVED_MEMORY: &str = "CASE WHEN grown THEN max(memory_mib, coalesce(max_memory_mib, memory_mib)) ELSE memory_mib END";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wake {
@@ -385,6 +397,15 @@ impl ComputerManager {
             });
         }
         let _op = self.op(bot_id).await;
+        let stopped = {
+            let mut conn = self.pool.acquire().await?;
+            Self::row(&mut conn, bot_id)
+                .await?
+                .filter(|row| row.observed_state == "stopped")
+        };
+        if let Some(row) = stopped {
+            self.configure_boot(bot_id, &row).await?;
+        }
         for _ in 0..2 {
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let active: Option<bool> =
@@ -457,32 +478,13 @@ impl ComputerManager {
         row: Row,
         wake: Wake,
     ) -> Result<Acquire, ComputerError> {
-        // A start boots at the configured size (see `configure_boot`).
-        let (cpus, memory) = match (wake, self.config.growth()) {
-            (Wake::Start, Some(_)) => (
-                self.config.cpus.max(row.cpus as u32),
-                self.config.memory_mib.max(row.memory_mib as u32),
-            ),
-            _ => (row.cpus as u32, row.memory_mib as u32),
-        };
+        let (cpus, memory) = row.reserved();
         if wake != Wake::Resume && !self.admits(&mut tx, bot_id, cpus, memory).await? {
             return Ok(Acquire::Queued {
                 reason: "the computer budget is in use; waiting for capacity".into(),
             });
         }
         let next = row.generation + 1;
-        if wake == Wake::Resume {
-            // A paused computer kept the size it grew to.
-            sqlx::query(
-                "UPDATE bot_computers SET grown_generation = ?2
-                 WHERE bot_id = ?1 AND grown_generation = ?3",
-            )
-            .bind(bot_id)
-            .bind(next)
-            .bind(row.generation)
-            .execute(&mut *tx)
-            .await?;
-        }
         let transient = match wake {
             Wake::Create => "creating",
             Wake::Start => "starting",
@@ -536,10 +538,7 @@ impl ComputerManager {
                 }
                 outcome
             }
-            Wake::Start => {
-                self.configure_boot(bot_id, &row, next).await?;
-                self.runtime.start(&row.runtime_name).await
-            }
+            Wake::Start => self.runtime.start(&row.runtime_name).await,
             Wake::Resume => self.runtime.resume(&row.runtime_name).await,
         };
         if let Err(err) = result {
@@ -666,18 +665,18 @@ impl ComputerManager {
         self.observe(bot_id).await
     }
 
-    /// Before a start, set the computer to boot at the configured size and
-    /// be able to grow to the desktop size. Growth persists across a
-    /// restart, so a computer that grew would otherwise boot at its
-    /// maximum; when it cannot be reset it is counted at that maximum.
+    /// Set a stopped computer to boot at the configured size, able to grow
+    /// to the desktop size, and return its row as it now is. Growth persists
+    /// across a restart, so a computer that grew stays counted at its
+    /// maximum until this reset succeeds. The caller holds the bot's
+    /// operation lock, and admits the start after this, against the result.
     async fn configure_boot(
         &self,
         bot_id: Uuid,
         row: &Row,
-        next: i64,
-    ) -> Result<(), ComputerError> {
+    ) -> Result<Row, ComputerError> {
         let Some((max_cpus, max_memory)) = self.config.growth() else {
-            return Ok(());
+            return Ok(row.clone());
         };
         let (cpus, memory) = (self.config.cpus, self.config.memory_mib);
         match self
@@ -688,7 +687,7 @@ impl ComputerManager {
             Ok(()) => {
                 sqlx::query(
                     "UPDATE bot_computers SET cpus = ?2, memory_mib = ?3, max_cpus = ?4,
-                         max_memory_mib = ?5
+                         max_memory_mib = ?5, grown = 0
                      WHERE bot_id = ?1",
                 )
                 .bind(bot_id)
@@ -701,16 +700,10 @@ impl ComputerManager {
             }
             Err(err) => {
                 tracing::warn!(bot = %bot_id, error = %err, "computer boot size unchanged");
-                if row.max() != (row.cpus as u32, row.memory_mib as u32) {
-                    sqlx::query("UPDATE bot_computers SET grown_generation = ?2 WHERE bot_id = ?1")
-                        .bind(bot_id)
-                        .bind(next)
-                        .execute(&self.pool)
-                        .await?;
-                }
             }
         }
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        Ok(Self::row(&mut conn, bot_id).await?.expect("exists"))
     }
 
     /// Whether the budget, besides every other active computer, has room for
