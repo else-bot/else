@@ -231,14 +231,25 @@ async fn guest_tools_desktop_and_isolation() {
         "{}",
         out.stderr
     );
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    let services = run("ps -eo comm | sort -u | tr '\\n' ' '")
-        .await
-        .unwrap()
-        .unwrap()
-        .stdout;
+    let services = || async {
+        run("ps -eo comm | sort -u | tr '\\n' ' '")
+            .await
+            .unwrap()
+            .unwrap()
+            .stdout
+    };
+    let idle = services().await;
+    assert!(idle.contains("supervisord"), "{idle}");
     for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
-        assert!(services.contains(service), "{service} missing: {services}");
+        assert!(!idle.contains(service), "{service} runs before any use: {idle}");
+    }
+    assert!(matches!(
+        manager.acquire_desktop(bot, "test:turn").await.unwrap(),
+        Acquire::Ready { .. }
+    ));
+    let shown = services().await;
+    for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
+        assert!(shown.contains(service), "{service} missing: {shown}");
     }
 
     let checks = run(
