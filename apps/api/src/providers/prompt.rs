@@ -1134,9 +1134,6 @@ pub(super) fn turn_content<'a>(
     if let Some(memory) = inject {
         segments.insert(0, Segment::Text(memory.text.clone()));
     }
-    if let Some(rules) = input.rules.as_deref() {
-        segments.insert(0, Segment::Text(crate::app::rules::prompt_block(rules)));
-    }
     if let Some(text) = &skills.text {
         segments.insert(0, Segment::Text(text.clone()));
     }

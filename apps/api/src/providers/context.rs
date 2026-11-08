@@ -1,5 +1,6 @@
-//! Context a native session keeps until it changes: the bot registry, the
-//! saved-permission snapshot, and the installed shared MCPs. Each block rides in the turn packet only
+//! Context a native session keeps until it changes: the bot's rules file,
+//! the bot registry, the saved-permission snapshot, and the installed shared
+//! MCPs. Each block rides in the turn packet only
 //! when its content hash differs from the one the session acknowledged, so
 //! the system prompt stays byte-identical across turns and the provider's
 //! cached prefix survives a new bot, a delegation, or a permission change.
@@ -20,8 +21,18 @@ pub struct Update {
 /// The blocks for this turn, by receipt key. An empty block does not apply
 /// to this turn (a routine run has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
-fn blocks(input: &TurnInput) -> [(&'static str, String); 3] {
+fn blocks(input: &TurnInput) -> [(&'static str, String); 4] {
     [
+        // The bot's rules file, verbatim; a cleared file renders its own block,
+        // so a session that held rules learns they are gone.
+        (
+            "rules",
+            input
+                .rules
+                .as_deref()
+                .map(crate::app::rules::prompt_block)
+                .unwrap_or_default(),
+        ),
         ("registry", prompt::registry_block(input)),
         ("permissions", prompt::permissions_block(input)),
         ("mcps", prompt::mcps_block(input)),
@@ -126,5 +137,28 @@ mod tests {
         }]);
         let text = for_session(&turn, None).text.unwrap();
         assert!(text.contains("- github (GitHub): Issues and pull requests\n"));
+    }
+
+    #[test]
+    fn rules_are_sent_once_again_when_they_change_and_when_cleared() {
+        let mut turn = input();
+        turn.rules = Some("## New issue\nSend `fix issue {ID}`.\n".into());
+        let first = for_session(&turn, None);
+        assert!(
+            first
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("Send `fix issue {ID}`.")
+        );
+        let held = session(first.applied);
+        assert_eq!(
+            for_session(&turn, Some(&held)).text,
+            None,
+            "unchanged rules stay out"
+        );
+        turn.rules = Some(String::new());
+        let cleared = for_session(&turn, Some(&held)).text.unwrap();
+        assert!(cleared.contains("You have no saved rules now."));
     }
 }
