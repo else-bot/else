@@ -477,42 +477,7 @@ impl Library {
     }
 
     pub async fn list(&self) -> Result<Vec<Summary>, Error> {
-        let root = self.root.clone();
-        tokio::task::spawn_blocking(move || {
-            let entries = match std::fs::read_dir(&root) {
-                Ok(entries) => entries,
-                Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(err) => return Err(err.into()),
-            };
-            require_dir(&root)?;
-            let mut summaries = Vec::new();
-            for entry in entries {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    continue;
-                }
-                let Ok(id) = PackageId::try_from(name) else {
-                    tracing::warn!("Ignoring an invalid directory in the shared MCP library");
-                    continue;
-                };
-                match read_manifest(&root.join(&id.0)) {
-                    Ok(manifest) if manifest.id == id => summaries.push(manifest),
-                    Ok(_) => tracing::warn!("Ignoring a mismatched MCP manifest id"),
-                    Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => continue,
-                    Err(_) => tracing::warn!("Ignoring an invalid MCP manifest"),
-                }
-            }
-            summaries.sort_by(|a, b| {
-                a.name
-                    .to_lowercase()
-                    .cmp(&b.name.to_lowercase())
-                    .then_with(|| a.id.0.cmp(&b.id.0))
-            });
-            Ok(summaries)
-        })
-        .await
-        .map_err(|_| Error::Connection)?
+        installed(self.root.clone()).await
     }
 
     pub async fn listings(&self) -> Result<Vec<Listing>, Error> {
@@ -1026,6 +991,46 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// The packages installed under `root`, sorted by name. Reads only the
+/// manifests, so a turn can list them without the library's connections.
+pub async fn installed(root: PathBuf) -> Result<Vec<Summary>, Error> {
+    tokio::task::spawn_blocking(move || {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        require_dir(&root)?;
+        let mut summaries = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(id) = PackageId::try_from(name) else {
+                tracing::warn!("Ignoring an invalid directory in the shared MCP library");
+                continue;
+            };
+            match read_manifest(&root.join(&id.0)) {
+                Ok(manifest) if manifest.id == id => summaries.push(manifest),
+                Ok(_) => tracing::warn!("Ignoring a mismatched MCP manifest id"),
+                Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => continue,
+                Err(_) => tracing::warn!("Ignoring an invalid MCP manifest"),
+            }
+        }
+        summaries.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+        Ok(summaries)
+    })
+    .await
+    .map_err(|_| Error::Connection)?
 }
 
 #[cfg(test)]

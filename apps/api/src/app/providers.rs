@@ -155,6 +155,9 @@ pub struct TurnInput {
     pub social_setups: Vec<crate::socials::store::Setup>,
     /// Settled waits on MCP jobs that no attempt has received yet.
     pub mcp_waits: Vec<McpWaitOutcome>,
+    /// The shared MCPs installed for every bot, for a turn that may use
+    /// them; `None` when it may not or the library could not be read.
+    pub mcps: Option<Vec<InstalledMcp>>,
     /// Set when this turn switches provider and the session missed turns.
     pub handoff: Option<HandoffContext>,
     /// The bot's active and unresolved guest jobs, given with any rebuilt
@@ -165,6 +168,14 @@ pub struct TurnInput {
     pub run: Option<SavedRun>,
     /// The bot's current rules file, given at the start of every turn.
     pub rules: Option<String>,
+}
+
+/// One shared MCP as a turn lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledMcp {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 
 /// The saved task a turn runs instead of an owner message.

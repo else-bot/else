@@ -33,6 +33,8 @@ pub struct Scheduler {
     slots: Arc<Semaphore>,
     summaries: AtomicUsize,
     gate: Arc<crate::maintenance::Gate>,
+    /// The shared MCP library's directory, set by the router.
+    mcp_root: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 /// A provider slot held by one memory summary. Released on drop.
@@ -76,7 +78,13 @@ impl Scheduler {
             slots: Arc::new(Semaphore::new(max_active)),
             summaries: AtomicUsize::new(0),
             gate: Arc::default(),
+            mcp_root: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Where the shared MCP library lives, so turns can list its packages.
+    pub fn use_mcp_library(&self, root: std::path::PathBuf) {
+        let _ = self.mcp_root.set(root);
     }
 
     /// Turns this process is running now.
@@ -354,6 +362,27 @@ impl Scheduler {
                 )
                 .await,
         );
+        if let Some(root) = self.mcp_root.get()
+            && turn_tools(&input.delegation).contains(&Tool::Mcp)
+        {
+            match crate::mcp::installed(root.clone()).await {
+                Ok(summaries) => {
+                    input.mcps = Some(
+                        summaries
+                            .into_iter()
+                            .map(|s| crate::app::providers::InstalledMcp {
+                                id: s.id.into(),
+                                name: s.name,
+                                description: s.description,
+                            })
+                            .collect(),
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(turn = %turn_id, error = %err, "listing shared MCPs failed");
+                }
+            }
+        }
         if self.registry.get(&provider_id).is_some() {
             match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, &cancel)
                 .await

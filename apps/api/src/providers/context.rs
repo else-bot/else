@@ -1,5 +1,5 @@
-//! Context a native session keeps until it changes: the bot registry and
-//! the saved-permission snapshot. Each block rides in the turn packet only
+//! Context a native session keeps until it changes: the bot registry, the
+//! saved-permission snapshot, and the installed shared MCPs. Each block rides in the turn packet only
 //! when its content hash differs from the one the session acknowledged, so
 //! the system prompt stays byte-identical across turns and the provider's
 //! cached prefix survives a new bot, a delegation, or a permission change.
@@ -20,10 +20,11 @@ pub struct Update {
 /// The blocks for this turn, by receipt key. An empty block does not apply
 /// to this turn (a routine run has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
-fn blocks(input: &TurnInput) -> [(&'static str, String); 2] {
+fn blocks(input: &TurnInput) -> [(&'static str, String); 3] {
     [
         ("registry", prompt::registry_block(input)),
         ("permissions", prompt::permissions_block(input)),
+        ("mcps", prompt::mcps_block(input)),
     ]
 }
 
@@ -112,5 +113,18 @@ mod tests {
         turn.delegation.remaining = 0;
         assert_eq!(prompt::instructions(&turn, "/p"), before);
         assert!(!before.contains("Researcher"));
+    }
+
+    #[test]
+    fn the_installed_mcps_are_listed_when_known() {
+        let mut turn = input();
+        assert!(!for_session(&turn, None).applied.contains_key("mcps"));
+        turn.mcps = Some(vec![crate::app::providers::InstalledMcp {
+            id: "github".into(),
+            name: "GitHub".into(),
+            description: "Issues and pull requests".into(),
+        }]);
+        let text = for_session(&turn, None).text.unwrap();
+        assert!(text.contains("- github (GitHub): Issues and pull requests\n"));
     }
 }

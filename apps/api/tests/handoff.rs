@@ -78,6 +78,11 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
     say(&app, &bot, A, "Owner fact: the code word is PURPLE-7.").await;
+    let first = last(&a.packets().await);
+    assert!(
+        first.contains("[else.bot installed MCPs] Shared MCPs every bot can use. This list replaces earlier ones.\n(none installed)"),
+        "{first}"
+    );
     let (t2, _) = say(&app, &bot, A, "Second message on A.").await;
     assert!(
         handoff(&app, t2).await.is_none(),
@@ -90,8 +95,8 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
         "a resumed session gets no history"
     );
     assert!(
-        !resumed.contains("[else.bot saved permissions]"),
-        "a resumed session already holds the unchanged permissions: {resumed}"
+        !resumed.contains("[else.bot saved permissions]") && !resumed.contains("installed MCPs"),
+        "a resumed session already holds the unchanged context: {resumed}"
     );
 
     let (t3, status) = say(&app, &bot, B, "Third, on B: what is the code word?").await;
@@ -127,8 +132,8 @@ async fn a_round_trip_hands_off_once_and_returning_sessions_get_only_their_delta
     assert!(resumed.ends_with("Fourth, still B."), "{resumed}");
     assert!(!resumed.contains("Third, on B:"), "{resumed}");
     assert!(
-        !resumed.contains("[else.bot saved permissions]"),
-        "a resumed session already holds the unchanged permissions: {resumed}"
+        !resumed.contains("[else.bot saved permissions]") && !resumed.contains("installed MCPs"),
+        "a resumed session already holds the unchanged context: {resumed}"
     );
 
     let a_before = a.packets().await.len();

@@ -152,6 +152,7 @@ impl AppState {
 }
 
 pub fn router(config: &Config, state: Arc<AppState>) -> Router {
+    state.scheduler.use_mcp_library(config.data_dir.join("mcp"));
     state.mcps.get_or_init(|| {
         crate::mcp::Library::new(config.data_dir.join("mcp"), state.scheduler.gate().clone())
             .with_oauth_key(state.secret_key.clone())
