@@ -91,6 +91,8 @@ impl Style {
 struct Rgb(u32);
 
 impl Rgb {
+    // Only the Linux Omarchy theme reader parses hex colors outside tests.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn parse(text: &str) -> Option<Self> {
         let hex = text.strip_prefix('#')?;
         if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {

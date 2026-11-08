@@ -478,7 +478,12 @@ impl ElseApp {
         v_flex()
             .w_full()
             .gap_1()
-            .child(div().w_full().pr(px(60.)).child(card))
+            .child(
+                div()
+                    .w_full()
+                    .pr(super::message_row::BOT_GUTTER)
+                    .child(card),
+            )
             .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
             .into_any_element()
     }

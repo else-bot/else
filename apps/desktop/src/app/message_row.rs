@@ -13,6 +13,9 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// Right gutter that sets the width of bot-side bubbles and cards.
+pub(super) const BOT_GUTTER: Pixels = px(60.);
+
 impl ElseApp {
     pub(super) fn render_row(
         &mut self,
@@ -73,7 +76,7 @@ impl ElseApp {
             let body = if let Some(task) = row.task.as_ref() {
                 gpui_kit::component::v_flex()
                     .w_full()
-                    .pr(px(60.))
+                    .pr(BOT_GUTTER)
                     .gap_2()
                     .children(
                         self.view
@@ -153,7 +156,7 @@ impl ElseApp {
             .when(group.first, |column| column.pt_1p5())
             .when(group.last, |column| column.pb_1p5())
             .children(row.unread_start.then(|| unread_divider(cx)))
-            .child(frame)
+            .child(div().w_full().pr(BOT_GUTTER).child(frame))
             .into_any_element()
     }
 
@@ -230,7 +233,7 @@ impl ElseApp {
             } else if user {
                 side.pl(relative(0.15))
             } else {
-                side.pr(px(60.))
+                side.pr(BOT_GUTTER)
             };
             side.child(card)
         };
@@ -376,10 +379,16 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
-            RowKey::SecretRequest(id) => self.render_secret_card(id, cx),
-            RowKey::Question(id) => self.render_question_card(id, cx),
-            RowKey::Draft(id) => self.render_draft_card(id, cx),
-            RowKey::SocialSetup(id) => self.render_social_card(id, cx),
+            RowKey::SecretRequest(id) => {
+                side(false, self.render_secret_card(id, cx)).into_any_element()
+            }
+            RowKey::Question(id) => {
+                side(false, self.render_question_card(id, cx)).into_any_element()
+            }
+            RowKey::Draft(id) => side(false, self.render_draft_card(id, cx)).into_any_element(),
+            RowKey::SocialSetup(id) => {
+                side(false, self.render_social_card(id, cx)).into_any_element()
+            }
             RowKey::Handoff(id) => self.render_handoff(id, cx),
             RowKey::Pending(request_id) => {
                 let pending = self
