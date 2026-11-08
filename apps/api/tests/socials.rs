@@ -217,7 +217,8 @@ async fn owner_work_uses_any_chat_and_a_woken_turn_reads_only_its_own() {
     let owner = turn(&db, bot, "user").await;
     let trigger = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
         .await
-        .unwrap();
+        .unwrap()
+        .value;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     assert_eq!(
         authorize(&db, &c, bot, owner, None, false).await.unwrap(),
@@ -315,29 +316,52 @@ async fn an_external_turn_sees_no_connection_it_was_not_delivered_from() {
 }
 
 #[tokio::test]
-async fn only_an_enabled_every_message_trigger_requests_message_content() {
+async fn only_discord_intent_changes_restart_the_listener() {
     let db = TestDb::migrated().await;
-    let c = account(&db, "intents").await;
+    let discord = account(&db, "intents").await;
+    sqlx::query("UPDATE social_connections SET provider='discord' WHERE id=?1")
+        .bind(discord.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let telegram = account(&db, "no-intents").await;
     let bot = bot(&db).await;
     let owner = turn(&db, bot, "user").await;
-    let content = || async {
-        store::connection(&db.pool, c.id)
-            .await
-            .unwrap()
-            .message_content
+    let content = |id: Uuid| {
+        let pool = db.pool.clone();
+        async move { store::connection(&pool, id).await.unwrap().message_content }
     };
-    store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::Mentions))
+    let mention = store::set_trigger(&db.pool, owner, &watch(discord.id, None, Wake::Mentions))
         .await
         .unwrap();
-    assert!(!content().await, "a mention needs no message content");
-    let all = store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::All))
+    assert!(!mention.reconnect, "a mention needs no message content");
+    assert!(!content(discord.id).await);
+    let all = store::set_trigger(&db.pool, owner, &watch(discord.id, None, Wake::All))
         .await
         .unwrap();
-    assert!(content().await);
-    store::set_trigger_enabled(&db.pool, bot, all.id, false)
+    assert!(all.reconnect && content(discord.id).await);
+    let same = store::set_trigger(&db.pool, owner, &watch(discord.id, Some("100"), Wake::All))
         .await
         .unwrap();
-    assert!(!content().await, "a paused trigger wakes nothing");
+    assert!(!same.reconnect, "already receiving message content");
+    store::delete_trigger(&db.pool, bot, same.value.id)
+        .await
+        .unwrap();
+    let paused = store::set_trigger_enabled(&db.pool, bot, all.value.id, false)
+        .await
+        .unwrap();
+    assert!(paused.reconnect && !content(discord.id).await);
+    let deleted = store::delete_trigger(&db.pool, bot, all.value.id)
+        .await
+        .unwrap();
+    assert!(!deleted.reconnect, "a paused trigger asked for nothing");
+    let telegram_all = store::set_trigger(&db.pool, owner, &watch(telegram.id, None, Wake::All))
+        .await
+        .unwrap();
+    assert!(
+        !telegram_all.reconnect,
+        "Telegram receives every message already, so in-flight actions continue"
+    );
 }
 
 #[tokio::test]
@@ -361,13 +385,15 @@ async fn a_bot_sets_its_own_triggers_only_for_owner_work_and_one_per_chat() {
     let owner = turn(&db, bot, "user").await;
     let first = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
         .await
-        .unwrap();
+        .unwrap()
+        .value;
     assert_eq!(first.destination_name.as_deref(), Some("Team"));
     let mut replaced = watch(c.id, Some("100"), Wake::Mentions);
     replaced.instructions = "Only answer release questions.".into();
     let second = store::set_trigger(&db.pool, owner, &replaced)
         .await
-        .unwrap();
+        .unwrap()
+        .value;
     assert_eq!(second.id, first.id, "the same chat replaces its trigger");
     assert_eq!(
         (second.wake, second.instructions.as_str()),
@@ -375,14 +401,18 @@ async fn a_bot_sets_its_own_triggers_only_for_owner_work_and_one_per_chat() {
     );
     let any = store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::Mentions))
         .await
-        .unwrap();
+        .unwrap()
+        .value;
     assert_ne!(any.id, first.id);
     let listed = store::triggers(&mut db.pool.acquire().await.unwrap(), bot)
         .await
         .unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(
-        store::delete_trigger(&db.pool, bot, any.id).await.unwrap(),
+        store::delete_trigger(&db.pool, bot, any.id)
+            .await
+            .unwrap()
+            .connection,
         c.id
     );
     assert!(
@@ -1072,10 +1102,14 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
     }
     sqlx::query("INSERT INTO social_connections(id,provider,remote_id,display_name,credential_salt,credential) VALUES(?1,'telegram','1','Old bot',x'00',x'00')")
         .bind(c).execute(&db.pool).await.unwrap();
-    let wake = r#"{"destinations":["100","200"],"permissions":{"read":true,"write":true,"send":true,"wake":true},"wake_policy":"mentions","instructions":"Answer support questions."}"#;
+    let long = "Answer support questions. ".repeat(300);
+    let wake = json!({"destinations":["100","200","100"],"permissions":{"read":true,"write":true,"send":true,"wake":true},"wake_policy":"mentions","instructions":long.trim()}).to_string();
     let read = r#"{"destinations":["100"],"permissions":{"read":true,"write":false,"send":false,"wake":false},"wake_policy":"never","instructions":""}"#;
     let binding = Uuid::new_v4();
-    for (bot, id, access) in [(watcher, binding, wake), (reader, Uuid::new_v4(), read)] {
+    for (bot, id, access) in [
+        (watcher, binding, wake.as_str()),
+        (reader, Uuid::new_v4(), read),
+    ] {
         sqlx::query(
             "INSERT INTO social_bindings(id,connection_id,bot_id,access) VALUES(?1,?2,?3,?4)",
         )
@@ -1098,7 +1132,11 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
     .fetch_all(&db.pool)
     .await
     .unwrap();
-    let answer = "Answer support questions.".to_owned();
+    let answer = long.trim().to_owned();
+    assert!(
+        answer.len() > 4000,
+        "legacy instructions allowed up to 8000 bytes"
+    );
     assert_eq!(
         triggers,
         [
@@ -1110,7 +1148,7 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
             ),
             (watcher, Some("200".into()), "mentions".into(), answer),
         ],
-        "only access that woke the bot becomes a trigger"
+        "only access that woke the bot becomes one trigger per chat"
     );
     let delivery: String = sqlx::query_scalar("SELECT status FROM social_deliveries")
         .fetch_one(&db.pool)

@@ -177,23 +177,19 @@ async fn toggle_trigger(
     ApiJson(input): ApiJson<Toggle>,
 ) -> Result<Json<Value>, ApiError> {
     super::turns::active_bot(&s, bot).await?;
-    let trigger = store::set_trigger_enabled(&s.db, bot, id, input.enabled)
+    let change = store::set_trigger_enabled(&s.db, bot, id, input.enabled)
         .await
         .map_err(error)?;
-    if let Some(m) = s.socials.as_ref() {
-        m.changed(trigger.connection_id).await;
-    }
-    Ok(Json(json!({"trigger":trigger})))
+    super::social_tools::reconnect(&s, &change).await;
+    Ok(Json(json!({ "trigger": change.value })))
 }
 async fn delete_trigger(
     State(s): State<Arc<AppState>>,
     ApiPath((bot, id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     super::turns::active_bot(&s, bot).await?;
-    let connection = store::delete_trigger(&s.db, bot, id).await.map_err(error)?;
-    if let Some(m) = s.socials.as_ref() {
-        m.changed(connection).await;
-    }
+    let change = store::delete_trigger(&s.db, bot, id).await.map_err(error)?;
+    super::social_tools::reconnect(&s, &change).await;
     Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]

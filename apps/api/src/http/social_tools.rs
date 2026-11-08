@@ -142,12 +142,10 @@ async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
             "Use connection_id, wake (mentions or all), instructions, and optional destination.",
         )
     })?;
-    let trigger = store::set_trigger(&s.db, g.turn_id, &input).await?;
-    if let Some(m) = s.socials.as_ref() {
-        m.changed(trigger.connection_id).await;
-    }
+    let change = store::set_trigger(&s.db, g.turn_id, &input).await?;
+    reconnect(s, &change).await;
     Ok(tool_result(json!({
-        "trigger": trigger,
+        "trigger": change.value,
         "next": "Tell the owner what will wake you and what you will do. They can pause or delete it in your sidebar."
     })))
 }
@@ -163,11 +161,18 @@ async fn list_triggers(s: &AppState, g: &Grant, args: &Value) -> Result<Value, E
 async fn delete_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
     let input: DeleteTrigger =
         serde_json::from_value(args.clone()).map_err(|_| Error::Invalid("Use trigger_id only."))?;
-    let connection = store::delete_trigger(&s.db, g.bot_id, input.trigger_id).await?;
-    if let Some(m) = s.socials.as_ref() {
-        m.changed(connection).await;
-    }
+    let change = store::delete_trigger(&s.db, g.bot_id, input.trigger_id).await?;
+    reconnect(s, &change).await;
     Ok(tool_result(json!({ "deleted": input.trigger_id })))
+}
+
+/// Restart the connection's listener only when what it receives changed.
+pub(super) async fn reconnect<T>(s: &AppState, change: &store::TriggerChange<T>) {
+    if change.reconnect
+        && let Some(m) = s.socials.as_ref()
+    {
+        m.changed(change.connection).await;
+    }
 }
 
 async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {

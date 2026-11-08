@@ -177,7 +177,7 @@ pub async fn set_trigger(
     pool: &SqlitePool,
     turn: Uuid,
     input: &TriggerInput,
-) -> Result<Trigger, Error> {
+) -> Result<TriggerChange<Trigger>, Error> {
     input.validate()?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let caller = crate::db::turns::asking_caller(&mut tx, turn)
@@ -197,6 +197,7 @@ pub async fn set_trigger(
     if !active {
         return Err(Error::NotFound);
     }
+    let before = wants_content(&mut tx, input.connection_id).await?;
     let destination = input.destination.as_deref();
     let existing: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM social_triggers WHERE connection_id=?1 AND bot_id=?2 AND coalesce(destination,'')=coalesce(?3,'')",
@@ -245,12 +246,38 @@ pub async fn set_trigger(
         }
     };
     let saved = trigger(&mut tx, caller.bot_id, id).await?;
+    let reconnect = before != wants_content(&mut tx, input.connection_id).await?;
     crate::db::events::bot_updated(&mut tx, caller.bot_id).await?;
     tx.commit().await?;
-    Ok(saved)
+    Ok(TriggerChange {
+        connection: saved.connection_id,
+        value: saved,
+        reconnect,
+    })
 }
 
 const MAX_TRIGGERS: i64 = 32;
+
+/// Whether a Discord connection's listener must ask for message content: an
+/// enabled trigger wakes on every message. Telegram has no such switch.
+async fn wants_content(conn: &mut SqliteConnection, connection: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id
+         WHERE t.connection_id=?1 AND t.enabled AND t.wake='all' AND c.provider='discord')",
+    )
+    .bind(connection)
+    .fetch_one(conn)
+    .await
+}
+
+/// A trigger change. `reconnect` is set when the connection's listener must
+/// restart to change what it receives; other changes leave in-flight actions
+/// alone.
+pub struct TriggerChange<T> {
+    pub value: T,
+    pub connection: Uuid,
+    pub reconnect: bool,
+}
 
 /// Pause or resume one of the bot's triggers. A paused trigger's queued
 /// messages are dropped.
@@ -259,8 +286,10 @@ pub async fn set_trigger_enabled(
     bot: Uuid,
     id: Uuid,
     enabled: bool,
-) -> Result<Trigger, Error> {
+) -> Result<TriggerChange<Trigger>, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let connection = trigger(&mut tx, bot, id).await?.connection_id;
+    let before = wants_content(&mut tx, connection).await?;
     let changed = sqlx::query(
         "UPDATE social_triggers SET enabled=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE bot_id=?1 AND id=?2",
     )
@@ -277,27 +306,39 @@ pub async fn set_trigger_enabled(
         revoke_deliveries(&mut tx, id).await?;
     }
     let saved = trigger(&mut tx, bot, id).await?;
+    let reconnect = before != wants_content(&mut tx, connection).await?;
     crate::db::events::bot_updated(&mut tx, bot).await?;
     tx.commit().await?;
-    Ok(saved)
+    Ok(TriggerChange {
+        value: saved,
+        connection,
+        reconnect,
+    })
 }
 
-/// Delete one of the bot's triggers and drop its queued messages. Returns
-/// its connection.
-pub async fn delete_trigger(pool: &SqlitePool, bot: Uuid, id: Uuid) -> Result<Uuid, Error> {
+/// Delete one of the bot's triggers and drop its queued messages.
+pub async fn delete_trigger(
+    pool: &SqlitePool,
+    bot: Uuid,
+    id: Uuid,
+) -> Result<TriggerChange<()>, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let connection: Option<Uuid> = sqlx::query_scalar(
-        "DELETE FROM social_triggers WHERE bot_id=?1 AND id=?2 RETURNING connection_id",
-    )
-    .bind(bot)
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let connection = connection.ok_or(Error::NotFound)?;
+    let connection = trigger(&mut tx, bot, id).await?.connection_id;
+    let before = wants_content(&mut tx, connection).await?;
+    sqlx::query("DELETE FROM social_triggers WHERE bot_id=?1 AND id=?2")
+        .bind(bot)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     revoke_deliveries(&mut tx, id).await?;
+    let reconnect = before != wants_content(&mut tx, connection).await?;
     crate::db::events::bot_updated(&mut tx, bot).await?;
     tx.commit().await?;
-    Ok(connection)
+    Ok(TriggerChange {
+        value: (),
+        connection,
+        reconnect,
+    })
 }
 
 async fn revoke_deliveries(conn: &mut SqliteConnection, trigger: Uuid) -> Result<(), sqlx::Error> {

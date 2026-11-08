@@ -7,7 +7,7 @@ CREATE TABLE social_triggers (
  bot_id BLOB NOT NULL REFERENCES bots(id),
  destination TEXT CHECK(destination IS NULL OR length(destination) BETWEEN 1 AND 100),
  wake TEXT NOT NULL CHECK(wake IN ('mentions','all')),
- instructions TEXT NOT NULL CHECK(length(CAST(instructions AS BLOB)) BETWEEN 1 AND 4000),
+ instructions TEXT NOT NULL CHECK(length(CAST(instructions AS BLOB)) BETWEEN 1 AND 8000),
  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
  created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%f+00:00','now')),
  updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))
@@ -16,12 +16,14 @@ CREATE UNIQUE INDEX social_trigger_scope ON social_triggers(connection_id,bot_id
 CREATE INDEX social_triggers_bot ON social_triggers(bot_id);
 
 INSERT INTO social_triggers(id,connection_id,bot_id,destination,wake,instructions)
-SELECT randomblob(16),b.connection_id,b.bot_id,d.value,json_extract(b.access,'$.wake_policy'),
-       coalesce(nullif(trim(json_extract(b.access,'$.instructions')),''),'Handle new messages here as the owner asked.')
-FROM social_bindings b JOIN json_each(b.access,'$.destinations') d
-JOIN social_connections c ON c.id=b.connection_id AND c.state<>'removed'
-WHERE json_extract(b.access,'$.permissions.read') AND json_extract(b.access,'$.permissions.wake')
-  AND json_extract(b.access,'$.wake_policy') IN ('mentions','all');
+SELECT randomblob(16),connection_id,bot_id,destination,wake,instructions FROM (
+ SELECT DISTINCT b.connection_id,b.bot_id,d.value AS destination,
+        json_extract(b.access,'$.wake_policy') AS wake,
+        coalesce(nullif(trim(json_extract(b.access,'$.instructions')),''),'Handle new messages here as the owner asked.') AS instructions
+ FROM social_bindings b JOIN json_each(b.access,'$.destinations') d
+ JOIN social_connections c ON c.id=b.connection_id AND c.state<>'removed'
+ WHERE json_extract(b.access,'$.permissions.read') AND json_extract(b.access,'$.permissions.wake')
+   AND json_extract(b.access,'$.wake_policy') IN ('mentions','all'));
 
 UPDATE social_deliveries SET status='revoked',settled_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
 WHERE status='pending';
