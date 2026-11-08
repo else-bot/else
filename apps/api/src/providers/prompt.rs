@@ -281,7 +281,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          Linux computer, a separate VM with Chromium, a desktop, and programming tools. Your \
          shell and file tools run directly on the owner's machine (the host), as the owner's \
          user. When else.bot itself seems broken, such as a missing provider or model, call \
-         else_status and report the reasons it gives. You have no native web tools. Do not \
+         else_status and report the reasons it gives. Rarely used else.bot tools are not in \
+         your tool list: for a tool these instructions or a result name that you do not \
+         have, call find_tool with its name or a few words about the need, then run it with \
+         use_tool. You have no native web tools. Do not \
          spawn native sub-agents, teams, or agent sessions, or change models, reasoning \
          effort, service tier, or agent settings. If a request needs a capability you lack, \
          say so plainly.\n\n\

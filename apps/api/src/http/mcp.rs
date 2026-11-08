@@ -72,18 +72,32 @@ pub async fn endpoint(
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            let mut tools = tool_list().as_array().cloned().unwrap_or_default();
-            tools.extend(super::outgoing_tools::schemas());
-            tools.extend(super::guest_tools::tool_list());
-            tools.extend(super::connectors::tool_list());
-            tools.extend(super::social_tools::schemas());
-            tools.extend(super::shared_mcp::schemas());
-            tools.push(super::mcp_wait::schema());
-            Ok(json!({ "tools": tools }))
+        "tools/list" => Ok(json!({ "tools": super::tool_search::listed(all_tools()) })),
+        "tools/call" if params["name"] == super::tool_search::FIND => {
+            match params["arguments"]["query"].as_str() {
+                Some(query) if !query.trim().is_empty() && query.len() <= 200 => {
+                    Ok(tool_result(super::tool_search::find(&all_tools(), query)))
+                }
+                _ => Ok(tool_error("Give a query of at most 200 bytes.")),
+            }
         }
         "tools/call" => {
-            let needs = match params["name"].as_str() {
+            // use_tool runs a deferred tool exactly as a direct call would:
+            // the same grant check below, under the deferred tool's name.
+            let (name, arguments) = if params["name"] == super::tool_search::USE {
+                match super::tool_search::target(&all_tools(), &params["arguments"]) {
+                    Ok((name, arguments)) => (Some(name), arguments),
+                    Err(message) => {
+                        return Json(
+                            json!({ "jsonrpc": "2.0", "id": id, "result": tool_error(message) }),
+                        )
+                        .into_response();
+                    }
+                }
+            } else {
+                (params["name"].as_str(), &params["arguments"])
+            };
+            let needs = match name {
                 Some("delegate" | "council" | "list_bots") => Tool::Delegate,
                 Some("mcp_install") => Tool::ManageMcp,
                 Some(
@@ -118,7 +132,7 @@ pub async fn endpoint(
             if let Err(err) = check(&state, &grant, needs).await {
                 return err.into_response();
             }
-            match (params["name"].as_str(), &params["arguments"]) {
+            match (name, arguments) {
                 (Some(name), args @ (Value::Object(_) | Value::Null)) => {
                     Ok(call(&state, &grant, name, args).await)
                 }
@@ -368,6 +382,18 @@ pub(crate) fn tool_image(meta: Value, png: &[u8]) -> Value {
         { "type": "image", "mimeType": "image/png",
           "data": base64::engine::general_purpose::STANDARD.encode(png) },
     ] })
+}
+
+/// Every else.bot tool definition, listed or deferred.
+pub(super) fn all_tools() -> Vec<Value> {
+    let mut tools = tool_list().as_array().cloned().unwrap_or_default();
+    tools.extend(super::outgoing_tools::schemas());
+    tools.extend(super::guest_tools::tool_list());
+    tools.extend(super::connectors::tool_list());
+    tools.extend(super::social_tools::schemas());
+    tools.extend(super::shared_mcp::schemas());
+    tools.push(super::mcp_wait::schema());
+    tools
 }
 
 pub(crate) fn tool_result(value: Value) -> Value {
