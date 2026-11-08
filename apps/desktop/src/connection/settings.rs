@@ -347,14 +347,7 @@ impl Shell {
             v_flex()
                 .size_full()
                 .min_h_0()
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .justify_end()
-                        .px_8()
-                        .pt_5()
-                        .child(self.render_server_identity(cx)),
-                )
+                .child(self.render_server_identity(cx))
                 .child(div().flex_1().min_h_0().child(body))
                 .into_any_element()
         } else {

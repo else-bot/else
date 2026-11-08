@@ -556,54 +556,50 @@ impl Shell {
             .map(|s| s.name.as_str())
             .unwrap_or("Server");
         let (status, color) = self.server_status(active.id, cx);
-        v_flex()
+        h_flex()
             .id("settings-server-context")
-            .w(px(220.))
+            .flex_none()
+            .w_full()
             .min_w_0()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .rounded(theme.radius)
-            .bg(theme.secondary.opacity(0.6))
+            .h(px(32.))
+            .px_8()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.secondary.opacity(0.35))
+            .text_xs()
+            .text_color(theme.muted_foreground)
             .aria_label(format!(
                 "Editing settings on {name}. {}. {status}",
                 active.profile.origin.as_str()
             ))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Editing settings on"),
+                Icon::new(if self.managed_server(&active.profile) {
+                    IconName::Laptop
+                } else {
+                    IconName::Server
+                })
+                .size_3()
+                .flex_none(),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Icon::new(if self.managed_server(&active.profile) {
-                            IconName::Laptop
-                        } else {
-                            IconName::Server
-                        })
-                        .size_3()
-                        .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(name.to_owned()),
-                    )
-                    .child(div().size_1p5().rounded_full().bg(color)),
-            )
+            .child(div().flex_none().child("Editing settings on"))
             .child(
                 div()
-                    .text_xs()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_color(theme.muted_foreground)
+                    .flex_none()
+                    .max_w(px(220.))
                     .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(name.to_owned()),
+            )
+            .child(div().flex_none().size_1p5().rounded_full().bg(color))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme.mono_font_family.clone())
                     .child(active.profile.origin.as_str().to_owned()),
             )
             .into_any_element()
