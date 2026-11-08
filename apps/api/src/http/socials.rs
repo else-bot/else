@@ -202,11 +202,10 @@ async fn complete(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
+    manager(&s)?;
     let setup = store::settle_setup(&s.db, id, Some(input.connection_id))
         .await
         .map_err(error)?;
-    m.changed(input.connection_id).await;
     s.scheduler.wake();
     Ok(Json(json!({"setup":setup})))
 }

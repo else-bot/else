@@ -1162,3 +1162,75 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
             .unwrap();
     assert_eq!(bindings, 0);
 }
+
+#[tokio::test]
+async fn completing_another_bots_setup_keeps_an_approved_send_running() {
+    use else_api::{
+        credentials::OwnerToken, http::AppState, providers::Registry, scheduler::Scheduler,
+    };
+    let db = TestDb::migrated().await;
+    let c = account(&db, "shared").await;
+    destinations(&db, c.id).await;
+    let (sender, asker) = (bot(&db).await, bot(&db).await);
+    let sending = turn(&db, sender, "user").await;
+    let asking = turn(&db, asker, "user").await;
+    let setup = store::request_setup(&db.pool, asking, Provider::Telegram, "Post updates")
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::default());
+    fake.blocked.store(true, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1);
+    let stop = CancellationToken::new();
+    let state = Arc::new(
+        AppState::new(
+            OwnerToken::parse(common::TOKEN).unwrap(),
+            db.pool.clone(),
+            scheduler,
+            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
+        )
+        .with_secret_key(Arc::new(key()))
+        .with_socials(manager.clone()),
+    );
+    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let action = Uuid::new_v4();
+    let running = manager.clone();
+    let send = tokio::spawn(async move {
+        running
+            .send(
+                c.id,
+                sender,
+                sending,
+                action,
+                SendMessage {
+                    destination: "100".into(),
+                    body: "approved body".into(),
+                    reply_to: None,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), fake.started.notified())
+        .await
+        .unwrap();
+    let (status, body) = http(
+        &router,
+        "POST",
+        &format!("/v1/connectors/socials/setups/{}/complete", setup.id),
+        common::TOKEN,
+        json!({ "connection_id": c.id }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    fake.release.notify_one();
+    let sent = tokio::time::timeout(Duration::from_secs(2), send)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(sent.is_ok(), "the other bot's send survives: {sent:?}");
+    assert_eq!(fake.sends.load(Ordering::SeqCst), 1);
+}
