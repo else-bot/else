@@ -52,7 +52,24 @@ fn needs_effect(name: &str, args: &Value) -> bool {
     }
 }
 
+/// The computer tools whose schema declares `effect`, all of them parking
+/// tools. Any other tool given an effect is refused before approval: its
+/// card would park the turn under a name no provider treats as parking.
+fn declares_effect(name: &str) -> bool {
+    matches!(
+        name,
+        "computer_run"
+            | "computer_job_start"
+            | "computer_input"
+            | "computer_write_file"
+            | "computer_browser"
+    )
+}
+
 fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
+    if !declares_effect(name) && args.get("effect").is_some_and(|e| !e.is_null()) {
+        return Err(format!("{name} takes no effect. Nothing was done."));
+    }
     let needs = needs_effect(name, args);
     let effect = match args.get("effect") {
         None | Some(Value::Null) if needs => {
@@ -272,6 +289,23 @@ pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tool_without_an_effect_in_its_schema_refuses_one() {
+        let read = json!({ "path": "notes.txt", "effect": "destructive" });
+        assert!(declared_effect("computer_read_file", &read).is_err());
+        assert!(declared_effect("computer_job_cancel", &json!({ "effect": "external" })).is_err());
+        assert_eq!(
+            declared_effect("computer_read_file", &json!({ "effect": null })),
+            Ok(None)
+        );
+        let schemas = crate::http::guest_tools::tool_list();
+        for tool in &schemas {
+            let name = tool["name"].as_str().unwrap();
+            let declared = tool["inputSchema"]["properties"].get("effect").is_some();
+            assert_eq!(declares_effect(name), declared, "{name}");
+        }
+    }
 
     #[test]
     fn acting_tools_must_declare_an_effect_and_reads_need_none() {
