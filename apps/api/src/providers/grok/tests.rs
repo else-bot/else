@@ -28,6 +28,35 @@ fn finish(t: &mut Tracker, event: &Value, stopping: Option<StopCause>) -> TurnOu
 }
 
 #[test]
+fn a_native_grok_on_path_wins_and_the_installed_binary_replaces_anything_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, body: &str, mode: u32| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(mode);
+        std::fs::set_permissions(&path, mode).unwrap();
+        path
+    };
+    let native = file("path/grok", "\x7fELF", 0o755);
+    let script = file("npm/.bin/grok", "#!/bin/sh\nexec node grok.js\n", 0o755);
+    let home = dir.path().join("home");
+    assert_eq!(installed(&home), None);
+    file("home/bin/grok", "\x7fELF", 0o644);
+    assert_eq!(installed(&home), None);
+    let binary = file("home/bin/grok", "\x7fELF", 0o755);
+    assert_eq!(installed(&home), Some(binary.clone()));
+
+    let some = |path: &PathBuf| Some(path.clone());
+    assert_eq!(choose(Ok(some(&native)), some(&binary)), Ok(some(&native)));
+    assert_eq!(choose(Ok(some(&script)), some(&binary)), Ok(some(&binary)));
+    assert_eq!(choose(Ok(None), some(&binary)), Ok(some(&binary)));
+    assert_eq!(choose(Err("shim".into()), some(&binary)), Ok(some(&binary)));
+    assert_eq!(choose(Ok(some(&script)), None), Ok(some(&script)));
+    assert_eq!(choose(Err("shim".into()), None), Err("shim".into()));
+}
+
+#[test]
 fn text_is_streamed_once_and_only_a_terminal_result_completes() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();

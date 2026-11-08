@@ -79,7 +79,7 @@ fn a_probe_waits_for_an_executable_writer_to_close() {
         });
         assert_eq!(
             fx.host.probe(&program, &["--version"], &[]).as_deref(),
-            Some("provider-version")
+            Ok("provider-version")
         );
     });
 }
@@ -95,9 +95,36 @@ fn a_probe_does_not_repeat_a_command_that_exits_with_failure() {
                 &["-c", "echo called >> \"$CALLS\"; exit 1"],
                 &[("CALLS".into(), calls.to_str().unwrap().into())],
             )
-            .is_none()
+            .is_err()
     );
     assert_eq!(std::fs::read_to_string(calls).unwrap(), "called\n");
+}
+
+#[test]
+fn a_failed_probe_says_why() {
+    let fx = fixture();
+    let probe =
+        |program: &str, script: &str| fx.host.probe(Path::new(program), &["-c", script], &[]);
+    assert_eq!(
+        probe(
+            "/bin/sh",
+            "echo ignored >&2; echo 'error: no config' >&2; exit 3"
+        ),
+        Err("exit status: 3: error: no config".into())
+    );
+    assert_eq!(
+        probe("/bin/sh", "kill -9 $$"),
+        Err("signal: 9 (SIGKILL)".into())
+    );
+    assert_eq!(probe("/bin/sh", "true"), Err("printed nothing".into()));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        probe("/bin/sh", "sleep 30 >/dev/null & echo provider-version"),
+        Ok("provider-version".into())
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let missing = probe("/nonexistent/grok", "true").unwrap_err();
+    assert!(missing.starts_with("could not start ("), "{missing}");
 }
 
 #[tokio::test]
@@ -280,7 +307,7 @@ fn codex_supports_startup_config(host: &Host, codex: &Path) -> bool {
     ] {
         let help = host
             .probe(codex, args, &[])
-            .unwrap_or_else(|| panic!("{} {} failed", codex.display(), args.join(" ")));
+            .unwrap_or_else(|why| panic!("{} {}: {why}", codex.display(), args.join(" ")));
         if !help.split_whitespace().any(|word| word == flag) {
             eprintln!(
                 "SKIPPED: {} does not support {flag}; install a Codex CLI with startup-config validation",
@@ -314,7 +341,7 @@ fn startup_config_checks_skip_only_clis_without_the_required_flags() {
 }
 
 #[test]
-#[should_panic(expected = "--help failed")]
+#[should_panic(expected = "/bin/false --help: exit status: 1")]
 fn a_broken_codex_cli_does_not_skip_startup_config_checks() {
     let fx = fixture();
     codex_supports_startup_config(&fx.host, Path::new("/bin/false"));

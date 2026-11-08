@@ -22,6 +22,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -101,16 +102,30 @@ impl Host {
     }
 
     /// Run `program args` with the passed environment plus `env` and return
-    /// its stdout, or `None` if it fails.
-    pub fn probe(&self, program: &Path, args: &[&str], env: &[(String, String)]) -> Option<String> {
+    /// its trimmed stdout, or why it did not run: it could not start, it
+    /// failed (with the last line of its stderr), or it printed nothing.
+    pub fn probe(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &[(String, String)],
+    ) -> Result<String, String> {
         let mut command = std::process::Command::new(program);
         command
             .args(args)
             .env_clear()
             .envs(passed_env())
             .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::null());
+        // A file, not a pipe: a background child that keeps stderr open must
+        // not hold the probe until it exits. Only a failure's reason needs it.
+        let mut stderr = probe_stderr();
+        command.stderr(
+            stderr
+                .as_ref()
+                .and_then(|f| f.try_clone().ok())
+                .map_or_else(Stdio::null, Stdio::from),
+        );
         let mut retries = 5;
         let output = loop {
             match command.output() {
@@ -119,14 +134,29 @@ impl Host {
                     retries -= 1;
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                result => break result.ok()?,
+                result => break result.map_err(|e| format!("could not start ({e})"))?,
             }
         };
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .filter(|s| !s.is_empty())
+        if !output.status.success() {
+            let mut text = String::new();
+            if let Some(file) = stderr.as_mut() {
+                let _ = file
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| file.read_to_string(&mut text));
+            }
+            return Err(match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+                Some(line) => {
+                    let line: String = line.chars().take(200).collect();
+                    format!("{}: {line}", output.status)
+                }
+                None => output.status.to_string(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if stdout.is_empty() {
+            return Err("printed nothing".into());
+        }
+        Ok(stdout)
     }
 
     /// Run a launch to completion like a provider run and return its stdout:
@@ -283,6 +313,39 @@ pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("not a directory"));
     }
     Ok(dir)
+}
+
+/// An anonymous file for a probe's stderr: created private, then unlinked.
+/// `None` if the temporary directory cannot hold one.
+fn probe_stderr() -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..8 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "else-probe-{}-{}-{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                let _ = fs::remove_file(&path);
+                return Some(file);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {

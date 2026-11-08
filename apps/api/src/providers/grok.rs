@@ -14,7 +14,7 @@
 mod protocol;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -49,12 +49,16 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build(wiring: &super::Wiring) -> super::Built {
-    let grok = Grok {
-        ready: Grok::ready(
-            Some(wiring.host.clone()),
-            super::executable(wiring.config.grok_bin.as_deref(), "grok"),
-            grok_home::host_home(),
+    let home = grok_home::host_home();
+    let program = match wiring.config.grok_bin.as_deref() {
+        Some(setting) => super::executable(Some(setting), "grok"),
+        None => choose(
+            super::executable(None, "grok"),
+            home.as_deref().and_then(installed),
         ),
+    };
+    let grok = Grok {
+        ready: Grok::ready(Some(wiring.host.clone()), program, home),
         tool_url: None,
     }
     .with_tools(wiring.tool_url.clone());
@@ -62,6 +66,38 @@ fn build(wiring: &super::Wiring) -> super::Built {
         provider: std::sync::Arc::new(grok),
         summarizer: None,
     }
+}
+
+/// The binary Grok's installers keep in the host's `GROK_HOME` (curl's
+/// install and the npm package's launcher both run it). The link is kept,
+/// not resolved, so it follows Grok's own updates.
+fn installed(home: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = home.join("bin").join("grok");
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then_some(path)
+}
+
+/// A native `grok` from `PATH`, else the installed binary when there is one.
+/// `PATH` can hold the npm package's script, which needs node and would
+/// unpack its own copy into each bot's `GROK_HOME`.
+fn choose(
+    on_path: Result<Option<PathBuf>, String>,
+    installed: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    match on_path {
+        Ok(Some(found)) if !is_script(&found) => Ok(Some(found)),
+        other => installed.map_or(other, |path| Ok(Some(path))),
+    }
+}
+
+fn is_script(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| &head == b"#!")
 }
 
 /// A CLI that runs and a host login.
@@ -92,9 +128,12 @@ impl Grok {
     ) -> Result<Ready, String> {
         let host = host.ok_or("Grok CLI is not configured on this host.")?;
         let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
-        let version = host
-            .probe(&program, &["--version"], &[])
-            .ok_or("Grok CLI does not run (`grok --version` failed).")?;
+        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
+            format!(
+                "Grok CLI does not run (`{} --version`: {why}).",
+                program.display()
+            )
+        })?;
         let login = login
             .filter(|dir| dir.join("auth.json").is_file())
             .ok_or("Grok CLI is not logged in on the host (run `grok login`).")?;
