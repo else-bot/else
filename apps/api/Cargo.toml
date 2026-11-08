@@ -62,8 +62,10 @@ tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
+zstd = { version = "0.13.3", default-features = false, features = ["zstdmt"] }
 
 [dev-dependencies]
+age = { version = "=0.12.1", default-features = false }
 tokio = { version = "1.54.1", features = ["test-util"] }
 rcgen = "0.14"
 async-trait = "0.1.92"
@@ -76,3 +78,4 @@ tokio-tungstenite = "0.30.0"
 tokio-util = "0.7.20"
 tower = { version = "0.5.3", features = ["util"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zstd = { version = "0.13.3", default-features = false }

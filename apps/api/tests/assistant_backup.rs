@@ -1,6 +1,6 @@
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -30,6 +30,9 @@ struct Fake {
     fail_export: AtomicBool,
     restored: Mutex<Vec<Spec>>,
     mounts: Mutex<HashMap<String, Vec<Mount>>>,
+    images: Mutex<HashMap<String, String>>,
+    /// Images a restore can use offline, as `msb` caches them on import.
+    cached: Mutex<HashSet<String>>,
     checkpoint_fails: AtomicBool,
     restore_fails_running: AtomicBool,
     stop_fails: AtomicBool,
@@ -89,6 +92,10 @@ impl ComputerRuntime for Fake {
             .lock()
             .unwrap()
             .insert(spec.name.clone(), spec.mounts.clone());
+        self.images
+            .lock()
+            .unwrap()
+            .insert(spec.name.clone(), spec.image.clone());
         Ok(())
     }
     async fn mounts(&self, name: &str) -> Result<Vec<Mount>, RuntimeError> {
@@ -136,7 +143,12 @@ impl ComputerRuntime for Fake {
     async fn copy_out(&self, _: &str, _: &str, _: &Path) -> Result<(), RuntimeError> {
         Ok(())
     }
-    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
+    async fn export_disk(
+        &self,
+        name: &str,
+        archive: &Path,
+        with_image: bool,
+    ) -> Result<(), RuntimeError> {
         if self.fail_export.load(SeqCst) {
             return Err(RuntimeError::Failed {
                 operation: "snapshot export".into(),
@@ -149,7 +161,11 @@ impl ComputerRuntime for Fake {
             RuntimeState::Stopped,
             "only stopped disks are exported"
         );
-        std::fs::write(archive, format!("MSB:{disk}")).unwrap();
+        let image = match with_image {
+            true => self.images.lock().unwrap()[name].clone(),
+            false => String::new(),
+        };
+        std::fs::write(archive, format!("MSB:{image}\n{disk}")).unwrap();
         Ok(())
     }
     async fn restore_disk(&self, archive: &Path, spec: &Spec) -> Result<(), RuntimeError> {
@@ -164,7 +180,23 @@ impl ComputerRuntime for Fake {
             });
         }
         let bytes = std::fs::read_to_string(archive).unwrap();
-        let disk = bytes.strip_prefix("MSB:").unwrap().to_owned();
+        let (image, disk) = bytes
+            .strip_prefix("MSB:")
+            .unwrap()
+            .split_once('\n')
+            .unwrap();
+        let disk = disk.to_owned();
+        let mut cached = self.cached.lock().unwrap();
+        if !image.is_empty() {
+            cached.insert(image.to_owned());
+        }
+        if !cached.contains(&spec.image) {
+            return Err(RuntimeError::Failed {
+                operation: "snapshot restore".into(),
+                message: format!("image {} is not cached", spec.image),
+            });
+        }
+        drop(cached);
         self.computers
             .lock()
             .unwrap()
@@ -189,7 +221,13 @@ async fn setup() -> Setup {
     setup_with(false).await
 }
 
+const PINNED: &str = "ghcr.io/else-bot/else-guest@sha256:2688c7291a6fb4b0efb77a09966ce013851939affdd994ac679036b3712daaaf";
+
 async fn setup_with(projects: bool) -> Setup {
+    setup_image(projects, PINNED).await
+}
+
+async fn setup_image(projects: bool, image: &str) -> Setup {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -202,6 +240,7 @@ async fn setup_with(projects: bool) -> Setup {
             state_dir: dir.path().join("state"),
             idle_after: Duration::from_secs(3600),
             projects_dir: projects.then(|| dir.path().join("bots")),
+            image: image.into(),
             ..ComputerConfig::default()
         },
     ));
@@ -335,6 +374,21 @@ async fn one_set_holds_the_database_and_every_computer_at_one_checkpoint() {
         manifest.artifacts.len(),
         4,
         "database, two disk archives and the shared MCP library"
+    );
+    assert_eq!(ca.image, cb.image);
+    let vms: Vec<bool> = manifest
+        .artifacts
+        .iter()
+        .filter(|x| x.kind == "vm")
+        .map(|x| {
+            let bot = x.bot_id.unwrap();
+            entry(bot).computer.unwrap().carries_image
+        })
+        .collect();
+    assert_eq!(
+        vms,
+        [true, false],
+        "the shared image is stored once, in the first archive"
     );
     assert_eq!(
         s.fake.starts.load(SeqCst),
@@ -790,6 +844,8 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     std::fs::write(pa.join("notes.md"), "alpha notes").unwrap();
     std::fs::write(pa.join("sub/data.csv"), "a,b\n").unwrap();
     std::os::unix::fs::symlink("sub/data.csv", pa.join("latest")).unwrap();
+    std::fs::write(pa.join("store.js"), "export {}").unwrap();
+    std::fs::hard_link(pa.join("store.js"), pa.join("sub/linked.js")).unwrap();
     let pb = bots.join(b_id.to_string());
     std::fs::create_dir_all(&pb).unwrap();
     std::fs::write(pb.join("sheet.csv"), "item,qty\n").unwrap();
@@ -818,7 +874,7 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
         "a desktop computer's elsebot user owns the project"
     );
     for bot in [a_id, b_id] {
-        let object = backup::projects::object(bot);
+        let object = backup::projects::Format::TarZstd.object(bot);
         assert!(
             manifest
                 .artifacts
@@ -861,6 +917,12 @@ async fn project_directories_are_backed_up_and_restored_with_their_mounts() {
     assert_eq!(
         std::fs::read_link(ra.join("latest")).unwrap(),
         Path::new("sub/data.csv")
+    );
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(ra.join("store.js")).unwrap().ino(),
+        std::fs::metadata(ra.join("sub/linked.js")).unwrap().ino(),
+        "hard links restore as one file"
     );
     assert_eq!(
         std::fs::read_to_string(projects.join(b_id.to_string()).join("sheet.csv")).unwrap(),
@@ -1037,4 +1099,166 @@ async fn backups_from_before_shared_mcp_support_still_restore() {
     .await
     .unwrap();
     assert_eq!(report.manifest.coverage.mcp, "omitted");
+}
+
+/// Rewrite a set's manifest (and its completion record) with `edit`.
+fn rewrite_manifest(set: &Path, edit: impl FnOnce(&mut serde_json::Value, &age::x25519::Identity)) {
+    let (mut completion, manifest, identity) = backup::restore::open_set(set, &key()).unwrap();
+    let mut value = serde_json::to_value(manifest).unwrap();
+    edit(&mut value, &identity);
+    completion.schema_version = value["schema_version"].as_u64().unwrap() as u32;
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let manifest_path = set.join(backup::MANIFEST);
+    std::fs::remove_file(&manifest_path).unwrap();
+    let sealed = backup::seal(
+        &manifest_path,
+        &identity,
+        &mut bytes.as_slice(),
+        backup::MAX_MANIFEST_BYTES,
+    )
+    .unwrap();
+    completion.manifest.ciphertext_bytes = sealed.ciphertext_bytes;
+    completion.manifest.ciphertext_sha256 = sealed.ciphertext_sha256;
+    std::fs::write(
+        set.join(backup::COMPLETE),
+        serde_json::to_vec(&completion).unwrap(),
+    )
+    .unwrap();
+}
+
+async fn computers_with_projects(s: &Setup) -> (Uuid, Uuid) {
+    let a: Uuid = s.app.create_bot("Alpha").await.parse().unwrap();
+    let b: Uuid = s.app.create_bot("Beta").await.parse().unwrap();
+    for (bot, disk) in [(a, "alpha disk"), (b, "beta disk")] {
+        let Acquire::Ready {
+            lease_id,
+            runtime_name,
+            ..
+        } = s.manager.acquire(bot, "test:use").await.unwrap()
+        else {
+            panic!()
+        };
+        s.fake.write(&runtime_name, disk);
+        s.manager.release(lease_id).await.unwrap();
+        let project = s.dir.path().join("bots").join(bot.to_string());
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("notes.md"), format!("{disk} notes")).unwrap();
+    }
+    (a, b)
+}
+
+async fn restore_fresh(s: &Setup, set: &Path, name: &str) -> (Arc<Fake>, std::path::PathBuf) {
+    let fresh = Arc::new(Fake::default());
+    let new_dir = s.dir.path().join(name);
+    std::fs::create_dir(&new_dir).unwrap();
+    let target = Target::new(&s.app);
+    restore(RestoreRequest {
+        set_dir: set,
+        key: &key(),
+        server: &target.params,
+        target_database: &target.name,
+        staging_parent: &s.dir.path().join("staging"),
+        max_bytes: 1 << 30,
+        computers: Some(ComputerTarget {
+            runtime: Some(fresh.clone()),
+            data_dir: &new_dir,
+        }),
+    })
+    .await
+    .unwrap();
+    (fresh, new_dir)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_2_sets_with_plain_project_tars_still_restore() {
+    let s = setup_with(true).await;
+    let (a, b) = computers_with_projects(&s).await;
+    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    rewrite_manifest(&summary.path, |manifest, identity| {
+        manifest["schema_version"] = json!(2);
+        for bot in manifest["bots"].as_array_mut().unwrap() {
+            if let Some(computer) = bot["computer"].as_object_mut() {
+                computer.remove("carries_image");
+            }
+        }
+        for artifact in manifest["artifacts"].as_array_mut().unwrap() {
+            if artifact["kind"] != "project" {
+                continue;
+            }
+            let object = artifact["object"].as_str().unwrap().to_owned();
+            let cipher = std::fs::read(summary.path.join(&object)).unwrap();
+            let compressed = backup::open_small(&cipher, identity, 1 << 20).unwrap();
+            let plain = zstd::stream::decode_all(compressed.as_slice()).unwrap();
+            std::fs::remove_file(summary.path.join(&object)).unwrap();
+            let bot: Uuid = artifact["bot_id"].as_str().unwrap().parse().unwrap();
+            let legacy = backup::projects::Format::Tar.object(bot);
+            let sealed = backup::seal(
+                &summary.path.join(&legacy),
+                identity,
+                &mut plain.as_slice(),
+                1 << 20,
+            )
+            .unwrap();
+            artifact["object"] = json!(legacy);
+            artifact["ciphertext_bytes"] = json!(sealed.ciphertext_bytes);
+            artifact["ciphertext_sha256"] = json!(sealed.ciphertext_sha256);
+            artifact["plaintext_bytes"] = json!(sealed.plaintext_bytes);
+            artifact["plaintext_sha256"] = json!(sealed.plaintext_sha256);
+        }
+    });
+    let (fresh, new_dir) = restore_fresh(&s, &summary.path, "restored-v2").await;
+    let projects = else_api::backup::restore::projects_dir(&new_dir);
+    for (bot, disk) in [(a, "alpha disk"), (b, "beta disk")] {
+        assert_eq!(
+            fresh.disk(&ComputerManager::runtime_name(bot)).unwrap(),
+            disk
+        );
+        assert_eq!(
+            std::fs::read_to_string(projects.join(bot.to_string()).join("notes.md")).unwrap(),
+            format!("{disk} notes")
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_computer_archive_without_its_image_must_follow_one_that_has_it() {
+    let s = setup_with(true).await;
+    computers_with_projects(&s).await;
+    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    rewrite_manifest(&summary.path, |manifest, _| {
+        for bot in manifest["bots"].as_array_mut().unwrap() {
+            if let Some(computer) = bot["computer"].as_object_mut() {
+                computer.insert("carries_image".into(), json!(false));
+            }
+        }
+    });
+    let Err(err) = backup::restore::open_set(&summary.path, &key()) else {
+        panic!("a set whose archives all lack their image opened");
+    };
+    assert!(err.to_string().contains("without its image"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn computers_from_a_tag_keep_their_own_image() {
+    let s = setup_image(true, "python:3.12-slim").await;
+    let (a, b) = computers_with_projects(&s).await;
+    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let carried: Vec<bool> = summary
+        .manifest
+        .bots
+        .iter()
+        .filter_map(|e| e.computer.as_ref().map(|c| c.carries_image))
+        .collect();
+    assert_eq!(
+        carried,
+        [true, true],
+        "a tag can name different images, so each archive keeps its own"
+    );
+    let (fresh, _) = restore_fresh(&s, &summary.path, "restored-tag").await;
+    for (bot, disk) in [(a, "alpha disk"), (b, "beta disk")] {
+        assert_eq!(
+            fresh.disk(&ComputerManager::runtime_name(bot)).unwrap(),
+            disk
+        );
+    }
 }

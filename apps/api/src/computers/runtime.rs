@@ -154,10 +154,17 @@ pub trait ComputerRuntime: Send + Sync {
     /// Copy a guest file to a host path.
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
-    /// Export a stopped computer's disk, with its image, to a standalone
-    /// archive at `archive`. The computer is not started.
-    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
-        let _ = (name, archive);
+    /// Export a stopped computer's disk to an archive at `archive`, with its
+    /// image when `with_image`. An archive without its image
+    /// restores only where the image is already cached, such as after
+    /// importing an archive that carries it. The computer is not started.
+    async fn export_disk(
+        &self,
+        name: &str,
+        archive: &Path,
+        with_image: bool,
+    ) -> Result<(), RuntimeError> {
+        let _ = (name, archive, with_image);
         Err(RuntimeError::Unavailable(
             "disk export is not supported".into(),
         ))
@@ -609,7 +616,12 @@ impl ComputerRuntime for Msb {
         .await
     }
 
-    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
+    async fn export_disk(
+        &self,
+        name: &str,
+        archive: &Path,
+        with_image: bool,
+    ) -> Result<(), RuntimeError> {
         let snapshot = format!("backup-{}", uuid::Uuid::new_v4().simple());
         let member = format!("{name}:{snapshot}");
         self.run_checked(
@@ -629,18 +641,12 @@ impl ComputerRuntime for Msb {
         let exported = async {
             self.run_checked("snapshot verify", &["snapshot", "verify", &member])
                 .await?;
-            self.run_checked(
-                "snapshot export",
-                &[
-                    "snapshot",
-                    "export",
-                    &member,
-                    "--with-image",
-                    "--output",
-                    &archive_arg,
-                ],
-            )
-            .await
+            let mut args = vec!["snapshot", "export", &member];
+            if with_image {
+                args.push("--with-image");
+            }
+            args.extend(["--output", &archive_arg]);
+            self.run_checked("snapshot export", &args).await
         }
         .await;
         let removed = self

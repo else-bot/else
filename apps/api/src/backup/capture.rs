@@ -231,6 +231,7 @@ async fn capture_computers(
     use crate::computers::{ComputerError, DiskCapture};
     let mut artifacts = Vec::new();
     let mut entries = std::collections::HashMap::new();
+    let mut carried = std::collections::HashSet::new();
     for (bot, name, status) in bots {
         if status != "active" {
             entries.insert(*bot, ("omitted-deleted-bot".to_owned(), None));
@@ -238,7 +239,7 @@ async fn capture_computers(
         }
         let object = format!("vm-{bot}.msb.age");
         let plain = staging.join(format!("vm-{bot}.msb"));
-        let captured = computers.capture_disk(*bot, &plain).await;
+        let captured = computers.capture_disk(*bot, &plain, &carried).await;
         let captured = match captured {
             Ok(captured) => captured,
             Err(ComputerError::Busy(why)) => {
@@ -271,9 +272,13 @@ async fn capture_computers(
                 was_running,
                 browser_checkpoint,
                 project_mount,
+                carries_image,
             } => {
                 let sealed =
                     seal_file(plain, staging.join(&object), identity.clone(), limit).await?;
+                if carries_image {
+                    carried.insert(image.clone());
+                }
                 let password_file = computers.desktop_password_file(*bot);
                 let desktop_password = std::fs::read_to_string(&password_file)
                     .ok()
@@ -315,6 +320,7 @@ async fn capture_computers(
                                 guest: m.guest,
                                 uid: m.uid,
                             }),
+                            carries_image,
                         }),
                     ),
                 );
@@ -395,8 +401,8 @@ async fn capture_projects(
             states.insert(*bot, "none".to_owned());
             continue;
         }
-        let object = super::projects::object(*bot);
-        let plain = staging.join(format!("project-{bot}.tar"));
+        let object = super::projects::Format::TarZstd.object(*bot);
+        let plain = staging.join(format!("project-{bot}.tar.zst"));
         let archive_target = plain.clone();
         let unreadable =
             tokio::task::spawn_blocking(move || super::projects::archive(&dir, &archive_target))
@@ -736,8 +742,9 @@ async fn capture_into(
             provider_state: "omitted-reauth-required".into(),
             whole_assistant: complete,
             note: if complete {
-                "Whole assistant: the database, every active bot's computer (standalone disk \
-                 archives with their images), every bot's project directory, and the shared MCP \
+                "Whole assistant: the database, every active bot's computer (disk archives; \
+                 each image is stored once, in the first archive that uses it, which a restore \
+                 imports first), every bot's project directory, and the shared MCP \
                  skills, documentation and config. Native provider \
                  sessions are not included: conversations are rebuilt from SQLite and \
                  providers may need a fresh login."

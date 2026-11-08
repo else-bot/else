@@ -413,7 +413,10 @@ async fn toolchain_projects_persist_and_restore() {
 
     stop(&app, &manager, bot).await;
     let archive = dir.path().join("disk.msb");
-    let captured = manager.capture_disk(bot, &archive).await.unwrap();
+    let captured = manager
+        .capture_disk(bot, &archive, &Default::default())
+        .await
+        .unwrap();
     let size = std::fs::metadata(&archive).unwrap().len();
     eprintln!(
         "disk archive with image: {:.1} MiB ({captured:?})",
