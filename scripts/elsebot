@@ -7,7 +7,7 @@ Usage: elsebot <command>
 
   status            the installed and running versions, and whether the API is up
   version           the installed version
-  update [options]  install the latest release (options: install.sh --help)
+  update [options]  install the latest release, or main on the dev channel (options: install.sh --help)
   reset [--yes]     erase local history, memory, credentials, projects and computers
   remove [--yes]    uninstall the app, server and all local else.bot data
   desktop           open the desktop app

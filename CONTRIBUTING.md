@@ -216,6 +216,16 @@ These lanes need an ARM64 host, Docker with Compose, and the platform build depe
 
 Add tests for observable behavior when a change needs coverage. Reuse existing fixtures. Avoid source-text assertions, tests of test runners, and tests that repeat a tool's own checks. Keep useful comments about external constraints and public contracts; make the rest clear through names and code structure.
 
+## Follow main on a test machine
+
+The dev update channel installs every commit of `main` instead of tagged releases, building the app, the server, and the guest image on the machine itself. Nothing waits for release assets. Switch once with the installer from `main`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash -s -- --channel dev
+```
+
+After that, `elsebot update` and the app's Updates screen offer each new commit of `main`. The installer saves the channel in `~/.else/config/update-channel` and keeps each build in `~/.else/versions/dev-<commit>`. Builds reuse `~/.else/build`, so only the first one compiles everything. When a commit changes `infra/guest` and Docker is running, the installer builds that guest image locally and points bot computers at it; otherwise they keep the published image. Return to tagged releases with `elsebot update --channel stable`. A server that applied database migrations from `main` cannot start an older release until a release includes those migrations; the installer then rolls back to the dev build.
+
 ## Work on bot computers
 
 Install Microsandbox 0.7.13. Linux needs `/dev/kvm` access; Apple silicon uses the Hypervisor framework. Docker is needed to build the guest image locally.
