@@ -9,7 +9,10 @@
 //! reply; the task conversation keeps its execution (source item, grants,
 //! native session). The parent attempt then ends; its owner turn waits
 //! (`waiting`) with no provider process, and a database trigger requeues it
-//! as a continuation once every child has an outcome. Identity, budget,
+//! as a continuation once every child has an outcome. When the owner replies
+//! in the target's chat while the child waits on an approval card there,
+//! that chat turn takes the task over: the card is skipped, the child ends,
+//! and the chat turn's outcome becomes the child's. Identity, budget,
 //! target, and permissions come from the server, never from tool arguments.
 
 use std::collections::HashMap;
@@ -418,12 +421,60 @@ pub async fn lock_targets_of_root(
     Ok(())
 }
 
+/// The owner's new message `turn_id` in `bot_id`'s chat answers the work
+/// delegated to that bot whose approval card is pending there, or that an
+/// earlier chat message in `conversation_id` took over. Its outcome becomes
+/// the delegation's; the caller then skips the cards and ends the parked
+/// child turns.
+pub async fn take_over(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+    conversation_id: Uuid,
+    turn_no: i64,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE delegations SET takeover_turn_id = ?4
+         WHERE target_bot_id = ?1 AND status IN ('queued', 'running')
+           AND (takeover_turn_id IN (
+                    SELECT id FROM turns WHERE conversation_id = ?2 AND turn_no < ?3
+                      AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
+                OR (takeover_turn_id IS NULL AND child_turn_id IN (
+                    SELECT q.turn_id FROM owner_questions q JOIN turns c ON c.id = q.turn_id
+                    WHERE q.status = 'pending' AND c.status = 'waiting')))",
+    )
+    .bind(bot_id)
+    .bind(conversation_id)
+    .bind(turn_no)
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 async fn stop_children(
     conn: &mut SqliteConnection,
-    children: Vec<(Uuid, Uuid)>,
+    children: Vec<(Uuid, Uuid, Option<Uuid>)>,
     message: &str,
 ) -> Result<(), sqlx::Error> {
-    for (child, target) in children {
+    for (child, target, takeover) in children {
+        if let Some(owner_turn) = takeover {
+            // The owner's own chat turn keeps running; only the task ends.
+            let changed = sqlx::query(
+                "UPDATE delegations SET status = 'cancelled', error = 'cancelled: ' || ?2,
+                     finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+                 WHERE child_turn_id = ?1 AND status IN ('queued', 'running')",
+            )
+            .bind(child)
+            .bind(message)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+            if changed > 0 {
+                events::turn_changed(conn, target, owner_turn).await?;
+            }
+            continue;
+        }
         let changed = sqlx::query(
             "UPDATE turns SET
                  status = CASE WHEN status IN ('queued', 'waiting') THEN 'interrupted' ELSE 'cancelling' END,
@@ -451,8 +502,9 @@ pub async fn cancel_for_bot(
     bot_id: Uuid,
     boundary: i64,
 ) -> Result<(), sqlx::Error> {
-    let children: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT d.child_turn_id, d.target_bot_id FROM delegations d JOIN turns r ON r.id = d.root_turn_id
+    let children: Vec<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT d.child_turn_id, d.target_bot_id, d.takeover_turn_id
+         FROM delegations d JOIN turns r ON r.id = d.root_turn_id
          WHERE d.parent_bot_id = ?1 AND r.turn_no <= ?2 AND d.status IN ('queued', 'running')
          ORDER BY d.created_at",
     )
@@ -466,8 +518,8 @@ pub async fn cancel_for_bot(
 /// Stop the pending children of one root whose attempt ended without a
 /// result to wait for (failed, uncertain, or reconciled after a restart).
 pub async fn cancel_for_root(conn: &mut SqliteConnection, root: Uuid) -> Result<(), sqlx::Error> {
-    let children: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT child_turn_id, target_bot_id FROM delegations
+    let children: Vec<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT child_turn_id, target_bot_id, takeover_turn_id FROM delegations
          WHERE root_turn_id = ?1 AND status IN ('queued', 'running') ORDER BY created_at",
     )
     .bind(root)
@@ -476,51 +528,51 @@ pub async fn cancel_for_root(conn: &mut SqliteConnection, root: Uuid) -> Result<
     stop_children(conn, children, "The delegating request ended.").await
 }
 
-/// Show a settled child's reply in the delegating bot's conversation, on
-/// the root turn, once: the item's ID is the delegation's. Every terminal
-/// transition journals `turn_changed` in its own transaction, which calls
-/// this, so the reply commits with the outcome and before the root resumes.
-/// Display only: provider history and memory skip it.
-pub async fn publish_reply(
-    conn: &mut SqliteConnection,
-    child_turn: Uuid,
-) -> Result<(), sqlx::Error> {
-    let row: Option<(Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+/// Show a settled task's reply in the delegating bot's conversation, on
+/// the root turn, once: the item's ID is the delegation's. `turn` is the
+/// child turn, or the owner chat turn that took the task over. Every
+/// terminal transition journals `turn_changed` in its own transaction,
+/// which calls this, so the reply commits with the outcome and before the
+/// root resumes. Display only: provider history and memory skip it.
+pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<(), sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, String)> = sqlx::query_as(
         "SELECT d.id, d.parent_bot_id, d.root_turn_id, r.conversation_id,
                 coalesce(nullif(d.result, ''), nullif(c.error_message, ''),
                     CASE d.status WHEN 'failed' THEN 'Task failed before it could reply.'
                          WHEN 'cancelled' THEN 'Task stopped before it could reply.' ELSE '' END)
          FROM delegations d JOIN turns r ON r.id = d.root_turn_id
-         JOIN turns c ON c.id = d.child_turn_id
+         JOIN turns c ON c.id = ?1
          JOIN bots p ON p.id = d.parent_bot_id
-         WHERE d.child_turn_id = ?1 AND d.status IN ('completed', 'failed', 'cancelled')
-           AND p.status = 'active' AND NOT EXISTS (SELECT 1 FROM items WHERE id = d.id)",
+         WHERE ((d.child_turn_id = ?1 AND d.takeover_turn_id IS NULL) OR d.takeover_turn_id = ?1)
+           AND d.status IN ('completed', 'failed', 'cancelled')
+           AND p.status = 'active' AND NOT EXISTS (SELECT 1 FROM items WHERE id = d.id)
+         ORDER BY d.created_at",
     )
-    .bind(child_turn)
-    .fetch_optional(&mut *conn)
+    .bind(turn)
+    .fetch_all(&mut *conn)
     .await?;
-    let Some((id, parent, root, conversation, text)) = row else {
-        return Ok(());
-    };
-    let seq: i64 = sqlx::query_scalar(
-        "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
-         RETURNING last_item_seq",
-    )
-    .bind(conversation)
-    .fetch_one(&mut *conn)
-    .await?;
-    sqlx::query(
-        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
-         VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
-    )
-    .bind(id)
-    .bind(conversation)
-    .bind(seq)
-    .bind(root)
-    .bind(text)
-    .execute(&mut *conn)
-    .await?;
-    events::item_upsert(conn, parent, id).await
+    for (id, parent, root, conversation, text) in rows {
+        let seq: i64 = sqlx::query_scalar(
+            "UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1
+             RETURNING last_item_seq",
+        )
+        .bind(conversation)
+        .fetch_one(&mut *conn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+             VALUES (?1, ?2, ?3, ?4, 'status', ?5)",
+        )
+        .bind(id)
+        .bind(conversation)
+        .bind(seq)
+        .bind(root)
+        .bind(text)
+        .execute(&mut *conn)
+        .await?;
+        events::item_upsert(conn, parent, id).await?;
+    }
+    Ok(())
 }
 
 pub use crate::app::providers::DelegationOutcome as Outcome;

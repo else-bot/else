@@ -360,8 +360,11 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
     }
     crate::db::events::turn_accepted(&mut tx, req.bot_id, turn_id).await?;
     crate::db::delegations::lock_targets_of_bot(&mut tx, req.bot_id).await?;
+    crate::db::delegations::take_over(&mut tx, req.bot_id, conversation_id, turn_no, turn_id)
+        .await?;
     // A delegated task shows its cards here through its receipt item; its
-    // turn lives in a task conversation and continues with the skip.
+    // turn lives in a task conversation. One this message took over ends
+    // below; any other continues with the skip.
     let skipped: Vec<(Uuid, bool)> = sqlx::query_as(
         "UPDATE owner_questions SET status = 'skipped',
              settled_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
@@ -370,8 +373,8 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
                 OR turn_id IN (SELECT d.child_turn_id FROM delegations d
                                JOIN items i ON i.turn_id = d.child_turn_id
                                WHERE i.conversation_id = ?1))
-         RETURNING turn_id,
-             turn_id IN (SELECT child_turn_id FROM delegations) AS delegated",
+         RETURNING turn_id, turn_id IN (SELECT child_turn_id FROM delegations
+                                        WHERE takeover_turn_id IS NULL) AS delegated",
     )
     .bind(conversation_id)
     .bind(turn_no)
@@ -388,11 +391,14 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
              finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE conversation_id = ?1 AND turn_no < ?2 AND status IN ('queued', 'waiting')
+         WHERE status IN ('queued', 'waiting')
+           AND ((conversation_id = ?1 AND turn_no < ?2)
+                OR id IN (SELECT child_turn_id FROM delegations WHERE takeover_turn_id = ?3))
          RETURNING id",
     )
     .bind(conversation_id)
     .bind(turn_no)
+    .bind(turn_id)
     .fetch_all(&mut *tx)
     .await?;
     for superseded in superseded {

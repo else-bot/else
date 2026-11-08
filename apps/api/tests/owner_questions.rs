@@ -1219,17 +1219,10 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    wait(&app, child, "running").await;
-    let delivered: Option<i32> =
-        sqlx::query_scalar("SELECT delivered_attempt FROM owner_questions WHERE id = ?1")
-            .bind(question)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
     assert_eq!(
-        delivered,
-        Some(2),
-        "the delegated task continues and receives the skipped outcome"
+        status(&app, child).await,
+        "interrupted",
+        "the chat reply carries the task instead of the parked turn"
     );
 }
 
@@ -1352,4 +1345,41 @@ async fn stopping_the_delegating_request_after_a_takeover_keeps_the_owner_chat_t
         .await
         .unwrap();
     assert_eq!(state, "cancelled", "a stopped request stays stopped");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_chat_message_carries_a_taken_over_task() {
+    let Harness { app, .. } = harness().await;
+    let leaf = app.create_bot("Release").await;
+    let (root, task, _, _) = delegated_card(&app, &leaf).await;
+
+    let first = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "[synthetic:slow] Yes, publish it.",
+            Some("synthetic"),
+        )
+        .await;
+    let first: Uuid = first.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, first, "running").await;
+    let correction = "Publish it as a patch release.";
+    let second = app
+        .send(&leaf, Uuid::new_v4(), correction, Some("synthetic"))
+        .await;
+    app.wait_turn(second.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    wait(&app, first, "interrupted").await;
+    wait(&app, root, "completed").await;
+    let (state, result): (String, Option<String>) =
+        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "completed");
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(correction)),
+        "{result:?}"
+    );
 }

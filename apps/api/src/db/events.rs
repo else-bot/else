@@ -138,27 +138,27 @@ pub async fn turn_changed(
     root_changed(conn, turn_id).await
 }
 
-/// Republish the delegating turn of `child_turn`, so its handoff card
-/// follows the child from queued to running to its outcome.
-async fn root_changed(conn: &mut SqliteConnection, child_turn: Uuid) -> Result<(), sqlx::Error> {
-    let root: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT d.parent_bot_id, d.root_turn_id FROM delegations d
+/// Republish the delegating turns of `task_turn`, a child turn or the owner
+/// chat turn that took tasks over, so each handoff card follows its task
+/// from queued to running to its outcome.
+async fn root_changed(conn: &mut SqliteConnection, task_turn: Uuid) -> Result<(), sqlx::Error> {
+    let roots: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT d.parent_bot_id, d.root_turn_id FROM delegations d
          JOIN bots p ON p.id = d.parent_bot_id
-         WHERE d.child_turn_id = ?1 AND p.status = 'active'",
+         WHERE (d.child_turn_id = ?1 OR d.takeover_turn_id = ?1) AND p.status = 'active'",
     )
-    .bind(child_turn)
-    .fetch_optional(&mut *conn)
+    .bind(task_turn)
+    .fetch_all(&mut *conn)
     .await?;
-    let Some((bot_id, root_turn)) = root else {
-        return Ok(());
-    };
-    let turn = turns::load_turn(conn, root_turn).await?;
-    let data = json!({
-        "bot_id": bot_id,
-        "conversation_id": turn.conversation_id,
-        "turn": turn_json(&turn),
-    });
-    append(conn, bot_id, "turn.updated", data).await?;
+    for (bot_id, root_turn) in roots {
+        let turn = turns::load_turn(conn, root_turn).await?;
+        let data = json!({
+            "bot_id": bot_id,
+            "conversation_id": turn.conversation_id,
+            "turn": turn_json(&turn),
+        });
+        append(conn, bot_id, "turn.updated", data).await?;
+    }
     Ok(())
 }
 
