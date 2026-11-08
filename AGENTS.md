@@ -16,3 +16,5 @@
 - Preserve accessibility labels when removing hover descriptions.
 - Bundle each new desktop icon in `AppIcons` in `apps/desktop/src/main.rs` unless GPUI Kit includes it by default, and verify it renders in the app.
 - Keep each bot tool description within 400 characters and each schema property description within 200, written per `.agents/skills/unslop`: say what the tool does and its one gotcha, keep policy in the bot instructions, and return situational guidance in the tool result as `next`.
+- Send bot context that can change between turns (registries, snapshots, lists, counts, rules) as a receipt-backed block in `apps/api/src/providers/context.rs`, never in the system prompt, so providers keep their cached prefix.
+- After changing bot instructions or tool descriptions, run the affected cases in `evals/bot-tool-use`, and add a case for each tool-use mistake you fix.
