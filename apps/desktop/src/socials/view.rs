@@ -247,8 +247,8 @@ impl SocialsView {
         }
         if access.destinations.is_empty() {
             card = card.child(div().text_sm().text_color(theme.muted_foreground).child(match provider {
-                Provider::Telegram => "No chats received yet. Add this bot to your group, or send it a private message, then refresh. A Telegram bot cannot import your old personal chat history.",
-                Provider::Discord => "No channels are available. Add the bot to your server and allow View Channels, then refresh. Reading ordinary server messages may also require Message Content Intent.",
+                Provider::Telegram => "No chats received yet. You can connect now and choose chats later. Add this bot to your channel or group, or send it a private message, then refresh. A Telegram bot cannot import your old personal chat history.",
+                Provider::Discord => "No channels are available yet. You can connect now and choose channels later. Add the bot to your server and allow View Channels, then refresh. Reading ordinary server messages may also require Message Content Intent.",
             }));
         }
         card = card.child(
@@ -342,7 +342,7 @@ impl SocialsView {
             .child(div().text_xs().font_semibold().child(format!("What should {bot_name} do here?")))
             .child(Textarea::new(&form.instructions).bordered(false).aria_label(format!("What should {bot_name} do here?")).disabled(self.busy || !self.available))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Describe what matters, when to reply, and what to ask you first. These instructions guide behavior. The permissions above still limit every tool call, and new conversations stay excluded."))
-            .child(h_flex().justify_end().child(Button::new("social-save-access").focus_ring(false).cursor_pointer().primary().small().label(if self.setup.is_some() { "Connect to assistant" } else { "Save access" }).disabled(self.busy || !self.available || access.bot.is_none() || (self.setup.is_some() && !access.draft.permissions.read) || (access.draft.permissions.read && access.draft.destinations.is_empty())).on_click(cx.listener(|view, _, window, cx| view.save(window, cx)))));
+            .child(h_flex().justify_end().child(Button::new("social-save-access").focus_ring(false).cursor_pointer().primary().small().label(if self.setup.is_some() { "Connect to assistant" } else { "Save access" }).disabled(self.busy || !self.available || access.bot.is_none() || (self.setup.is_some() && !access.draft.permissions.read)).on_click(cx.listener(|view, _, window, cx| view.save(window, cx)))));
         let paused = connection.state != "active";
         card = card.child(
             h_flex()

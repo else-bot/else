@@ -515,11 +515,6 @@ impl SocialsView {
             cx.notify();
             return;
         }
-        if access.draft.permissions.read && access.draft.destinations.is_empty() {
-            self.error = Some("Choose at least one destination.".into());
-            cx.notify();
-            return;
-        }
         let id = connection.id;
         let mut access = access.draft.clone();
         access.destinations.sort();

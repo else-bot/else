@@ -268,7 +268,6 @@ pub async fn authorize(
         access.destinations.retain(|d| scoped.contains(d));
     }
     if !access.permissions.read
-        || access.destinations.is_empty()
         || write && !access.permissions.write
         || send && !access.permissions.send
         || destination.is_some_and(|d| !access.destinations.iter().any(|x| x == d))
@@ -521,10 +520,8 @@ pub async fn settle_setup(
         };
     }
     if let Some((cid, access)) = completion {
-        if !access.permissions.read || access.destinations.is_empty() {
-            return Err(Error::Invalid(
-                "Choose at least one destination and enable reading to complete setup.",
-            ));
+        if !access.permissions.read {
+            return Err(Error::Invalid("Enable reading to complete setup."));
         }
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM social_connections WHERE id=?1 AND provider=?2 AND state='active')",
