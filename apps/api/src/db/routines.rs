@@ -646,6 +646,7 @@ struct OnDemand {
     model: Option<Json<RoutineModel>>,
     queued: bool,
     busy: bool,
+    last_due_at: Option<DateTime<Utc>>,
 }
 
 /// Queue a run of a routine now, at the owner's request, outside its
@@ -678,7 +679,8 @@ pub async fn run_now(
                 EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
                         WHERE rr.routine_id = r.id
                           AND (t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain')
-                               OR NOT rr.reviewed)) AS busy
+                               OR NOT rr.reviewed)) AS busy,
+                (SELECT max(due_at) FROM routine_runs WHERE routine_id = r.id) AS last_due_at
          FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL",
     )
     .bind(id)
@@ -694,6 +696,7 @@ pub async fn run_now(
         model,
         queued,
         busy,
+        last_due_at,
     }) = row
     else {
         return Err(RoutineError::NotFound);
@@ -728,13 +731,17 @@ pub async fn run_now(
         Err(Skip::ProviderUnavailable) => return Err(RoutineError::ProviderUnavailable),
         Err(Skip::Overlap) => return Err(RoutineError::AlreadyRunning),
     };
+    // Later than every earlier run, so it is the routine's last run.
+    let due = last_due_at.map_or(now, |last| {
+        now.max(last + chrono::Duration::milliseconds(1))
+    });
     sqlx::query(
         "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(run_id)
     .bind(id)
-    .bind(ts(now))
+    .bind(ts(due))
     .bind(&name)
     .bind(turn_id)
     .bind(prompt_revision)

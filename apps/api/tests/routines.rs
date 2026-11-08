@@ -833,6 +833,49 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     assert_eq!(listed[0]["last_run"]["turn_id"], run.to_string().as_str());
     assert_eq!(listed[0]["next_run_at"], next_run_at);
     assert_eq!(listed[0]["enabled"], true);
+    for _ in 0..200 {
+        let reviewed: bool =
+            sqlx::query_scalar("SELECT reviewed FROM routine_runs WHERE turn_id = ?1")
+                .bind(run)
+                .fetch_one(&h.app.db.pool)
+                .await
+                .unwrap();
+        if reviewed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(
+        set_enabled(&h.app, &main, &id, false).await.status,
+        StatusCode::OK
+    );
+    let (again, token) = h.running(&main, GATE).await;
+    let ran = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
+    assert!(!ran.error, "{}", ran.body);
+    assert_eq!(ran.result["queued"], true, "a new request runs it again");
+    assert_eq!(ran.result["routine"]["enabled"], false);
+    assert!(ran.result["routine"]["next_run_at"].is_null());
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        ran.result["routine"]["last_run"]["turn_id"],
+        all[1].0.unwrap().to_string().as_str()
+    );
+    h.release(again).await;
+    let paused_run = all[1].0.unwrap();
+    h.started(paused_run).await;
+    h.release(paused_run).await;
+    h.app
+        .wait_turn(&paused_run.to_string(), &["completed"])
+        .await;
+    let listed = owner_routines(&h.app, &main).await;
+    assert_eq!(listed[0]["last_run"]["status"], "completed");
+    assert_eq!(
+        listed[0]["enabled"], false,
+        "a run on demand never resumes it"
+    );
+    assert!(listed[0]["next_run_at"].is_null());
 }
 
 #[tokio::test]
