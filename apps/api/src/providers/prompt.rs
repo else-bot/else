@@ -312,7 +312,8 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          else_status and report the reasons it gives. Rarely used else.bot tools are not in \
          your tool list: for a tool these instructions or a result name that you do not \
          have, call find_tool with its name or a few words about the need, then run it with \
-         use_tool. You have no native web tools. Do not \
+         use_tool. Tool names may carry a provider prefix, such as mcp__elsebot__delegate: call \
+         each by the name in your tool list. You have no native web tools. Do not \
          spawn native sub-agents, teams, or agent sessions, or change models, reasoning \
          effort, service tier, or agent settings. If a request needs a capability you lack, \
          say so plainly.\n\n\
@@ -1153,5 +1154,15 @@ mod tests {
         input.delegation.can_create_bot = true;
         let size = super::instructions(&input, "/p").len();
         assert!(size <= 13_000, "{size} bytes");
+    }
+
+    /// Native host tools cannot be gated, so the instructions carry this rule.
+    #[test]
+    fn host_installs_and_settings_need_the_owners_approval() {
+        let mut input = crate::providers::cli::session::tests::input();
+        input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
+        let rules = super::instructions(&input, "/p");
+        assert!(rules.contains("call ask_permission with the exact command"));
+        assert!(rules.contains("installing software, changing system settings"));
     }
 }

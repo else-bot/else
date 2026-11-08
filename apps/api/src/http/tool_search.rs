@@ -68,6 +68,13 @@ fn schemas() -> [Value; 2] {
 /// first, then by words shared with each tool's name and description.
 pub fn find(all: &[Value], query: &str) -> Value {
     let query = query.to_lowercase();
+    let bare = query.trim().trim_start_matches("mcp__elsebot__");
+    if TOOL_NAMES.contains(&bare) {
+        return json!({ "tools": [], "listed": format!(
+            "{bare} is in your tool list, as mcp__elsebot__{bare} where your tools carry that \
+             prefix: call it directly."
+        ) });
+    }
     let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 2)
@@ -199,6 +206,13 @@ mod tests {
                 .all(|t| t["name"] != "computer_run")
         );
         assert_eq!(find(&all, "zzzz")["available"], json!(DEFERRED_TOOLS));
+        let listed = find(&all, "delegate");
+        assert!(
+            listed["listed"]
+                .as_str()
+                .unwrap()
+                .contains("call it directly")
+        );
     }
 
     #[test]
