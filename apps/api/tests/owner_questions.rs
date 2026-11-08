@@ -968,8 +968,19 @@ async fn only_the_owner_answers_and_only_for_the_asking_bot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_not_open_questions() {
+async fn a_task_delegated_for_an_owner_request_asks_open_questions_in_its_bot_chat() {
     let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
+    let child_token = grant(&app, child, owner_tools()).await;
+    let asked = tool_text(&tool(&app, &child_token, "ask_owner", choice_args()).await);
+    assert_eq!(asked["parked"], true, "{asked}");
+    let shown = shown_turn(&app, &leaf, child).await;
+    assert_eq!(shown["questions"][0]["status"], "pending", "{shown}");
+}
+
+/// A running task the main bot delegated to another bot while serving an
+/// owner message: that bot's ID and the task's turn.
+async fn delegated_task(app: &TestApp) -> (String, Uuid) {
     let main = app.main_bot().await;
     let leaf = app.create_bot("Ops").await;
     let warm = app
@@ -977,10 +988,10 @@ async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_not_open_questio
         .await;
     app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
         .await;
-    let (turn, _) = running(&app, &main).await;
-    let parent = grant(&app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let (turn, _) = running(app, &main).await;
+    let parent = grant(app, turn, vec![Tool::ReadMemory, Tool::Delegate]).await;
     let delegated = tool(
-        &app,
+        app,
         &parent,
         "delegate",
         json!({ "target_bot_id": leaf, "task": "[synthetic:slow] clean the server disk now" }),
@@ -996,26 +1007,31 @@ async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_not_open_questio
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
-    wait(&app, child, "running").await;
+    wait(app, child, "running").await;
+    (leaf, child)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_tasks_ask_for_approval_in_their_bot_chat_but_cannot_record_standing_grants() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
     let child_token = grant(&app, child, owner_tools()).await;
-    for (name, args) in [
-        ("ask_owner", choice_args()),
-        (
-            "confirm_permission",
-            json!({ "target": { "scope": "bot" }, "authorization": "Always allow destructive actions" }),
-        ),
-    ] {
-        let refused = tool(&app, &child_token, name, args).await;
-        assert!(is_error(&refused), "{name}: {}", refused.body);
-        assert!(
-            tool_text(&refused)
-                .as_str()
-                .unwrap()
-                .starts_with("NOT_ALLOWED"),
-            "{name}: {}",
-            refused.body
-        );
-    }
+    let refused = tool(
+        &app,
+        &child_token,
+        "confirm_permission",
+        json!({ "target": { "scope": "bot" }, "authorization": "Always allow destructive actions" }),
+    )
+    .await;
+    assert!(is_error(&refused), "{}", refused.body);
+    assert!(
+        tool_text(&refused)
+            .as_str()
+            .unwrap()
+            .starts_with("NOT_ALLOWED"),
+        "{}",
+        refused.body
+    );
     let pending = tool_text(&tool(&app, &child_token, "computer_run", delete_args()).await);
     let question: Uuid = pending["question_id"]
         .as_str()
