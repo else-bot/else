@@ -1618,10 +1618,27 @@ async fn delegated_task(app: &TestApp) -> (String, Uuid, Uuid, Uuid) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chat_approval_of_a_delegated_draft_answers_the_delegating_request() {
+    chat_approval_of_a_delegated_draft(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_approval_before_the_task_parks_still_answers_the_delegating_request() {
+    chat_approval_of_a_delegated_draft(false).await;
+}
+
+async fn chat_approval_of_a_delegated_draft(parked: bool) {
     let Harness { app, .. } = harness().await;
     let (leaf, root, task, child) = delegated_task(&app).await;
     let id = draft(&app, &grant(&app, child).await, lunch()).await;
-    wait(&app, child, "waiting").await;
+    if parked {
+        wait(&app, child, "waiting").await;
+    } else {
+        assert_eq!(
+            status(&app, child).await,
+            "running",
+            "the card is out before the task parks"
+        );
+    }
 
     let (reply, token) = running(
         &app,
