@@ -173,6 +173,41 @@ fn errors_are_classified_by_their_cause() {
 }
 
 #[test]
+fn a_grok_that_fails_before_opening_a_session_reports_its_own_error() {
+    // Grok 1.0.77's output, verbatim apart from usage fields, for an expired login.
+    let unopened = json!({"type":"system","subtype":"init","session_id":"","apiKeySource":"user","model":"unknown","cwd":"","permissionMode":"default","tools":[],"slash_commands":[],"mcp_servers":[],"skills":[],"uuid":"82a378fb-dfaf-4779-b369-29be16172cff"});
+    let failed = json!({"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":0,"num_turns":0,"stop_reason":null,"errors":["Not signed in. To authenticate without a browser, run:\n  grok login --device-code"],"session_id":"","uuid":"920e941e-75bd-40da-a5a9-837d4fc0308e"});
+    let output = json!({"type":"assistant","session_id":"","message":{"content":[]}});
+
+    let mut t = tracker(true);
+    assert_eq!(t.on(&unopened), Ok(vec![]));
+    assert!(t.on(&output).is_err(), "no output without a session");
+    let tool_call = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"run_terminal_command","id":"c1","input":{}}]}});
+    assert!(
+        t.on(&tool_call).is_err(),
+        "no tool call after Grok reported no session"
+    );
+    let Some(Event::Finished(terminal)) = t.on(&failed).unwrap().pop() else {
+        panic!("terminal");
+    };
+    match t.outcome(terminal, None, false) {
+        TurnOutcome::Failed { code, message } => {
+            assert_eq!(code, "provider_failed");
+            assert!(message.contains("Not signed in."), "{message}");
+            assert!(!message.contains("[\""), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let mut t = tracker(true);
+    t.on(&init(true)).unwrap();
+    assert!(
+        t.on(&output).is_err(),
+        "an opened session cannot lose its ID"
+    );
+}
+
+#[test]
 fn malformed_known_events_fail_and_unknown_events_are_ignored() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();

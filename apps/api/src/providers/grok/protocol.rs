@@ -22,12 +22,21 @@ pub(super) enum Terminal {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Pending,
+    Opened,
+    /// Grok stopped before opening any session, as it does without a valid
+    /// login; it reports an empty session ID.
+    Unopened,
+}
+
 pub(super) struct Tracker {
     model: String,
     session: String,
     expected: Vec<String>,
     mcp: bool,
-    initialized: bool,
+    start: Start,
     calls: HashMap<String, String>,
 }
 
@@ -66,7 +75,7 @@ impl Tracker {
             session: session.into(),
             expected,
             mcp,
-            initialized: false,
+            start: Start::Pending,
             calls: HashMap::new(),
         }
     }
@@ -88,7 +97,9 @@ impl Tracker {
     }
 
     fn on_init(&mut self, event: &Value) -> Result<(), Violation> {
-        if self.initialized || text(&event["session_id"], "session ID")? != Some(&self.session) {
+        if self.start != Start::Pending
+            || text(&event["session_id"], "session ID")? != Some(&self.session)
+        {
             return Err(Violation::policy(
                 "Grok did not initialize the requested session",
             ));
@@ -126,8 +137,23 @@ impl Tracker {
                 "Grok reported unexpected MCP servers: {servers:?}"
             )));
         }
-        self.initialized = true;
+        self.start = Start::Opened;
         Ok(())
+    }
+
+    fn unopened(&mut self, event: &Value) -> Result<Vec<Event<Terminal>>, Violation> {
+        let kind = required(&event["type"], "event")?;
+        if kind == "system"
+            && text(&event["subtype"], "system event")? == Some("init")
+            && self.start == Start::Pending
+        {
+            self.start = Start::Unopened;
+            return Ok(Vec::new());
+        }
+        match terminal(kind, event)? {
+            Some(terminal) => Ok(vec![Event::Finished(terminal)]),
+            None => Err(Violation::policy("Grok sent output without a session")),
+        }
     }
 
     fn on_assistant(&mut self, event: &Value) -> Result<(), Violation> {
@@ -189,16 +215,22 @@ impl Protocol for Tracker {
         if text(&event["parent_tool_use_id"], "parent tool use")?.is_some() {
             return Err(Violation::policy("Grok ran a native subagent"));
         }
-        if text(&event["session_id"], "session ID")?.is_some_and(|id| id != self.session) {
-            return Err(Violation::policy(
-                "Grok reported a different native session",
-            ));
+        let different = || Violation::policy("Grok reported a different native session");
+        match (self.start, text(&event["session_id"], "session ID")?) {
+            (_, Some(id)) if !id.is_empty() && id != self.session => return Err(different()),
+            (Start::Unopened, _) | (Start::Pending, Some("")) => return self.unopened(event),
+            (Start::Opened, Some("")) => return Err(different()),
+            _ => {}
         }
         self.check_model(&event["model"])?;
         self.check_model(&event["message"]["model"])?;
         self.check_model(&event["event"]["message"]["model"])?;
+        let kind = required(&event["type"], "event")?;
+        if let Some(terminal) = terminal(kind, event)? {
+            return Ok(vec![Event::Finished(terminal)]);
+        }
         let mut events = Vec::new();
-        match required(&event["type"], "event")? {
+        match kind {
             "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
                 "init" => self.on_init(event)?,
                 sub if sub.starts_with("task_") || sub.contains("agent") => {
@@ -207,7 +239,7 @@ impl Protocol for Tracker {
                 _ => {}
             },
             "stream_event" => {
-                if !self.initialized {
+                if self.start != Start::Opened {
                     return Err(Violation::policy(
                         "Grok produced output before its inventory",
                     ));
@@ -237,17 +269,6 @@ impl Protocol for Tracker {
             "control_request" => {
                 return Err(Violation::policy("Grok requested interactive permission"));
             }
-            "result" => events.push(Event::Finished(Terminal::Result {
-                success: text(&event["subtype"], "result")? == Some("success")
-                    && event["is_error"] == false,
-                stop_reason: text(&event["stop_reason"], "result")?.map(str::to_owned),
-                errors: event["errors"].to_string(),
-            })),
-            "error" => events.push(Event::Finished(Terminal::Error(
-                text(&event["message"], "error")?
-                    .unwrap_or("Grok failed")
-                    .to_owned(),
-            ))),
             _ => {}
         }
         Ok(events)
@@ -267,7 +288,13 @@ impl Protocol for Tracker {
                 errors,
             } => (success, stop_reason, errors),
         };
-        if !self.initialized || !accepted {
+        if self.start == Start::Unopened {
+            return failed(
+                "provider_failed",
+                format!("Grok stopped before opening a session: {errors}"),
+            );
+        }
+        if self.start != Start::Opened || !accepted {
             return TurnOutcome::Uncertain {
                 message: format!("Grok ended without acknowledging the prompt: {errors}"),
             };
@@ -294,6 +321,30 @@ impl Protocol for Tracker {
     fn resumable(&self, outcome: &TurnOutcome) -> bool {
         *outcome == TurnOutcome::Completed
     }
+}
+
+fn terminal(kind: &str, event: &Value) -> Result<Option<Terminal>, Violation> {
+    Ok(Some(match kind {
+        "result" => Terminal::Result {
+            success: text(&event["subtype"], "result")? == Some("success")
+                && event["is_error"] == false,
+            stop_reason: text(&event["stop_reason"], "result")?.map(str::to_owned),
+            errors: errors(&event["errors"]),
+        },
+        "error" => Terminal::Error(
+            text(&event["message"], "error")?
+                .unwrap_or("Grok failed")
+                .to_owned(),
+        ),
+        _ => return Ok(None),
+    }))
+}
+
+fn errors(value: &Value) -> String {
+    let messages: Option<Vec<&str>> = value
+        .as_array()
+        .and_then(|list| list.iter().map(Value::as_str).collect());
+    messages.map_or_else(|| value.to_string(), |messages| messages.join("\n"))
 }
 
 fn failed(code: &str, message: impl Into<String>) -> TurnOutcome {
