@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -78,50 +79,51 @@ impl Connection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Destination {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub can_send: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Permissions {
-    pub read: bool,
-    pub write: bool,
-    pub send: bool,
-    pub wake: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakePolicy {
-    #[default]
-    Never,
     Mentions,
     All,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BindingInput {
-    pub destinations: Vec<String>,
-    pub permissions: Permissions,
-    pub wake_policy: WakePolicy,
-    pub instructions: String,
+impl WakePolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mentions => "on mention",
+            Self::All => "every message",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Binding {
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Trigger {
+    pub id: Uuid,
+    pub connection_id: Uuid,
     pub bot_id: Uuid,
-    #[serde(flatten)]
-    pub access: BindingInput,
+    pub provider: Provider,
+    pub connection_name: String,
+    pub username: Option<String>,
+    pub destination: Option<String>,
+    pub destination_name: Option<String>,
+    pub wake: WakePolicy,
+    pub instructions: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Trigger {
+    pub fn title(&self) -> &str {
+        self.destination_name
+            .as_deref()
+            .or(self.destination.as_deref())
+            .unwrap_or("Any chat")
+    }
 }
 
 #[derive(Deserialize)]
 pub struct ConnectionDetail {
     pub connection: Connection,
-    pub bindings: Vec<Binding>,
 }
 
 #[derive(Deserialize)]
@@ -171,40 +173,37 @@ impl Client {
         .map(|(_, r)| r.connection)
     }
 
-    pub async fn social_destinations(
+    pub async fn set_social_trigger_enabled(
         self: Arc<Self>,
+        bot: Uuid,
         id: Uuid,
-    ) -> Result<Vec<Destination>, ClientError> {
+        enabled: bool,
+    ) -> Result<Trigger, ClientError> {
         #[derive(Deserialize)]
         struct Response {
-            destinations: Vec<Destination>,
+            trigger: Trigger,
         }
         self.call::<Response>(
-            Method::GET,
-            format!("/v1/connectors/socials/connections/{id}/destinations"),
+            Method::PATCH,
+            format!("/v1/bots/{bot}/social-triggers/{id}"),
+            Some(json!({"enabled": enabled})),
+        )
+        .await
+        .map(|(_, response)| response.trigger)
+    }
+
+    pub async fn delete_social_trigger(
+        self: Arc<Self>,
+        bot: Uuid,
+        id: Uuid,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::DELETE,
+            format!("/v1/bots/{bot}/social-triggers/{id}"),
             None,
         )
         .await
-        .map(|(_, r)| r.destinations)
-    }
-
-    pub async fn bind_social(
-        self: Arc<Self>,
-        id: Uuid,
-        bot: Uuid,
-        access: BindingInput,
-    ) -> Result<Binding, ClientError> {
-        #[derive(Deserialize)]
-        struct Response {
-            binding: Binding,
-        }
-        self.call::<Response>(
-            Method::PUT,
-            format!("/v1/connectors/socials/connections/{id}/bots/{bot}"),
-            Some(json!(access)),
-        )
-        .await
-        .map(|(_, response)| response.binding)
+        .map(|_| ())
     }
 
     pub async fn set_social_active(
@@ -249,12 +248,11 @@ impl Client {
         self: Arc<Self>,
         id: Uuid,
         connection: Uuid,
-        access: BindingInput,
     ) -> Result<(), ClientError> {
         self.call::<serde_json::Value>(
             Method::POST,
             format!("/v1/connectors/socials/setups/{id}/complete"),
-            Some(json!({"connection_id": connection, "access": access})),
+            Some(json!({"connection_id": connection})),
         )
         .await
         .map(|_| ())
@@ -316,43 +314,70 @@ mod tests {
             assert!(!format!("{connection:?}").contains("private-bot-credential"));
         }
     }
+    #[tokio::test]
+    async fn completing_setup_sends_only_the_connection_id() {
+        let setup = Uuid::new_v4();
+        let connection = Uuid::new_v4();
+        let (origin, request) = crate::api::tests::serve_once(response(json!({"setup": {
+            "id": setup, "provider": "telegram", "reason": "Watch messages",
+            "status": "connected", "connection_id": connection
+        }})))
+        .await;
+        let owner = OwnerToken::parse(&"T".repeat(43)).unwrap();
+        let client =
+            Arc::new(Client::new(origin, &owner, tokio::runtime::Handle::current()).unwrap());
+        client
+            .complete_social_setup(setup, connection)
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with(&format!(
+            "POST /v1/connectors/socials/setups/{setup}/complete HTTP/1.1"
+        )));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"connection_id": connection})
+        );
+    }
 
     #[tokio::test]
-    async fn access_revocation_keeps_owner_instructions_and_clears_authority() {
-        let connection = Uuid::new_v4();
+    async fn trigger_changes_use_the_bot_scoped_routes() {
         let bot = Uuid::new_v4();
-        let access = BindingInput {
-            destinations: Vec::new(),
-            permissions: Permissions::default(),
-            wake_policy: WakePolicy::Never,
-            instructions: "Summarize mentions.\nAsk me before posting.".into(),
-        };
-        let (origin, request) = crate::api::tests::serve_once(response(json!({"binding": {
-            "id": Uuid::new_v4(), "connection_id": connection, "bot_id": bot,
-            "destinations": [], "permissions": access.permissions, "wake_policy": "never", "instructions": access.instructions
+        let id = Uuid::new_v4();
+        let (origin, request) = crate::api::tests::serve_once(response(json!({"trigger": {
+            "id": id, "bot_id": bot, "connection_id": Uuid::new_v4(), "provider": "discord",
+            "connection_name": "Team bot", "username": null, "destination": null,
+            "destination_name": null, "wake": "all", "instructions": "Summarize questions.",
+            "enabled": false, "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-02T07:00:00.456+00:00"
         }}))).await;
         let owner = OwnerToken::parse(&"T".repeat(43)).unwrap();
         let client =
             Arc::new(Client::new(origin, &owner, tokio::runtime::Handle::current()).unwrap());
-        let binding = client
-            .bind_social(connection, bot, access.clone())
+        let trigger = client
+            .set_social_trigger_enabled(bot, id, false)
             .await
             .unwrap();
-        assert_eq!(binding.bot_id, bot);
-        assert_eq!(binding.access.instructions, access.instructions);
+        assert_eq!(trigger.id, id);
+        assert!(!trigger.enabled);
         let request = request.await.unwrap();
         let (head, body) = request.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with(&format!(
-            "PUT /v1/connectors/socials/connections/{connection}/bots/{bot} HTTP/1.1"
+            "PATCH /v1/bots/{bot}/social-triggers/{id} HTTP/1.1"
         )));
-        let body: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["instructions"], access.instructions);
-        assert_eq!(body["destinations"], json!([]));
         assert_eq!(
-            body["permissions"],
-            json!({"read": false, "write": false, "send": false, "wake": false})
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"enabled": false})
         );
-        assert_eq!(body["wake_policy"], "never");
-        assert!(body.get("token").is_none());
+
+        let (origin, request) =
+            crate::api::tests::serve_once("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        let client =
+            Arc::new(Client::new(origin, &owner, tokio::runtime::Handle::current()).unwrap());
+        client.delete_social_trigger(bot, id).await.unwrap();
+        assert!(request.await.unwrap().starts_with(&format!(
+            "DELETE /v1/bots/{bot}/social-triggers/{id} HTTP/1.1"
+        )));
     }
 }

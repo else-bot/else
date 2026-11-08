@@ -156,9 +156,9 @@ impl Shell {
         } else if self.socials.is_none()
             && let Some(active) = &self.active
         {
-            let (client, bots) = active.app.read(cx).social_context();
+            let client = active.app.read(cx).social_client();
             self.socials =
-                Some(cx.new(|cx| crate::socials::SocialsView::new(client, bots, None, window, cx)));
+                Some(cx.new(|cx| crate::socials::SocialsView::new(client, None, window, cx)));
             if !active.app.read(cx).social_network_available() {
                 self.socials
                     .as_ref()

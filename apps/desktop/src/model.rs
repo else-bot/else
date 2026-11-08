@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::socials::Trigger;
 use crate::api::{Activity, Bot};
 
 mod outgoing;
@@ -395,6 +396,8 @@ pub struct Snapshot {
     /// Absent from servers without routines.
     #[serde(default)]
     pub routines: Vec<Routine>,
+    #[serde(default)]
+    pub social_triggers: Vec<Trigger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,6 +435,7 @@ pub struct Conversation {
     pub selected_provider_id: Option<String>,
     pub activity: Option<Activity>,
     routines: Vec<Routine>,
+    social_triggers: Vec<Trigger>,
 }
 
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
@@ -452,6 +456,7 @@ impl Conversation {
             selected_provider_id: snapshot.selected_provider_id,
             activity: Some(snapshot.activity),
             routines: snapshot.routines,
+            social_triggers: snapshot.social_triggers,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -532,6 +537,12 @@ impl Conversation {
                     self.routines =
                         serde_json::from_value(routines.clone()).map_err(|_| Reset::Malformed)?;
                 }
+                self.social_triggers = data
+                    .get("social_triggers")
+                    .map(|triggers| serde_json::from_value(triggers.clone()))
+                    .transpose()
+                    .map_err(|_| Reset::Malformed)?
+                    .unwrap_or_default();
             }
             other => return Err(Reset::UnknownKind(other.to_owned())),
         }
@@ -703,6 +714,10 @@ impl Conversation {
                         .is_none_or(|at| item.created_at.is_none_or(|created| created <= at))
             })
             .map(|item| item.id)
+    }
+
+    pub fn social_triggers(&self) -> &[Trigger] {
+        &self.social_triggers
     }
 
     pub fn routines(&self) -> &[Routine] {
@@ -1189,6 +1204,80 @@ mod tests {
             json!({ "bot": { "id": bot(), "name": "A" }, "routines": [{ "id": 1 }] }),
         );
         assert_eq!(c.apply(&malformed), Err(Reset::Malformed));
+    }
+
+    fn social_trigger(enabled: bool, provider: &str) -> serde_json::Value {
+        json!({
+            "id": Uuid::from_u128(80), "connection_id": Uuid::from_u128(81),
+            "bot_id": bot(), "provider": provider, "connection_name": "Team bot",
+            "username": "team_bot", "destination": "-100123", "destination_name": "Proliquid",
+            "wake": "mentions", "instructions": "Summarize questions.", "enabled": enabled,
+            "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-02T07:00:00.456+00:00"
+        })
+    }
+
+    #[test]
+    fn social_triggers_parse_from_snapshots_and_bot_updates() {
+        let first: Snapshot = serde_json::from_value(json!({
+            "event_cursor": format!("{PREFIX}:1"), "items": [], "turns": [],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 },
+            "social_triggers": [social_trigger(true, "telegram")]
+        }))
+        .unwrap();
+        let mut conversation = Conversation::from_snapshot(first).unwrap();
+        assert_eq!(conversation.social_triggers().len(), 1);
+        let trigger = &conversation.social_triggers()[0];
+        assert_eq!(trigger.id, Uuid::from_u128(80));
+        assert_eq!(trigger.connection_id, Uuid::from_u128(81));
+        assert_eq!(trigger.bot_id, bot());
+        assert_eq!(trigger.title(), "Proliquid");
+        assert_eq!(trigger.wake.label(), "on mention");
+        assert_eq!(trigger.instructions, "Summarize questions.");
+        assert!(trigger.enabled);
+        let update = |seq, triggers| {
+            frame(
+                seq,
+                "bot.updated",
+                json!({
+                    "bot": { "id": bot(), "name": "Assistant" }, "social_triggers": triggers
+                }),
+            )
+        };
+        conversation
+            .apply(&update(2, json!([social_trigger(false, "discord")])))
+            .unwrap();
+        assert!(!conversation.social_triggers()[0].enabled);
+        assert_eq!(
+            conversation.social_triggers()[0].provider.label(),
+            "Discord"
+        );
+        let mut older = snapshot(1, vec![], None);
+        older.social_triggers =
+            vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
+        conversation.merge_older(older);
+        assert!(
+            !conversation.social_triggers()[0].enabled,
+            "older pages keep the current triggers"
+        );
+        conversation.apply(&update(3, json!([]))).unwrap();
+        assert!(
+            conversation.social_triggers().is_empty(),
+            "deleted triggers leave the list"
+        );
+        assert_eq!(
+            conversation.apply(&update(4, json!([{ "id": 1 }]))),
+            Err(Reset::Malformed)
+        );
+    }
+
+    #[test]
+    fn older_servers_without_social_triggers_use_an_empty_list() {
+        let mut conversation = Conversation::from_snapshot(snapshot(1, vec![], None)).unwrap();
+        assert!(conversation.social_triggers().is_empty());
+        conversation.social_triggers =
+            vec![serde_json::from_value(social_trigger(true, "telegram")).unwrap()];
+        conversation.apply(&bot_updated(2, None)).unwrap();
+        assert!(conversation.social_triggers().is_empty());
     }
 
     #[test]

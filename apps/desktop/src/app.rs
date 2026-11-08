@@ -300,15 +300,8 @@ impl ElseApp {
         self.connection == Connection::Connected
     }
 
-    pub(crate) fn social_context(&self) -> (Arc<Client>, Vec<Bot>) {
-        (
-            self.client.clone(),
-            self.bots
-                .iter()
-                .filter(|b| b.is_active())
-                .cloned()
-                .collect(),
-        )
+    pub(crate) fn social_client(&self) -> Arc<Client> {
+        self.client.clone()
     }
 
     pub fn new(

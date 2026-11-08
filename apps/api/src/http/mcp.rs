@@ -99,7 +99,11 @@ pub async fn endpoint(
                 Some("ask_permission") => Tool::AskPermission,
                 Some("ask_owner" | "confirm_permission" | "social_connect") => Tool::AskOwner,
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
-                Some(name) if name.starts_with("routine_") || name.starts_with("webhook_") => {
+                Some(name)
+                    if name.starts_with("routine_")
+                        || name.starts_with("webhook_")
+                        || name.starts_with("social_trigger_") =>
+                {
                     Tool::Routines
                 }
                 Some(name) if name.starts_with("computer_") => Tool::Computer,
@@ -473,9 +477,13 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "create_bot" => create_bot(state, grant, args).await,
         "rename_bot" => rename_bot(state, grant, args).await,
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
-        "social_connect" | "social_connections" | "social_action" | "social_action_status" => {
-            super::social_tools::call(state, grant, name, args).await
-        }
+        "social_connect"
+        | "social_connections"
+        | "social_action"
+        | "social_action_status"
+        | "social_trigger_set"
+        | "social_trigger_list"
+        | "social_trigger_delete" => super::social_tools::call(state, grant, name, args).await,
         "ask_owner" => super::owner_tools::ask_owner(state, grant, args).await,
         "ask_permission" => super::owner_tools::ask_permission(state, grant, args).await,
         "confirm_permission" => super::owner_tools::confirm_permission(state, grant, args).await,

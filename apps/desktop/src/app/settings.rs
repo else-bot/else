@@ -4,6 +4,7 @@ use super::{APP_CONTEXT, Connection, ElseApp, ToggleSettings};
 use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
+use crate::api::socials::Trigger;
 use crate::api::{Bot, BotProfile, ProfileChoice};
 use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
 use crate::model::{LastRun, Routine};
@@ -278,10 +279,30 @@ impl RoutineSave {
     }
 }
 
+enum TriggerSave {
+    Saving { attempt: Uuid, enabled: bool },
+    Deleting { attempt: Uuid },
+    Failed(String),
+}
+
+impl TriggerSave {
+    fn attempt(&self) -> Option<Uuid> {
+        match self {
+            Self::Saving { attempt, .. } | Self::Deleting { attempt } => Some(*attempt),
+            Self::Failed(_) => None,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.attempt().is_some()
+    }
+}
+
 pub(super) struct BotSettings {
     details: Details,
     model: ModelState,
     routines: HashMap<Uuid, RoutineSave>,
+    triggers: HashMap<Uuid, TriggerSave>,
 }
 
 impl ElseApp {
@@ -351,6 +372,7 @@ impl ElseApp {
                 details,
                 model: ModelState::Loading(Uuid::nil()),
                 routines: HashMap::new(),
+                triggers: HashMap::new(),
             },
         );
         self.load_profile(bot.id, window, cx);
@@ -638,6 +660,114 @@ impl ElseApp {
             });
         })
         .detach();
+    }
+
+    pub(super) fn sync_social_trigger_changes(&mut self) {
+        if let Some(view) = &self.view
+            && let Some(conversation) = &view.conversation
+            && let Some(entry) = self.settings.get_mut(&view.bot_id)
+        {
+            entry.triggers.retain(|id, save| {
+                let trigger = conversation
+                    .social_triggers()
+                    .iter()
+                    .find(|trigger| trigger.id == *id);
+                still_pending(save, trigger)
+            });
+        }
+    }
+
+    fn changeable_trigger(&self, bot: Uuid, id: Uuid) -> Option<&Trigger> {
+        if self.connection != Connection::Connected {
+            return None;
+        }
+        let entry = self.settings.get(&bot)?;
+        if entry.triggers.get(&id).is_some_and(TriggerSave::busy) {
+            return None;
+        }
+        self.view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())?
+            .social_triggers()
+            .iter()
+            .find(|trigger| trigger.id == id)
+    }
+
+    fn change_social_trigger(
+        &mut self,
+        bot: Uuid,
+        id: Uuid,
+        enabled: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.changeable_trigger(bot, id).is_none() {
+            return;
+        }
+        let attempt = Uuid::new_v4();
+        let change = match enabled {
+            Some(enabled) => TriggerSave::Saving { attempt, enabled },
+            None => TriggerSave::Deleting { attempt },
+        };
+        let Some(entry) = self.settings.get_mut(&bot) else {
+            return;
+        };
+        entry.triggers.insert(id, change);
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match enabled {
+                Some(enabled) => client
+                    .set_social_trigger_enabled(bot, id, enabled)
+                    .await
+                    .map(|_| ()),
+                None => client.delete_social_trigger(bot, id).await,
+            };
+            let _ = this.update(cx, |app, cx| {
+                let Some(entry) = app.settings.get_mut(&bot) else {
+                    return;
+                };
+                if entry.triggers.get(&id).and_then(TriggerSave::attempt) != Some(attempt) {
+                    return;
+                }
+                if let Err(error) = result {
+                    let action = if enabled.is_some() { "save" } else { "delete" };
+                    entry.triggers.insert(
+                        id,
+                        TriggerSave::Failed(format!("Couldn't {action}. {error}")),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_social_trigger_delete_dialog(
+        &mut self,
+        bot: Uuid,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) =
+            self.changeable_trigger(bot, id)
+                .map(|trigger| match trigger.destination {
+                    Some(_) => format!("the trigger for {}", trigger.title()),
+                    None => "the trigger for any chat".to_owned(),
+                })
+        else {
+            return;
+        };
+        self.open_delete_confirmation(
+            DeleteTarget::SocialTrigger(name),
+            window,
+            cx,
+            move |app, window, cx| {
+                app.change_social_trigger(bot, id, None, window, cx);
+            },
+        );
     }
 
     fn open_model_dialog(&mut self, bot: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -938,7 +1068,8 @@ impl ElseApp {
                 body = body
                     .child(self.render_details(bot.id, &entry.details, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
-                    .child(self.render_routines(bot.id, &entry.routines, cx));
+                    .child(self.render_routines(bot.id, &entry.routines, cx))
+                    .child(self.render_social_triggers(bot.id, &entry.triggers, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
             }
@@ -1283,6 +1414,130 @@ impl ElseApp {
 }
 
 impl ElseApp {
+    fn render_social_triggers(
+        &self,
+        bot: Uuid,
+        saves: &HashMap<Uuid, TriggerSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = section("Social triggers", cx);
+        let Some(conversation) = self
+            .view
+            .as_ref()
+            .filter(|view| view.bot_id == bot)
+            .and_then(|view| view.conversation.as_ref())
+        else {
+            return body.child(muted("Loading…", cx)).into_any_element();
+        };
+        if conversation.social_triggers().is_empty() {
+            return body.child(muted(
+                "No triggers yet. Ask the bot in chat to watch a Telegram or Discord chat, for example \"wake up when someone mentions you in the Proliquid channel\".", cx,
+            )).into_any_element();
+        }
+        body.children(
+            conversation.social_triggers().iter().map(|trigger| {
+                self.render_social_trigger(bot, trigger, saves.get(&trigger.id), cx)
+            }),
+        )
+        .into_any_element()
+    }
+
+    fn render_social_trigger(
+        &self,
+        bot: Uuid,
+        trigger: &Trigger,
+        save: Option<&TriggerSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let id = trigger.id;
+        let busy = save.is_some_and(TriggerSave::busy);
+        let checked = match save {
+            Some(TriggerSave::Saving { enabled, .. }) => *enabled,
+            _ => trigger.enabled,
+        };
+        let disabled = busy || self.connection != Connection::Connected;
+        let switch = Switch::new(ElementId::Name(format!("social-trigger-{id}").into()))
+            .focus_ring(false)
+            .cursor_pointer()
+            .checked(checked)
+            .small()
+            .accessibility_label(format!("Run trigger for {}", trigger.title()))
+            .disabled(disabled)
+            .on_click(cx.listener(move |app, enabled: &bool, window, cx| {
+                app.change_social_trigger(bot, id, Some(*enabled), window, cx)
+            }));
+        let delete = Button::new(ElementId::Name(
+            format!("social-trigger-delete-{id}").into(),
+        ))
+        .focus_ring(false)
+        .cursor_pointer()
+        .ghost()
+        .xsmall()
+        .label("Delete")
+        .accessibility_label(format!("Delete trigger for {}", trigger.title()))
+        .loading(matches!(save, Some(TriggerSave::Deleting { .. })))
+        .disabled(disabled)
+        .on_click(cx.listener(move |app, _, window, cx| {
+            app.open_social_trigger_delete_dialog(bot, id, window, cx)
+        }));
+        let pill = |text: String| {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .text_xs()
+                .bg(theme.sidebar_accent)
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let connection = trigger
+            .username
+            .as_ref()
+            .map(|username| format!("@{username}"))
+            .unwrap_or_else(|| trigger.connection_name.clone());
+        let error = match save {
+            Some(TriggerSave::Failed(error)) => Some(error.clone()),
+            _ => None,
+        };
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_3()
+            .rounded(theme.radius_lg)
+            .bg(theme.sidebar_accent.opacity(0.4))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(trigger.title().to_owned()),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(pill(connection))
+                    .child(pill(trigger.wake.label().into()))
+                    .when(!checked, |row| row.child(pill("paused".into()))),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .whitespace_normal()
+                    .child(trigger.instructions.clone()),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .items_center()
+                    .gap_1()
+                    .child(delete)
+                    .child(switch),
+            )
+            .children(error.map(|error| note(error, true, cx)))
+            .into_any_element()
+    }
+
     fn render_routines(
         &self,
         bot: Uuid,
@@ -1819,12 +2074,24 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// Whether a trigger's local change still waits for the server: a save until
+/// the trigger reports the saved state, a failure until the trigger is gone.
+fn still_pending(save: &TriggerSave, trigger: Option<&Trigger>) -> bool {
+    match (save, trigger) {
+        (_, None) => false,
+        (TriggerSave::Saving { enabled, .. }, Some(trigger)) => *enabled != trigger.enabled,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Metadata, MetadataChange, MetadataSync, describe_cron, describe_hours, last_run, parse_name,
+        Metadata, MetadataChange, MetadataSync, Trigger, TriggerSave, describe_cron,
+        describe_hours, last_run, parse_name, still_pending,
     };
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
+    use uuid::Uuid;
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
         Metadata {
@@ -2088,5 +2355,42 @@ mod tests {
             text,
             "Paused after 3 failed runs (the provider process exited)"
         );
+    }
+
+    fn trigger(enabled: bool) -> Trigger {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1), "connection_id": Uuid::from_u128(2), "bot_id": Uuid::from_u128(3),
+            "provider": "telegram", "connection_name": "Proliquid", "username": "proliquid_bot",
+            "destination": null, "destination_name": null, "wake": "mentions",
+            "instructions": "Answer questions.", "enabled": enabled,
+            "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-01T07:00:00.123+00:00"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_trigger_switch_stays_busy_until_the_server_reports_the_saved_state() {
+        let saving = TriggerSave::Saving {
+            attempt: Uuid::new_v4(),
+            enabled: false,
+        };
+        assert!(
+            still_pending(&saving, Some(&trigger(true))),
+            "a stale event keeps it busy"
+        );
+        assert!(!still_pending(&saving, Some(&trigger(false))));
+        let failed = TriggerSave::Failed("Couldn't save.".into());
+        assert!(
+            still_pending(&failed, Some(&trigger(true))),
+            "the error stays visible"
+        );
+        let deleting = TriggerSave::Deleting {
+            attempt: Uuid::new_v4(),
+        };
+        assert!(
+            !still_pending(&deleting, None),
+            "a deleted trigger drops its state"
+        );
+        assert!(!still_pending(&failed, None));
     }
 }

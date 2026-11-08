@@ -500,6 +500,7 @@ impl ElseApp {
     }
 
     pub(super) fn sync_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_social_trigger_changes();
         let Some(view) = self.view.as_mut() else {
             return;
         };

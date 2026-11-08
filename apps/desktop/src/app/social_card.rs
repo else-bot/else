@@ -42,7 +42,6 @@ impl ElseApp {
             }
             keep
         });
-        let bot = view.bot_id;
         for setup in setups {
             if let Some(card) = view.social_forms.get_mut(&setup.id) {
                 if card.status != setup.status {
@@ -58,20 +57,13 @@ impl ElseApp {
             } else {
                 let id = setup.id;
                 let client = self.client.clone();
-                let bots = self
-                    .bots
-                    .iter()
-                    .filter(|b| b.is_active())
-                    .cloned()
-                    .collect();
                 let form = cx.new(|cx| {
                     if let Some(connection) =
                         setup.connection_id.filter(|_| setup.status == "connected")
                     {
                         crate::socials::SocialsView::new_receipt(
                             client,
-                            bots,
-                            (id, setup.provider, bot),
+                            (id, setup.provider),
                             connection,
                             window,
                             cx,
@@ -79,8 +71,7 @@ impl ElseApp {
                     } else {
                         crate::socials::SocialsView::new(
                             client,
-                            bots,
-                            Some((id, setup.provider, bot)),
+                            Some((id, setup.provider)),
                             window,
                             cx,
                         )
@@ -118,7 +109,7 @@ impl ElseApp {
         }
         let text = match setup.status.as_str() {
             "connected" => format!(
-                "{} connected. Manage access and instructions in Settings → Socials.",
+                "{} connected. Manage connections in Settings → Socials.",
                 setup.provider.label()
             ),
             "cancelled" => format!("{} connection request cancelled.", setup.provider.label()),

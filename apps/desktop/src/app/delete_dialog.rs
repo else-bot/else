@@ -10,6 +10,7 @@ pub(super) enum DeleteTarget {
     Bot(String),
     Category { name: String, bots: usize },
     Routine(String),
+    SocialTrigger(String),
 }
 
 struct Consequence {
@@ -110,6 +111,23 @@ impl ElseApp {
                     ),
                 ],
                 Some("Bots, conversations, memory, and files are kept."),
+            ),
+            DeleteTarget::SocialTrigger(name) => (
+                name,
+                "trigger",
+                [
+                    Consequence::new(
+                        IconName::Pause,
+                        "No more automatic reactions",
+                        "This trigger leaves the list and won't wake the bot again.",
+                    ),
+                    Consequence::new(
+                        IconName::Clock,
+                        "Current work finishes",
+                        "Work already in progress won't be stopped.",
+                    ),
+                ],
+                Some("The connection stays available when you ask the bot to use it."),
             ),
             DeleteTarget::Routine(name) => (
                 name,

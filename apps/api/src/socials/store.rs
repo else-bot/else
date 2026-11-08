@@ -10,7 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_bindings sb WHERE sb.connection_id=social_connections.id AND json_extract(sb.access,'$.wake_policy')='all' AND json_array_length(sb.access,'$.destinations')>0) AS message_content";
+const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_triggers st WHERE st.connection_id=social_connections.id AND st.enabled AND st.wake='all') AS message_content";
 fn identity(
     key: &SecretKey,
     id: Uuid,
@@ -132,10 +132,15 @@ pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Conne
     .execute(&mut *tx)
     .await?;
     if state == "removed" {
-        sqlx::query("DELETE FROM social_bindings WHERE connection_id=?1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        let bots: Vec<Uuid> = sqlx::query_scalar(
+            "DELETE FROM social_triggers WHERE connection_id=?1 RETURNING bot_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for bot in bots {
+            crate::db::events::bot_updated(&mut tx, bot).await?;
+        }
     }
     tx.commit().await?;
     removed.state = state.into();
@@ -143,82 +148,206 @@ pub async fn set_state(pool: &SqlitePool, id: Uuid, state: &str) -> Result<Conne
     removed.health = state.into();
     Ok(removed)
 }
-pub async fn bindings(pool: &SqlitePool, id: Uuid) -> Result<Vec<Binding>, Error> {
-    let rows: Vec<(Uuid, Uuid, Json<BindingInput>)> =
-        sqlx::query_as("SELECT id,bot_id,access FROM social_bindings WHERE connection_id=?1")
-            .bind(id)
-            .fetch_all(pool)
-            .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(bid, bot, Json(access))| Binding {
-            id: bid,
-            connection_id: id,
-            bot_id: bot,
-            access,
-        })
-        .collect())
-}
-pub async fn bind(
-    pool: &SqlitePool,
-    id: Uuid,
-    bot: Uuid,
-    input: BindingInput,
-) -> Result<Binding, Error> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let binding = bind_in(&mut tx, id, bot, input).await?;
-    tx.commit().await?;
-    Ok(binding)
+const TRIGGER_COLUMNS: &str = "t.id,t.connection_id,t.bot_id,c.provider,c.display_name AS connection_name,c.username,t.destination,json_extract(d.info,'$.name') AS destination_name,t.wake,t.instructions,t.enabled,t.created_at,t.updated_at FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id AND c.state<>'removed' LEFT JOIN social_destinations d ON d.connection_id=t.connection_id AND d.id=t.destination";
+
+/// The bot's triggers, oldest first.
+pub async fn triggers(conn: &mut SqliteConnection, bot: Uuid) -> Result<Vec<Trigger>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {TRIGGER_COLUMNS} WHERE t.bot_id=?1 ORDER BY t.created_at,t.id"
+    )))
+    .bind(bot)
+    .fetch_all(conn)
+    .await
 }
 
-async fn bind_in(
-    conn: &mut SqliteConnection,
-    id: Uuid,
-    bot: Uuid,
-    input: BindingInput,
-) -> Result<Binding, Error> {
+async fn trigger(conn: &mut SqliteConnection, bot: Uuid, id: Uuid) -> Result<Trigger, Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {TRIGGER_COLUMNS} WHERE t.bot_id=?1 AND t.id=?2"
+    )))
+    .bind(bot)
+    .bind(id)
+    .fetch_optional(conn)
+    .await?
+    .ok_or(Error::NotFound)
+}
+
+/// Create or replace the calling bot's trigger for one chat (or any chat)
+/// of a connection. Only work rooted in an owner message sets triggers.
+pub async fn set_trigger(
+    pool: &SqlitePool,
+    turn: Uuid,
+    input: &TriggerInput,
+) -> Result<TriggerChange<Trigger>, Error> {
     input.validate()?;
-    let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b,social_connections c WHERE b.id=?1 AND b.status='active' AND c.id=?2 AND c.state<>'removed')").bind(bot).bind(id).fetch_one(&mut *conn).await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let caller = crate::db::turns::asking_caller(&mut tx, turn)
+        .await?
+        .ok_or(Error::Forbidden)?;
+    if crate::db::delegations::origin(&mut tx, turn).await?
+        != crate::app::providers::Origin::OwnerRequest
+    {
+        return Err(Error::Forbidden);
+    }
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM social_connections WHERE id=?1 AND state<>'removed')",
+    )
+    .bind(input.connection_id)
+    .fetch_one(&mut *tx)
+    .await?;
     if !active {
         return Err(Error::NotFound);
     }
-    let known: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM social_destinations WHERE connection_id=?1")
+    let before = wants_content(&mut tx, input.connection_id).await?;
+    let destination = input.destination.as_deref();
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM social_triggers WHERE connection_id=?1 AND bot_id=?2 AND coalesce(destination,'')=coalesce(?3,'')",
+    )
+    .bind(input.connection_id)
+    .bind(caller.bot_id)
+    .bind(destination)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = match existing {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE social_triggers SET wake=?2,instructions=?3,enabled=1,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?1",
+            )
             .bind(id)
-            .fetch_all(&mut *conn)
+            .bind(input.wake)
+            .bind(input.instructions.trim())
+            .execute(&mut *tx)
             .await?;
-    if input.destinations.iter().any(|d| !known.contains(d)) {
-        return Err(Error::Invalid(
-            "A selected destination is not visible to this connection.",
-        ));
-    }
-    let bid = Uuid::new_v4();
-    sqlx::query("INSERT INTO social_bindings(id,connection_id,bot_id,access) VALUES(?1,?2,?3,?4) ON CONFLICT(connection_id,bot_id) DO UPDATE SET id=excluded.id,access=excluded.access").bind(bid).bind(id).bind(bot).bind(Json(&input)).execute(&mut *conn).await?;
-    sqlx::query("UPDATE social_connections SET generation=generation+1 WHERE id=?1")
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("UPDATE social_deliveries SET status='revoked' WHERE connection_id=?1 AND bot_id=?2 AND status='pending'").bind(id).bind(bot).execute(&mut *conn).await?;
-    Ok(Binding {
-        id: bid,
-        connection_id: id,
-        bot_id: bot,
-        access: input,
+            id
+        }
+        None => {
+            let total: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM social_triggers WHERE bot_id=?1")
+                    .bind(caller.bot_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if total >= MAX_TRIGGERS {
+                return Err(Error::Invalid(
+                    "This bot already has 32 triggers. Delete one first.",
+                ));
+            }
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO social_triggers(id,connection_id,bot_id,destination,wake,instructions) VALUES(?1,?2,?3,?4,?5,?6)",
+            )
+            .bind(id)
+            .bind(input.connection_id)
+            .bind(caller.bot_id)
+            .bind(destination)
+            .bind(input.wake)
+            .bind(input.instructions.trim())
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+    };
+    let saved = trigger(&mut tx, caller.bot_id, id).await?;
+    let reconnect = before != wants_content(&mut tx, input.connection_id).await?;
+    crate::db::events::bot_updated(&mut tx, caller.bot_id).await?;
+    tx.commit().await?;
+    Ok(TriggerChange {
+        connection: saved.connection_id,
+        value: saved,
+        reconnect,
     })
 }
-pub async fn revoke(pool: &SqlitePool, id: Uuid, bot: Uuid) -> Result<(), Error> {
+
+const MAX_TRIGGERS: i64 = 32;
+
+/// Whether a Discord connection's listener must ask for message content: an
+/// enabled trigger wakes on every message. Telegram has no such switch.
+async fn wants_content(conn: &mut SqliteConnection, connection: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM social_triggers t JOIN social_connections c ON c.id=t.connection_id
+         WHERE t.connection_id=?1 AND t.enabled AND t.wake='all' AND c.provider='discord')",
+    )
+    .bind(connection)
+    .fetch_one(conn)
+    .await
+}
+
+/// A trigger change. `reconnect` is set when the connection's listener must
+/// restart to change what it receives; other changes leave in-flight actions
+/// alone.
+pub struct TriggerChange<T> {
+    pub value: T,
+    pub connection: Uuid,
+    pub reconnect: bool,
+}
+
+/// Pause or resume one of the bot's triggers. A paused trigger's queued
+/// messages are dropped.
+pub async fn set_trigger_enabled(
+    pool: &SqlitePool,
+    bot: Uuid,
+    id: Uuid,
+    enabled: bool,
+) -> Result<TriggerChange<Trigger>, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("DELETE FROM social_bindings WHERE connection_id=?1 AND bot_id=?2")
-        .bind(id)
-        .bind(bot)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE social_connections SET generation=generation+1 WHERE id=?1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE social_deliveries SET status='revoked' WHERE connection_id=?1 AND bot_id=?2 AND status='pending'").bind(id).bind(bot).execute(&mut *tx).await?;
+    let connection = trigger(&mut tx, bot, id).await?.connection_id;
+    let before = wants_content(&mut tx, connection).await?;
+    let changed = sqlx::query(
+        "UPDATE social_triggers SET enabled=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE bot_id=?1 AND id=?2",
+    )
+    .bind(bot)
+    .bind(id)
+    .bind(enabled)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Err(Error::NotFound);
+    }
+    if !enabled {
+        revoke_deliveries(&mut tx, id).await?;
+    }
+    let saved = trigger(&mut tx, bot, id).await?;
+    let reconnect = before != wants_content(&mut tx, connection).await?;
+    crate::db::events::bot_updated(&mut tx, bot).await?;
     tx.commit().await?;
+    Ok(TriggerChange {
+        value: saved,
+        connection,
+        reconnect,
+    })
+}
+
+/// Delete one of the bot's triggers and drop its queued messages.
+pub async fn delete_trigger(
+    pool: &SqlitePool,
+    bot: Uuid,
+    id: Uuid,
+) -> Result<TriggerChange<()>, Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let connection = trigger(&mut tx, bot, id).await?.connection_id;
+    let before = wants_content(&mut tx, connection).await?;
+    sqlx::query("DELETE FROM social_triggers WHERE bot_id=?1 AND id=?2")
+        .bind(bot)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    revoke_deliveries(&mut tx, id).await?;
+    let reconnect = before != wants_content(&mut tx, connection).await?;
+    crate::db::events::bot_updated(&mut tx, bot).await?;
+    tx.commit().await?;
+    Ok(TriggerChange {
+        value: (),
+        connection,
+        reconnect,
+    })
+}
+
+async fn revoke_deliveries(conn: &mut SqliteConnection, trigger: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE social_deliveries SET status='revoked',settled_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE trigger_id=?1 AND status='pending'",
+    )
+    .bind(trigger)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 pub async fn destinations(pool: &SqlitePool, id: Uuid) -> Result<Vec<Destination>, Error> {
@@ -243,6 +372,9 @@ pub async fn save_destinations(
     Ok(())
 }
 
+/// What `turn` of `bot` may do on connection `c` right now. Work for the
+/// owner may use any chat; a turn an incoming message started may only read
+/// the chats delivered to it.
 pub async fn authorize(
     conn: &mut SqliteConnection,
     c: &Connection,
@@ -251,30 +383,38 @@ pub async fn authorize(
     destination: Option<&str>,
     write: bool,
     send: bool,
-) -> Result<BindingInput, Error> {
-    let row:Option<(Json<BindingInput>,String)>=sqlx::query_as("SELECT g.access,i.kind FROM social_bindings g JOIN social_connections c ON c.id=g.connection_id JOIN turns t ON t.bot_id=g.bot_id JOIN bots b ON b.id=t.bot_id JOIN items i ON i.id=t.owner_item_id WHERE c.id=?1 AND c.state='active' AND c.generation=?2 AND g.bot_id=?3 AND t.id=?4 AND t.status IN ('sending','running') AND b.status='active' AND NOT b.cancel_pending").bind(c.id).bind(c.generation).bind(bot).bind(turn).fetch_optional(&mut *conn).await?;
-    let (Json(mut access), kind) = row.ok_or(Error::Forbidden)?;
-    if kind == "connector" {
-        let scoped: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT d.destination FROM social_deliveries d \
-             JOIN social_bindings b ON b.id=d.binding_id AND b.connection_id=d.connection_id \
-             WHERE d.turn_id=?1 AND d.connection_id=?2 AND b.bot_id=?3",
-        )
-        .bind(turn)
-        .bind(c.id)
-        .bind(bot)
-        .fetch_all(&mut *conn)
-        .await?;
-        access.destinations.retain(|d| scoped.contains(d));
-        if access.destinations.is_empty() {
-            return Err(Error::Forbidden);
+) -> Result<Access, Error> {
+    let kind: Option<String> = sqlx::query_scalar(
+        "SELECT i.kind FROM social_connections c JOIN turns t ON t.id=?4 JOIN bots b ON b.id=t.bot_id
+         JOIN items i ON i.id=t.owner_item_id
+         WHERE c.id=?1 AND c.state='active' AND c.generation=?2 AND t.bot_id=?3
+           AND t.status IN ('sending','running') AND b.status='active' AND NOT b.cancel_pending",
+    )
+    .bind(c.id)
+    .bind(c.generation)
+    .bind(bot)
+    .bind(turn)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let access = match kind.ok_or(Error::Forbidden)?.as_str() {
+        "connector" => {
+            let chats: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT destination FROM social_deliveries
+                 WHERE turn_id=?1 AND connection_id=?2 AND bot_id=?3",
+            )
+            .bind(turn)
+            .bind(c.id)
+            .bind(bot)
+            .fetch_all(&mut *conn)
+            .await?;
+            if chats.is_empty() {
+                return Err(Error::Forbidden);
+            }
+            Access::Woken(chats)
         }
-    }
-    if !access.permissions.read
-        || write && !access.permissions.write
-        || send && !access.permissions.send
-        || destination.is_some_and(|d| !access.destinations.iter().any(|x| x == d))
-    {
+        _ => Access::Owner,
+    };
+    if (write || send) && !access.mutates() || destination.is_some_and(|d| !access.allows(d)) {
         return Err(Error::Forbidden);
     }
     Ok(access)
@@ -355,24 +495,20 @@ pub async fn record(
     sqlx::query("INSERT INTO social_destinations(connection_id,id,info) VALUES(?1,?2,?3) ON CONFLICT(connection_id,id) DO UPDATE SET info=CASE WHEN ?4='telegram' THEN excluded.info ELSE social_destinations.info END").bind(c.id).bind(&event.destination.id).bind(Json(&event.destination)).bind(c.provider).execute(&mut *tx).await?;
     let inserted=sqlx::query("INSERT OR IGNORE INTO social_messages(connection_id,destination,message_id,author_id,body,event_id) VALUES(?1,?2,?3,?4,?5,?6)").bind(c.id).bind(&event.destination.id).bind(&event.message_id).bind(&event.author_id).bind(&event.body).bind(&event.event_id).execute(&mut *tx).await?.rows_affected();
     if inserted > 0 && !event.from_bot {
-        let rows: Vec<(Uuid, Uuid, Json<BindingInput>)> =
-            sqlx::query_as("SELECT id,bot_id,access FROM social_bindings WHERE connection_id=?1")
-                .bind(c.id)
-                .fetch_all(&mut *tx)
-                .await?;
-        for (bid, bot, Json(b)) in rows {
-            if b.permissions.read
-                && b.permissions.wake
-                && b.destinations.contains(&event.destination.id)
-                && match b.wake_policy {
-                    WakePolicy::Never => false,
-                    WakePolicy::All => true,
-                    WakePolicy::Mentions => event.mentioned || event.direct,
-                }
-            {
-                sqlx::query("INSERT OR IGNORE INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) VALUES(?1,?2,?3,?4,?5,?6)").bind(c.id).bind(&event.event_id).bind(bot).bind(bid).bind(&event.destination.id).bind(&event.message_id).execute(&mut *tx).await?;
-            }
-        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id)
+             SELECT ?1,?2,t.bot_id,t.id,?3,?4 FROM social_triggers t JOIN bots b ON b.id=t.bot_id AND b.status='active'
+             WHERE t.connection_id=?1 AND t.enabled AND (t.destination IS NULL OR t.destination=?3)
+               AND (?5 OR t.wake='all')
+             ORDER BY t.destination IS NULL",
+        )
+        .bind(c.id)
+        .bind(&event.event_id)
+        .bind(&event.destination.id)
+        .bind(&event.message_id)
+        .bind(event.mentioned || event.direct)
+        .execute(&mut *tx)
+        .await?;
     }
     sqlx::query("DELETE FROM social_messages WHERE connection_id=?1 AND rowid NOT IN (SELECT rowid FROM social_messages WHERE connection_id=?1 ORDER BY created_at DESC LIMIT 5000)").bind(c.id).execute(&mut *tx).await?;
     sqlx::query(
@@ -487,7 +623,7 @@ pub async fn request_setup(
 pub async fn settle_setup(
     pool: &SqlitePool,
     id: Uuid,
-    completion: Option<(Uuid, BindingInput)>,
+    connection: Option<Uuid>,
 ) -> Result<Setup, Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let setup: Setup = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -497,7 +633,6 @@ pub async fn settle_setup(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(Error::NotFound)?;
-    let connection = completion.as_ref().map(|(id, _)| *id);
     let wanted = if connection.is_some() {
         "connected"
     } else {
@@ -505,34 +640,18 @@ pub async fn settle_setup(
     };
     if setup.status != "pending" {
         return if setup.status == wanted && setup.connection_id == connection {
-            if let Some((cid, access)) = &completion {
-                let saved: Option<Json<BindingInput>> = sqlx::query_scalar(
-                    "SELECT access FROM social_bindings WHERE connection_id=?1 AND bot_id=?2",
-                )
-                .bind(cid)
-                .bind(setup.bot_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if saved.as_ref().map(|saved| &saved.0) != Some(access) {
-                    return Err(Error::Conflict);
-                }
-            }
             Ok(setup)
         } else {
             Err(Error::Conflict)
         };
     }
-    if let Some((cid, access)) = completion {
-        if !access.permissions.read {
-            return Err(Error::Invalid("Enable reading to complete setup."));
-        }
+    if let Some(cid) = connection {
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM social_connections WHERE id=?1 AND provider=?2 AND state='active')",
         ).bind(cid).bind(setup.provider).fetch_one(&mut *tx).await?;
         if !valid {
             return Err(Error::Forbidden);
         }
-        bind_in(&mut tx, cid, setup.bot_id, access).await?;
     }
     let next = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE social_setups SET status=?2,connection_id=?3 WHERE id=?1 RETURNING {SETUP_COLUMNS}"
