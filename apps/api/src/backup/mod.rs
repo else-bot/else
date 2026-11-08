@@ -34,7 +34,10 @@ use sha2::{Digest, Sha256};
 
 use crate::credentials::SecretKey;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
+/// The oldest schema a restore still reads: 2 holds plain project tars and
+/// every computer archive with its image.
+pub const MIN_SCHEMA_VERSION: u32 = 2;
 pub const FORMAT: &str = "age-encryption.org/v1";
 pub const KDF: &str = "HKDF-SHA-256";
 pub const PURPOSE: &str = "else.bot/backups/v1";
@@ -123,9 +126,10 @@ pub struct Completion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-    /// `sqlite`, `vm` (one bot's standalone disk archive with image),
-    /// `file` (a host artifact a bot fetched, `file-<artifact id>.age`), or
-    /// `project` (a bot's project directory, `project-<bot>.tar.age`), or
+    /// `sqlite`, `vm` (one bot's disk archive, see
+    /// [`ComputerEntry::carries_image`]), `file` (a host artifact a bot
+    /// fetched, `file-<artifact id>.age`), `project` (a bot's project
+    /// directory, see [`projects::Format`]), or
     /// `mcp` (the shared MCP library, `mcp.tar.age`).
     pub kind: String,
     pub object: String,
@@ -218,6 +222,15 @@ pub struct ComputerEntry {
     /// there. Absent in sets made before project mounts.
     #[serde(default)]
     pub project_mount: Option<ProjectMount>,
+    /// The archive holds the computer's image. A set stores each image in
+    /// the first archive that uses it only, and a restore imports that one
+    /// first; sets before schema 3 hold it in every archive.
+    #[serde(default = "carries_image")]
+    pub carries_image: bool,
+}
+
+fn carries_image() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

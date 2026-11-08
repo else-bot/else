@@ -428,7 +428,7 @@ impl ComputerRuntime for Fake {
     async fn copy_out(&self, _: &str, _: &str, _: &Path) -> Result<(), RuntimeError> {
         Ok(())
     }
-    async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {
+    async fn export_disk(&self, name: &str, archive: &Path, _: bool) -> Result<(), RuntimeError> {
         let disk = self.computers.lock().unwrap().get(name).unwrap().1.clone();
         std::fs::write(archive, disk).unwrap();
         Ok(())

@@ -108,7 +108,7 @@ pub fn open_set(
         })?;
     let completion: Completion = serde_json::from_slice(&bootstrap)
         .map_err(|e| BackupError::Invalid(format!("completion record: {e}")))?;
-    if completion.schema_version != super::SCHEMA_VERSION {
+    if !(super::MIN_SCHEMA_VERSION..=super::SCHEMA_VERSION).contains(&completion.schema_version) {
         return Err(BackupError::Invalid(format!(
             "unsupported schema version {}",
             completion.schema_version
@@ -157,7 +157,9 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
     if first.kind != "sqlite" || first.object != DATABASE || first.bot_id.is_some() {
         return invalid("the database dump must come first");
     }
+    let format = super::projects::Format::of(manifest.schema_version);
     let mut seen = std::collections::HashSet::new();
+    let mut carried = std::collections::HashSet::new();
     let mut files = std::collections::HashSet::new();
     let mut projects = std::collections::HashSet::new();
     let mut mcp = false;
@@ -189,7 +191,7 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
                 .bots
                 .iter()
                 .any(|b| b.id == bot && matches!(b.project.as_str(), "included" | "partial"));
-            if artifact.object != super::projects::object(bot) || !named {
+            if artifact.object != format.object(bot) || !named {
                 return invalid(&artifact.object);
             }
             if !projects.insert(bot) {
@@ -203,15 +205,19 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         if !seen.insert(bot) {
             return invalid("two archives for one bot");
         }
-        let named = manifest.bots.iter().any(|b| {
-            b.id == bot
-                && b.vm == "included"
-                && b.computer
-                    .as_ref()
-                    .is_some_and(|c| c.object == artifact.object)
-        });
-        if !named {
+        let computer = manifest
+            .bots
+            .iter()
+            .find(|b| b.id == bot && b.vm == "included")
+            .and_then(|b| b.computer.as_ref())
+            .filter(|c| c.object == artifact.object);
+        let Some(computer) = computer else {
             return invalid("an archive no bot entry names");
+        };
+        if computer.carries_image {
+            carried.insert(computer.image.as_str());
+        } else if manifest.schema_version < 3 || !carried.contains(computer.image.as_str()) {
+            return invalid("a computer archive without its image follows no archive that has it");
         }
     }
     let included = manifest.bots.iter().filter(|b| b.vm == "included").count();
@@ -541,6 +547,7 @@ async fn restore_runtime(
             .map_err(|e| BackupError::Io(e.to_string()))??;
         }
         let projects = projects_dir(target.data_dir);
+        let format = super::projects::Format::of(manifest.schema_version);
         for artifact in manifest.artifacts[1..]
             .iter()
             .filter(|a| a.kind == "project")
@@ -554,7 +561,7 @@ async fn restore_runtime(
             let dir = projects.join(bot.to_string());
             tokio::task::spawn_blocking(move || {
                 let result = verify_and_decrypt(&set_dir, &artifact, &identity, &plain)
-                    .and_then(|()| super::projects::unpack(&plain, &dir));
+                    .and_then(|()| super::projects::unpack(&plain, &dir, format));
                 let _ = std::fs::remove_file(&plain);
                 result
             })

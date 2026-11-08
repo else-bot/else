@@ -399,7 +399,7 @@ async fn scripts_drive_the_visible_browser_safely() {
         }
         if expected == 1 {
             let held = manager
-                .capture_disk(bot, &dir.path().join("disk.msb"))
+                .capture_disk(bot, &dir.path().join("disk.msb"), &Default::default())
                 .await;
             assert!(
                 held.is_err(),

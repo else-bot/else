@@ -11,11 +11,14 @@ impl ComputerManager {
     /// through the normal stop (a desktop checkpoints Chromium); a stopped
     /// one, including an owner-stopped one, is exported without being
     /// started. A held or transitioning computer is `Busy`: the backup
-    /// defers rather than capturing live work.
+    /// defers rather than capturing live work. The archive includes the
+    /// computer's image unless it is one of `carried`, images another
+    /// archive of the same set already holds.
     pub async fn capture_disk(
         &self,
         bot_id: Uuid,
         archive: &std::path::Path,
+        carried: &std::collections::HashSet<String>,
     ) -> Result<DiskCapture, ComputerError> {
         let _op = self.op(bot_id).await;
         let row = {
@@ -31,7 +34,10 @@ impl ComputerManager {
             "missing" => return Ok(DiskCapture::Missing),
             _ => self.stop_for_disk(bot_id, &row).await?,
         }
-        self.runtime.export_disk(&row.runtime_name, archive).await?;
+        let carries_image = !carried.contains(&row.image);
+        self.runtime
+            .export_disk(&row.runtime_name, archive, carries_image)
+            .await?;
         let project_mount = self
             .runtime
             .mounts(&row.runtime_name)
@@ -54,6 +60,7 @@ impl ComputerManager {
             was_running,
             browser_checkpoint,
             project_mount,
+            carries_image,
         })
     }
 

@@ -189,6 +189,8 @@ pub enum DiskCapture {
         /// Its mount of the bot's project directory, if it was created with
         /// one: a restore must bind it again.
         project_mount: Option<Mount>,
+        /// The archive includes the image (it was not in `carried`).
+        carries_image: bool,
     },
     /// The bot never used a computer.
     NoComputer,
