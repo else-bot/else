@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 mod reset;
 
-const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version]\n       \
+const USAGE: &str = "usage: else-api [serve|setup|migrate|backup|version|context]\n       \
 else-api restore <set-dir> <new-database-file> [<new-data-dir>]\n       \
 else-api restore-remote <set-id> <new-database-file> [<new-data-dir>]\n       \
 else-api upgrade-computer <bot-id> <image> [--network <profile>]\n       \
@@ -33,9 +33,18 @@ another); the old computer is kept stopped\n  \
 rollback-computer  switch a bot back to the computer its last upgrade replaced\n  \
 reset --yes  erase this installation's local state; use `elsebot reset`\n  \
 remove-state --yes  erase local state without setup; used by `elsebot remove`\n  \
-version  print this build's version\n";
+version  print this build's version\n  \
+context  print representative bot instructions, tool schemas, and byte counts as JSON\n";
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("context") {
+        if std::env::args().len() != 2 {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+        println!("{}", http::context::export());
+        return ExitCode::SUCCESS;
+    }
     if matches!(
         std::env::args().nth(1).as_deref(),
         Some("version" | "--version" | "-V")

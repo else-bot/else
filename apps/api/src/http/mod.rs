@@ -5,6 +5,7 @@ pub mod bots;
 pub mod categories;
 pub mod computers;
 pub mod connectors;
+pub mod context;
 pub mod conversation;
 mod desktop_stream;
 pub mod error;
