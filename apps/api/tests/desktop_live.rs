@@ -105,6 +105,10 @@ async fn forward(port: u16, guest: String) {
             let guest = guest.clone();
             tokio::spawn(async move {
                 let mut upstream = tokio::net::TcpStream::connect(guest).await.unwrap();
+                // Without this, Nagle holds each small update request on this
+                // relay for a delayed ACK, and Linux measures about 20 fps.
+                client.set_nodelay(true).unwrap();
+                upstream.set_nodelay(true).unwrap();
                 let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
             });
         }
