@@ -223,7 +223,7 @@ async fn accept_send(
                 .map_err(|err| with_id(err.into()))?
         }
     };
-    if let Some(active) = accepted.preempted {
+    for &active in &accepted.preempted {
         state.scheduler.interrupt(active).await;
     }
     if accepted.created {
