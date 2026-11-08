@@ -940,3 +940,39 @@ for line in sys.stdin:
     let host = &codex.ready.as_ref().unwrap().host;
     assert!(host.live_processes(turn_id).is_empty());
 }
+
+#[test]
+fn token_usage_of_this_turn_is_reported_per_model_request() {
+    use crate::app::providers::Usage;
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+    };
+    let update = |turn: &str| crate::providers::codex_rpc::Incoming::Notification {
+        method: "thread/tokenUsage/updated".into(),
+        params: json!({ "threadId": "th", "turnId": turn, "tokenUsage": {
+            "total": { "inputTokens": 900, "cachedInputTokens": 800, "outputTokens": 90,
+                       "reasoningOutputTokens": 9, "totalTokens": 990 },
+            "last": { "inputTokens": 300, "cachedInputTokens": 200, "outputTokens": 30,
+                      "reasoningOutputTokens": 3, "totalTokens": 330 } } }),
+    };
+    let usage = Usage {
+        input: 300,
+        cached_input: 200,
+        cache_write: 0,
+        output: 30,
+    };
+    let reported = events.on(&update("tu")).unwrap();
+    assert!(matches!(reported.as_slice(), [Event::Usage(u)] if *u == usage));
+    assert!(events.on(&update("other")).unwrap().is_empty());
+}

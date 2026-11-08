@@ -83,6 +83,24 @@ fn a_turn_is_accepted_by_its_echo_and_streams_text() {
 }
 
 #[test]
+fn the_result_reports_token_usage_with_cache_reads_and_writes_in_input() {
+    let events = tracker().on(
+        &json!({"type":"result","subtype":"success","is_error":false,
+        "result":"ok","usage":{"input_tokens":5,"cache_read_input_tokens":1000,
+        "cache_creation_input_tokens":200,"output_tokens":40}}),
+    );
+    assert_eq!(
+        events.unwrap()[0],
+        Event::Usage(crate::app::providers::Usage {
+            input: 1205,
+            cached_input: 1000,
+            cache_write: 200,
+            output: 40,
+        })
+    );
+}
+
+#[test]
 fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     let mut tools = claude_home::tool_names();
     tools.push("Agent".into());

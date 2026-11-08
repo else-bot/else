@@ -683,6 +683,27 @@ impl SinkState {
         Ok(())
     }
 
+    /// Recorded even after fencing: the provider spent the tokens either way.
+    async fn usage(&mut self, usage: crate::app::providers::Usage) {
+        let added = sqlx::query(
+            "UPDATE turns SET input_tokens = coalesce(input_tokens, 0) + ?2,
+                 cached_input_tokens = coalesce(cached_input_tokens, 0) + ?3,
+                 cache_write_tokens = coalesce(cache_write_tokens, 0) + ?4,
+                 output_tokens = coalesce(output_tokens, 0) + ?5
+             WHERE id = ?1",
+        )
+        .bind(self.turn_id)
+        .bind(usage.input)
+        .bind(usage.cached_input)
+        .bind(usage.cache_write)
+        .bind(usage.output)
+        .execute(&self.pool)
+        .await;
+        if let Err(err) = added {
+            tracing::warn!(turn = %self.turn_id, error = %err, "recording token usage failed");
+        }
+    }
+
     async fn text(&mut self, chunk: &str) -> Result<(), Fenced> {
         if self.fenced {
             return Err(Fenced);
@@ -778,6 +799,11 @@ impl TurnSink for SqliteSink {
                 Box::pin(async move { state.reported(&settings, &native_turn_id).await })
             })
             .await
+    }
+    async fn usage(&self, usage: crate::app::providers::Usage) {
+        self.state
+            .call_async(move |state| Box::pin(state.usage(usage)))
+            .await;
     }
     async fn text(&self, chunk: &str) -> Result<(), Fenced> {
         let mut remaining = chunk;

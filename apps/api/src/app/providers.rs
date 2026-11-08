@@ -339,6 +339,17 @@ pub enum TurnOutcome {
 #[error("turn is no longer active")]
 pub struct Fenced;
 
+/// Tokens one provider report counted. `input` is every prompt token,
+/// cached ones included, so providers that count cache reads separately
+/// (Claude) and those that count them inside input (Codex) compare.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: i64,
+    pub cached_input: i64,
+    pub cache_write: i64,
+    pub output: i64,
+}
+
 /// Durable progress reporting for one turn. Lifecycle transitions persist
 /// before returning; assistant text is batched in a bounded buffer.
 /// Adapters must await each call to completion and never race it in a
@@ -365,6 +376,10 @@ pub trait TurnSink: Send + Sync {
     async fn text(&self, chunk: &str) -> Result<(), Fenced>;
     /// End the current agent message: later text starts a new assistant item.
     async fn end_message(&self) -> Result<(), Fenced>;
+    /// Add the tokens a provider reported for this turn. Bookkeeping only.
+    async fn usage(&self, usage: Usage) {
+        let _ = usage;
+    }
     /// Record the native session this turn uses (new or resumed). Replaces
     /// any other active session of this provider for the conversation.
     async fn session(&self, state: &SessionState) -> Result<(), Fenced>;

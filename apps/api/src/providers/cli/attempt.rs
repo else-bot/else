@@ -181,6 +181,8 @@ pub enum Event<T> {
     EndMessage,
     /// An else.bot tool parked the turn.
     Parked,
+    /// Tokens the provider reported, added to the turn's totals.
+    Usage(crate::app::providers::Usage),
     Finished(T),
 }
 
@@ -295,6 +297,10 @@ where
                 Event::EndMessage => sink.end_message().await,
                 Event::Parked => {
                     life.parked();
+                    Ok(())
+                }
+                Event::Usage(usage) => {
+                    sink.usage(usage).await;
                     Ok(())
                 }
                 Event::Finished(terminal) => {

@@ -135,6 +135,26 @@ async fn each_agent_message_is_its_own_item() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_turn_sums_the_token_usage_its_provider_reports() {
+    let app = TestApp::installed().await;
+    let bot = app.main_bot().await;
+    let sent = app
+        .send(&bot, Uuid::new_v4(), "[synthetic:usage]", Some("synthetic"))
+        .await;
+    let turn = sent.body["turn"]["id"].as_str().unwrap();
+    assert_eq!(app.wait_turn(turn, &["completed"]).await, "completed");
+    let usage: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT input_tokens, cached_input_tokens, cache_write_tokens, output_tokens
+         FROM turns WHERE id = ?1",
+    )
+    .bind(turn.parse::<Uuid>().unwrap())
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(usage, (2000, 1800, 100, 30));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_duplicate_sends_accept_once() {
     let app = Arc::new(TestApp::installed().await);
     let bot = app.main_bot().await;

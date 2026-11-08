@@ -249,6 +249,17 @@ impl Provider for Synthetic {
                 return TurnOutcome::Interrupted;
             }
         }
+        if input.text.contains("[synthetic:usage]") {
+            for output in [10, 20] {
+                sink.usage(crate::app::providers::Usage {
+                    input: 1000,
+                    cached_input: 900,
+                    cache_write: 50,
+                    output,
+                })
+                .await;
+            }
+        }
         if input.text.contains("[synthetic:messages]")
             && (sink.end_message().await.is_err() || sink.text(SECOND_MESSAGE).await.is_err())
         {
