@@ -1219,16 +1219,167 @@ async fn a_new_message_in_the_target_chat_skips_a_delegated_card() {
         StatusCode::CONFLICT,
         "a skipped card cannot approve"
     );
-    wait(&app, child, "running").await;
-    let delivered: Option<i32> =
-        sqlx::query_scalar("SELECT delivered_attempt FROM owner_questions WHERE id = ?1")
-            .bind(question)
+    assert_eq!(
+        status(&app, child).await,
+        "interrupted",
+        "the chat reply carries the task instead of the parked turn"
+    );
+}
+
+async fn delegated_card(app: &TestApp, leaf: &str) -> (Uuid, Uuid, Uuid, Uuid) {
+    let main = app.main_bot().await;
+    let warm = app
+        .send(leaf, Uuid::new_v4(), "hello", Some("synthetic"))
+        .await;
+    app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let (root, _) = running(app, &main).await;
+    let parent = grant(app, root, vec![Tool::ReadMemory, Tool::Delegate]).await;
+    let delegated = tool(
+        app,
+        &parent,
+        "delegate",
+        json!({ "target_bot_id": leaf, "task": "[synthetic:slow] publish the patch release" }),
+    )
+    .await;
+    let task: Uuid = tool_text(&delegated)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait(app, child, "running").await;
+    let child_token = grant(app, child, owner_tools()).await;
+    let pending = tool_text(&tool(app, &child_token, "computer_run", delete_args()).await);
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(app, child, "waiting").await;
+    wait(app, root, "waiting").await;
+    (root, task, child, question)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_reply_in_chat_takes_over_a_delegated_card_and_reports_back() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Release").await;
+    let (root, task, child, question) = delegated_card(&app, &leaf).await;
+
+    let follow_up = "Always approve the patch releases.";
+    let sent = app
+        .send(&leaf, Uuid::new_v4(), follow_up, Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    assert_eq!(question_row(&app, question).await.0, "skipped");
+    assert_eq!(status(&app, child).await, "interrupted");
+    let reply = sent.body["turn"]["id"].as_str().unwrap().to_owned();
+    app.wait_turn(&reply, &["completed"]).await;
+    wait(&app, root, "completed").await;
+
+    let (state, result): (String, Option<String>) =
+        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
+            .bind(task)
             .fetch_one(&app.db.pool)
             .await
             .unwrap();
+    assert_eq!(state, "completed");
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(follow_up)),
+        "the owner's chat turn answers the task: {result:?}"
+    );
+    let shown: String = sqlx::query_scalar("SELECT text FROM items WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        shown.contains(follow_up),
+        "the delegating chat shows it: {shown}"
+    );
     assert_eq!(
-        delivered,
-        Some(2),
-        "the delegated task continues and receives the skipped outcome"
+        answer(&app, &leaf, question, "approve").await.status,
+        StatusCode::CONFLICT,
+        "the stale card cannot run the task again"
+    );
+    assert_eq!(permissions(&app, &main).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_delegating_request_after_a_takeover_keeps_the_owner_chat_turn() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Release").await;
+    let (_, task, _, _) = delegated_card(&app, &leaf).await;
+
+    let sent = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "[synthetic:slow] Yes, publish it.",
+            Some("synthetic"),
+        )
+        .await;
+    let reply: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, reply, "running").await;
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "cancelled");
+    wait(&app, reply, "completed").await;
+    let state: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "cancelled", "a stopped request stays stopped");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_chat_message_carries_a_taken_over_task() {
+    let Harness { app, .. } = harness().await;
+    let leaf = app.create_bot("Release").await;
+    let (root, task, _, _) = delegated_card(&app, &leaf).await;
+
+    let first = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "[synthetic:slow] Yes, publish it.",
+            Some("synthetic"),
+        )
+        .await;
+    let first: Uuid = first.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, first, "running").await;
+    let correction = "Publish it as a patch release.";
+    let second = app
+        .send(&leaf, Uuid::new_v4(), correction, Some("synthetic"))
+        .await;
+    app.wait_turn(second.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    wait(&app, first, "interrupted").await;
+    wait(&app, root, "completed").await;
+    let (state, result): (String, Option<String>) =
+        sqlx::query_as("SELECT status, result FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "completed");
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(correction)),
+        "{result:?}"
     );
 }
