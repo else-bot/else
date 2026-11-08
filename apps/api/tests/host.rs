@@ -117,6 +117,12 @@ fn a_failed_probe_says_why() {
         Err("signal: 9 (SIGKILL)".into())
     );
     assert_eq!(probe("/bin/sh", "true"), Err("printed nothing".into()));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        probe("/bin/sh", "sleep 30 >/dev/null & echo provider-version"),
+        Ok("provider-version".into())
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
     let missing = probe("/nonexistent/grok", "true").unwrap_err();
     assert!(missing.starts_with("could not start ("), "{missing}");
 }

@@ -22,6 +22,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -116,6 +117,14 @@ impl Host {
             .envs(passed_env())
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
+        // A file, not a pipe: a background child that keeps stderr open must
+        // not hold the probe until it exits.
+        let mut stderr = probe_stderr().map_err(|e| format!("could not start ({e})"))?;
+        command.stderr(
+            stderr
+                .try_clone()
+                .map_err(|e| format!("could not start ({e})"))?,
+        );
         let mut retries = 5;
         let output = loop {
             match command.output() {
@@ -128,13 +137,17 @@ impl Host {
             }
         };
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(
-                match stderr.lines().map(str::trim).rfind(|l| !l.is_empty()) {
-                    Some(line) => format!("{}: {line}", output.status),
-                    None => output.status.to_string(),
-                },
-            );
+            let mut text = String::new();
+            let _ = stderr
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| stderr.read_to_string(&mut text));
+            return Err(match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+                Some(line) => {
+                    let line: String = line.chars().take(200).collect();
+                    format!("{}: {line}", output.status)
+                }
+                None => output.status.to_string(),
+            });
         }
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if stdout.is_empty() {
@@ -297,6 +310,26 @@ pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("not a directory"));
     }
     Ok(dir)
+}
+
+/// An anonymous file for a probe's stderr: created private, then unlinked.
+fn probe_stderr() -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "else-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    fs::remove_file(&path)?;
+    Ok(file)
 }
 
 fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {

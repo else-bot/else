@@ -50,13 +50,15 @@ pub static DEFINITION: Definition = Definition {
 
 fn build(wiring: &super::Wiring) -> super::Built {
     let home = grok_home::host_home();
-    let configured = configured_program(wiring.config.grok_bin.as_deref(), home.as_deref());
-    let grok = Grok {
-        ready: Grok::ready(
-            Some(wiring.host.clone()),
-            super::executable(configured.as_deref(), "grok"),
-            home,
+    let program = match wiring.config.grok_bin.as_deref() {
+        Some(setting) => super::executable(Some(setting), "grok"),
+        None => choose(
+            super::executable(None, "grok"),
+            home.as_deref().and_then(installed),
         ),
+    };
+    let grok = Grok {
+        ready: Grok::ready(Some(wiring.host.clone()), program, home),
         tool_url: None,
     }
     .with_tools(wiring.tool_url.clone());
@@ -66,19 +68,36 @@ fn build(wiring: &super::Wiring) -> super::Built {
     }
 }
 
-/// `ELSE_GROK_BIN`, else the binary Grok's installers keep in the host's
-/// `GROK_HOME` (curl's install and the npm package's launcher both run it),
-/// else `None` to search `PATH`. The `grok` on `PATH` can be a launcher that
-/// needs node and would unpack its own copy into each bot's `GROK_HOME`.
-fn configured_program(setting: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
-    setting.map(Path::to_path_buf).or_else(|| {
-        home.map(|home| home.join("bin").join("grok"))
-            .filter(|path| {
-                use std::os::unix::fs::PermissionsExt;
-                path.metadata()
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-    })
+/// The binary Grok's installers keep in the host's `GROK_HOME` (curl's
+/// install and the npm package's launcher both run it). The link is kept,
+/// not resolved, so it follows Grok's own updates.
+fn installed(home: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = home.join("bin").join("grok");
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then_some(path)
+}
+
+/// A native `grok` from `PATH`, else the installed binary when there is one.
+/// `PATH` can hold the npm package's script, which needs node and would
+/// unpack its own copy into each bot's `GROK_HOME`.
+fn choose(
+    on_path: Result<Option<PathBuf>, String>,
+    installed: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    match on_path {
+        Ok(Some(found)) if !is_script(&found) => Ok(Some(found)),
+        other => installed.map_or(other, |path| Ok(Some(path))),
+    }
+}
+
+fn is_script(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| &head == b"#!")
 }
 
 /// A CLI that runs and a host login.
