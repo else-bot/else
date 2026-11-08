@@ -10,7 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_bindings sb WHERE sb.connection_id=social_connections.id AND json_extract(sb.access,'$.wake_policy')='all') AS message_content";
+const COLUMNS: &str = "id,provider,remote_id,display_name,username,state,health,generation,instructions,EXISTS(SELECT 1 FROM social_bindings sb WHERE sb.connection_id=social_connections.id AND json_extract(sb.access,'$.wake_policy')='all' AND json_array_length(sb.access,'$.destinations')>0) AS message_content";
 fn identity(
     key: &SecretKey,
     id: Uuid,
@@ -266,6 +266,9 @@ pub async fn authorize(
         .fetch_all(&mut *conn)
         .await?;
         access.destinations.retain(|d| scoped.contains(d));
+        if access.destinations.is_empty() {
+            return Err(Error::Forbidden);
+        }
     }
     if !access.permissions.read
         || write && !access.permissions.write
