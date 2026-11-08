@@ -94,7 +94,7 @@ pub(super) fn schemas() -> Vec<Value> {
             "name": "draft_message",
             "description": format!("Show the owner a message or post you drafted for a \
                 messaging or social platform: x for a post on X (Twitter), telegram for a \
-                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
+                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections or a public Telegram @username or t.me link; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
                 send one you would send for the owner, instead of ask_permission or an approval \
                 card. It has no subject or addresses; use draft_email for email. They may edit \
                 its text. {REVIEW}"),

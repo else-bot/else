@@ -71,7 +71,7 @@ For Telegram, create a bot with [@BotFather](https://t.me/BotFather) using `/new
 
 Choose the conversations the assistant may access and describe its work in the instructions field. These instructions teach the assistant how to behave. They cannot grant access beyond the selected destinations and permissions. Sending a message still requires your approval of its draft.
 
-A Telegram bot receives messages in chats it joins, subject to Telegram's privacy settings. It does not connect your personal inbox or import arbitrary older chat history. Add the bot to a group and send a message to make that destination available. A Discord bot can access only channels allowed by its server permissions. Reading ordinary server message content also requires the Message Content Intent in the Developer Portal.
+A Telegram bot receives messages in chats it joins, subject to Telegram's privacy settings. It does not connect your personal inbox or import arbitrary older chat history. Add the bot to a group and send a message to make that destination available. A public channel or group also works by its `@username` or `t.me` link, such as "post Test in @my_channel". To post in a channel, make the bot an administrator. A Discord bot can access only channels allowed by its server permissions. Reading ordinary server message content also requires the Message Content Intent in the Developer Portal.
 
 Open **Settings → Socials** to manage connections, edit each bot's instructions and access, replace a token, pause a connection, or disconnect it.
 

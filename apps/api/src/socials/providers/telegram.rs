@@ -42,9 +42,9 @@ fn poll_error(error: RequestError) -> Error {
     }
 }
 fn chat(s: &str) -> Result<ChatId, Error> {
-    s.parse::<i64>()
-        .map(ChatId)
-        .map_err(|_| Error::Invalid("Telegram destination must be a chat ID or a public @username."))
+    s.parse::<i64>().map(ChatId).map_err(|_| {
+        Error::Invalid("Telegram destination must be a chat ID or a public @username.")
+    })
 }
 fn message(s: &str) -> Result<MessageId, Error> {
     s.parse::<i32>()
@@ -81,7 +81,11 @@ pub async fn resolve(c: &Connection, b: &Bot, username: &str) -> Result<Destinat
             ),
             _ => Error::Platform,
         })?;
-    let me = c.remote_id.parse().map(UserId).map_err(|_| Error::Platform)?;
+    let me = c
+        .remote_id
+        .parse()
+        .map(UserId)
+        .map_err(|_| Error::Platform)?;
     let can_send = match b.get_chat_member(chat.id, me).await.map(|m| m.kind) {
         Ok(member) if chat.is_channel() => member.can_post_messages(),
         Ok(ChatMemberKind::Restricted(Restricted {

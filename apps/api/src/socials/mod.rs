@@ -23,6 +23,12 @@ impl Operation {
             Self::Send(message) => Some(&message.destination),
         }
     }
+    fn destination_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Command(c) => c.destination_mut(),
+            Self::Send(message) => Some(&mut message.destination),
+        }
+    }
     fn mutates(&self) -> bool {
         match self {
             Self::Command(c) => c.mutates(),
@@ -61,6 +67,11 @@ enum WorkerRequest {
         generation: i64,
         reply: oneshot::Sender<Result<Vec<Destination>, Error>>,
     },
+    Resolve {
+        generation: i64,
+        username: String,
+        reply: oneshot::Sender<Result<Destination, Error>>,
+    },
 }
 impl WorkerRequest {
     fn reject(self) {
@@ -69,6 +80,9 @@ impl WorkerRequest {
                 let _ = request.reply.send(Err(Error::Inactive));
             }
             Self::Discover { reply, .. } => {
+                let _ = reply.send(Err(Error::Inactive));
+            }
+            Self::Resolve { reply, .. } => {
                 let _ = reply.send(Err(Error::Inactive));
             }
         }
@@ -182,14 +196,59 @@ impl Manager {
         store::save_destinations(&self.db, c.id, &list).await?;
         store::destinations(&self.db, c.id).await
     }
+    /// The chat ID `destination` names. A public `@username` or share link
+    /// is looked up once and saved as a seen chat, so triggers, woken-turn
+    /// scopes, and receipts keep matching the IDs incoming messages carry.
+    pub async fn resolve(self: &Arc<Self>, id: Uuid, destination: &str) -> Result<String, Error> {
+        let Some(username) = public_username(destination)? else {
+            return Ok(destination.to_owned());
+        };
+        let c = store::connection(&self.db, id).await?;
+        if c.state != "active" {
+            return Err(Error::Inactive);
+        }
+        let worker = self.worker(id).await?;
+        let (reply, result) = oneshot::channel();
+        worker
+            .commands
+            .try_send(WorkerRequest::Resolve {
+                generation: c.generation,
+                username,
+                reply,
+            })
+            .map_err(|_| Error::Busy)?;
+        let found = tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .map_err(|_| Error::Platform)?
+            .map_err(|_| Error::Inactive)??;
+        Ok(found.id)
+    }
+    async fn resolve_session(
+        &self,
+        c: &Connection,
+        session: &providers::Session,
+        username: &str,
+    ) -> Result<Destination, Error> {
+        let found = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.transport.resolve(c, session, username),
+        )
+        .await
+        .map_err(|_| Error::Platform)??;
+        store::save_destinations(&self.db, c.id, std::slice::from_ref(&found)).await?;
+        Ok(found)
+    }
     async fn request(
         self: &Arc<Self>,
         id: Uuid,
         bot: Uuid,
         turn: Uuid,
         action: Option<Uuid>,
-        operation: Operation,
+        mut operation: Operation,
     ) -> Result<Value, Error> {
+        if let Some(destination) = operation.destination_mut() {
+            *destination = self.resolve(id, destination).await?;
+        }
         let c = store::connection(&self.db, id).await?;
         if let Operation::Command(cmd) = &operation
             && !c.provider.supports(cmd.operation())
@@ -308,6 +367,21 @@ impl Manager {
                                     _ = stop.cancelled() => (Err(Error::Inactive), true),
                                     _ = changed.changed() => (Err(Error::Inactive), true),
                                     result = self.discover_session(&c, &session) => (result, false),
+                                };
+                                let _ = reply.send(result);
+                                if reload { break true; }
+                                continue;
+                            }
+                            WorkerRequest::Resolve { generation, username, reply } => {
+                                if generation != c.generation || c.state != "active" {
+                                    let _ = reply.send(Err(Error::Inactive));
+                                    continue;
+                                }
+                                let (result, reload) = tokio::select! {
+                                    biased;
+                                    _ = stop.cancelled() => (Err(Error::Inactive), true),
+                                    _ = changed.changed() => (Err(Error::Inactive), true),
+                                    result = self.resolve_session(&c, &session, &username) => (result, false),
                                 };
                                 let _ = reply.send(result);
                                 if reload { break true; }

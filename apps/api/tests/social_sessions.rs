@@ -50,6 +50,20 @@ impl Transport for ObserveSessions {
             can_send: true,
         }])
     }
+    async fn resolve(
+        &self,
+        _: &Connection,
+        session: &Session,
+        _: &str,
+    ) -> Result<Destination, Error> {
+        self.observe("resolve", session).await;
+        Ok(Destination {
+            id: "100".into(),
+            name: "Team".into(),
+            kind: "channel".into(),
+            can_send: true,
+        })
+    }
     async fn execute(&self, session: &Session, _: &Command) -> Result<Value, Error> {
         self.observe("execute", session).await;
         Ok(json!({"ok": true}))

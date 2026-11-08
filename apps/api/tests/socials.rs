@@ -1002,7 +1002,10 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     )
     .await;
     assert_eq!(
-        (set["trigger"]["destination"].as_str(), set["trigger"]["destination_name"].as_str()),
+        (
+            set["trigger"]["destination"].as_str(),
+            set["trigger"]["destination_name"].as_str()
+        ),
         (Some("-100777"), Some("Team alerts")),
         "a trigger keys on the chat ID incoming messages carry: {set}"
     );
@@ -1017,7 +1020,7 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
         &router,
         &grant,
         "draft_message",
-        json!({"platform":"telegram","account_id":connection,"destination":"@team_alerts","body":"Test"}),
+        json!({"platform":"telegram","account_id":connection,"destination":"https://t.me/team_alerts","body":"Test"}),
     )
     .await;
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();

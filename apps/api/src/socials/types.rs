@@ -50,6 +50,7 @@ impl Provider {
                 "A BotFather token connects a bot identity, not your personal Telegram inbox.",
                 "History and search retain at most 5000 observed messages per connection, not arbitrary older chats.",
                 "Add the bot to a group or message it first. Group privacy mode controls which messages it receives.",
+                "A public channel or group also works by its @username or t.me link. Posting in a channel needs the bot as an administrator.",
             ],
             Self::Discord => &[
                 "A bot token acts as your Discord application, not your personal user account.",
@@ -101,6 +102,43 @@ pub struct Identity {
     pub display_name: String,
     pub username: Option<String>,
 }
+/// How an owner names a public Telegram chat: `@name` or its share link.
+/// Returns `@name` for a public username, `None` for anything else, and
+/// an error for a private invite link, which a bot cannot look up.
+pub fn public_username(destination: &str) -> Result<Option<String>, Error> {
+    let text = destination.trim();
+    let path = if let Some(name) = text.strip_prefix('@') {
+        name
+    } else {
+        let host = text
+            .strip_prefix("https://")
+            .or_else(|| text.strip_prefix("http://"))
+            .unwrap_or(text);
+        match ["t.me/", "telegram.me/", "www.t.me/", "www.telegram.me/"]
+            .iter()
+            .find_map(|prefix| host.strip_prefix(prefix))
+        {
+            Some(path) => path.strip_prefix("s/").unwrap_or(path),
+            None => return Ok(None),
+        }
+    };
+    if path.starts_with('+') || path.starts_with("joinchat") {
+        return Err(Error::Invalid(
+            "A private Telegram invite link has no public username. Post in the chat so it appears in social_connections, then use its chat ID.",
+        ));
+    }
+    let name = path.split(['/', '?', '#']).next().unwrap_or_default();
+    let valid = (4..=32).contains(&name.len())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if valid {
+        Ok(Some(format!("@{name}")))
+    } else {
+        Err(Error::Invalid(
+            "Use a Telegram chat ID, a public @username, or a t.me link.",
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Destination {
     pub id: String,
@@ -287,6 +325,23 @@ impl Command {
             | Self::Poll { destination, .. } => Some(destination),
         }
     }
+    pub fn destination_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Conversations => None,
+            Self::History { destination, .. }
+            | Self::Search { destination, .. }
+            | Self::Message { destination, .. }
+            | Self::Chat { destination }
+            | Self::Members { destination, .. }
+            | Self::Edit { destination, .. }
+            | Self::Delete { destination, .. }
+            | Self::React { destination, .. }
+            | Self::Pin { destination, .. }
+            | Self::Unpin { destination, .. }
+            | Self::CreateThread { destination, .. }
+            | Self::Poll { destination, .. } => Some(destination),
+        }
+    }
     pub fn sends(&self) -> bool {
         self.operation().sends()
     }
@@ -435,4 +490,38 @@ pub struct Envelope {
     pub incoming: Incoming,
     pub next_offset: i64,
     pub ack: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_public_telegram_chat_is_named_by_username_or_share_link() {
+        for named in [
+            "@proliquid_test_alerts",
+            "t.me/proliquid_test_alerts",
+            "https://t.me/proliquid_test_alerts",
+            "http://telegram.me/proliquid_test_alerts/",
+            "https://t.me/s/proliquid_test_alerts",
+            "https://t.me/proliquid_test_alerts/42?single",
+        ] {
+            assert_eq!(
+                public_username(named).unwrap().as_deref(),
+                Some("@proliquid_test_alerts"),
+                "{named}"
+            );
+        }
+        for id in ["-1001234567890", "100", "123456789012345678"] {
+            assert_eq!(public_username(id).unwrap(), None, "{id}");
+        }
+        for refused in [
+            "https://t.me/+AbCdEf123",
+            "t.me/joinchat/AbCd",
+            "@x",
+            "@bad name",
+        ] {
+            assert!(public_username(refused).is_err(), "{refused}");
+        }
+    }
 }
