@@ -551,6 +551,7 @@ struct Fake {
     release: Notify,
     blocked: AtomicBool,
     sends: AtomicUsize,
+    refused: AtomicBool,
 }
 #[async_trait]
 impl Transport for Fake {
@@ -589,9 +590,37 @@ impl Transport for Fake {
         _: mpsc::Sender<Envelope>,
         stop: CancellationToken,
     ) -> Result<(), Error> {
+        if self.refused.load(Ordering::SeqCst) {
+            return Err(Error::ReceiverConflict);
+        }
         stop.cancelled().await;
         Ok(())
     }
+}
+
+async fn health_after_listening(refused: bool) -> String {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "listener").await;
+    let fake = Arc::new(Fake::default());
+    fake.refused.store(refused, Ordering::SeqCst);
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake,
+    ));
+    manager.changed(c.id).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    store::connection(&db.pool, c.id).await.unwrap().health
+}
+
+#[tokio::test]
+async fn a_bot_whose_updates_go_elsewhere_shows_the_conflict_instead_of_connected() {
+    assert_eq!(health_after_listening(true).await, "receiver_conflict");
+}
+
+#[tokio::test]
+async fn a_listener_that_stays_open_is_connected() {
+    assert_eq!(health_after_listening(false).await, "connected");
 }
 
 #[tokio::test]

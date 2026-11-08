@@ -62,6 +62,22 @@ pub struct Connection {
     pub instructions: String,
 }
 
+impl Connection {
+    /// Another webhook, app, or server takes this bot's messages, so none
+    /// reach the connection.
+    pub fn receiver_conflict(&self) -> bool {
+        self.health == "receiver_conflict"
+    }
+
+    pub fn health_label(&self) -> &str {
+        if self.receiver_conflict() {
+            "messages go elsewhere"
+        } else {
+            &self.health
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Destination {
     pub id: String,

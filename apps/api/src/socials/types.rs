@@ -345,6 +345,10 @@ pub enum Error {
     Uncertain,
     #[error("The connection is busy. Retry later.")]
     Busy,
+    #[error(
+        "Another webhook, app, or server receives this bot's messages. Telegram delivers them to only one receiver."
+    )]
+    ReceiverConflict,
     #[error("Encrypted credentials are unavailable.")]
     Crypto,
     #[error("The connector database operation failed.")]

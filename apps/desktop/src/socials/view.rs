@@ -172,7 +172,11 @@ impl SocialsView {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(format!("{} · {}", connection.state, connection.health)),
+                    .child(format!(
+                        "{} · {}",
+                        connection.state,
+                        connection.health_label()
+                    )),
             );
         let mut bots = h_flex().gap_1().flex_wrap();
         for bot in &self.bots {
@@ -245,9 +249,13 @@ impl SocialsView {
                     })),
             );
         }
-        if access.destinations.is_empty() {
+        if connection.receiver_conflict() {
+            card = card.child(div().text_sm().text_color(theme.danger).child(
+                "Another webhook, app, or server is receiving this bot's messages, so no chats can appear here. Telegram delivers them to only one receiver. Remove the bot's webhook or stop the other app, then refresh.",
+            ));
+        } else if access.destinations.is_empty() {
             card = card.child(div().text_sm().text_color(theme.muted_foreground).child(match provider {
-                Provider::Telegram => "No chats received yet. You can connect now and choose chats later. Add this bot to your channel or group, or send it a private message, then refresh. A Telegram bot cannot import your old personal chat history.",
+                Provider::Telegram => "No chats received yet. You can connect now and choose chats later. Add this bot to your channel as an administrator, add it to a group, or send it a private message, then refresh. A Telegram bot cannot import your old personal chat history.",
                 Provider::Discord => "No channels are available yet. You can connect now and choose channels later. Add the bot to your server and allow View Channels, then refresh. Reading ordinary server messages may also require Message Content Intent.",
             }));
         }
@@ -468,7 +476,7 @@ impl Render for SocialsView {
                                         "{} · {} · {}",
                                         connection.provider.label(),
                                         connection.state,
-                                        connection.health
+                                        connection.health_label()
                                     ),
                                 )),
                         )

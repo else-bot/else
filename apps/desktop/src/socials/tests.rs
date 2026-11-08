@@ -93,3 +93,19 @@ fn saved_revocation_and_empty_instructions_do_not_turn_into_defaults() {
     assert!(access.draft.destinations.is_empty());
     assert!(access.draft.instructions.is_empty());
 }
+
+#[test]
+fn a_bot_whose_messages_go_elsewhere_says_so_instead_of_its_raw_health() {
+    let connection = |health: &str| -> crate::api::socials::Connection {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "provider": "telegram", "remote_id": "1",
+            "display_name": "Proliquid", "username": "proliquid_bot", "state": "active",
+            "health": health, "generation": 1, "instructions": ""
+        }))
+        .unwrap()
+    };
+    let conflicted = connection("receiver_conflict");
+    assert!(conflicted.receiver_conflict());
+    assert_eq!(conflicted.health_label(), "messages go elsewhere");
+    assert_eq!(connection("connected").health_label(), "connected");
+}
