@@ -248,7 +248,7 @@ impl ElseApp {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
-        let row = super::view::reading_column().py_1p5();
+        let row = v_flex().w_full().py_1p5();
         let muted = |text: String| {
             div()
                 .text_xs()
