@@ -5,7 +5,7 @@
 //! GET /v1/bots/{id}/desktop/stream?mode=watch|control[&wake=true]
 //! server → {"type":"size","width":W,"height":H}   first, and on every resize
 //! server → {"type":"mode","mode":"watch"|"control"}  initial mode and each ack
-//! server → binary PNG of the whole screen, only when it changed, ≤ 5 per second
+//! server → binary PNG of the whole screen, only when it changed
 //! server → {"type":"error","code":C,"message":M}   fatal ones close the stream
 //! client → {"type":"mode","mode":"watch"|"control"}
 //! client → {"type":"pointer","x":X,"y":Y,"buttons":MASK}   RFB button mask
@@ -24,6 +24,9 @@
 //! keyboard batches fail with `OWNER_USING_DESKTOP` until control ends; at
 //! most one stream controls a bot. Leaving control, `release`, and every way
 //! a stream ends release what it pressed. In watch mode input is dropped.
+//! The stream asks for the next screen update as soon as one arrives and
+//! encodes a frame once the previous one is on the socket, so the frame rate
+//! follows the guest and the owner's connection instead of a timer.
 //! API shutdown signals streams with `server_stopping` and waits for input,
 //! control, and lease cleanup within the configured shutdown grace period.
 
@@ -40,7 +43,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -53,7 +56,6 @@ use crate::computers::viewer::{self, Event, Framebuffer, Target};
 use crate::computers::{ComputerManager, ViewerLease, ViewerRefusal, ViewerTarget};
 
 const MAX_MESSAGE: usize = 4 * 1024;
-const FRAME_EVERY: Duration = Duration::from_millis(200);
 const LEASE_CHECK: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
@@ -164,8 +166,8 @@ async fn session(
     let stop = &admission.stop;
     let (sink, mut incoming) = socket.split();
     let (out, out_rx) = mpsc::channel(16);
-    let frame_queued = Arc::new(AtomicBool::new(false));
-    let writer = tokio::spawn(write(sink, out_rx, frame_queued.clone()));
+    let frame_slot = Arc::new(FrameSlot::default());
+    let writer = tokio::spawn(write(sink, out_rx, frame_slot.clone()));
     let stream_id = Uuid::new_v4();
     let holder = format!("desktop-stream:{stream_id}");
     let viewer = tokio::select! {
@@ -187,7 +189,7 @@ async fn session(
                 stream_id,
                 target,
                 out.clone(),
-                frame_queued,
+                frame_slot,
                 stop.clone(),
             );
             let ended = session.run(params.mode, &mut incoming).await;
@@ -280,10 +282,18 @@ fn refused(refusal: ViewerRefusal) -> End {
     End { code, message }
 }
 
+/// At most one frame waits for the socket, and a frame dropped because the
+/// queue was full is encoded again only after the writer makes progress.
+#[derive(Default)]
+struct FrameSlot {
+    queued: AtomicBool,
+    written: Notify,
+}
+
 async fn write(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut out: mpsc::Receiver<Message>,
-    frame_queued: Arc<AtomicBool>,
+    slot: Arc<FrameSlot>,
 ) {
     while let Some(message) = out.recv().await {
         let frame = matches!(message, Message::Binary(_));
@@ -294,8 +304,9 @@ async fn write(
             return;
         }
         if frame {
-            frame_queued.store(false, Ordering::Release);
+            slot.queued.store(false, Ordering::Release);
         }
+        slot.written.notify_one();
     }
     let _ = tokio::time::timeout(CLOSE_LIMIT, sink.close()).await;
 }
@@ -334,7 +345,7 @@ struct Session {
     stream_id: Uuid,
     target: ViewerTarget,
     out: mpsc::Sender<Message>,
-    frame_queued: Arc<AtomicBool>,
+    frame_slot: Arc<FrameSlot>,
     mode: Mode,
     control_lease: Option<Uuid>,
     watch_server: Option<bool>,
@@ -361,7 +372,7 @@ impl Session {
         stream_id: Uuid,
         target: ViewerTarget,
         out: mpsc::Sender<Message>,
-        frame_queued: Arc<AtomicBool>,
+        frame_slot: Arc<FrameSlot>,
         stop: CancellationToken,
     ) -> Self {
         Self {
@@ -371,7 +382,7 @@ impl Session {
             stream_id,
             target,
             out,
-            frame_queued,
+            frame_slot,
             mode: Mode::Watch,
             control_lease: None,
             watch_server: None,
@@ -450,8 +461,6 @@ impl Session {
         if let Some(end) = self.send_mode().await {
             return Some(end);
         }
-        let mut frame_tick = tokio::time::interval(FRAME_EVERY);
-        frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut lease_tick = tokio::time::interval(LEASE_CHECK);
         lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let renew_every = self.computers.config().lease_ttl / 3;
@@ -459,6 +468,7 @@ impl Session {
         let mut pinged = Instant::now();
         let mut seen = Instant::now();
         let stop = self.stop.clone();
+        let frame_slot = self.frame_slot.clone();
         loop {
             let ended = tokio::select! {
                 _ = stop.cancelled() => end("server_stopping", STOPPING),
@@ -483,11 +493,11 @@ impl Session {
                 png = encoded(&mut self.encoding) => {
                     match png {
                         Some(png) => {
-                            self.frame_queued.store(true, Ordering::Release);
+                            self.frame_slot.queued.store(true, Ordering::Release);
                             if let Err(mpsc::error::TrySendError::Full(_)) =
                                 self.out.try_send(Message::Binary(png.into()))
                             {
-                                self.frame_queued.store(false, Ordering::Release);
+                                self.frame_slot.queued.store(false, Ordering::Release);
                                 self.dirty = true;
                             }
                         }
@@ -495,7 +505,10 @@ impl Session {
                     }
                     None
                 }
-                _ = frame_tick.tick() => self.frame_tick().await,
+                _ = frame_slot.written.notified() => {
+                    self.encode();
+                    None
+                }
                 _ = lease_tick.tick() => {
                     if seen.elapsed() > IDLE_LIMIT {
                         end("client_gone", "")
@@ -810,7 +823,8 @@ impl Session {
             }
             Event::UpdateEnd => {
                 self.requested = false;
-                None
+                self.encode();
+                self.frame_request().await
             }
             _ => {
                 self.dirty = true;
@@ -838,13 +852,13 @@ impl Session {
         None
     }
 
-    async fn frame_tick(&mut self) -> Option<End> {
-        if self.dirty && self.encoding.is_none() && !self.frame_queued.load(Ordering::Acquire) {
+    fn encode(&mut self) {
+        if self.dirty && self.encoding.is_none() && !self.frame_slot.queued.load(Ordering::Acquire)
+        {
             let snapshot = self.fb.snapshot();
             self.encoding = Some(tokio::task::spawn_blocking(move || snapshot.png()));
             self.dirty = false;
         }
-        self.frame_request().await
     }
 
     async fn shutdown(&mut self) {

@@ -204,8 +204,19 @@ async fn rfb_server(
     init.extend_from_slice(name);
     io.send(&init).await?;
     let mut shade = 0u8;
+    // A real server holds an incremental request until the screen changes;
+    // this screen changes every 20 ms.
+    let mut held: Option<tokio::time::Instant> = None;
     loop {
-        let kind = io.take(1).await?[0];
+        let kind = tokio::select! {
+            kind = io.take(1) => kind?[0],
+            _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)), if held.is_some() => {
+                held = None;
+                shade = shade.wrapping_add(40);
+                io.send(&full_update(shade)).await?;
+                continue;
+            }
+        };
         match kind {
             0 => {
                 io.take(19).await?;
@@ -216,16 +227,15 @@ async fn rfb_server(
                 io.take(n * 4).await?;
             }
             3 => {
-                io.take(9).await?;
-                shade = shade.wrapping_add(40);
-                let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0];
-                update.extend_from_slice(&W.to_be_bytes());
-                update.extend_from_slice(&H.to_be_bytes());
-                update.extend_from_slice(&0i32.to_be_bytes());
-                update.extend(
-                    std::iter::repeat_n([shade, 0, 0, 0], W as usize * H as usize).flatten(),
-                );
-                io.send(&update).await?;
+                let request = io.take(9).await?;
+                if request[0] == 1 {
+                    held.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_millis(20)
+                    });
+                } else {
+                    shade = shade.wrapping_add(40);
+                    io.send(&full_update(shade)).await?;
+                }
             }
             4 => {
                 let m = io.take(7).await?;
@@ -241,6 +251,15 @@ async fn rfb_server(
             other => panic!("unexpected client message {other}"),
         }
     }
+}
+
+fn full_update(shade: u8) -> Vec<u8> {
+    let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0];
+    update.extend_from_slice(&W.to_be_bytes());
+    update.extend_from_slice(&H.to_be_bytes());
+    update.extend_from_slice(&0i32.to_be_bytes());
+    update.extend(std::iter::repeat_n([shade, 0, 0, 0], W as usize * H as usize).flatten());
+    update
 }
 
 struct Setup {

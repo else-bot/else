@@ -175,6 +175,26 @@ fn decode_frame(bytes: &[u8], expected: Option<(u16, u16)>) -> Result<Arc<Render
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
 }
 
+type Decoding = tokio::task::JoinHandle<Result<Arc<RenderImage>, String>>;
+
+fn decode_later(
+    bytes: tokio_tungstenite::tungstenite::Bytes,
+    expected: Option<(u16, u16)>,
+) -> Decoding {
+    tokio::task::spawn_blocking(move || decode_frame(&bytes, expected))
+}
+
+async fn decoded(task: &mut Option<Decoding>) -> Result<Arc<RenderImage>, String> {
+    let Some(handle) = task else {
+        return std::future::pending().await;
+    };
+    let frame = handle
+        .await
+        .map_err(|_| "Cannot decode the desktop frame.".to_owned());
+    *task = None;
+    frame?
+}
+
 impl Client {
     pub async fn computer(self: Arc<Self>, bot: Uuid) -> Result<ComputerState, ClientError> {
         let this = self.clone();
@@ -336,6 +356,11 @@ impl Client {
         }
         let mut last_sequence = 0;
         let mut typing: Option<std::vec::IntoIter<u32>> = None;
+        // The socket keeps being read while a frame decodes; only the newest
+        // frame that arrived meanwhile is decoded next, so a slow decode skips
+        // stale frames instead of falling behind the screen.
+        let mut decoding: Option<Decoding> = None;
+        let mut newest = None;
         loop {
             tokio::select! {
                 biased;
@@ -389,6 +414,12 @@ impl Client {
                                     if !valid_dimensions(u32::from(width), u32::from(height)) {
                                         return Err("The desktop size exceeds the image limit.".into());
                                     }
+                                    if dimensions != Some((width, height)) {
+                                        if let Some(stale) = decoding.take() {
+                                            stale.abort();
+                                        }
+                                        newest = None;
+                                    }
                                     dimensions = Some((width, height));
                                     deliver!(DesktopEvent::Size { width, height });
                                 },
@@ -410,10 +441,11 @@ impl Client {
                             }
                         },
                         Ok(Some(Ok(Message::Binary(bytes)))) => {
-                            let frame = tokio::task::spawn_blocking(move || decode_frame(&bytes, dimensions))
-                                .await
-                                .map_err(|_| "Cannot decode the desktop frame.")??;
-                            deliver!(DesktopEvent::Frame(frame));
+                            if decoding.is_some() {
+                                newest = Some((bytes, dimensions));
+                            } else {
+                                decoding = Some(decode_later(bytes, dimensions));
+                            }
                         },
                         Ok(Some(Ok(Message::Ping(bytes)))) => send!(Message::Pong(bytes)),
                         Ok(Some(Ok(Message::Pong(_)))) => {},
@@ -425,6 +457,11 @@ impl Client {
                         },
                         Ok(Some(Ok(_))) => {},
                     }
+                },
+                frame = decoded(&mut decoding) => {
+                    let frame = frame?;
+                    decoding = newest.take().map(|(bytes, expected)| decode_later(bytes, expected));
+                    deliver!(DesktopEvent::Frame(frame));
                 },
                 () = std::future::ready(()), if typing.is_some() => {
                     let next = typing.as_mut().and_then(Iterator::next);
@@ -683,6 +720,43 @@ mod tests {
             stream.events.recv().await,
             Some(DesktopEvent::Frame(_))
         ));
+        drop(stream);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_frames_ends_on_the_newest_without_going_back() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Message::Text(
+                r#"{"type":"size","width":1,"height":1}"#.into(),
+            ))
+            .await
+            .unwrap();
+            for shade in 0..40 {
+                ws.send(Message::Binary(png(1, 1, vec![shade, 0, 0, 255]).into()))
+                    .await
+                    .unwrap();
+            }
+            ws.send(Message::Text(r#"{"type":"mode","mode":"watch"}"#.into()))
+                .await
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        });
+        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut shades = Vec::new();
+        let mut mode = false;
+        while !(mode && shades.last() == Some(&39)) {
+            match stream.events.recv().await.unwrap() {
+                DesktopEvent::Frame(image) => shades.push(image.as_bytes(0).unwrap()[2]),
+                DesktopEvent::Mode(DesktopMode::Watch) => mode = true,
+                _ => {}
+            }
+        }
+        assert!(shades.is_sorted_by(|a, b| a < b), "{shades:?}");
         drop(stream);
         server.await.unwrap();
     }
