@@ -123,6 +123,9 @@ impl Codex {
         {
             let mut params = settings.clone();
             params["threadId"] = json!(session.native_id);
+            // Without this, the response carries every past turn and a
+            // long-lived thread outgrows the reader's line limit.
+            params["excludeTurns"] = json!(true);
             match server.request("thread/resume", params, RPC_TIMEOUT).await {
                 Ok(response) => {
                     return Ok((Opened::Resumed(session), Reported::from_response(&response)));
