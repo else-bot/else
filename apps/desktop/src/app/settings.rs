@@ -815,7 +815,7 @@ impl ElseApp {
                 _ => None,
             })
         });
-        let picker = cx.new(|cx| ProfilePicker::new(&caps, initial, window, cx));
+        let picker = cx.new(|_| ProfilePicker::new(&caps, initial));
         let observer = cx.observe_in(&picker, window, |_, _, window, _| window.refresh());
         let holder = cx.new(|_| ModelDialog {
             bot,
@@ -889,7 +889,7 @@ impl ElseApp {
             let mine = holder.clone();
             dialog
                 .title(if routine { "Routine model" } else { "Change model" })
-                .w(px(420.))
+                .w(px(640.))
                 .on_ok(move |_, window, cx| {
                     let _ = app_ok.update(cx, |app, cx| app.apply_model(window, cx));
                     false

@@ -66,7 +66,7 @@ impl ElseApp {
         let profile = self
             .caps
             .clone()
-            .map(|caps| cx.new(|cx| ProfilePicker::new(&caps, caps.defaults.as_ref(), window, cx)));
+            .map(|caps| cx.new(|_| ProfilePicker::new(&caps, caps.defaults.as_ref()).tabs()));
         let choices = category_choices(&self.categories);
         let category =
             cx.new(|cx| SelectState::new(choices.clone(), Some(IndexPath::new(0)), window, cx));

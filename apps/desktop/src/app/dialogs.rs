@@ -33,7 +33,7 @@ impl ElseApp {
                 .placeholder("Your assistant's name, e.g. Jarvis")
                 .default_value(current)
         });
-        let picker = cx.new(|cx| ProfilePicker::new(caps, caps.defaults.as_ref(), window, cx));
+        let picker = cx.new(|_| ProfilePicker::new(caps, caps.defaults.as_ref()));
         self._welcome_enter =
             Some(
                 cx.subscribe_in(&name, window, |app, _, event: &InputEvent, window, cx| {
@@ -107,7 +107,7 @@ impl ElseApp {
         let theme = cx.theme();
         let ready = welcome.picker.read(cx).any_available();
         let mut card = v_flex()
-            .w(px(560.))
+            .w(px(640.))
             .gap_4()
             .p_6()
             .rounded(theme.radius_lg)
