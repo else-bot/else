@@ -177,7 +177,9 @@ impl ElseApp {
                     .w_full()
                     .px_3p5()
                     .py(header_padding)
-                    .rounded(theme.radius_lg)
+                    .rounded(theme.radius_lg - px(1.))
+                    .when(complete, |button| button.rounded_t(px(0.)))
+                    .when(expanded, |button| button.rounded_b(px(0.)))
                     .accessibility_label(format!(
                         "{} activity for {title}. {summary}",
                         if expanded { "Collapse" } else { "Expand" }

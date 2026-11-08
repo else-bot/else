@@ -12,6 +12,7 @@ use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::time::Duration;
 
 /// Right gutter that sets the width of bot-side bubbles and cards.
 pub(super) const BOT_GUTTER: Pixels = px(60.);
@@ -70,6 +71,22 @@ impl ElseApp {
         };
         let Some(body) = body else {
             return div().into_any_element();
+        };
+        let body = match self.view.as_ref().and_then(|view| view.revealed) {
+            Some((key, at)) if row.contains(key) && at.elapsed() < Duration::from_secs(2) => {
+                let highlight = cx.theme().primary;
+                div()
+                    .w_full()
+                    .rounded(cx.theme().radius_lg)
+                    .child(body)
+                    .with_animation(
+                        SharedString::from(format!("revealed-{key:?}-{at:?}")),
+                        Animation::new(Duration::from_millis(1600)).with_max_fps(60.),
+                        move |row, t| row.bg(highlight.opacity(0.16 * (1. - t))),
+                    )
+                    .into_any_element()
+            }
+            _ => body,
         };
         let column = super::view::reading_column();
         let Some(group) = row.routine else {
@@ -281,11 +298,7 @@ impl ElseApp {
                 // are aligned to the bubble's side.
                 let mut column = gpui_kit::component::v_flex().w_full().gap_1();
                 let mut card = card(text, user).id(SharedString::from(format!("message-{id}")));
-                if item.bot_task.is_some() || item.bot_reply.is_some() {
-                    card = self
-                        .render_bot_message(item, text, cx)?
-                        .id(SharedString::from(format!("message-{id}")));
-                } else if !user
+                if !user
                     && run.first
                     && turn.and_then(|t| t.routine.as_ref()).is_none()
                     && let Some(bot) = self.bots.iter().find(|b| b.id == view.bot_id)
