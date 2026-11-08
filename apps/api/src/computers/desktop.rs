@@ -244,7 +244,18 @@ impl ComputerManager {
         Ok(Ok(()))
     }
 
-    /// Run the guest's per-boot setup (`else-init`) once per boot.
+    /// The zone the guest's clock uses: the owner's device zone, else this
+    /// host's, else UTC. It must match the person who takes over the browser.
+    async fn guest_timezone(&self) -> Result<String, ComputerError> {
+        let owner = crate::db::installation::owner_timezone(&self.pool).await?;
+        let valid = |zone: &String| zone.parse::<chrono_tz::Tz>().is_ok();
+        Ok(owner
+            .filter(valid)
+            .or_else(|| iana_time_zone::get_timezone().ok().filter(valid))
+            .unwrap_or_else(|| "UTC".into()))
+    }
+
+    /// Run the guest's per-boot setup (`else-init ZONE`) once per boot.
     pub(super) async fn ensure_services(
         &self,
         bot_id: Uuid,
@@ -262,9 +273,10 @@ impl ComputerManager {
         if done == Some(generation) {
             return Ok(());
         }
+        let zone = self.guest_timezone().await?;
         let result = self
             .runtime
-            .exec(name, GUEST_INIT, &[], Duration::from_secs(60))
+            .exec(name, GUEST_INIT, &[&zone], Duration::from_secs(60))
             .await;
         match result {
             Ok(out) if out.status == Some(0) => {

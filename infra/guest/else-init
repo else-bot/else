@@ -2,6 +2,16 @@
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 set -e
 mkdir -p /run/elsebot /var/log/elsebot
+# $1 is the owner's IANA time zone. Sites such as X block logins from a
+# browser whose clock zone does not match the person using it; Chromium
+# reads it when it starts.
+case "$1" in
+    ''|*..*|/*|*[!A-Za-z0-9/_+-]*) ;;
+    *) if [ -f "/usr/share/zoneinfo/$1" ]; then
+           ln -sf "/usr/share/zoneinfo/$1" /etc/localtime
+           echo "$1" > /etc/timezone
+       fi ;;
+esac
 pid="$(cat /run/elsebot/supervisord.pid 2>/dev/null || true)"
 if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = supervisord ]; then
     echo already-running
