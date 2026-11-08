@@ -482,7 +482,9 @@ impl RowText {
 /// A read-only markdown view for text outside the transcript's rows.
 pub(super) fn markdown_view(state: &Entity<TextViewState>, cx: &App) -> TextView {
     TextView::new(state)
-        .style(TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx)))
+        .style(TextViewStyle::from_theme(&gpui_kit::base::Theme::global(
+            cx,
+        )))
         .w_full()
         .text_sm()
         .line_height(rems(1.375))

@@ -451,7 +451,10 @@ impl ElseApp {
             view.pending_reveal = Some((from, author, original.to_owned()));
             self.load_older(window, cx);
         } else {
-            window.push_notification("The original message is no longer in this conversation.", cx);
+            window.push_notification(
+                "The original message is no longer in this conversation.",
+                cx,
+            );
         }
     }
 

@@ -21,7 +21,10 @@ pub(super) enum Body {
     /// The item's own text, already rendered for the transcript.
     Item(Uuid),
     /// The task a reply answers.
-    Prompt { item: Uuid, text: String },
+    Prompt {
+        item: Uuid,
+        text: String,
+    },
     Empty,
 }
 
@@ -261,7 +264,10 @@ mod tests {
             "kind": "user",
             "text": "Done: v0.94.24 is live.",
         });
-        value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         serde_json::from_value(value).unwrap()
     }
 

@@ -118,7 +118,10 @@ impl ElseApp {
         } else {
             "Task received".to_owned()
         };
-        let messages = format!("{count} {}", if count == 1 { "message" } else { "messages" });
+        let messages = format!(
+            "{count} {}",
+            if count == 1 { "message" } else { "messages" }
+        );
         let mut avatars = h_flex().flex_none().items_center().gap_1();
         for (id, _) in participants.iter().take(3) {
             if let Some(bot) = self.bots.iter().find(|bot| bot.id == *id) {

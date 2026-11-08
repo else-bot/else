@@ -147,7 +147,9 @@ impl ProfilePicker {
                 groups = groups.child(
                     Button::new(SharedString::from(format!("model-{provider_id}-{model}")))
                         .focus_ring(false)
-                        .when(available && !self.disabled, |button| button.cursor_pointer())
+                        .when(available && !self.disabled, |button| {
+                            button.cursor_pointer()
+                        })
                         .ghost()
                         .selected(selected)
                         .small()
@@ -313,12 +315,7 @@ impl ProfilePicker {
                         .text_color(theme.muted_foreground)
                         .child(label),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(options),
-                )
+                .child(div().flex_1().min_w_0().child(options))
         };
         let segmented = || {
             h_flex()
@@ -330,8 +327,14 @@ impl ProfilePicker {
         };
         v_flex()
             .gap_2()
-            .child(row("Reasoning", segmented().children(efforts).into_any_element()))
-            .child(row("Speed", segmented().children(speeds).into_any_element()))
+            .child(row(
+                "Reasoning",
+                segmented().children(efforts).into_any_element(),
+            ))
+            .child(row(
+                "Speed",
+                segmented().children(speeds).into_any_element(),
+            ))
             .when(!fast_offered, |settings| {
                 settings.child(
                     div()
@@ -454,7 +457,9 @@ impl Render for ProfilePicker {
                         .child("No provider is available on this computer yet."),
                 )
             })
-            .when(self.choice.is_some(), |body| body.child(self.render_settings(cx)))
+            .when(self.choice.is_some(), |body| {
+                body.child(self.render_settings(cx))
+            })
     }
 }
 

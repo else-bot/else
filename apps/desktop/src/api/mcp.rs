@@ -226,7 +226,10 @@ mod icon_tests {
     fn icons_come_from_the_host_its_parent_and_known_aliases_but_not_loopback() {
         assert_eq!(
             icon_candidates("https://mcp.sentry.dev"),
-            ["https://mcp.sentry.dev/favicon.ico", "https://sentry.dev/favicon.ico"]
+            [
+                "https://mcp.sentry.dev/favicon.ico",
+                "https://sentry.dev/favicon.ico"
+            ]
         );
         assert_eq!(
             icon_candidates("https://api.githubcopilot.com"),

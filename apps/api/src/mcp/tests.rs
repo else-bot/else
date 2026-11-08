@@ -384,7 +384,10 @@ async fn owner_listings_name_the_http_origin_without_credentials() {
         .collect();
     assert_eq!(
         websites,
-        [("local", None), ("sentry", Some("https://mcp.sentry.dev:8443"))]
+        [
+            ("local", None),
+            ("sentry", Some("https://mcp.sentry.dev:8443"))
+        ]
     );
     let public = serde_json::to_value(&listings).unwrap();
     assert_eq!(public[1]["name"], "T3 Code");
