@@ -20,8 +20,8 @@ use super::error::{ApiError, ApiJson, ApiPath};
 use super::mcp::{Outcome, tool_error, tool_result};
 use crate::app::providers::{Availability, Profile, default_profiles};
 use crate::app::routines::{
-    DEFAULT_TIMEZONE, MAX_NAME_CHARS, MAX_PER_BOT, MAX_PROMPT_BYTES, ModelSetting, RoutineModel,
-    RoutineName, RoutinePrompt, Schedule, match_model,
+    ActiveHours, DEFAULT_TIMEZONE, InvalidRoutine, MAX_NAME_CHARS, MAX_PER_BOT, MAX_PROMPT_BYTES,
+    ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule, match_model,
 };
 use crate::db::routines::{self, By, Caller, NewRoutine, Patch, RoutineError};
 use crate::grants::Grant;
@@ -191,8 +191,29 @@ fn fields() -> Value {
                       day-of-week, digits with * , - / only (for example 0 9 * * 1-5 for \
                       weekdays at 09:00). Day-of-week 0 or 7 is Sunday." },
         "timezone": { "type": "string",
-                      "description": "IANA time zone the cron is read in, such as \
-                          Europe/Paris. Defaults to UTC." },
+                      "description": "IANA time zone the cron and active hours are read in, \
+                          such as Europe/Paris. Omit it to use the time zone of the owner's \
+                          desktop app (UTC if it never reported one)." },
+        "active_hours": {
+            "description": "When runs may start; occurrences outside are skipped. Omit it on \
+                create for the owner's working hours: Monday to Friday, 08:00 to 18:00. Pass \
+                \"always\" only when the owner asks for nights or weekends (24/7, every day, a \
+                Saturday or late-evening time), or set the days and hours they asked for. End \
+                is excluded and must be after start.",
+            "oneOf": [
+                { "type": "string", "enum": ["always"] },
+                { "type": "object",
+                  "properties": {
+                      "days": { "type": "array", "minItems": 1, "uniqueItems": true,
+                                "items": { "type": "string",
+                                           "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] } },
+                      "start": { "type": "string", "description": "HH:MM, 24-hour." },
+                      "end": { "type": "string", "description": "HH:MM, 24-hour." },
+                  },
+                  "required": ["days", "start", "end"],
+                  "additionalProperties": false },
+            ],
+        },
         "model": { "type": "string", "maxLength": MAX_MODEL_CHARS,
                    "description": "Only when the owner asks for this routine to run on a \
                        specific model: its ID or name, such as gpt-6.1-sol, GPT 6.1 Sol, or \
@@ -433,6 +454,11 @@ pub fn update_schema() -> Value {
          again. Omit it to keep the routine's model. A name that matches no single model is \
          not guessed: the routine uses your model and the result says so."
     );
+    properties["active_hours"]["description"] = json!(
+        "When runs may start; omit it to keep the current hours. Pass \"always\" when the \
+         owner asks for nights or weekends (24/7, every day), or the days and hours they asked \
+         for. End is excluded and must be after start."
+    );
     properties["enabled"] = json!({ "type": "boolean",
         "description": "False pauses future runs; true resumes counting from now." });
     json!({
@@ -464,6 +490,34 @@ pub fn delete_schema() -> Value {
     })
 }
 
+/// `active_hours` as a bot sends it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HoursArg {
+    Always(String),
+    Window(WindowArg),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowArg {
+    days: Vec<String>,
+    start: String,
+    end: String,
+}
+
+impl HoursArg {
+    fn parse(&self) -> Result<Option<ActiveHours>, InvalidRoutine> {
+        match self {
+            Self::Always(word) if word == "always" => Ok(None),
+            Self::Always(_) => Err(InvalidRoutine::ActiveHours),
+            Self::Window(WindowArg { days, start, end }) => {
+                ActiveHours::parse(days, start, end).map(Some)
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateArgs {
@@ -471,6 +525,7 @@ struct CreateArgs {
     prompt: String,
     cron: String,
     timezone: Option<String>,
+    active_hours: Option<HoursArg>,
     model: Option<String>,
     provider_id: Option<String>,
     reasoning_effort: Option<String>,
@@ -479,24 +534,37 @@ struct CreateArgs {
 
 fn parse_new(
     args: &CreateArgs,
+    timezone: Option<&str>,
     now: chrono::DateTime<Utc>,
 ) -> Result<(RoutineName, RoutinePrompt, Schedule), RoutineError> {
+    let hours = match &args.active_hours {
+        None => Some(ActiveHours::WORKING),
+        Some(arg) => arg.parse()?,
+    };
     Ok((
         RoutineName::parse(&args.name)?,
         RoutinePrompt::parse(&args.prompt)?,
-        Schedule::parse_due(&args.cron, args.timezone.as_deref(), now)?,
+        Schedule::parse_due(&args.cron, timezone, hours, now)?,
     ))
 }
 
 pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     let Ok(args) = serde_json::from_value::<CreateArgs>(args.clone()) else {
         return invalid(
-            "pass name, prompt, and cron as strings, and optionally timezone and model with \
-             provider_id, reasoning_effort, and service_tier.",
+            "pass name, prompt, and cron as strings, and optionally timezone, active_hours, and \
+             model with provider_id, reasoning_effort, and service_tier.",
         );
     };
     let now = Utc::now();
-    let (name, prompt, schedule) = match parse_new(&args, now) {
+    let owner_timezone = match &args.timezone {
+        Some(_) => None,
+        None => match crate::db::installation::owner_timezone(&state.db).await {
+            Ok(zone) => zone,
+            Err(err) => return reject(err.into()),
+        },
+    };
+    let timezone = args.timezone.as_deref().or(owner_timezone.as_deref());
+    let (name, prompt, schedule) = match parse_new(&args, timezone, now) {
         Ok(parsed) => parsed,
         Err(err) => return reject(err),
     };
@@ -526,6 +594,7 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         name: &name,
         prompt: &prompt,
         schedule: &schedule,
+        requested_timezone: args.timezone.as_deref(),
         model: &model,
         model_request: model_request.as_deref(),
     };
@@ -538,9 +607,13 @@ pub async fn create(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             };
             let next = if routine.deleted {
                 "This routine was deleted; do not create it again unless the owner asks."
-            } else if args.timezone.is_none() {
+            } else if timezone.is_none() {
                 "Saved. It runs in UTC because no timezone was given; tell the owner the \
                  schedule and next run time, and offer to set their time zone."
+            } else if args.active_hours.is_none() {
+                "Saved. It starts runs only Monday to Friday, 08:00 to 18:00, the owner's \
+                 default working hours. Tell the owner the schedule and the next run time, and \
+                 that you can run it at night and on weekends if they ask."
             } else {
                 "Saved. Tell the owner the schedule and the next run time."
             };
@@ -593,6 +666,7 @@ struct UpdateArgs {
     prompt: Option<String>,
     cron: Option<String>,
     timezone: Option<String>,
+    active_hours: Option<HoursArg>,
     enabled: Option<bool>,
     #[serde(default, deserialize_with = "present")]
     model: Option<Option<String>>,
@@ -611,6 +685,11 @@ fn parse_patch(args: &UpdateArgs) -> Result<Patch, RoutineError> {
             .transpose()?,
         cron: args.cron.clone(),
         timezone: args.timezone.clone(),
+        active_hours: args
+            .active_hours
+            .as_ref()
+            .map(HoursArg::parse)
+            .transpose()?,
         enabled: args.enabled,
         model: None,
         dismiss_failures: false,

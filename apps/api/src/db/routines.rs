@@ -28,7 +28,8 @@ use super::{bot_profiles, events};
 use crate::app::messages::MAX_QUEUED_TURNS;
 use crate::app::providers::{Availability, Origin, Profile, RoutineRun};
 use crate::app::routines::{
-    InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineModel, RoutineName, RoutinePrompt, Schedule,
+    ActiveHours, InvalidRoutine, MAX_PER_BOT, ModelSetting, RoutineModel, RoutineName,
+    RoutinePrompt, Schedule,
 };
 use crate::providers::Registry;
 
@@ -107,6 +108,8 @@ pub struct Routine {
     pub prompt_revision: i64,
     pub cron: String,
     pub timezone: String,
+    /// When runs may start; `None` is any time.
+    pub active_hours: Option<ActiveHours>,
     pub enabled: bool,
     pub model: ModelSetting,
     pub next_run_at: Option<DateTime<Utc>>,
@@ -130,6 +133,8 @@ struct Row {
     prompt_revision: i64,
     cron: String,
     timezone: String,
+    #[sqlx(flatten)]
+    active: ActiveColumns,
     enabled: bool,
     model: Option<Json<RoutineModel>>,
     requested_model: Option<String>,
@@ -174,6 +179,7 @@ impl From<Row> for Routine {
             prompt_revision: row.prompt_revision,
             cron: row.cron,
             timezone: row.timezone,
+            active_hours: row.active.hours(),
             enabled: row.enabled,
             model: setting(row.model, row.requested_model),
             next_run_at: row.next_due_at,
@@ -184,6 +190,31 @@ impl From<Row> for Routine {
             failed_runs: row.failed_runs,
             paused_reason: row.paused_reason,
         }
+    }
+}
+
+/// A routine's stored active hours.
+#[derive(sqlx::FromRow, Default)]
+struct ActiveColumns {
+    active_days: Option<i64>,
+    active_start: Option<i64>,
+    active_end: Option<i64>,
+}
+
+impl ActiveColumns {
+    fn hours(&self) -> Option<ActiveHours> {
+        ActiveHours::from_columns(self.active_days?, self.active_start?, self.active_end?)
+    }
+
+    fn from_hours(hours: Option<ActiveHours>) -> Self {
+        hours.map_or_else(Self::default, |hours| {
+            let (days, start, end) = hours.columns();
+            Self {
+                active_days: Some(days),
+                active_start: Some(start),
+                active_end: Some(end),
+            }
+        })
     }
 }
 
@@ -202,7 +233,8 @@ fn columns(model: &ModelSetting) -> (Option<Json<&RoutineModel>>, Option<&str>) 
 }
 
 const SELECT: &str =
-    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone, r.enabled,
+    "SELECT r.id, r.bot_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
+        r.active_days, r.active_start, r.active_end, r.enabled,
         r.model, r.requested_model, r.next_due_at, r.created_at, r.updated_at, r.deleted_at,
         r.failed_runs, r.paused_reason, lr.due_at AS run_due_at, lr.skip_reason, lr.turn_id, t.status AS turn_status,
         t.error_code, t.error_message, t.finished_at
@@ -286,6 +318,9 @@ pub struct NewRoutine<'a> {
     pub name: &'a RoutineName,
     pub prompt: &'a RoutinePrompt,
     pub schedule: &'a Schedule,
+    /// The time zone as the bot sent it; `None` when it took the owner's.
+    /// A retry matches on this, not on the zone it resolved to.
+    pub requested_timezone: Option<&'a str>,
     pub model: &'a ModelSetting,
     /// The model arguments as the bot sent them, if any: a retry with the
     /// same request returns the same routine even if resolving would now
@@ -294,14 +329,19 @@ pub struct NewRoutine<'a> {
 }
 
 fn create_hash(routine: &NewRoutine<'_>) -> Vec<u8> {
+    let hours_key = routine
+        .schedule
+        .hours()
+        .map(|hours| format!("hours {hours}"));
     let mut hasher = Sha256::new();
     for part in [
         "routine",
         routine.prompt.as_str(),
         routine.schedule.cron(),
-        routine.schedule.timezone(),
+        routine.requested_timezone.unwrap_or("owner"),
     ]
     .into_iter()
+    .chain(hours_key.as_deref())
     .chain(routine.model_request)
     {
         hasher.update(part.as_bytes());
@@ -354,10 +394,12 @@ pub async fn create(
     }
     let id = Uuid::new_v4();
     let (model, requested_model) = columns(routine.model);
+    let active = ActiveColumns::from_hours(routine.schedule.hours());
     sqlx::query(
         "INSERT INTO routines (id, bot_id, conversation_id, name, prompt, cron, timezone,
-             next_due_at, created_turn_id, created_name, request_hash, model, requested_model)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12)",
+             next_due_at, created_turn_id, created_name, request_hash, model, requested_model,
+             active_days, active_start, active_end)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?4, ?10, ?11, ?12, ?13, ?14, ?15)",
     )
     .bind(id)
     .bind(caller.bot_id)
@@ -371,6 +413,9 @@ pub async fn create(
     .bind(&hash)
     .bind(model)
     .bind(requested_model)
+    .bind(active.active_days)
+    .bind(active.active_start)
+    .bind(active.active_end)
     .execute(&mut *tx)
     .await?;
     events::bot_updated(&mut tx, caller.bot_id).await?;
@@ -386,6 +431,8 @@ pub struct Patch {
     pub prompt: Option<RoutinePrompt>,
     pub cron: Option<String>,
     pub timezone: Option<String>,
+    /// `Some(None)` lets runs start at any time.
+    pub active_hours: Option<Option<ActiveHours>>,
     pub enabled: Option<bool>,
     pub model: Option<ModelSetting>,
     /// Forget the routine's failed runs (the owner saw them).
@@ -398,6 +445,8 @@ struct RoutineSettings {
     prompt: String,
     cron: String,
     timezone: String,
+    #[sqlx(flatten)]
+    active: ActiveColumns,
     enabled: bool,
     next_due_at: Option<String>,
     model: Option<Json<RoutineModel>>,
@@ -419,7 +468,8 @@ pub async fn update(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     authorize_by(&mut tx, by).await?;
     let current: Option<RoutineSettings> = sqlx::query_as(
-        "SELECT name, prompt, cron, timezone, enabled, next_due_at, model, requested_model
+        "SELECT name, prompt, cron, timezone, active_days, active_start, active_end, enabled,
+             next_due_at, model, requested_model
          FROM routines WHERE id = ?1 AND bot_id = ?2 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -431,6 +481,7 @@ pub async fn update(
         prompt,
         cron,
         timezone,
+        active,
         enabled,
         next_due_at: next_due,
         model,
@@ -439,9 +490,11 @@ pub async fn update(
     else {
         return Err(RoutineError::NotFound);
     };
+    let hours = active.hours();
     let schedule = Schedule::parse_due(
         patch.cron.as_deref().unwrap_or(&cron),
         Some(patch.timezone.as_deref().unwrap_or(&timezone)),
+        patch.active_hours.unwrap_or(hours),
         now,
     )?;
     let new_name = patch.name.map_or(name.clone(), |n| n.as_str().to_owned());
@@ -451,7 +504,9 @@ pub async fn update(
     let new_enabled = patch.enabled.unwrap_or(enabled);
     let new_model = patch.model.unwrap_or_else(|| setting(model, requested));
     let (model, requested_model) = columns(&new_model);
-    let rescheduled = schedule.cron() != cron || schedule.timezone() != timezone;
+    let rescheduled =
+        schedule.cron() != cron || schedule.timezone() != timezone || schedule.hours() != hours;
+    let active = ActiveColumns::from_hours(schedule.hours());
     let next_due = if !new_enabled {
         None
     } else if rescheduled || !enabled {
@@ -477,12 +532,14 @@ pub async fn update(
         "UPDATE routines SET name = ?2, prompt = ?3, cron = ?4, timezone = ?5, enabled = ?6,
              next_due_at = ?7, prompt_revision = prompt_revision + (prompt IS NOT ?3),
              model = ?8, requested_model = ?9,
+             active_days = ?11, active_start = ?12, active_end = ?13,
              failed_runs = CASE WHEN ?10 OR (?6 AND NOT enabled) THEN 0 ELSE failed_runs END,
              paused_reason = CASE WHEN ?10 OR ?6 THEN NULL ELSE paused_reason END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
          WHERE id = ?1 AND (name IS NOT ?2 OR prompt IS NOT ?3 OR cron IS NOT ?4
              OR timezone IS NOT ?5 OR enabled IS NOT ?6 OR next_due_at IS NOT ?7
              OR model IS NOT ?8 OR requested_model IS NOT ?9
+             OR active_days IS NOT ?11 OR active_start IS NOT ?12 OR active_end IS NOT ?13
              OR (?10 AND (failed_runs <> 0 OR paused_reason IS NOT NULL)))",
     )
     .bind(id)
@@ -495,6 +552,9 @@ pub async fn update(
     .bind(model)
     .bind(requested_model)
     .bind(patch.dismiss_failures)
+    .bind(active.active_days)
+    .bind(active.active_start)
+    .bind(active.active_end)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -632,6 +692,8 @@ struct EndedRun {
     prompt: String,
     prompt_revision: i64,
     timezone: String,
+    #[sqlx(flatten)]
+    active: ActiveColumns,
     enabled: bool,
     next_due_at: Option<DateTime<Utc>>,
     model: Option<Json<RoutineModel>>,
@@ -652,6 +714,7 @@ async fn review(
         "SELECT rr.routine_id, rr.turn_id, t.turn_no, rr.due_at, rr.retry_of IS NOT NULL AS retry,
                 t.status, t.error_code, t.error_message,
                 r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.timezone,
+                r.active_days, r.active_start, r.active_end,
                 r.enabled, r.next_due_at, r.model, r.failed_runs,
                 r.deleted_at IS NULL AND b.status = 'active' AS live,
                 NOT b.cancel_pending AND NOT EXISTS (
@@ -695,7 +758,12 @@ async fn review(
             Some(Json(own)) => RunOn::Own(own, run.routine_id),
             None => RunOn::Bot,
         };
-        let queued = if run.may_retry {
+        let in_hours = run.active.hours().is_none_or(|hours| {
+            run.timezone
+                .parse::<chrono_tz::Tz>()
+                .is_ok_and(|tz| hours.contains(&now.with_timezone(&tz)))
+        });
+        let queued = if run.may_retry && in_hours {
             queue_saved_task(
                 &mut tx,
                 registry,
@@ -883,6 +951,8 @@ struct Due {
     prompt_revision: i64,
     cron: String,
     timezone: String,
+    #[sqlx(flatten)]
+    active: ActiveColumns,
     model: Option<Json<RoutineModel>>,
     due_at: String,
 }
@@ -1019,7 +1089,7 @@ async fn admit(
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row: Option<Due> = sqlx::query_as(
         "SELECT r.bot_id, r.conversation_id, r.name, r.prompt, r.prompt_revision, r.cron, r.timezone,
-                r.model, r.next_due_at AS due_at
+                r.active_days, r.active_start, r.active_end, r.model, r.next_due_at AS due_at
          FROM routines r JOIN bots b ON b.id = r.bot_id
          WHERE r.id = ?1 AND r.next_due_at IS NOT NULL AND r.next_due_at <= ?2
            AND b.status = 'active' AND NOT b.cancel_pending
@@ -1039,20 +1109,26 @@ async fn admit(
         prompt_revision,
         cron,
         timezone,
+        active,
         model,
         due_at,
     }) = row
     else {
         return Ok(false);
     };
-    let next = Schedule::parse(&cron, Some(&timezone))
-        .ok()
-        .and_then(|schedule| schedule.next_after(now));
+    let schedule = Schedule::parse(&cron, Some(&timezone), active.hours()).ok();
+    let next = schedule.as_ref().and_then(|s| s.next_after(now));
     sqlx::query("UPDATE routines SET next_due_at = ?2 WHERE id = ?1")
         .bind(id)
         .bind(next.map(ts))
         .execute(&mut *tx)
         .await?;
+    // Admitted late (the server was down or busy) after its active hours
+    // closed: the next occurrence inside them stands in for it.
+    if schedule.is_some_and(|s| !s.allows(now)) {
+        tx.commit().await?;
+        return Ok(false);
+    }
     let recorded: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM routine_runs WHERE routine_id = ?1 AND due_at = ?2)",
     )

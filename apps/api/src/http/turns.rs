@@ -101,6 +101,9 @@ struct SendBody {
     /// The outgoing draft open in the app, with the owner's unsaved edits.
     #[serde(default)]
     open_draft: Option<crate::db::outgoing_drafts::Attachment>,
+    /// The IANA time zone of the owner's device; new routines use it.
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 async fn send(
@@ -108,6 +111,12 @@ async fn send(
     ApiPath(bot_id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<SendBody>,
 ) -> Result<Response, ApiError> {
+    if let Some(zone) = body.timezone.as_deref()
+        && zone.parse::<chrono_tz::Tz>().is_ok()
+        && let Err(err) = crate::db::installation::set_owner_timezone(&state.db, zone).await
+    {
+        tracing::warn!(error = %err, "recording the owner's time zone failed");
+    }
     let accepted = accept_send(&state, bot_id, body, false).await?;
     let status = if accepted.created {
         StatusCode::ACCEPTED
@@ -137,6 +146,7 @@ pub(super) async fn introduce(
             provider_id: None,
             reaction: None,
             open_draft: None,
+            timezone: None,
         },
         true,
     )

@@ -524,6 +524,9 @@ impl Client {
     ) -> Result<Sent, ClientError> {
         let mut body =
             json!({ "request_id": request_id, "text": text, "provider_id": provider_id });
+        if let Ok(zone) = iana_time_zone::get_timezone() {
+            body["timezone"] = json!(zone);
+        }
         if let Some(reaction) = reaction {
             body["reaction"] = json!(reaction);
         }

@@ -2135,6 +2135,7 @@ dependencies = [
  "else-tailnet",
  "futures-util",
  "gpui-kit",
+ "iana-time-zone",
  "image",
  "libc",
  "markdown",

@@ -177,6 +177,139 @@ async fn bot_edits_leave_one_ordered_notice_in_live_and_paged_history() {
 }
 
 #[tokio::test]
+async fn new_routines_default_to_working_hours_in_the_desktop_time_zone() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let sent = h
+        .app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/turns"),
+            Some(json!({ "request_id": Uuid::new_v4(), "text": SLOW,
+                         "timezone": "America/New_York" })),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    let turn: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let (_, token) = h.started(turn).await;
+
+    let called = tool(
+        &h.app,
+        &token,
+        "routine_create",
+        json!({ "name": "Inbox", "prompt": "Triage my inbox.", "cron": "*/30 * * * *" }),
+    )
+    .await;
+    assert!(!called.error, "{}", called.body);
+    assert!(
+        called.result["next"]
+            .as_str()
+            .unwrap()
+            .contains("Monday to Friday, 08:00 to 18:00"),
+        "the bot is told to mention the default hours"
+    );
+    let routine = &called.result["routine"];
+    assert_eq!(routine["timezone"], "America/New_York");
+    assert_eq!(
+        routine["active_hours"],
+        json!({ "days": ["mon", "tue", "wed", "thu", "fri"], "start": "08:00", "end": "18:00" })
+    );
+    let zone: chrono_tz::Tz = "America/New_York".parse().unwrap();
+    let local = at(&routine["next_run_at"]).with_timezone(&zone);
+    use chrono::{Datelike, Timelike};
+    assert!(local.weekday().num_days_from_monday() < 5, "{local}");
+    assert!((8..18).contains(&local.hour()), "{local}");
+
+    let id = routine["id"].clone();
+
+    sqlx::query("UPDATE installation SET owner_timezone = 'Europe/Paris'")
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+    let retry = tool(
+        &h.app,
+        &token,
+        "routine_create",
+        json!({ "name": "Inbox", "prompt": "Triage my inbox.", "cron": "*/30 * * * *" }),
+    )
+    .await;
+    assert!(!retry.error, "{}", retry.body);
+    assert_eq!(
+        retry.result["created"], false,
+        "a retry survives a new desktop zone"
+    );
+    assert_eq!(retry.result["routine"]["timezone"], "America/New_York");
+
+    let nested = tool(
+        &h.app,
+        &token,
+        "routine_create",
+        json!({ "name": "Nested", "prompt": "x", "cron": "0 9 * * *", "active_hours":
+                { "days": ["mon"], "start": "08:00", "end": "18:00", "timezone": "UTC" } }),
+    )
+    .await;
+    assert!(
+        nested.error,
+        "unknown fields inside active_hours are refused"
+    );
+
+    let raw_id = id.as_str().unwrap().to_owned();
+    sqlx::query("UPDATE routines SET next_due_at = '2030-01-04T22:59:00.000+00:00' WHERE id = ?1")
+        .bind(raw_id.parse::<Uuid>().unwrap())
+        .execute(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        fire(&h.app, at(&json!("2030-01-05T17:00:00Z"))).await,
+        0,
+        "Friday 17:59 caught up on Saturday does not run"
+    );
+    assert!(runs(&h.app, &raw_id).await.is_empty());
+    let listed = owner_routines(&h.app, &main).await;
+    assert_eq!(
+        at(&listed[0]["next_run_at"]),
+        at(&json!("2030-01-07T13:00:00Z")),
+        "Monday 08:00 in New York"
+    );
+
+    let nights = tool(
+        &h.app,
+        &token,
+        "routine_create",
+        json!({ "name": "Backup", "prompt": "Check the backup.", "cron": "0 23 * * *" }),
+    )
+    .await;
+    assert!(nights.error, "a night-only schedule needs explicit hours");
+    assert!(
+        nights.result.as_str().unwrap().contains("active_hours"),
+        "{}",
+        nights.body
+    );
+
+    let always = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": id, "active_hours": "always" }),
+    )
+    .await;
+    assert!(!always.error, "{}", always.body);
+    assert_eq!(always.result["routine"]["active_hours"], Value::Null);
+    let weekend = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": id, "active_hours":
+                { "days": ["sat", "sun"], "start": "10:00", "end": "12:00" } }),
+    )
+    .await;
+    assert!(!weekend.error, "{}", weekend.body);
+    let local = at(&weekend.result["routine"]["next_run_at"]).with_timezone(&zone);
+    assert!(local.weekday().num_days_from_monday() >= 5, "{local}");
+    assert!((10..12).contains(&local.hour()), "{local}");
+}
+
+#[tokio::test]
 async fn a_bot_manages_its_own_routines_over_mcp() {
     let h = harness().await;
     let main = h.app.main_bot().await;
@@ -242,7 +375,7 @@ async fn a_bot_manages_its_own_routines_over_mcp() {
         &h.app,
         &token,
         json!({ "name": "Paris", "prompt": "Check the agenda.", "cron": "30 7 * * 1-5",
-                "timezone": "Europe/Paris" }),
+                "timezone": "Europe/Paris", "active_hours": "always" }),
     )
     .await;
     assert_eq!(paris["timezone"], "Europe/Paris");
@@ -383,7 +516,8 @@ async fn a_new_bot_takes_over_a_routine_without_the_owner_repeating_it() {
     let h = harness().await;
     let main = h.app.main_bot().await;
     let args = json!({ "name": "Morning digest", "prompt": "Summarize the owner's unread mail.",
-                       "cron": "30 7 * * 1-5", "timezone": "Europe/Paris" });
+                       "cron": "30 7 * * 1-5", "timezone": "Europe/Paris",
+                       "active_hours": "always" });
     let (setup, token) = h.running(&main, GATE).await;
     let old = create(&h.app, &token, args.clone()).await;
     h.release(setup).await;
@@ -865,7 +999,7 @@ async fn failing_routine(h: &Harness, bot: &str, prompt: &str) -> (String, DateT
     let routine = create(
         &h.app,
         &token,
-        json!({ "name": "Tickets", "prompt": prompt, "cron": "0 * * * *" }),
+        json!({ "name": "Tickets", "prompt": prompt, "cron": "0 * * * *", "active_hours": "always" }),
     )
     .await;
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
@@ -1119,7 +1253,7 @@ async fn overlapping_occurrences_are_skipped_and_missed_ones_coalesce() {
         &h.app,
         &token,
         json!({ "name": "Slow", "prompt": "[synthetic:slow] a long routine report for overlap checks.",
-                "cron": "0 * * * *" }),
+                "cron": "0 * * * *", "active_hours": "always" }),
     )
     .await;
     let id = routine["id"].as_str().unwrap().to_owned();
@@ -1337,12 +1471,9 @@ async fn stop_deletion_and_maintenance_hold_runs() {
     let h = harness().await;
     let main = h.app.main_bot().await;
     let (setup, token) = h.owner_turn(&main).await;
-    let routine = create(
-        &h.app,
-        &token,
-        digest("[synthetic:slow] a long routine report for stop checks."),
-    )
-    .await;
+    let mut args = digest("[synthetic:slow] a long routine report for stop checks.");
+    args["active_hours"] = json!("always");
+    let routine = create(&h.app, &token, args).await;
     let id = routine["id"].as_str().unwrap().to_owned();
     h.app.wait_turn(&setup.to_string(), &["completed"]).await;
 

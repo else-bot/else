@@ -348,6 +348,15 @@ pub struct LastRun {
     pub error: Option<TurnError>,
 }
 
+/// The days (`mon` to `sun`) and the span, end excluded, when a routine's
+/// runs may start, in its time zone.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ActiveHours {
+    pub days: Vec<String>,
+    pub start: String,
+    pub end: String,
+}
+
 /// A bot's saved task, run on a cron schedule in its conversation.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Routine {
@@ -356,6 +365,9 @@ pub struct Routine {
     pub prompt: String,
     pub cron: String,
     pub timezone: String,
+    /// When runs may start; `None` is any time.
+    #[serde(default)]
+    pub active_hours: Option<ActiveHours>,
     pub enabled: bool,
     #[serde(default)]
     pub model: Option<crate::api::ProfileChoice>,
