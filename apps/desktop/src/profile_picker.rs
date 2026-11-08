@@ -10,6 +10,9 @@ use gpui_kit::*;
 use crate::api::{Capabilities, ProfileChoice, ProviderInfo};
 
 const FAST: &str = "priority";
+const STOP_PAD: f32 = 4.;
+const STOP_DOT: f32 = 16.;
+const TRACK: f32 = 3.;
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
@@ -267,29 +270,15 @@ impl ProfilePicker {
                             .w_full()
                             .min_w_0()
                             .gap_2()
-                            .items_start()
                             .child(
-                                v_flex()
+                                div()
                                     .flex_1()
                                     .min_w_0()
-                                    .items_start()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
-                                            .truncate()
-                                            .child(model_label(model)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_family(theme.mono_font_family.clone())
-                                            .text_color(theme.muted_foreground)
-                                            .truncate()
-                                            .child(model.to_owned()),
-                                    ),
+                                    .truncate()
+                                    .text_sm()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(theme.foreground)
+                                    .child(model.to_owned()),
                             )
                             .child(radio(on, cx)),
                     )
@@ -321,19 +310,12 @@ impl ProfilePicker {
                         .gap_2()
                         .child(
                             div()
-                                .flex_none()
-                                .text_sm()
-                                .text_color(theme.foreground)
-                                .child(model_label(model)),
-                        )
-                        .child(
-                            div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_xs()
+                                .text_sm()
                                 .font_family(theme.mono_font_family.clone())
-                                .text_color(theme.muted_foreground)
+                                .text_color(theme.foreground)
                                 .child((*model).to_owned()),
                         )
                         .children(on.then(|| {
@@ -466,7 +448,7 @@ impl ProfilePicker {
                 .flex_basis(px(0.))
                 .min_w_0()
                 .h_auto()
-                .py_1()
+                .py(px(STOP_PAD))
                 .toggled(on)
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .child(
@@ -476,7 +458,7 @@ impl ProfilePicker {
                         .gap_1p5()
                         .child(
                             div()
-                                .size(px(16.))
+                                .size(px(STOP_DOT))
                                 .rounded_full()
                                 .border_2()
                                 .border_color(if i <= index {
@@ -511,20 +493,20 @@ impl ProfilePicker {
             .child(
                 div()
                     .absolute()
-                    .top(px(10.5))
+                    .top(px(STOP_PAD + (STOP_DOT - TRACK) / 2.))
                     .left(edge)
                     .right(edge)
-                    .h(px(3.))
+                    .h(px(TRACK))
                     .rounded_full()
                     .bg(theme.border),
             )
             .child(
                 div()
                     .absolute()
-                    .top(px(10.5))
+                    .top(px(STOP_PAD + (STOP_DOT - TRACK) / 2.))
                     .left(edge)
                     .w(relative(index as f32 / count))
-                    .h(px(3.))
+                    .h(px(TRACK))
                     .rounded_full()
                     .bg(theme.primary),
             )
