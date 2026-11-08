@@ -417,7 +417,7 @@ impl Manager {
             Operation::Command(Command::Conversations) => {
                 let list = store::destinations(&self.db, c.id).await?;
                 Ok(
-                    json!({"destinations":list.into_iter().filter(|d|access.destinations.contains(&d.id)).collect::<Vec<_>>(),"instructions":access.instructions}),
+                    json!({"destinations":list.into_iter().filter(|d|access.allows(&d.id)).collect::<Vec<_>>()}),
                 )
             }
             Operation::Command(Command::History {

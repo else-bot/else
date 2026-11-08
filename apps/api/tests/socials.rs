@@ -27,17 +27,12 @@ fn key() -> SecretKey {
 fn token() -> Token {
     Token::parse("private-native-social-test-token".into()).unwrap()
 }
-fn access(destinations: &[&str]) -> BindingInput {
-    BindingInput {
-        destinations: destinations.iter().map(|s| s.to_string()).collect(),
-        permissions: Permissions {
-            read: true,
-            write: true,
-            send: true,
-            wake: true,
-        },
-        wake_policy: WakePolicy::Mentions,
-        instructions: "Only help when mentioned. Draft before sending.".into(),
+fn watch(c: Uuid, destination: Option<&str>, wake: Wake) -> TriggerInput {
+    TriggerInput {
+        connection_id: c,
+        destination: destination.map(str::to_owned),
+        wake,
+        instructions: "Summarize what the team asks and draft replies for my approval.".into(),
     }
 }
 async fn account(db: &TestDb, name: &str) -> Connection {
@@ -172,97 +167,99 @@ async fn tokens_are_encrypted_identity_bound_and_never_public() {
     ));
 }
 
+/// A trigger as a bot would have set it for an owner request.
+async fn trigger_row(
+    db: &TestDb,
+    c: Uuid,
+    bot: Uuid,
+    destination: Option<&str>,
+    wake: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO social_triggers(id,connection_id,bot_id,destination,wake,instructions) VALUES(?1,?2,?3,?4,?5,'Tell me what the team asks.')")
+        .bind(id)
+        .bind(c)
+        .bind(bot)
+        .bind(destination)
+        .bind(wake)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn authorize(
+    db: &TestDb,
+    c: &Connection,
+    bot: Uuid,
+    turn: Uuid,
+    chat: Option<&str>,
+    write: bool,
+) -> Result<Access, Error> {
+    store::authorize(
+        &mut db.pool.acquire().await.unwrap(),
+        c,
+        bot,
+        turn,
+        chat,
+        write,
+        false,
+    )
+    .await
+}
+
 #[tokio::test]
-async fn grants_require_real_destinations_and_scope_external_turns() {
+async fn owner_work_uses_any_chat_and_a_woken_turn_reads_only_its_own() {
     let db = TestDb::migrated().await;
     let c = account(&db, "scope").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
     let owner = turn(&db, bot, "user").await;
-    assert!(
-        store::bind(&db.pool, c.id, bot, access(&["999"]))
-            .await
-            .is_err()
-    );
-    let binding = store::bind(&db.pool, c.id, bot, access(&["100", "200"]))
+    let trigger = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
         .await
         .unwrap();
     let c = store::connection(&db.pool, c.id).await.unwrap();
-    store::authorize(
-        &mut db.pool.acquire().await.unwrap(),
-        &c,
-        bot,
-        owner,
-        Some("100"),
-        false,
-        false,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        authorize(&db, &c, bot, owner, None, false).await.unwrap(),
+        Access::Owner
+    );
+    authorize(&db, &c, bot, owner, Some("200"), true)
+        .await
+        .expect("owner work edits any chat");
+    authorize(&db, &c, bot, owner, Some("not-seen-yet"), false)
+        .await
+        .expect("owner work may name a chat the bot has not seen");
     sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
         .bind(owner)
         .execute(&db.pool)
         .await
         .unwrap();
     let external = turn(&db, bot, "connector").await;
-    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id,status,turn_id) VALUES(?1,'e',?2,?3,'100','1','delivered',?4)").bind(c.id).bind(bot).bind(binding.id).bind(external).execute(&db.pool).await.unwrap();
-    let scoped = store::authorize(
-        &mut db.pool.acquire().await.unwrap(),
-        &c,
-        bot,
-        external,
-        None,
-        false,
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(scoped.destinations, ["100"]);
-    store::authorize(
-        &mut db.pool.acquire().await.unwrap(),
-        &c,
-        bot,
-        external,
-        Some("100"),
-        false,
-        false,
-    )
-    .await
-    .unwrap();
-    assert!(
-        store::authorize(
-            &mut db.pool.acquire().await.unwrap(),
-            &c,
-            bot,
-            external,
-            Some("200"),
-            false,
-            false
-        )
-        .await
-        .is_err()
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id,status,turn_id) VALUES(?1,'e',?2,?3,'100','1','delivered',?4)").bind(c.id).bind(bot).bind(trigger.id).bind(external).execute(&db.pool).await.unwrap();
+    assert_eq!(
+        authorize(&db, &c, bot, external, None, false)
+            .await
+            .unwrap(),
+        Access::Woken(vec!["100".into()])
     );
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
+    authorize(&db, &c, bot, external, Some("100"), false)
         .await
         .unwrap();
-    let fresh = store::connection(&db.pool, c.id).await.unwrap();
     assert!(
-        store::authorize(
-            &mut db.pool.acquire().await.unwrap(),
-            &fresh,
-            bot,
-            external,
-            Some("100"),
-            false,
-            false
-        )
-        .await
-        .is_err()
+        authorize(&db, &c, bot, external, Some("200"), false)
+            .await
+            .is_err()
+    );
+    assert!(
+        authorize(&db, &c, bot, external, Some("100"), true)
+            .await
+            .is_err(),
+        "a woken turn only reads"
     );
 }
 
 #[tokio::test]
-async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
+async fn setup_needs_only_its_provider_connection_and_requeues() {
     let db = TestDb::migrated().await;
     let bot = bot(&db).await;
     let turn = turn(&db, bot, "user").await;
@@ -270,21 +267,12 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
         .await
         .unwrap();
     let c = account(&db, "setup").await;
-    destinations(&db, c.id).await;
-    let mut invalid = access(&["100"]);
-    invalid.permissions = Permissions::default();
-    assert!(
-        store::settle_setup(&db.pool, request.id, Some((c.id, invalid)))
-            .await
-            .is_err()
-    );
-    assert!(store::bindings(&db.pool, c.id).await.unwrap().is_empty());
     sqlx::query("UPDATE turns SET status='waiting' WHERE id=?1")
         .bind(turn)
         .execute(&db.pool)
         .await
         .unwrap();
-    let done = store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
+    let done = store::settle_setup(&db.pool, request.id, Some(c.id))
         .await
         .unwrap();
     assert_eq!(done.status, "connected");
@@ -295,62 +283,18 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
         .unwrap();
     assert_eq!(status, "queued");
     assert_eq!(
-        store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
+        store::settle_setup(&db.pool, request.id, Some(c.id))
             .await
             .unwrap()
             .status,
-        "connected"
+        "connected",
+        "a retry of the same completion changes nothing"
     );
-    let generation = store::connection(&db.pool, c.id).await.unwrap().generation;
-    store::settle_setup(&db.pool, request.id, Some((c.id, access(&["100"]))))
-        .await
-        .unwrap();
-    assert_eq!(
-        store::connection(&db.pool, c.id).await.unwrap().generation,
-        generation
-    );
-}
-
-#[tokio::test]
-async fn setup_completes_before_any_chat_is_chosen_and_grants_no_chat() {
-    let db = TestDb::migrated().await;
-    let bot = bot(&db).await;
-    let turn = turn(&db, bot, "user").await;
-    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Post updates")
-        .await
-        .unwrap();
-    let c = account(&db, "no-chats-yet").await;
-    let done = store::settle_setup(&db.pool, request.id, Some((c.id, access(&[]))))
-        .await
-        .unwrap();
-    assert_eq!(done.status, "connected");
-    let c = store::connection(&db.pool, c.id).await.unwrap();
-    let granted = store::authorize(
-        &mut db.pool.acquire().await.unwrap(),
-        &c,
-        bot,
-        turn,
-        None,
-        false,
-        false,
-    )
-    .await
-    .expect("the bot discovers the connection");
-    assert!(granted.destinations.is_empty());
-    destinations(&db, c.id).await;
     assert!(
-        store::authorize(
-            &mut db.pool.acquire().await.unwrap(),
-            &c,
-            bot,
-            turn,
-            Some("100"),
-            false,
-            false
-        )
-        .await
-        .is_err(),
-        "a chat that arrives later stays excluded until the owner chooses it"
+        store::settle_setup(&db.pool, request.id, None)
+            .await
+            .is_err(),
+        "a settled setup cannot be cancelled"
     );
 }
 
@@ -360,41 +304,92 @@ async fn an_external_turn_sees_no_connection_it_was_not_delivered_from() {
     let c = account(&db, "unrelated").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
     let external = turn(&db, bot, "connector").await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     assert!(
-        store::authorize(
-            &mut db.pool.acquire().await.unwrap(),
-            &c,
-            bot,
-            external,
-            None,
-            false,
-            false
-        )
-        .await
-        .is_err(),
-        "an incoming message elsewhere cannot read this connection's instructions"
+        authorize(&db, &c, bot, external, None, false)
+            .await
+            .is_err(),
+        "an incoming message elsewhere cannot read this connection"
     );
 }
 
 #[tokio::test]
-async fn a_binding_without_chats_does_not_request_message_content() {
+async fn only_an_enabled_every_message_trigger_requests_message_content() {
     let db = TestDb::migrated().await;
-    let c = account(&db, "no-chats-wake-all").await;
+    let c = account(&db, "intents").await;
     let bot = bot(&db).await;
-    let mut empty = access(&[]);
-    empty.wake_policy = WakePolicy::All;
-    store::bind(&db.pool, c.id, bot, empty).await.unwrap();
-    assert!(
-        !store::connection(&db.pool, c.id)
+    let owner = turn(&db, bot, "user").await;
+    let content = || async {
+        store::connection(&db.pool, c.id)
             .await
             .unwrap()
-            .message_content,
-        "no chat can wake the bot, so the shared connection keeps its intents"
+            .message_content
+    };
+    store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::Mentions))
+        .await
+        .unwrap();
+    assert!(!content().await, "a mention needs no message content");
+    let all = store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::All))
+        .await
+        .unwrap();
+    assert!(content().await);
+    store::set_trigger_enabled(&db.pool, bot, all.id, false)
+        .await
+        .unwrap();
+    assert!(!content().await, "a paused trigger wakes nothing");
+}
+
+#[tokio::test]
+async fn a_bot_sets_its_own_triggers_only_for_owner_work_and_one_per_chat() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "triggers").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    let external = turn(&db, bot, "connector").await;
+    assert!(
+        store::set_trigger(&db.pool, external, &watch(c.id, Some("100"), Wake::All))
+            .await
+            .is_err(),
+        "an incoming message cannot set a trigger"
+    );
+    sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
+        .bind(external)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let owner = turn(&db, bot, "user").await;
+    let first = store::set_trigger(&db.pool, owner, &watch(c.id, Some("100"), Wake::All))
+        .await
+        .unwrap();
+    assert_eq!(first.destination_name.as_deref(), Some("Team"));
+    let mut replaced = watch(c.id, Some("100"), Wake::Mentions);
+    replaced.instructions = "Only answer release questions.".into();
+    let second = store::set_trigger(&db.pool, owner, &replaced)
+        .await
+        .unwrap();
+    assert_eq!(second.id, first.id, "the same chat replaces its trigger");
+    assert_eq!(
+        (second.wake, second.instructions.as_str()),
+        (Wake::Mentions, "Only answer release questions.")
+    );
+    let any = store::set_trigger(&db.pool, owner, &watch(c.id, None, Wake::Mentions))
+        .await
+        .unwrap();
+    assert_ne!(any.id, first.id);
+    let listed = store::triggers(&mut db.pool.acquire().await.unwrap(), bot)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        store::delete_trigger(&db.pool, bot, any.id).await.unwrap(),
+        c.id
+    );
+    assert!(
+        store::delete_trigger(&db.pool, Uuid::new_v4(), first.id)
+            .await
+            .is_err(),
+        "only its bot deletes it"
     );
 }
 
@@ -405,9 +400,6 @@ async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain()
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
     let turn = turn(&db, bot, "user").await;
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
     let c = store::connection(&db.pool, c.id).await.unwrap();
     let id = Uuid::new_v4();
     let payload = json!({"operation":"delete","destination":"100","message_id":"1"});
@@ -489,9 +481,7 @@ async fn incoming_delivery_is_deduplicated_and_telegram_history_pages_numericall
     let c = account(&db, "history").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
+    trigger_row(&db, c.id, bot, Some("100"), "mentions").await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     for id in 1..=11 {
         let event = Incoming {
@@ -630,9 +620,6 @@ async fn changing_generation_cancels_inflight_sdk_wait_and_records_uncertainty()
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
     let turn = turn(&db, bot, "user").await;
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
     let manager = Arc::new(Manager::with_transport(
@@ -687,9 +674,6 @@ async fn stopped_turn_cancels_sdk_wait_without_connection_change() {
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
     let turn = turn(&db, bot, "user").await;
-    store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
     let fake = Arc::new(Fake::default());
     fake.blocked.store(true, Ordering::SeqCst);
     let manager = Arc::new(Manager::with_transport(
@@ -863,19 +847,10 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
         .parse()
         .unwrap();
     destinations(&db, connection).await;
-    let (status, binding) = http(
-        &router,
-        "PUT",
-        &format!("/v1/connectors/socials/connections/{connection}/bots/{bot}"),
-        common::TOKEN,
-        json!(access(&["100"])),
-    )
-    .await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{binding}");
     let discovery = rpc(&router, &grant, "social_connections", json!({})).await;
     assert_eq!(
-        discovery["connections"][0]["instructions"],
-        "Only help when mentioned. Draft before sending."
+        discovery["connections"][0]["destinations"][0]["id"], "100",
+        "any bot working for the owner sees the connection's chats: {discovery}"
     );
     let proposed=rpc(&router,&grant,"draft_message",json!({"platform":"telegram","account_id":connection,"destination":"100","body":"Original draft","reply_to":"10"})).await;
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
@@ -923,26 +898,24 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
 }
 
 #[tokio::test]
-async fn cancelled_setup_cannot_mutate_existing_access_or_pending_deliveries() {
+async fn cancelled_setup_cannot_complete_or_touch_pending_deliveries() {
     let db = TestDb::migrated().await;
     let bot = bot(&db).await;
     let turn = turn(&db, bot, "user").await;
     let c = account(&db, "cancelled-setup").await;
     destinations(&db, c.id).await;
-    let original = store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
+    let trigger = trigger_row(&db, c.id, bot, Some("100"), "all").await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
-    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
-        .bind(c.id).bind(bot).bind(original.id).execute(&db.pool).await.unwrap();
-    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Update access")
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) VALUES(?1,'pending',?2,?3,'100','1')")
+        .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
+    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Connect again")
         .await
         .unwrap();
     store::settle_setup(&db.pool, request.id, None)
         .await
         .unwrap();
     assert!(
-        store::settle_setup(&db.pool, request.id, Some((c.id, access(&["200"]))))
+        store::settle_setup(&db.pool, request.id, Some(c.id))
             .await
             .is_err()
     );
@@ -950,9 +923,6 @@ async fn cancelled_setup_cannot_mutate_existing_access_or_pending_deliveries() {
         store::connection(&db.pool, c.id).await.unwrap().generation,
         c.generation
     );
-    let bindings = store::bindings(&db.pool, c.id).await.unwrap();
-    assert_eq!(bindings[0].id, original.id);
-    assert_eq!(bindings[0].access.destinations, ["100"]);
     let status: String =
         sqlx::query_scalar("SELECT status FROM social_deliveries WHERE event_id='pending'")
             .fetch_one(&db.pool)
@@ -967,14 +937,12 @@ async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_mess
     let c = account(&db, "retention").await;
     destinations(&db, c.id).await;
     let bot = bot(&db).await;
-    let binding = store::bind(&db.pool, c.id, bot, access(&["100"]))
-        .await
-        .unwrap();
+    let trigger = trigger_row(&db, c.id, bot, Some("100"), "mentions").await;
     let c = store::connection(&db.pool, c.id).await.unwrap();
     sqlx::query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000) INSERT INTO social_messages(connection_id,destination,message_id,author_id,body,event_id,created_at) SELECT ?1,'100',CAST(x AS TEXT),'human','backlog',CAST(x AS TEXT),printf('2020-01-01T00:%05d',x) FROM n")
         .bind(c.id).execute(&db.pool).await.unwrap();
-    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) SELECT connection_id,event_id,?2,?3,destination,message_id FROM social_messages WHERE connection_id=?1")
-        .bind(c.id).bind(bot).bind(binding.id).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,trigger_id,destination,message_id) SELECT connection_id,event_id,?2,?3,destination,message_id FROM social_messages WHERE connection_id=?1")
+        .bind(c.id).bind(bot).bind(trigger).execute(&db.pool).await.unwrap();
     let unavailable = else_api::providers::Registry::new(vec![]);
     assert_eq!(
         else_api::socials::delivery::admit_pending(&db.pool, &unavailable, 1)
@@ -1017,4 +985,142 @@ async fn retention_expires_pending_deliveries_and_recovery_admits_remaining_mess
             .unwrap(),
         1
     );
+}
+
+fn incoming(event: &str, chat: &str, mentioned: bool, from_bot: bool) -> Incoming {
+    Incoming {
+        event_id: event.into(),
+        destination: Destination {
+            id: chat.into(),
+            name: "Chat".into(),
+            kind: "group".into(),
+            can_send: true,
+        },
+        message_id: event.into(),
+        author_id: "human".into(),
+        body: "hello".into(),
+        mentioned,
+        direct: false,
+        from_bot,
+    }
+}
+
+#[tokio::test]
+async fn a_message_wakes_only_bots_whose_enabled_trigger_matches_it() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "wake").await;
+    let (watcher, mentions, paused) = (bot(&db).await, bot(&db).await, bot(&db).await);
+    trigger_row(&db, c.id, watcher, Some("100"), "all").await;
+    trigger_row(&db, c.id, watcher, None, "all").await;
+    trigger_row(&db, c.id, mentions, None, "mentions").await;
+    let off = trigger_row(&db, c.id, paused, Some("100"), "all").await;
+    store::set_trigger_enabled(&db.pool, paused, off, false)
+        .await
+        .unwrap();
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    store::record(&db.pool, &c, &incoming("plain", "100", false, false), 1)
+        .await
+        .unwrap();
+    store::record(&db.pool, &c, &incoming("mention", "200", true, false), 2)
+        .await
+        .unwrap();
+    store::record(&db.pool, &c, &incoming("echo", "100", true, true), 3)
+        .await
+        .unwrap();
+    let woken: Vec<(String, Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT d.event_id, d.bot_id, t.destination FROM social_deliveries d
+         JOIN social_triggers t ON t.id = d.trigger_id ORDER BY d.event_id, d.bot_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let mut expected = vec![
+        ("mention".to_owned(), mentions, None),
+        ("mention".to_owned(), watcher, None),
+        ("plain".to_owned(), watcher, Some("100".to_owned())),
+    ];
+    expected.sort();
+    assert_eq!(
+        woken, expected,
+        "paused triggers and the bot's own messages wake nobody"
+    );
+}
+
+#[tokio::test]
+async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
+    use std::borrow::Cow;
+    let db = TestDb::empty().await;
+    let before = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            else_api::db::MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version < 32)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    before.run(&db.pool).await.unwrap();
+    let (watcher, reader, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    for bot in [watcher, reader] {
+        sqlx::query("INSERT INTO bots(id,name) VALUES(?1,'Old')")
+            .bind(bot)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO social_connections(id,provider,remote_id,display_name,credential_salt,credential) VALUES(?1,'telegram','1','Old bot',x'00',x'00')")
+        .bind(c).execute(&db.pool).await.unwrap();
+    let wake = r#"{"destinations":["100","200"],"permissions":{"read":true,"write":true,"send":true,"wake":true},"wake_policy":"mentions","instructions":"Answer support questions."}"#;
+    let read = r#"{"destinations":["100"],"permissions":{"read":true,"write":false,"send":false,"wake":false},"wake_policy":"never","instructions":""}"#;
+    let binding = Uuid::new_v4();
+    for (bot, id, access) in [(watcher, binding, wake), (reader, Uuid::new_v4(), read)] {
+        sqlx::query(
+            "INSERT INTO social_bindings(id,connection_id,bot_id,access) VALUES(?1,?2,?3,?4)",
+        )
+        .bind(id)
+        .bind(c)
+        .bind(bot)
+        .bind(access)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("INSERT INTO social_deliveries(connection_id,event_id,bot_id,binding_id,destination,message_id) VALUES(?1,'e',?2,?3,'100','1')")
+        .bind(c).bind(watcher).bind(binding).execute(&db.pool).await.unwrap();
+
+    else_api::db::MIGRATOR.run(&db.pool).await.unwrap();
+
+    let triggers: Vec<(Uuid, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT bot_id, destination, wake, instructions FROM social_triggers ORDER BY destination",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let answer = "Answer support questions.".to_owned();
+    assert_eq!(
+        triggers,
+        [
+            (
+                watcher,
+                Some("100".into()),
+                "mentions".into(),
+                answer.clone()
+            ),
+            (watcher, Some("200".into()), "mentions".into(), answer),
+        ],
+        "only access that woke the bot becomes a trigger"
+    );
+    let delivery: String = sqlx::query_scalar("SELECT status FROM social_deliveries")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(delivery, "revoked");
+    let bindings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name='social_bindings'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(bindings, 0);
 }

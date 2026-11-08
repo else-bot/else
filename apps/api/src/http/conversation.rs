@@ -77,6 +77,7 @@ async fn snapshot(
         "activity": activity_json(bot),
         "older_before_seq": snapshot.older_before_seq,
         "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
+        "social_triggers": snapshot.social_triggers,
     })))
 }
 

@@ -108,65 +108,83 @@ pub struct Destination {
     pub kind: String,
     pub can_send: bool,
 }
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Permissions {
-    pub read: bool,
-    pub write: bool,
-    pub send: bool,
-    pub wake: bool,
+/// What one turn may do on a connection. Work for the owner may read any
+/// chat and request mutations, each still approved per call. A turn an
+/// incoming message started may only read the chats that woke it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Access {
+    Owner,
+    Woken(Vec<String>),
 }
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+impl Access {
+    pub fn allows(&self, destination: &str) -> bool {
+        match self {
+            Self::Owner => true,
+            Self::Woken(chats) => chats.iter().any(|chat| chat == destination),
+        }
+    }
+    pub fn mutates(&self) -> bool {
+        matches!(self, Self::Owner)
+    }
+}
+
+/// When a trigger wakes its bot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
-pub enum WakePolicy {
-    #[default]
-    Never,
+#[sqlx(rename_all = "lowercase")]
+pub enum Wake {
+    /// A mention of the bot, or any direct message.
     Mentions,
     All,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+
+/// A bot's own rule to wake on incoming messages, set for an owner request.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Trigger {
+    pub id: Uuid,
+    pub connection_id: Uuid,
+    pub bot_id: Uuid,
+    pub provider: Provider,
+    pub connection_name: String,
+    pub username: Option<String>,
+    /// `None` wakes on any chat the platform delivers.
+    pub destination: Option<String>,
+    pub destination_name: Option<String>,
+    pub wake: Wake,
+    pub instructions: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BindingInput {
-    pub destinations: Vec<String>,
-    pub permissions: Permissions,
+pub struct TriggerInput {
+    pub connection_id: Uuid,
     #[serde(default)]
-    pub wake_policy: WakePolicy,
-    #[serde(default)]
+    pub destination: Option<String>,
+    pub wake: Wake,
     pub instructions: String,
 }
-impl BindingInput {
+impl TriggerInput {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.destinations.len() > 100
-            || self
-                .destinations
-                .iter()
-                .any(|s| s.is_empty() || s.len() > 100 || s.chars().any(char::is_control))
-        {
-            return Err(Error::Invalid("Choose at most 100 valid destinations."));
-        }
-        if self.instructions.len() > 8000 || self.instructions.contains('\0') {
-            return Err(Error::Invalid("Instructions must be at most 8000 bytes."));
-        }
-        let p = &self.permissions;
-        if (!p.read && (p.write || p.send || p.wake || self.wake_policy != WakePolicy::Never))
-            || (p.send && !p.write)
-            || (p.wake && self.wake_policy == WakePolicy::Never)
-            || (!p.wake && self.wake_policy != WakePolicy::Never)
+        if self
+            .destination
+            .as_deref()
+            .is_some_and(|d| d.is_empty() || d.len() > 100 || d.chars().any(char::is_control))
         {
             return Err(Error::Invalid(
-                "Write, send and wake require read; send requires write. Wake must match its policy.",
+                "Use a chat ID from social_connections, or omit destination for any chat.",
+            ));
+        }
+        let instructions = self.instructions.trim();
+        if instructions.is_empty() || instructions.len() > 4000 || instructions.contains('\0') {
+            return Err(Error::Invalid(
+                "Describe what to do on a match in 1 to 4000 bytes.",
             ));
         }
         Ok(())
     }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Binding {
-    pub id: Uuid,
-    pub connection_id: Uuid,
-    pub bot_id: Uuid,
-    #[serde(flatten)]
-    pub access: BindingInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

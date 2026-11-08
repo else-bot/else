@@ -34,8 +34,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(destinations),
         )
         .route(
-            "/connectors/socials/connections/{id}/bots/{bot}",
-            put(binding).delete(revoke),
+            "/bots/{bot}/social-triggers/{id}",
+            axum::routing::patch(toggle_trigger).delete(delete_trigger),
         )
         .route("/connectors/socials/setups/{id}/complete", post(complete))
         .route(
@@ -75,11 +75,8 @@ async fn detail(
     State(s): State<Arc<AppState>>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let (connection, bindings) =
-        tokio::join!(store::connection(&s.db, id), store::bindings(&s.db, id));
-    Ok(Json(
-        json!({"connection":connection.map_err(error)?,"bindings":bindings.map_err(error)?}),
-    ))
+    let connection = store::connection(&s.db, id).await.map_err(error)?;
+    Ok(Json(json!({ "connection": connection })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,30 +166,40 @@ async fn destinations(
     let list = manager(&s)?.discover(id).await.map_err(error)?;
     Ok(Json(json!({"destinations":list})))
 }
-async fn binding(
-    State(s): State<Arc<AppState>>,
-    ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
-    ApiJson(input): ApiJson<BindingInput>,
-) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
-    let binding = store::bind(&s.db, id, bot, input).await.map_err(error)?;
-    m.changed(id).await;
-    Ok(Json(json!({"binding":binding})))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Toggle {
+    enabled: bool,
 }
-async fn revoke(
+async fn toggle_trigger(
     State(s): State<Arc<AppState>>,
-    ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
+    ApiPath((bot, id)): ApiPath<(Uuid, Uuid)>,
+    ApiJson(input): ApiJson<Toggle>,
 ) -> Result<Json<Value>, ApiError> {
-    let m = manager(&s)?;
-    store::revoke(&s.db, id, bot).await.map_err(error)?;
-    m.changed(id).await;
-    Ok(Json(json!({"revoked":true})))
+    super::turns::active_bot(&s, bot).await?;
+    let trigger = store::set_trigger_enabled(&s.db, bot, id, input.enabled)
+        .await
+        .map_err(error)?;
+    if let Some(m) = s.socials.as_ref() {
+        m.changed(trigger.connection_id).await;
+    }
+    Ok(Json(json!({"trigger":trigger})))
+}
+async fn delete_trigger(
+    State(s): State<Arc<AppState>>,
+    ApiPath((bot, id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    super::turns::active_bot(&s, bot).await?;
+    let connection = store::delete_trigger(&s.db, bot, id).await.map_err(error)?;
+    if let Some(m) = s.socials.as_ref() {
+        m.changed(connection).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Complete {
     connection_id: Uuid,
-    access: BindingInput,
 }
 async fn complete(
     State(s): State<Arc<AppState>>,
@@ -200,7 +207,7 @@ async fn complete(
     ApiJson(input): ApiJson<Complete>,
 ) -> Result<Json<Value>, ApiError> {
     let m = manager(&s)?;
-    let setup = store::settle_setup(&s.db, id, Some((input.connection_id, input.access)))
+    let setup = store::settle_setup(&s.db, id, Some(input.connection_id))
         .await
         .map_err(error)?;
     m.changed(input.connection_id).await;

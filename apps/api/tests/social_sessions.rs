@@ -142,24 +142,6 @@ async fn discovery_commands_and_listener_share_sdk_until_credential_rotation() {
     )
     .await
     .unwrap();
-    store::bind(
-        &db.pool,
-        c.id,
-        bot,
-        BindingInput {
-            destinations: vec!["100".into()],
-            permissions: Permissions {
-                read: true,
-                write: true,
-                send: true,
-                wake: false,
-            },
-            wake_policy: WakePolicy::Never,
-            instructions: "".into(),
-        },
-    )
-    .await
-    .unwrap();
     let (tx, mut rx) = mpsc::channel(16);
     let manager = Arc::new(Manager::with_transport(
         db.pool.clone(),
