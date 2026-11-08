@@ -355,6 +355,50 @@ async fn setup_completes_before_any_chat_is_chosen_and_grants_no_chat() {
 }
 
 #[tokio::test]
+async fn an_external_turn_sees_no_connection_it_was_not_delivered_from() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "unrelated").await;
+    destinations(&db, c.id).await;
+    let bot = bot(&db).await;
+    store::bind(&db.pool, c.id, bot, access(&["100"]))
+        .await
+        .unwrap();
+    let external = turn(&db, bot, "connector").await;
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    assert!(
+        store::authorize(
+            &mut db.pool.acquire().await.unwrap(),
+            &c,
+            bot,
+            external,
+            None,
+            false,
+            false
+        )
+        .await
+        .is_err(),
+        "an incoming message elsewhere cannot read this connection's instructions"
+    );
+}
+
+#[tokio::test]
+async fn a_binding_without_chats_does_not_request_message_content() {
+    let db = TestDb::migrated().await;
+    let c = account(&db, "no-chats-wake-all").await;
+    let bot = bot(&db).await;
+    let mut empty = access(&[]);
+    empty.wake_policy = WakePolicy::All;
+    store::bind(&db.pool, c.id, bot, empty).await.unwrap();
+    assert!(
+        !store::connection(&db.pool, c.id)
+            .await
+            .unwrap()
+            .message_content,
+        "no chat can wake the bot, so the shared connection keeps its intents"
+    );
+}
+
+#[tokio::test]
 async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain() {
     let db = TestDb::migrated().await;
     let c = account(&db, "actions").await;
