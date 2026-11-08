@@ -672,13 +672,7 @@ impl ElseApp {
                     .social_triggers()
                     .iter()
                     .find(|trigger| trigger.id == *id);
-                match (save, trigger) {
-                    (_, None) => false,
-                    (TriggerSave::Saving { enabled, .. }, Some(trigger)) => {
-                        *enabled != trigger.enabled
-                    }
-                    _ => true,
-                }
+                still_pending(save, trigger)
             });
         }
     }
@@ -757,9 +751,12 @@ impl ElseApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = self
-            .changeable_trigger(bot, id)
-            .map(|trigger| trigger.title().to_owned())
+        let Some(name) =
+            self.changeable_trigger(bot, id)
+                .map(|trigger| match trigger.destination {
+                    Some(_) => format!("the trigger for {}", trigger.title()),
+                    None => "the trigger for any chat".to_owned(),
+                })
         else {
             return;
         };
@@ -2077,12 +2074,24 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// Whether a trigger's local change still waits for the server: a save until
+/// the trigger reports the saved state, a failure until the trigger is gone.
+fn still_pending(save: &TriggerSave, trigger: Option<&Trigger>) -> bool {
+    match (save, trigger) {
+        (_, None) => false,
+        (TriggerSave::Saving { enabled, .. }, Some(trigger)) => *enabled != trigger.enabled,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Metadata, MetadataChange, MetadataSync, describe_cron, describe_hours, last_run, parse_name,
+        Metadata, MetadataChange, MetadataSync, Trigger, TriggerSave, describe_cron,
+        describe_hours, last_run, parse_name, still_pending,
     };
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
+    use uuid::Uuid;
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
         Metadata {
@@ -2346,5 +2355,42 @@ mod tests {
             text,
             "Paused after 3 failed runs (the provider process exited)"
         );
+    }
+
+    fn trigger(enabled: bool) -> Trigger {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1), "connection_id": Uuid::from_u128(2), "bot_id": Uuid::from_u128(3),
+            "provider": "telegram", "connection_name": "Proliquid", "username": "proliquid_bot",
+            "destination": null, "destination_name": null, "wake": "mentions",
+            "instructions": "Answer questions.", "enabled": enabled,
+            "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-01T07:00:00.123+00:00"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_trigger_switch_stays_busy_until_the_server_reports_the_saved_state() {
+        let saving = TriggerSave::Saving {
+            attempt: Uuid::new_v4(),
+            enabled: false,
+        };
+        assert!(
+            still_pending(&saving, Some(&trigger(true))),
+            "a stale event keeps it busy"
+        );
+        assert!(!still_pending(&saving, Some(&trigger(false))));
+        let failed = TriggerSave::Failed("Couldn't save.".into());
+        assert!(
+            still_pending(&failed, Some(&trigger(true))),
+            "the error stays visible"
+        );
+        let deleting = TriggerSave::Deleting {
+            attempt: Uuid::new_v4(),
+        };
+        assert!(
+            !still_pending(&deleting, None),
+            "a deleted trigger drops its state"
+        );
+        assert!(!still_pending(&failed, None));
     }
 }

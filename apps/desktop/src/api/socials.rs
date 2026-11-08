@@ -349,7 +349,7 @@ mod tests {
             "id": id, "bot_id": bot, "connection_id": Uuid::new_v4(), "provider": "discord",
             "connection_name": "Team bot", "username": null, "destination": null,
             "destination_name": null, "wake": "all", "instructions": "Summarize questions.",
-            "enabled": false, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-02T00:00:00Z"
+            "enabled": false, "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-02T07:00:00.456+00:00"
         }}))).await;
         let owner = OwnerToken::parse(&"T".repeat(43)).unwrap();
         let client =

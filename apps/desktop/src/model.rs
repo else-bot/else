@@ -1212,7 +1212,7 @@ mod tests {
             "bot_id": bot(), "provider": provider, "connection_name": "Team bot",
             "username": "team_bot", "destination": "-100123", "destination_name": "Proliquid",
             "wake": "mentions", "instructions": "Summarize questions.", "enabled": enabled,
-            "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-02T00:00:00Z"
+            "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-02T07:00:00.456+00:00"
         })
     }
 

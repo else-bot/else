@@ -295,7 +295,11 @@ impl SocialsView {
                 view.busy = false;
                 match result {
                     Ok(()) => view.show_receipt(connection.id, connection.provider, window, cx),
-                    Err(error) => view.error = Some(error.to_string()),
+                    Err(error) => {
+                        view.error = Some(format!(
+                            "{error} The bot is connected. Choose it under \"Or use a bot you already connected\" to finish."
+                        ))
+                    }
                 }
                 cx.notify();
             });

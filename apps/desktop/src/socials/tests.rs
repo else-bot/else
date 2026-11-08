@@ -23,7 +23,7 @@ fn trigger_card_titles_prefer_the_chat_name_then_id_then_any_chat() {
         "provider": "telegram", "connection_name": "Team bot", "username": null,
         "destination_name": "Proliquid", "destination": "-100123", "wake": "all",
         "instructions": "Watch for questions.", "enabled": true,
-        "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"
+        "created_at": "2026-11-01T07:00:00.123+00:00", "updated_at": "2026-11-01T07:00:00.123+00:00"
     }))
     .unwrap();
     assert_eq!(trigger.title(), "Proliquid");
