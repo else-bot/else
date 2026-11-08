@@ -548,6 +548,34 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         let logged = crate::app::tools::loggable_args(name, args);
         record(state, grant, name, &logged, &log).await;
     }
+    with_next(name, result)
+}
+
+/// What to do after a tool parked the turn, for results that do not say: the
+/// guidance arrives when it applies instead of in every turn's descriptions.
+const PARKED_NEXT: &str = "Tell the owner briefly what you are waiting for and end this \
+    attempt now, without more tool calls. You continue automatically when it is settled.";
+
+fn with_next(name: &str, mut result: Value) -> Value {
+    if !crate::app::tools::parks(name, &result) {
+        return result;
+    }
+    let Some(block) = result["content"]
+        .as_array_mut()
+        .and_then(|blocks| blocks.iter_mut().find(|b| b["type"] == "text"))
+    else {
+        return result;
+    };
+    let Some(mut payload) = block["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+    else {
+        return result;
+    };
+    if payload.get("next").is_none() {
+        payload["next"] = json!(PARKED_NEXT);
+        block["text"] = json!(payload.to_string());
+    }
     result
 }
 
@@ -1296,3 +1324,24 @@ async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
+#[cfg(test)]
+mod next_tests {
+    use super::*;
+
+    #[test]
+    fn a_parked_result_without_guidance_gets_the_next_step() {
+        let parked = tool_result(json!({ "status": "pending", "parked": true }));
+        let text = with_next("delegate", parked)["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["next"],
+            PARKED_NEXT
+        );
+        let own = tool_result(json!({ "parked": true, "next": "Own guidance." }));
+        assert_eq!(with_next("ask_owner", own.clone()), own);
+        let done = tool_result(json!({ "status": "done" }));
+        assert_eq!(with_next("delegate", done.clone()), done);
+    }
+}
