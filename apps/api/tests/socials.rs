@@ -571,6 +571,7 @@ struct Fake {
     release: Notify,
     blocked: AtomicBool,
     sends: AtomicUsize,
+    sent_to: std::sync::Mutex<Vec<String>>,
     refused: AtomicBool,
 }
 #[async_trait]
@@ -585,13 +586,24 @@ impl Transport for Fake {
     async fn destinations(&self, _: &Session) -> Result<Vec<Destination>, Error> {
         Ok(vec![])
     }
+    async fn resolve(&self, _: &Connection, _: &Session, name: &str) -> Result<Destination, Error> {
+        match name {
+            "@team_alerts" => Ok(Destination {
+                id: "-100777".into(),
+                name: "Team alerts".into(),
+                kind: "group".into(),
+                can_send: true,
+            }),
+            _ => Err(Error::Invalid("no such public chat")),
+        }
+    }
     async fn execute(&self, _: &Session, _: &Command) -> Result<Value, Error> {
         Ok(json!({"ok":true}))
     }
     async fn send(
         &self,
         _: &Session,
-        _: &str,
+        destination: &str,
         body: &str,
         _: Option<&str>,
     ) -> Result<Value, Error> {
@@ -600,6 +612,7 @@ impl Transport for Fake {
             self.release.notified().await;
         }
         self.sends.fetch_add(1, Ordering::SeqCst);
+        self.sent_to.lock().unwrap().push(destination.to_owned());
         Ok(json!({"id":"sent","body":body}))
     }
     async fn listen(
@@ -924,6 +937,108 @@ async fn owner_credentials_task_authority_and_approved_native_send_stay_separate
     .await
     .unwrap();
     assert_eq!(body, "The owner's exact approved revision");
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
+    use else_api::{
+        credentials::OwnerToken, grants::Tool, http::AppState, providers::Registry,
+        scheduler::Scheduler,
+    };
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(Manager::with_transport(
+        db.pool.clone(),
+        Arc::new(key()),
+        fake.clone(),
+    ));
+    let scheduler = Scheduler::new(db.pool.clone(), Registry::new(vec![]), 1);
+    let stop = CancellationToken::new();
+    let state = Arc::new(
+        AppState::new(
+            OwnerToken::parse(common::TOKEN).unwrap(),
+            db.pool.clone(),
+            scheduler.clone(),
+            else_api::events::EventHub::start(db.pool.clone(), stop.clone()),
+        )
+        .with_secret_key(Arc::new(key()))
+        .with_socials(manager),
+    );
+    let router = else_api::http::router(&else_api::config::Config::load(&TestEnv).unwrap(), state);
+    let conversation: Uuid = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?1")
+        .bind(turn)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let issue = || {
+        scheduler.grants().issue(
+            bot,
+            conversation,
+            turn,
+            vec![Tool::Social, Tool::Routines, Tool::AskOwner],
+            Duration::from_secs(300),
+        )
+    };
+    let grant = issue().await;
+    let (status, created) = http(
+        &router,
+        "POST",
+        "/v1/connectors/socials/connections",
+        common::TOKEN,
+        json!({"provider":"telegram","token":"private-owner-bot-token"}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{created}");
+    let connection = created["connection"]["id"].as_str().unwrap().to_owned();
+
+    let set = rpc(
+        &router,
+        &grant,
+        "social_trigger_set",
+        json!({"connection_id":connection,"destination":"@team_alerts","wake":"mentions","instructions":"Summarize alerts for me."}),
+    )
+    .await;
+    assert_eq!(
+        (set["trigger"]["destination"].as_str(), set["trigger"]["destination_name"].as_str()),
+        (Some("-100777"), Some("Team alerts")),
+        "a trigger keys on the chat ID incoming messages carry: {set}"
+    );
+    let discovery = rpc(&router, &grant, "social_connections", json!({})).await;
+    assert_eq!(
+        discovery["connections"][0]["destinations"][0],
+        json!({"id":"-100777","name":"Team alerts","kind":"group","can_send":true}),
+        "a looked-up chat is listed before it posts anything: {discovery}"
+    );
+
+    let proposed = rpc(
+        &router,
+        &grant,
+        "draft_message",
+        json!({"platform":"telegram","account_id":connection,"destination":"@team_alerts","body":"Test"}),
+    )
+    .await;
+    let draft = proposed["draft"]["draft_id"].as_str().unwrap();
+    let (status, approved) = http(
+        &router,
+        "POST",
+        &format!("/v1/bots/{bot}/outgoing-drafts/{draft}/approve"),
+        common::TOKEN,
+        json!({"version":1}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{approved}");
+    sqlx::query("UPDATE turns SET attempt=2 WHERE id=?1")
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let grant = issue().await;
+    let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
+    assert_eq!(result["status"], "sent", "{result}");
+    assert_eq!(*fake.sent_to.lock().unwrap(), vec!["-100777".to_owned()]);
     stop.cancel();
 }
 
