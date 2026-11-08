@@ -75,6 +75,8 @@ fn a_configured_npm_script_gives_way_to_the_installed_binary() {
     let home = std::fs::canonicalize(home).unwrap();
     assert_eq!(lookup(Some(&script), Some(&home)), Ok(Some(binary)));
     assert_eq!(lookup(Some(&native), Some(&home)), Ok(Some(native)));
+    let missing = dir.path().join("missing/grok");
+    assert!(lookup(Some(&missing), Some(&home)).is_err());
 }
 
 #[test]

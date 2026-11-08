@@ -75,9 +75,13 @@ fn installed(home: &Path) -> Option<PathBuf> {
 
 /// `ELSE_GROK_BIN` or `PATH`, under the same rule as [`choose`]: the
 /// installer writes `ELSE_GROK_BIN` from its own `PATH`, so it can name the
-/// npm package's script too.
+/// npm package's script too. A setting that does not resolve stays an error.
 fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
-    choose(super::executable(configured, "grok"), home.and_then(installed))
+    let found = super::executable(configured, "grok");
+    match configured {
+        Some(_) if found.is_err() => found,
+        _ => choose(found, home.and_then(installed)),
+    }
 }
 
 /// A native `grok` from `PATH`, else the installed binary when there is one.
