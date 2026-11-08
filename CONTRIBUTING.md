@@ -30,7 +30,7 @@ git config --worktree core.hooksPath .githooks
 cargo build --workspace --locked
 ```
 
-The pre-commit hook runs `cargo test --workspace --locked` and blocks commits when tests fail. Git does not enable repository hooks on clone, so run the hook configuration commands once per checkout. For an existing linked worktree, run `git config --worktree core.hooksPath .githooks` there.
+The pre-commit hook runs `cargo fmt --all -- --check` and `cargo check --workspace --all-targets --locked`. The pre-push hook runs `cargo test --workspace --locked`. Fix failures before committing or pushing. Git does not enable repository hooks on clone, so run the hook configuration commands once per checkout. For an existing linked worktree, run `git config --worktree core.hooksPath .githooks` there.
 
 For real provider replies, install Codex, Claude Code, or Grok Build and sign in as your development user. Set `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, or `ELSE_GROK_BIN` if a CLI is outside `PATH`.
 
@@ -120,8 +120,10 @@ The launcher disables incremental compilation to limit disk growth in developmen
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+python3 scripts/check_migrations.py
+python3 scripts/test-migrations.py
 cargo test --workspace --locked
 ```
 
@@ -139,11 +141,19 @@ ELSE_LIVE_GROK=1 cargo test -p else-api --test grok_live --locked -- --nocapture
 
 This journey creates disposable bots and checks session reuse, host files, MCP calls, cancellation, and provider handoffs with the installed Grok CLI.
 
-The pre-commit hook runs the full Cargo suite locally. Fix test failures before committing. Pull requests skip the `cargo-test` job, and the required `cargo-test` check accepts the skipped job. The release workflow runs the full suite on Ubuntu with stable Rust against every release commit, and manual `cargo-test` runs do the same for the head of a branch.
+Pull requests run two independent Rust jobs on Blacksmith Ubuntu runners. `cargo-check` runs formatting, checks all workspace targets, enforces strict Clippy, checks migration numbering, and tests bundled-icon coverage. `cargo-test` runs the full locked workspace suite, including API integration tests. Runtime assertions such as the memory tests can fail even when compilation passes, so the full suite also gates PRs. This costs another runner and test build per update. Separate caches and cancellation of superseded runs limit that cost without delaying the fast job behind the suite.
 
-The `release-ready` check must also pass before merging. It tests the release tooling and installers and rejects a changed workspace version, which only the release workflow sets. Changes require a pull request, but branches do not need to be up to date with `main`. Force pushes, branch deletion, and non-linear history are blocked. Releases never add commits to `main`.
+The release workflow calls `cargo-test` against every release commit. Manual runs check the selected branch with both jobs.
 
-CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for release tests and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
+The `release-ready` check tests the release tooling and installers and rejects a changed workspace version, which only the release workflow sets. Releases never add commits to `main`.
+
+### Branch protection
+
+In the [Main pull requests and checks ruleset](https://github.com/else-bot/else/rules/26617470), require `cargo-check`, `cargo-test`, and `release-ready` from GitHub Actions. Keep **Require branches to be up to date before merging** enabled. These jobs run on every PR to `main` without path filters. A skipped Rust suite does not provide test coverage.
+
+Fetch `origin/main` and rebase before the first push and again before merging. Rerun `python3 scripts/check_migrations.py` after rebasing. An up-to-date branch runs main's workflow and scripts against its own changes. Force pushes, branch deletion, and non-linear history on `main` are blocked.
+
+CI caches Cargo downloads and compiled output by Rust version and lockfile, with separate caches for fast checks, the full suite, and each release platform. It saves the cache after compilation succeeds, before running tests or packaging releases, so a later failure keeps the completed build available. A compiler change requires a fresh cache. Lockfile changes can restore the previous cache and rebuild changed dependencies.
 
 Use a focused target while developing, for example:
 

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+for variable in $(git rev-parse --local-env-vars); do
+	unset "$variable"
+done
+exec cargo test --workspace --locked
