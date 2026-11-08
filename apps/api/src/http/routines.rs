@@ -57,6 +57,9 @@ fn code(err: &RoutineError) -> &'static str {
         RoutineError::NameTaken => "NAME_TAKEN",
         RoutineError::Conflict => "CREATE_CONFLICT",
         RoutineError::Limit => "LIMIT_REACHED",
+        RoutineError::AlreadyRunning => "ALREADY_RUNNING",
+        RoutineError::QueueFull => "QUEUE_FULL",
+        RoutineError::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
         RoutineError::Invalid(_) => "INVALID_ROUTINE",
         RoutineError::Db(_) => "UNAVAILABLE",
     }
@@ -490,6 +493,24 @@ pub fn delete_schema() -> Value {
     })
 }
 
+pub fn run_schema() -> Value {
+    json!({
+        "name": "routine_run",
+        "description": "Run one of your routines now, when the owner asks to run, rerun, or \
+            retry it. Its schedule, active hours, and enabled state stay as they are. The run \
+            starts after your current reply and reports to the owner like a scheduled run, so \
+            tell the owner it is queued and do not do its task yourself. Repeating the call in \
+            this request returns the same run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "routine_id": { "type": "string", "format": "uuid" } },
+            "required": ["routine_id"],
+            "additionalProperties": false,
+        },
+        "annotations": annotations(false, false),
+    })
+}
+
 /// `active_hours` as a bot sends it.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -754,12 +775,12 @@ pub async fn update(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DeleteArgs {
+struct RoutineIdArgs {
     routine_id: Uuid,
 }
 
 pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
-    let Ok(args) = serde_json::from_value::<DeleteArgs>(args.clone()) else {
+    let Ok(args) = serde_json::from_value::<RoutineIdArgs>(args.clone()) else {
         return invalid("pass routine_id.");
     };
     match routines::delete(&state.db, By::Turn(caller(grant)), args.routine_id).await {
@@ -775,6 +796,39 @@ pub async fn delete(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             );
             let result = json!({ "routine_id": args.routine_id, "deleted": true,
                                  "already_deleted": !now_deleted });
+            (tool_result(result), Some(log))
+        }
+        Err(err) => reject(err),
+    }
+}
+
+pub async fn run(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    let Ok(args) = serde_json::from_value::<RoutineIdArgs>(args.clone()) else {
+        return invalid("pass routine_id.");
+    };
+    match routines::run_now(
+        &state.db,
+        state.scheduler.registry(),
+        caller(grant),
+        args.routine_id,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok((routine, queued)) => {
+            state.scheduler.wake();
+            let log = format!(
+                "{} {} ({})",
+                if queued { "queued" } else { "already queued" },
+                routine.name,
+                routine.id
+            );
+            let result = json!({
+                "routine": routine_json(&routine),
+                "queued": queued,
+                "next": "The run starts after this reply and reports to the owner when it ends. \
+                    Tell the owner it is queued; do not run its task yourself.",
+            });
             (tool_result(result), Some(log))
         }
         Err(err) => reject(err),
