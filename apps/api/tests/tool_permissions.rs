@@ -49,6 +49,7 @@ async fn setup() -> (Harness, String, uuid::Uuid, String) {
 }
 
 fn executed(called: &recorder::Called, title: &str) {
+    assert_eq!(called.status, StatusCode::OK, "{}", called.body);
     assert!(!called.error, "{}", called.body);
     let body: Value = serde_json::from_str(
         called.result["result"]["content"][0]["text"]
@@ -454,17 +455,7 @@ async fn revoking_a_tool_grant_does_not_leave_a_used_approval_available_to_repla
         .await;
     assert_eq!(answered.status, StatusCode::OK);
     h.release(turn).await;
-    let continued = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let continued = h.grant(turn).await;
-            if continued != token {
-                break continued;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let continued = h.continued(turn, &token).await;
     executed(
         &tool(&h.app, &continued, "mcp_request", args.clone()).await,
         "TradingView",

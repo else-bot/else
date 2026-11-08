@@ -3,6 +3,7 @@
 - Keep coordination lock-free where possible; shard any necessary locks by the resource they protect.
 - Own shared mutable state in actors and communicate through bounded messages with backpressure.
 - Run independent async calls concurrently with `tokio::join!` in Rust; keep dependent or order-sensitive calls sequential.
+- In recorder test fixtures, use `started(turn)` before calling tools and `continued(turn, previous_token)` after resuming an attempt; a recorded grant alone does not prove that the turn is ready.
 - Read and follow `.agents/rules/*.md` before using the repository's shared skills and agents.
 - Before opening a PR, run `cargo clippy --workspace --all-targets --locked -- -D warnings` or `scripts/check-clippy.sh` and fix every finding, including findings in untouched files.
 - Fix lint causes instead of adding blanket suppressions; justify targeted `#[allow]` and `#[expect]` attributes inline.

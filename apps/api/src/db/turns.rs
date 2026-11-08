@@ -600,21 +600,25 @@ const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
 /// has no turn in an active status. A waiting owner turn holds only owner
 /// work, and a waiting task holds nothing. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
-/// again, so a later failure never strands an already committed claim.
-pub async fn claim_next(pool: &SqlitePool, skip: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
+/// again, so a later failure never strands an already committed claim. A
+/// turn in `busy` still has a task finishing its previous attempt, whose
+/// cleanup would end a new attempt's grants; it and the rest of its bot's
+/// queue wait for that task to wake the scheduler again.
+pub async fn claim_next(pool: &SqlitePool, busy: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (
             SELECT t.id, t.bot_id, t.created_at,
                    row_number() OVER (PARTITION BY t.bot_id ORDER BY t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
             WHERE t.status = 'queued' AND b.status = 'active' AND NOT b.cancel_pending
-              AND NOT (lower(hex(t.bot_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
               AND NOT EXISTS (SELECT 1 FROM turns a
                               WHERE a.bot_id = t.bot_id AND a.status IN {ACTIVE_STATUSES})
               AND {TASK_OR_NO_WAITING_OWNER}
-         ) oldest WHERE queue_rank = 1 ORDER BY created_at, id LIMIT 8"
+         ) oldest WHERE queue_rank = 1
+           AND NOT (lower(hex(id)) IN (SELECT replace(value, '-', '') FROM json_each(?1)))
+         ORDER BY created_at, id LIMIT 8"
     )))
-    .bind(sqlx::types::Json(skip))
+    .bind(sqlx::types::Json(busy))
     .fetch_all(pool)
     .await?;
     for (turn_id, bot_id) in candidates {

@@ -480,6 +480,7 @@ fn run_serve() -> anyhow::Result<()> {
     let owner_token = credentials::load_owner_token(&config.owner_token_file)?;
     let secret_key = Arc::new(credentials::load_secret_key(&config.secret_key)?);
     runtime()?.block_on(async {
+        let shutdown = install_shutdown_signals()?;
         let pool = database(&config).await?;
         db::installation::check_installed(&pool).await?;
         let listener = TcpListener::bind(config.bind)
@@ -585,7 +586,7 @@ fn run_serve() -> anyhow::Result<()> {
             stop_scheduler.clone(),
         ));
         let published = lock.publish(config.bind)?;
-        let result = serve(&config, listener, state).await;
+        let result = serve(&config, listener, state, shutdown).await;
         drop(published);
         stop_scheduler.cancel();
         let _ = tokio::join!(
@@ -623,6 +624,7 @@ async fn serve(
     config: &Config,
     listener: TcpListener,
     state: Arc<http::AppState>,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "API listening");
 
@@ -671,8 +673,7 @@ async fn serve(
         result = &mut server => {
             return result.context("server task")?.context("serving HTTP");
         }
-        signal = shutdown_signal() => signal?,
-
+        () = shutdown => {}
     }
     tracing::info!("shutdown requested; draining connections");
     let streams = state.stop_desktop_streams();
@@ -712,12 +713,14 @@ async fn serve_listener(
         .await
 }
 
-async fn shutdown_signal() -> anyhow::Result<()> {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("installing SIGTERM handler")?;
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result.context("waiting for Ctrl-C")?,
-        _ = term.recv() => {}
-    }
-    Ok(())
+fn install_shutdown_signals() -> anyhow::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+    let mut interrupt = signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
 }

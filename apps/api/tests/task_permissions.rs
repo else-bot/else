@@ -118,7 +118,7 @@ async fn owner_quote_cannot_override_a_pending_or_denied_host_action() {
     h.release(turn).await;
     wait(app, turn, "waiting").await;
     assert_eq!(answer(app, &bot, question, "deny").await, StatusCode::OK);
-    let token = next_grant(&h, turn, &token).await;
+    let token = h.continued(turn, &token).await;
     let called = tool(app, &token, "ask_permission", args).await;
     assert_eq!(called.result["status"], "denied", "{}", called.body);
     assert!(permissions(app, &bot).await.is_empty());
@@ -164,18 +164,6 @@ async fn owner_quote_cannot_approve_a_different_action_after_the_attempt_parks()
 async fn wait(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
-}
-
-async fn next_grant(h: &Harness, turn: Uuid, old: &str) -> String {
-    for _ in 0..400 {
-        let token = h.grant(turn).await;
-        if token != old {
-            wait(&h.app, turn, "running").await;
-            return token;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("turn {turn} never continued");
 }
 
 async fn answer(app: &TestApp, bot: &str, question: Uuid, choice: &str) -> StatusCode {
@@ -389,7 +377,7 @@ async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
     h.release(turn).await;
     wait(app, turn, "waiting").await;
     assert_eq!(answer(app, &main, denied, "deny").await, StatusCode::OK);
-    let token = next_grant(&h, turn, &token).await;
+    let token = h.continued(turn, &token).await;
 
     let (allowed, choices) = pending(app, &token, tailscale("up")).await;
     assert_eq!(choices, ALWAYS);
@@ -399,7 +387,7 @@ async fn an_exact_denial_outlasts_a_task_grant_given_later_in_the_request() {
         answer(app, &main, allowed, "approve_task").await,
         StatusCode::OK
     );
-    let token = next_grant(&h, turn, &token).await;
+    let token = h.continued(turn, &token).await;
 
     let again = tool(app, &token, "ask_permission", tailscale("down")).await;
     assert_eq!(again.result["status"], "denied", "{}", again.body);
