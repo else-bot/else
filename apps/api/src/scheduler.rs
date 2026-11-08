@@ -211,6 +211,16 @@ impl Scheduler {
         }
         if let Some(_admission) = self.gate.enter() {
             let now = chrono::Utc::now();
+            if let Err(err) = crate::db::routines::review_ended(
+                &self.pool,
+                &self.registry,
+                now,
+                crate::db::routines::REVIEW_BATCH,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "reviewing ended routine runs failed");
+            }
             let (admitted, woken, mail, social) = tokio::join!(
                 crate::db::routines::admit_due(
                     &self.pool,
