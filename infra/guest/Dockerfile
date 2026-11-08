@@ -19,7 +19,7 @@ RUN chmod 0755 /usr/local/bin/else-browser /usr/local/bin/else-init /usr/local/b
 
 ARG IMAGE_TAG=else-guest:3
 RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n' \
-      cargo chromium fonts-noto-cjk g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
+      cargo chromium fonts-noto-cjk fonts-noto-core g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
       python3-venv rustc x11vnc \
     | jq -R -s --arg tag "$IMAGE_TAG" \
       '{image: $tag, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}' \
