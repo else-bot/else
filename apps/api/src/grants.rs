@@ -52,6 +52,8 @@ pub enum Tool {
     ManageMcp,
     Mail,
     Social,
+    /// Read this installation's version and component status.
+    Diagnose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

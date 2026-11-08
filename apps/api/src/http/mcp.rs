@@ -111,6 +111,7 @@ pub async fn endpoint(
                 Some("social_connections" | "social_action" | "social_action_status") => {
                     Tool::Social
                 }
+                Some("else_status") => Tool::Diagnose,
                 _ => Tool::ReadMemory,
             };
             if let Err(err) = check(&state, &grant, needs).await {
@@ -326,6 +327,16 @@ fn tool_list() -> Value {
         super::webhooks::update_schema(),
         super::webhooks::delete_schema(),
         {
+            "name": "else_status",
+            "description": "This else.bot installation's version and the state of each part \
+                the owner sees: every provider CLI (available, or the exact reason it is not, \
+                such as a path that fails or a missing login), whether it has a saved model \
+                profile, bot computers, and backups. Call it before reporting that a provider, \
+                model, computer, or backup is missing or broken, and quote its reasons.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": read_only,
+        },
+        {
             "name": "memory_date",
             "description": "When entry seq (and optionally end_seq) was recorded, with its source.",
             "inputSchema": {
@@ -471,6 +482,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "memory_view" => view(state, grant, args).await,
         "memory_zoom" => zoom(state, grant, args).await,
         "memory_date" => date(state, grant, args).await,
+        "else_status" => (tool_result(super::status(state).await), None),
         "delegate" => delegate(state, grant, args).await,
         "council" => council(state, grant, args).await,
         "list_bots" => list_bots(state, grant, args).await,

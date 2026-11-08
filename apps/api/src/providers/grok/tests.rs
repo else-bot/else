@@ -57,6 +57,29 @@ fn a_native_grok_on_path_wins_and_the_installed_binary_replaces_anything_else() 
 }
 
 #[test]
+fn a_configured_npm_script_gives_way_to_the_installed_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&path, mode).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    };
+    let script = file("npm/.bin/grok", "#!/bin/sh\nexec node grok.js\n");
+    let native = file("opt/grok", "\x7fELF");
+    let home = dir.path().join("home");
+    assert_eq!(lookup(Some(&script), Some(&home)), Ok(Some(script.clone())));
+    let binary = file("home/bin/grok", "\x7fELF");
+    let home = std::fs::canonicalize(home).unwrap();
+    assert_eq!(lookup(Some(&script), Some(&home)), Ok(Some(binary)));
+    assert_eq!(lookup(Some(&native), Some(&home)), Ok(Some(native)));
+    let missing = dir.path().join("missing/grok");
+    assert!(lookup(Some(&missing), Some(&home)).is_err());
+}
+
+#[test]
 fn text_is_streamed_once_and_only_a_terminal_result_completes() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();

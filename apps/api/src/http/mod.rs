@@ -49,6 +49,12 @@ use crate::scheduler::Scheduler;
 use error::ApiError;
 
 /// Shared request state and host-only services.
+#[derive(Default)]
+pub struct StartupFaults {
+    pub computers: Option<String>,
+    pub backups: Option<String>,
+}
+
 pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: SqlitePool,
@@ -65,6 +71,8 @@ pub struct AppState {
     pub mcps: std::sync::OnceLock<crate::mcp::Library>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub socials: Option<Arc<crate::socials::Manager>>,
+    /// Why bot computers or backups did not start, for `else_status`.
+    pub startup_faults: StartupFaults,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     pub(crate) server_updates: crate::actor::Actor<crate::server_updates::Installation>,
     desktop_streams: desktop_stream::Streams,
@@ -90,6 +98,7 @@ impl AppState {
             backups: None,
             mcps: std::sync::OnceLock::new(),
             socials: None,
+            startup_faults: StartupFaults::default(),
             update_hold: crate::actor::Actor::default(),
             server_updates: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
@@ -309,61 +318,26 @@ async fn readiness(
 }
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let registry = state.scheduler.registry();
     let (configured, defaults, onboarding_required) = tokio::join!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            sqlx::query_scalar("SELECT provider_id FROM provider_profiles").fetch_all(&state.db),
-        ),
+        configured_profiles(&state.db),
         settings::defaults(&state),
         onboarding::required(&state),
     );
-    let configured: Option<Vec<String>> = configured.ok().and_then(Result::ok);
-    let mut default_id = None;
-    let providers: Vec<_> = registry
+    let providers: Vec<_> = state
+        .scheduler
+        .registry()
         .all()
         .iter()
         .map(|provider| {
-            let has_profile = configured
-                .as_ref()
-                .map(|ids| ids.iter().any(|id| id == provider.id()));
-            let (available, reason) = match provider.availability() {
-                Availability::Unavailable(reason) => (false, Some(reason)),
-                Availability::Available
-                    if provider.uses_profile() && has_profile == Some(false) =>
-                {
-                    (
-                        false,
-                        Some(format!(
-                            "No saved {} execution profile. Save an explicit model first \
-                         (PATCH /v1/settings/providers/{}).",
-                            provider.label(),
-                            provider.id()
-                        )),
-                    )
-                }
-                Availability::Available => (true, None),
-            };
-            if available && default_id.is_none() {
-                default_id = Some(provider.id());
-            }
-            let cli = provider.availability();
-            json!({
-                "id": provider.id(),
-                "label": provider.label(),
-                "available": available,
-                "unavailable_reason": reason,
-                "cli_available": cli == Availability::Available,
-                "cli_unavailable_reason": match cli {
-                    Availability::Unavailable(reason) => Some(reason),
-                    Availability::Available => None,
-                },
-                "catalog": provider.catalog(),
-                "requires_profile": provider.uses_profile(),
-                "profile_configured": has_profile,
-            })
+            let mut view = provider_view(provider.as_ref(), configured.as_deref());
+            view["catalog"] = json!(provider.catalog());
+            view
         })
         .collect();
+    let default_id = providers
+        .iter()
+        .find(|view| view["available"] == true)
+        .map(|view| view["id"].clone());
     let defaults = defaults.ok().flatten();
     let onboarding_required = onboarding_required.unwrap_or(false);
     Json(json!({
@@ -379,6 +353,95 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
             "max_bot_name_chars": crate::app::bots::MAX_NAME_CHARS,
         },
     }))
+}
+
+/// Provider IDs with a saved execution profile; `None` when they cannot be
+/// read in time.
+async fn configured_profiles(db: &SqlitePool) -> Option<Vec<String>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_scalar("SELECT provider_id FROM provider_profiles").fetch_all(db),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
+fn provider_view(
+    provider: &dyn crate::app::providers::Provider,
+    configured: Option<&[String]>,
+) -> serde_json::Value {
+    let has_profile = configured.map(|ids| ids.iter().any(|id| id == provider.id()));
+    let cli = provider.availability();
+    let reason = match &cli {
+        Availability::Unavailable(reason) => Some(reason.clone()),
+        Availability::Available if provider.uses_profile() && has_profile == Some(false) => {
+            Some(format!(
+                "No saved {} execution profile. Save an explicit model first \
+                 (PATCH /v1/settings/providers/{}).",
+                provider.label(),
+                provider.id()
+            ))
+        }
+        Availability::Available => None,
+    };
+    json!({
+        "id": provider.id(),
+        "label": provider.label(),
+        "available": reason.is_none(),
+        "unavailable_reason": reason,
+        "cli_available": cli == Availability::Available,
+        "cli_unavailable_reason": match cli {
+            Availability::Unavailable(reason) => Some(reason),
+            Availability::Available => None,
+        },
+        "requires_profile": provider.uses_profile(),
+        "profile_configured": has_profile,
+    })
+}
+
+/// What a bot reports when else.bot itself seems broken: the version and
+/// each part's state with the reason it gives.
+pub(crate) async fn status(state: &AppState) -> serde_json::Value {
+    let (configured, backups) = tokio::join!(configured_profiles(&state.db), async {
+        let backups = state.backups.as_ref()?;
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), backups.snapshot());
+        Some(
+            read.await
+                .map_err(|_| "backup status did not answer in 2 seconds".to_owned()),
+        )
+    });
+    let providers: Vec<_> = state
+        .scheduler
+        .registry()
+        .all()
+        .iter()
+        .map(|provider| provider_view(provider.as_ref(), configured.as_deref()))
+        .collect();
+    let backups = match backups {
+        None => json!({ "available": false, "unavailable_reason": state.startup_faults.backups }),
+        Some(Err(why)) => json!({ "available": false, "error": why }),
+        Some(Ok(Err(err))) => json!({ "available": false, "error": err.to_string() }),
+        Some(Ok(Ok(snapshot))) => json!({
+            "available": snapshot.unavailable_reason.is_none(),
+            "unavailable_reason": snapshot.unavailable_reason,
+            "enabled": snapshot.enabled,
+            "running": snapshot.running,
+            "next_backup_at": snapshot.next_backup_at,
+            "last_error": snapshot.last_error,
+            "latest": snapshot.recent.first(),
+        }),
+    };
+    json!({
+        "version": crate::VERSION,
+        "providers": providers,
+        "profiles_readable": configured.is_some(),
+        "computers": {
+            "available": state.computers.is_some(),
+            "unavailable_reason": state.startup_faults.computers,
+        },
+        "backups": backups,
+    })
 }
 
 #[cfg(test)]
