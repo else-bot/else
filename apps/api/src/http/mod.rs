@@ -49,6 +49,12 @@ use crate::scheduler::Scheduler;
 use error::ApiError;
 
 /// Shared request state and host-only services.
+#[derive(Default)]
+pub struct StartupFaults {
+    pub computers: Option<String>,
+    pub backups: Option<String>,
+}
+
 pub struct AppState {
     pub owner_token: OwnerToken,
     pub db: SqlitePool,
@@ -65,6 +71,8 @@ pub struct AppState {
     pub mcps: std::sync::OnceLock<crate::mcp::Library>,
     pub connectors: Option<Arc<crate::connectors::ConnectorManager>>,
     pub socials: Option<Arc<crate::socials::Manager>>,
+    /// Why bot computers or backups did not start, for `else_status`.
+    pub startup_faults: StartupFaults,
     pub(crate) update_hold: crate::actor::Actor<Option<crate::maintenance::Closed>>,
     pub(crate) server_updates: crate::actor::Actor<crate::server_updates::Installation>,
     desktop_streams: desktop_stream::Streams,
@@ -90,6 +98,7 @@ impl AppState {
             backups: None,
             mcps: std::sync::OnceLock::new(),
             socials: None,
+            startup_faults: StartupFaults::default(),
             update_hold: crate::actor::Actor::default(),
             server_updates: crate::actor::Actor::default(),
             desktop_streams: desktop_stream::Streams::default(),
@@ -395,10 +404,9 @@ fn provider_view(
 /// each part's state with the reason it gives.
 pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     let (configured, backups) = tokio::join!(configured_profiles(&state.db), async {
-        match &state.backups {
-            Some(backups) => Some(backups.snapshot().await),
-            None => None,
-        }
+        let backups = state.backups.as_ref()?;
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), backups.snapshot());
+        Some(read.await.map_err(|_| "backup status did not answer in 2 seconds".to_owned()))
     });
     let providers: Vec<_> = state
         .scheduler
@@ -408,9 +416,10 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
         .map(|provider| provider_view(provider.as_ref(), configured.as_deref()))
         .collect();
     let backups = match backups {
-        None => json!({ "available": false }),
-        Some(Err(err)) => json!({ "available": false, "error": err.to_string() }),
-        Some(Ok(snapshot)) => json!({
+        None => json!({ "available": false, "unavailable_reason": state.startup_faults.backups }),
+        Some(Err(why)) => json!({ "available": false, "error": why }),
+        Some(Ok(Err(err))) => json!({ "available": false, "error": err.to_string() }),
+        Some(Ok(Ok(snapshot))) => json!({
             "available": snapshot.unavailable_reason.is_none(),
             "unavailable_reason": snapshot.unavailable_reason,
             "enabled": snapshot.enabled,
@@ -424,7 +433,10 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
         "version": crate::VERSION,
         "providers": providers,
         "profiles_readable": configured.is_some(),
-        "computers": { "available": state.computers.is_some() },
+        "computers": {
+            "available": state.computers.is_some(),
+            "unavailable_reason": state.startup_faults.computers,
+        },
         "backups": backups,
     })
 }

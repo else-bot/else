@@ -545,7 +545,10 @@ fn run_serve() -> anyhow::Result<()> {
                 computer_task = Some(tokio::spawn(manager.clone().run(stop_scheduler.clone())));
                 state = state.with_computers(manager);
             }
-            Err(err) => tracing::warn!(error = %err, "bot computers unavailable"),
+            Err(err) => {
+                tracing::warn!(error = %err, "bot computers unavailable");
+                state.startup_faults.computers = Some(err.to_string());
+            }
         }
         let backup_task = match else_api::backup::service::Backups::start(
             &config,
@@ -569,6 +572,7 @@ fn run_serve() -> anyhow::Result<()> {
             }
             Err(error) => {
                 tracing::warn!(error = %error, "backup service unavailable; API continues without backups");
+                state.startup_faults.backups = Some(error.to_string());
                 None
             }
         };
