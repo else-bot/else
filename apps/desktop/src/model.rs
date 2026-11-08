@@ -364,6 +364,12 @@ pub struct Routine {
     pub next_run_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub last_run: Option<LastRun>,
+    /// Consecutive failed runs the owner has not dismissed.
+    #[serde(default)]
+    pub failed_runs: i64,
+    /// Why else.bot switched the routine off: `needs_action` or `repeated`.
+    #[serde(default)]
+    pub paused_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

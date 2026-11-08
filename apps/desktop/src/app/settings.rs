@@ -250,6 +250,7 @@ impl ModelDialog {
 #[derive(Debug, Clone, PartialEq)]
 enum RoutineSave {
     Saving { attempt: Uuid, enabled: bool },
+    Dismissing { attempt: Uuid },
     Model { attempt: Uuid },
     Deleting { attempt: Uuid },
     Failed(String),
@@ -259,15 +260,19 @@ impl RoutineSave {
     fn busy(&self) -> bool {
         matches!(
             self,
-            Self::Saving { .. } | Self::Model { .. } | Self::Deleting { .. }
+            Self::Saving { .. }
+                | Self::Dismissing { .. }
+                | Self::Model { .. }
+                | Self::Deleting { .. }
         )
     }
 
     fn attempt(&self) -> Option<Uuid> {
         match self {
-            Self::Saving { attempt, .. } | Self::Model { attempt } | Self::Deleting { attempt } => {
-                Some(*attempt)
-            }
+            Self::Saving { attempt, .. }
+            | Self::Dismissing { attempt }
+            | Self::Model { attempt }
+            | Self::Deleting { attempt } => Some(*attempt),
             Self::Failed(_) => None,
         }
     }
@@ -485,13 +490,45 @@ impl ElseApp {
         cx: &mut Context<Self>,
     ) {
         let attempt = Uuid::new_v4();
-        if !self.begin_routine_change(bot, routine, RoutineSave::Saving { attempt, enabled }) {
+        let request = self
+            .client
+            .clone()
+            .set_routine_enabled(bot, routine, enabled);
+        let change = RoutineSave::Saving { attempt, enabled };
+        self.save_routine(bot, routine, change, request, window, cx);
+    }
+
+    fn dismiss_routine_failures(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let attempt = Uuid::new_v4();
+        let request = self.client.clone().dismiss_routine_failures(bot, routine);
+        let change = RoutineSave::Dismissing { attempt };
+        self.save_routine(bot, routine, change, request, window, cx);
+    }
+
+    fn save_routine(
+        &mut self,
+        bot: Uuid,
+        routine: Uuid,
+        change: RoutineSave,
+        request: impl std::future::Future<Output = Result<Routine, crate::api::ClientError>> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(attempt) = change.attempt() else {
+            return;
+        };
+        if !self.begin_routine_change(bot, routine, change) {
             return;
         }
         cx.notify();
-        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.set_routine_enabled(bot, routine, enabled).await;
+            let result = request.await;
             let _ = this.update(cx, |app, cx| {
                 let Some(entry) = current_change(&mut app.settings, bot, routine, attempt) else {
                     return;
@@ -1308,11 +1345,22 @@ impl ElseApp {
             .on_click(cx.listener(move |app, _, window, cx| {
                 app.open_routine_delete_dialog(bot, id, window, cx)
             }));
+        let dismiss = (routine.failed_runs > 0).then(|| {
+            Button::new(ElementId::Name(format!("routine-dismiss-{id}").into()))
+                .focus_ring(false)
+                .cursor_pointer()
+                .ghost()
+                .xsmall()
+                .label("Dismiss")
+                .loading(matches!(save, Some(RoutineSave::Dismissing { .. })))
+                .accessibility_label(format!("Dismiss the failures of {}", routine.name))
+                .disabled(busy || !connected)
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.dismiss_routine_failures(bot, id, window, cx)
+                }))
+        });
         let schedule = format!("{} · {}", describe_cron(&routine.cron), routine.timezone);
-        let last = routine
-            .last_run
-            .as_ref()
-            .map(|run| last_run(run, &routine.timezone));
+        let last = last_run(routine);
         let problem = match save {
             Some(RoutineSave::Failed(err)) => Some(err.clone()),
             _ => last
@@ -1515,6 +1563,7 @@ impl ElseApp {
                             .flex_none()
                             .gap_1()
                             .items_center()
+                            .children(dismiss)
                             .child(delete)
                             .child(switch),
                     ),
@@ -1631,8 +1680,30 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     }
 }
 
-fn last_run(run: &LastRun, timezone: &str) -> (String, bool) {
-    let when = local_time(run.due_at, timezone);
+/// The routine's last run, and whether it needs the owner's attention: a
+/// pause, or failures not yet dismissed.
+fn last_run(routine: &Routine) -> Option<(String, bool)> {
+    let run = routine.last_run.as_ref()?;
+    let when = local_time(run.due_at, &routine.timezone);
+    let error = run.error.as_ref().and_then(|e| e.message.clone());
+    if !routine.enabled
+        && let Some(reason) = &routine.paused_reason
+    {
+        let why = match reason.as_str() {
+            "repeated" => format!("Paused after {} failed runs", routine.failed_runs),
+            _ => "Paused: retrying won't fix the last failure".to_owned(),
+        };
+        let detail = error.map_or_else(String::new, |e| format!(" ({e})"));
+        return Some((format!("{why}{detail}"), true));
+    }
+    let (text, attention) = last_run_status(run, &when, error);
+    Some((
+        text,
+        attention && (routine.failed_runs > 0 || run.status == "skipped"),
+    ))
+}
+
+fn last_run_status(run: &LastRun, when: &str, error: Option<String>) -> (String, bool) {
     let reason = |code: &str| match code {
         "overlap" => "the previous run was still going",
         "queue_full" => "too many messages were waiting",
@@ -1641,11 +1712,7 @@ fn last_run(run: &LastRun, timezone: &str) -> (String, bool) {
     };
     match run.status.as_str() {
         "failed" | "uncertain" | "interrupted" => {
-            let detail = run
-                .error
-                .as_ref()
-                .and_then(|e| e.message.clone())
-                .unwrap_or_else(|| run.status.clone());
+            let detail = error.unwrap_or_else(|| run.status.clone());
             (format!("Last run {when} {}: {detail}", run.status), true)
         }
         "skipped" => (
@@ -1714,7 +1781,7 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metadata, MetadataChange, MetadataSync, describe_cron, parse_name};
+    use super::{Metadata, MetadataChange, MetadataSync, describe_cron, last_run, parse_name};
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
@@ -1909,5 +1976,42 @@ mod tests {
         ] {
             assert_eq!(describe_cron(cron), cron);
         }
+    }
+
+    #[test]
+    fn a_routine_card_flags_pauses_and_undismissed_failures_only() {
+        let routine = |extra: serde_json::Value| -> crate::model::Routine {
+            let mut value = serde_json::json!({
+                "id": uuid::Uuid::nil(), "name": "Tickets", "prompt": "p",
+                "cron": "0 * * * *", "timezone": "Europe/Paris", "enabled": true,
+                "next_run_at": null, "updated_at": "2026-11-08T03:00:00Z",
+                "last_run": { "due_at": "2026-11-08T02:00:00Z", "status": "failed",
+                              "skip_reason": null,
+                              "error": { "code": "provider_unavailable",
+                                         "message": "the provider process exited" } },
+            });
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let (text, attention) =
+            last_run(&routine(serde_json::json!({ "failed_runs": 1 }))).unwrap();
+        assert!(attention);
+        assert!(
+            text.ends_with("failed: the provider process exited"),
+            "{text}"
+        );
+        let (_, attention) = last_run(&routine(serde_json::json!({}))).unwrap();
+        assert!(!attention, "dismissed failures stay visible but quiet");
+        let (text, attention) = last_run(&routine(serde_json::json!({
+            "enabled": false, "failed_runs": 3, "paused_reason": "repeated",
+        })))
+        .unwrap();
+        assert!(attention);
+        assert_eq!(
+            text,
+            "Paused after 3 failed runs (the provider process exited)"
+        );
     }
 }

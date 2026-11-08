@@ -783,6 +783,21 @@ impl Client {
         .map(|(_, v)| v.routine)
     }
 
+    /// Forget a routine's failed runs. Repeating it is a no-op.
+    pub async fn dismiss_routine_failures(
+        self: Arc<Self>,
+        bot: Uuid,
+        routine: Uuid,
+    ) -> Result<Routine, ClientError> {
+        self.call::<RoutineEnvelope>(
+            Method::PATCH,
+            format!("/v1/bots/{bot}/routines/{routine}"),
+            Some(json!({ "dismiss_failures": true })),
+        )
+        .await
+        .map(|(_, v)| v.routine)
+    }
+
     pub async fn set_routine_model(
         self: Arc<Self>,
         bot: Uuid,
