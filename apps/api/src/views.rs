@@ -149,6 +149,11 @@ pub fn routine_json(routine: &Routine) -> Value {
         "prompt_revision": routine.prompt_revision,
         "cron": routine.cron,
         "timezone": routine.timezone,
+        "active_hours": routine.active_hours.map(|hours| json!({
+            "days": hours.days(),
+            "start": hours.start(),
+            "end": hours.end(),
+        })),
         "enabled": routine.enabled,
         "model": match &routine.model {
             ModelSetting::Own(model) => json!(model),

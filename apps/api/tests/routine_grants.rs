@@ -35,7 +35,7 @@ async fn create(
         app,
         token,
         "routine_create",
-        json!({ "name": name, "prompt": prompt, "cron": cron }),
+        json!({ "name": name, "prompt": prompt, "cron": cron, "active_hours": "always" }),
     )
     .await;
     assert!(!called.error, "{}", called.body);

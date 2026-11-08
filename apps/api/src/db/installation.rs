@@ -215,3 +215,20 @@ pub async fn check_installed(pool: &SqlitePool) -> Result<Option<Uuid>, InstallE
         Some((default, _)) => Ok(default),
     }
 }
+
+/// The IANA time zone the owner's desktop app last reported, if any.
+pub async fn owner_timezone(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT owner_timezone FROM installation")
+        .fetch_optional(pool)
+        .await
+        .map(Option::flatten)
+}
+
+/// Record the owner's time zone; writes only when it changed.
+pub async fn set_owner_timezone(pool: &SqlitePool, timezone: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE installation SET owner_timezone = ?1 WHERE owner_timezone IS NOT ?1")
+        .bind(timezone)
+        .execute(pool)
+        .await
+        .map(drop)
+}

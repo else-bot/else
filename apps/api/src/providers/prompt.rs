@@ -214,9 +214,12 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          Monday, hourly), save it as a routine with routine_create instead of a cron job or \
          background script: a short name, the complete task as the prompt (self-contained, as \
          you will read it later without this conversation), a standard five-field cron \
-         expression (minute hour day-of-month month day-of-week), and the owner's IANA time \
-         zone when they named one or it is clear from context; otherwise it runs in UTC, so \
-         say so. Confirm the schedule and the next run time from the result. routine_list, \
+         expression (minute hour day-of-month month day-of-week), and an IANA time zone only \
+         when the owner named one; otherwise it uses the time zone of the owner's desktop app. \
+         Routines start runs only during the owner's working hours (Monday to Friday, 08:00 to \
+         18:00) unless you pass active_hours: pass \"always\" when the owner asks for 24/7, \
+         every day, nights, or weekends, or the days and hours they asked for. Confirm the \
+         schedule, its active hours, and the next run time from the result. routine_list, \
          routine_update, and routine_delete manage your routines; the owner can also switch \
          them off in Bot settings. When the owner wants a routine on a specific model, pass \
          model (and reasoning_effort or service_tier only if they asked); otherwise omit it so \

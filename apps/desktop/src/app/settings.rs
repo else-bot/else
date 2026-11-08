@@ -1366,7 +1366,15 @@ impl ElseApp {
                     app.dismiss_routine_failures(bot, id, window, cx)
                 }))
         });
-        let schedule = format!("{} · {}", describe_cron(&routine.cron), routine.timezone);
+        let schedule = match &routine.active_hours {
+            Some(hours) => format!(
+                "{} · {} · {}",
+                describe_cron(&routine.cron),
+                describe_hours(hours),
+                routine.timezone
+            ),
+            None => format!("{} · {}", describe_cron(&routine.cron), routine.timezone),
+        };
         let last = last_run(routine);
         let problem = match save {
             Some(RoutineSave::Failed(err)) => Some(err.clone()),
@@ -1687,6 +1695,33 @@ fn describe_cron_fields([minute, hour, day, month, weekday]: [&str; 5]) -> Optio
     }
 }
 
+fn describe_hours(hours: &crate::model::ActiveHours) -> String {
+    let has = |names: &[&str]| {
+        hours.days.len() == names.len() && names.iter().all(|n| hours.days.iter().any(|d| d == n))
+    };
+    let days = if has(&["mon", "tue", "wed", "thu", "fri"]) {
+        "Weekdays".to_owned()
+    } else if has(&["sat", "sun"]) {
+        "Weekends".to_owned()
+    } else if hours.days.len() == 7 {
+        "Every day".to_owned()
+    } else {
+        hours
+            .days
+            .iter()
+            .map(|day| {
+                let mut chars = day.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("{days} {} to {}", hours.start, hours.end)
+}
+
 fn last_run(routine: &Routine) -> Option<(String, bool)> {
     let run = routine.last_run.as_ref()?;
     let when = local_time(run.due_at, &routine.timezone);
@@ -1786,7 +1821,9 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metadata, MetadataChange, MetadataSync, describe_cron, last_run, parse_name};
+    use super::{
+        Metadata, MetadataChange, MetadataSync, describe_cron, describe_hours, last_run, parse_name,
+    };
     use crate::avatar::{Avatar, AvatarColor, AvatarShape};
 
     fn metadata(name: &str, avatar: Avatar) -> Metadata {
@@ -1948,6 +1985,39 @@ mod tests {
             ("  0\t*/6  * *   * ", "Every 6 hours"),
         ] {
             assert_eq!(describe_cron(cron), readable, "{cron}");
+        }
+    }
+
+    #[test]
+    fn active_hours_read_as_days_and_a_span() {
+        let hours = |days: &[&str], start: &str, end: &str| crate::model::ActiveHours {
+            days: days.iter().map(|d| (*d).to_owned()).collect(),
+            start: start.to_owned(),
+            end: end.to_owned(),
+        };
+        for (value, readable) in [
+            (
+                hours(&["mon", "tue", "wed", "thu", "fri"], "08:00", "18:00"),
+                "Weekdays 08:00 to 18:00",
+            ),
+            (
+                hours(&["sat", "sun"], "10:00", "12:00"),
+                "Weekends 10:00 to 12:00",
+            ),
+            (
+                hours(
+                    &["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                    "07:00",
+                    "22:00",
+                ),
+                "Every day 07:00 to 22:00",
+            ),
+            (
+                hours(&["mon", "wed"], "09:00", "17:30"),
+                "Mon, Wed 09:00 to 17:30",
+            ),
+        ] {
+            assert_eq!(describe_hours(&value), readable);
         }
     }
 
