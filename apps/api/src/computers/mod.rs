@@ -670,11 +670,7 @@ impl ComputerManager {
     /// across a restart, so a computer that grew stays counted at its
     /// maximum until this reset succeeds. The caller holds the bot's
     /// operation lock, and admits the start after this, against the result.
-    async fn configure_boot(
-        &self,
-        bot_id: Uuid,
-        row: &Row,
-    ) -> Result<Row, ComputerError> {
+    async fn configure_boot(&self, bot_id: Uuid, row: &Row) -> Result<Row, ComputerError> {
         let Some((max_cpus, max_memory)) = self.config.growth() else {
             return Ok(row.clone());
         };
