@@ -27,6 +27,7 @@ struct Fake {
     create_delay: Mutex<Duration>,
     fail_unpack: std::sync::atomic::AtomicBool,
     fail_close: std::sync::atomic::AtomicBool,
+    fail_configure: std::sync::atomic::AtomicBool,
     specs: Mutex<Vec<Spec>>,
 }
 
@@ -127,6 +128,32 @@ impl ComputerRuntime for Fake {
         self.log(format!("resume {name}"));
         self.set(name, RuntimeState::Running)
     }
+    async fn grow(&self, name: &str, cpus: u32, memory_mib: u32) -> Result<(), RuntimeError> {
+        self.log(format!("grow {name} {cpus}cpu {memory_mib}MiB"));
+        Ok(())
+    }
+    async fn configure(
+        &self,
+        name: &str,
+        cpus: u32,
+        memory_mib: u32,
+        max_cpus: u32,
+        max_memory_mib: u32,
+    ) -> Result<(), RuntimeError> {
+        self.log(format!(
+            "configure {name} {cpus}cpu {memory_mib}MiB up to {max_cpus}cpu {max_memory_mib}MiB"
+        ));
+        if self
+            .fail_configure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(RuntimeError::Failed {
+                operation: "modify".into(),
+                message: "busy".into(),
+            });
+        }
+        Ok(())
+    }
     async fn remove(&self, name: &str) -> Result<(), RuntimeError> {
         self.log(format!("remove {name}"));
         let mut computers = self.computers.lock().unwrap();
@@ -156,6 +183,10 @@ impl ComputerRuntime for Fake {
             self.log(format!("close-browser {name}"));
         } else if program == else_api::computers::GUEST_CHECKPOINT {
             self.log(format!("checkpoint {name}"));
+        } else if program == else_api::computers::GUEST_INIT {
+            self.log(format!("init {name}"));
+        } else if program == "/bin/sh" && args[1] == else_api::computers::GUEST_DESKTOP {
+            self.log(format!("desktop {name}"));
         }
         let mut computers = self.computers.lock().unwrap();
         let Computer { state, files } = computers.get_mut(name).expect("exists");
@@ -281,8 +312,8 @@ async fn computers_are_created_on_first_use_reused_and_kept_apart() {
         .count();
     assert_eq!(creates, 2, "{:?}", fake.calls());
     assert!(
-        fake.calls().iter().any(|c| c.contains("1cpu 2048MiB")),
-        "1 vCPU and 2 GiB"
+        fake.calls().iter().any(|c| c.contains("1cpu 1024MiB")),
+        "1 vCPU and 1 GiB"
     );
     let read = |lease| manager.exec(lease, "read", &["/root/note"], second);
     assert_eq!(read(lease_a).await.unwrap().stdout, "A-only");
@@ -1048,4 +1079,188 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
         "{calls:?}"
     );
     assert_eq!(closes(&fake), 1, "only the old computer's browser closes");
+}
+
+/// A desktop computer boots at its small size for commands. Its screen
+/// starts, and it grows to the desktop size, only when something needs the
+/// desktop, once per boot. Growth is admitted against the budget and held
+/// until the computer stops; without room the screen runs at the boot size
+/// and grows once room frees. Its next start boots small again.
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let base = ComputerConfig::default();
+    let reserved = |cpus: u32, memory: u32| (cpus, memory + base.overhead_mib);
+    let (small_cpus, small_memory) = reserved(base.cpus, base.memory_mib);
+    let (big_cpus, big_memory) = reserved(base.desktop_cpus, base.desktop_memory_mib);
+    let manager = manager(
+        &app,
+        &fake,
+        ComputerConfig {
+            desktop: true,
+            state_dir: dir.path().to_owned(),
+            max_cpus: big_cpus + small_cpus,
+            max_memory_mib: (big_memory + small_memory) as u64,
+            ..config(2)
+        },
+    )
+    .await;
+    let a: Uuid = app.create_bot("Screen").await.parse().unwrap();
+    let b: Uuid = app.create_bot("Scripts").await.parse().unwrap();
+    let count = |prefix: &str| {
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with(prefix))
+            .count()
+    };
+
+    let (lease_a, name_a) = ready(&manager, a, "test:a").await;
+    let (lease_b, name_b) = ready(&manager, b, "test:b").await;
+    assert_eq!(count("desktop"), 0, "commands start no desktop");
+    assert_eq!(count("init"), 2, "each boot runs the guest's setup");
+    let spec = fake.specs.lock().unwrap()[0].clone();
+    assert_eq!(
+        (
+            spec.cpus,
+            spec.memory_mib,
+            spec.max_cpus,
+            spec.max_memory_mib
+        ),
+        (1, 1024, 2, 2048),
+        "created small, able to grow"
+    );
+
+    let shown = manager.acquire_desktop(a, "test:a").await.unwrap();
+    assert!(matches!(shown, Acquire::Ready { lease_id, .. } if lease_id == lease_a));
+    let calls = fake.calls();
+    let grew = calls
+        .iter()
+        .position(|c| c == &format!("grow {name_a} 2cpu 2048MiB"));
+    let started = calls.iter().position(|c| c == &format!("desktop {name_a}"));
+    assert!(
+        grew.is_some() && grew < started,
+        "grown before its screen starts: {calls:?}"
+    );
+    manager.acquire_desktop(a, "test:a").await.unwrap();
+    assert_eq!((count("grow"), count("desktop")), (1, 1), "once per boot");
+
+    let small = manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert!(matches!(small, Acquire::Ready { .. }), "{small:?}");
+    assert_eq!(
+        (
+            count(&format!("grow {name_b}")),
+            count(&format!("desktop {name_b}"))
+        ),
+        (0, 1),
+        "a screen at the boot size without room to grow"
+    );
+    manager
+        .exec(
+            lease_b,
+            "write",
+            &["/root/note", "still works"],
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    manager.release(lease_a).await.unwrap();
+    manager.tick(&never()).await.unwrap();
+    assert_eq!(observed(&app, a).await, "stopped");
+    assert!(matches!(
+        manager.acquire_desktop(b, "test:b").await.unwrap(),
+        Acquire::Ready { .. }
+    ));
+    assert_eq!(
+        (
+            count(&format!("grow {name_b}")),
+            count(&format!("desktop {name_b}"))
+        ),
+        (1, 1),
+        "grown once room freed, its screen kept"
+    );
+
+    ready(&manager, a, "test:a2").await;
+    let calls = fake.calls();
+    let configured = calls
+        .iter()
+        .rposition(|c| c == &format!("configure {name_a} 1cpu 1024MiB up to 2cpu 2048MiB"));
+    let restarted = calls.iter().rposition(|c| c == &format!("start {name_a}"));
+    assert!(
+        configured.is_some() && configured < restarted,
+        "boots small again: {calls:?}"
+    );
+    assert_eq!(
+        count(&format!("desktop {name_a}")),
+        1,
+        "a restart starts no desktop"
+    );
+}
+
+/// A computer that grew is counted at its maximum until a reset of its boot
+/// size succeeds: through a failed stop, and on a restart whose reset failed,
+/// which waits for room for its maximum.
+#[tokio::test(flavor = "multi_thread")]
+async fn grown_computers_stay_counted_until_their_size_is_reset() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let app = TestApp::installed().await;
+    let fake = Arc::new(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let base = ComputerConfig::default();
+    let (small_cpus, small_memory) = (base.cpus, base.memory_mib + base.overhead_mib);
+    let (big_cpus, big_memory) = (
+        base.desktop_cpus,
+        base.desktop_memory_mib + base.overhead_mib,
+    );
+    let manager = manager(
+        &app,
+        &fake,
+        ComputerConfig {
+            desktop: true,
+            state_dir: dir.path().to_owned(),
+            max_cpus: big_cpus + small_cpus,
+            max_memory_mib: (big_memory + small_memory) as u64,
+            ..config(2)
+        },
+    )
+    .await;
+    let a: Uuid = app.create_bot("Grown").await.parse().unwrap();
+    let b: Uuid = app.create_bot("Other").await.parse().unwrap();
+    let grows = |name: &str| {
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with(&format!("grow {name}")))
+            .count()
+    };
+    let (_, name_a) = ready(&manager, a, "test:a").await;
+    manager.acquire_desktop(a, "test:a").await.unwrap();
+    assert_eq!(grows(&name_a), 1);
+
+    fake.fail_stop.store(true, SeqCst);
+    let _ = manager.owner_stop(a).await;
+    assert_ne!(observed(&app, a).await, "stopped", "the stop failed");
+    fake.fail_stop.store(false, SeqCst);
+    let (_, name_b) = ready(&manager, b, "test:b").await;
+    manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert_eq!(
+        grows(&name_b),
+        0,
+        "a failed stop still holds the grown size"
+    );
+
+    manager.owner_stop(a).await.unwrap();
+    manager.owner_resume(a).await.unwrap();
+    manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert_eq!(grows(&name_b), 1, "room once it stopped");
+
+    fake.fail_configure.store(true, SeqCst);
+    let waiting = manager.acquire(a, "test:a2").await.unwrap();
+    assert!(
+        matches!(&waiting, Acquire::Queued { .. }),
+        "an unreset restart needs room for its maximum: {waiting:?}"
+    );
+    fake.fail_configure.store(false, SeqCst);
+    let (_, _) = ready(&manager, a, "test:a2").await;
 }

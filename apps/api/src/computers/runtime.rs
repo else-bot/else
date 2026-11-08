@@ -67,6 +67,10 @@ pub struct Spec {
     pub image: String,
     pub cpus: u32,
     pub memory_mib: u32,
+    /// The vCPUs and memory a running computer may grow to (the boot size
+    /// when it cannot grow).
+    pub max_cpus: u32,
+    pub max_memory_mib: u32,
     /// Microsandbox network profile (`public`: internet only, no host,
     /// private, or link-local networks).
     pub network: String,
@@ -97,6 +101,31 @@ pub trait ComputerRuntime: Send + Sync {
     async fn stop(&self, name: &str) -> Result<(), RuntimeError>;
     async fn pause(&self, name: &str) -> Result<(), RuntimeError>;
     async fn resume(&self, name: &str) -> Result<(), RuntimeError>;
+
+    /// Grow a running computer's vCPUs and memory, within the maximums it
+    /// booted with. The guest keeps the added memory until it stops.
+    async fn grow(&self, name: &str, cpus: u32, memory_mib: u32) -> Result<(), RuntimeError> {
+        let _ = (name, cpus, memory_mib);
+        Err(RuntimeError::Unavailable(
+            "this runtime cannot resize a computer".into(),
+        ))
+    }
+
+    /// Set a stopped computer's boot vCPUs and memory and the maximums it
+    /// may grow to, for its next start.
+    async fn configure(
+        &self,
+        name: &str,
+        cpus: u32,
+        memory_mib: u32,
+        max_cpus: u32,
+        max_memory_mib: u32,
+    ) -> Result<(), RuntimeError> {
+        let _ = (name, cpus, memory_mib, max_cpus, max_memory_mib);
+        Err(RuntimeError::Unavailable(
+            "this runtime cannot resize a computer".into(),
+        ))
+    }
     /// Run a command in a running computer.
     async fn exec(
         &self,
@@ -499,6 +528,14 @@ impl ComputerRuntime for Msb {
         .iter()
         .map(|a| (*a).to_owned())
         .collect();
+        if spec.max_cpus > spec.cpus {
+            args.push("--max-cpus".into());
+            args.push(spec.max_cpus.to_string());
+        }
+        if spec.max_memory_mib > spec.memory_mib {
+            args.push("--max-memory".into());
+            args.push(format!("{}M", spec.max_memory_mib));
+        }
         for (host, guest) in &spec.ports {
             args.push("--port".into());
             args.push(format!("127.0.0.1:{host}:{guest}"));
@@ -531,6 +568,45 @@ impl ComputerRuntime for Msb {
 
     async fn resume(&self, name: &str) -> Result<(), RuntimeError> {
         self.control("resume", &["resume", name]).await
+    }
+
+    async fn grow(&self, name: &str, cpus: u32, memory_mib: u32) -> Result<(), RuntimeError> {
+        let cpus = cpus.to_string();
+        let memory = format!("{memory_mib}M");
+        self.control(
+            "modify",
+            &["modify", name, "--cpus", &cpus, "--memory", &memory],
+        )
+        .await
+    }
+
+    async fn configure(
+        &self,
+        name: &str,
+        cpus: u32,
+        memory_mib: u32,
+        max_cpus: u32,
+        max_memory_mib: u32,
+    ) -> Result<(), RuntimeError> {
+        let (cpus, max_cpus) = (cpus.to_string(), max_cpus.to_string());
+        let memory = format!("{memory_mib}M");
+        let max_memory = format!("{max_memory_mib}M");
+        self.control(
+            "modify",
+            &[
+                "modify",
+                name,
+                "--cpus",
+                &cpus,
+                "--memory",
+                &memory,
+                "--max-cpus",
+                &max_cpus,
+                "--max-memory",
+                &max_memory,
+            ],
+        )
+        .await
     }
 
     async fn export_disk(&self, name: &str, archive: &Path) -> Result<(), RuntimeError> {

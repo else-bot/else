@@ -28,11 +28,14 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import time
 import urllib.parse
 import urllib.request
 
 ENDPOINT = "http://127.0.0.1:9222"
+DESKTOP = "/usr/local/bin/else-desktop"
+SCREEN = "/tmp/.X11-unix/X99"
 LOCK = "/var/lib/elsebot/browser.lock"
 MAX_EVALUATE = 300
 CONTROLLED = "/var/lib/elsebot/browser-controlled.jsonl"
@@ -96,11 +99,23 @@ def ready(timeout=30):
     """Wait until DevTools answers (the browser may be starting or restarting)."""
     deadline = time.monotonic() + timeout
     last = None
+    # Only a desktop that never started is started here; a browser that is
+    # restarting comes back by itself.
+    started = os.path.exists(SCREEN) or not os.access(DESKTOP, os.X_OK)
     while time.monotonic() < deadline:
         try:
             return _get_json("/json/version")
         except Exception as e:  # noqa: BLE001 - any failure means not yet
             last = e
+            if not started:
+                # The desktop starts on first use.
+                started = True
+                try:
+                    subprocess.run([DESKTOP], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=max(1, deadline - time.monotonic()), check=False)
+                except subprocess.TimeoutExpired:
+                    pass
+                continue
             time.sleep(0.25)
     raise BrowserNotReady(f"the browser did not answer at {ENDPOINT} within {timeout} s ({last})")
 

@@ -57,6 +57,10 @@ impl ComputerManager {
         timeout: Duration,
         env: &Env,
     ) -> Result<Result<CommandOutput, Acquire>, ComputerError> {
+        let acquired = self.acquire_desktop(bot_id, holder).await?;
+        if !matches!(acquired, Acquire::Ready { .. }) {
+            return Ok(Err(acquired));
+        }
         self.run_foreground(bot_id, holder, command, timeout, env, true)
             .await
     }

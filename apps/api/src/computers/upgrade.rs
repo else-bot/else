@@ -216,7 +216,8 @@ impl ComputerManager {
 
     async fn admit(&self, bot_id: Uuid, row: &super::Row) -> Result<(), ComputerError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let admitted = self.admits(&mut tx, bot_id, row).await?;
+        let (cpus, memory) = row.reserved();
+        let admitted = self.admits(&mut tx, bot_id, cpus, memory).await?;
         tx.commit().await?;
         if admitted {
             Ok(())
@@ -487,6 +488,7 @@ impl ComputerManager {
             .create(staging)
             .map_err(io)?;
 
+        let row = &self.configure_boot(bot_id, row).await?;
         self.admit(bot_id, row).await?;
         self.runtime.start(&row.runtime_name).await?;
         let out = self
@@ -558,6 +560,8 @@ impl ComputerManager {
                 image: image.to_owned(),
                 cpus: row.cpus as u32,
                 memory_mib: row.memory_mib as u32,
+                max_cpus: row.max().0,
+                max_memory_mib: row.max().1,
                 network: network.to_owned(),
                 ports,
                 files,

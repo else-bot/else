@@ -231,14 +231,28 @@ async fn guest_tools_desktop_and_isolation() {
         "{}",
         out.stderr
     );
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    let services = run("ps -eo comm | sort -u | tr '\\n' ' '")
-        .await
-        .unwrap()
-        .unwrap()
-        .stdout;
+    let services = || async {
+        run("ps -eo comm | sort -u | tr '\\n' ' '")
+            .await
+            .unwrap()
+            .unwrap()
+            .stdout
+    };
+    let idle = services().await;
+    assert!(idle.contains("supervisord"), "{idle}");
     for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
-        assert!(services.contains(service), "{service} missing: {services}");
+        assert!(
+            !idle.contains(service),
+            "{service} runs before any use: {idle}"
+        );
+    }
+    assert!(matches!(
+        manager.acquire_desktop(bot, "test:turn").await.unwrap(),
+        Acquire::Ready { .. }
+    ));
+    let shown = services().await;
+    for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
+        assert!(shown.contains(service), "{service} missing: {shown}");
     }
 
     let checks = run(
@@ -959,7 +973,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         "{:?}",
         summary.manifest.coverage
     );
-    assert_eq!(summary.manifest.artifacts.len(), 3);
+    assert_eq!(summary.manifest.artifacts.len(), 4);
     assert_eq!(
         manager
             .runtime_state(&ComputerManager::runtime_name(beta))

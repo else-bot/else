@@ -93,7 +93,9 @@ pub fn tool_list() -> Vec<Value> {
                 runtimes your computer has (current images include Node.js and npm, Python 3 \
                 with venv for pip, Rust and Cargo, Git, gcc/g++, make, curl, and jq); if that \
                 command is missing, the computer uses an older image: check a tool with \
-                `command -v` before relying on it. Declare its effect: destructive or sensitive external \
+                `command -v` before relying on it. The screen and Chromium start on first use: \
+                the CDP helpers and the screen tools start them, and `else-desktop` starts them \
+                for anything else. Declare its effect: destructive or sensitive external \
                 commands need approval unless a saved permission applies. Routine reversible \
                 work, including remote ticket creation and updates, runs without a card.",
             "inputSchema": { "type": "object", "properties": {
@@ -321,18 +323,44 @@ fn fit(mut value: Value) -> Value {
     value
 }
 
-async fn lease(state: &AppState, grant: &Grant) -> Result<Uuid, Outcome> {
+/// The turn's lease on its computer; with `desktop`, its screen and browser
+/// running too.
+async fn lease(state: &AppState, grant: &Grant, desktop: bool) -> Result<Uuid, Outcome> {
     let Some(computers) = state.computers.as_ref() else {
         return Err((
             tool_error("COMPUTER_UNAVAILABLE: no computer runtime on this host."),
             None,
         ));
     };
-    match computers.acquire(grant.bot_id, &holder(grant)).await {
+    let acquired = if desktop {
+        computers
+            .acquire_desktop(grant.bot_id, &holder(grant))
+            .await
+    } else {
+        computers.acquire(grant.bot_id, &holder(grant)).await
+    };
+    match acquired {
         Ok(Acquire::Ready { lease_id, .. }) => Ok(lease_id),
         Ok(other) => Err((not_ready(&other), None)),
         Err(err) => Err(failure(err)),
     }
+}
+
+/// Whether a command names the guest's browser or screen helpers, so its
+/// computer grows for the desktop before the command starts it.
+fn wants_desktop(command: &str) -> bool {
+    const HELPERS: [&str; 9] = [
+        "else-desktop",
+        "elsecdp",
+        "cdp.mjs",
+        "/usr/local/lib/elsebot/cdp",
+        "else-browser",
+        "else-screenshot",
+        "else-input",
+        "chromium",
+        ":9222",
+    ];
+    HELPERS.iter().any(|h| command.contains(h))
 }
 
 fn job_json(job: &crate::computers::jobs::JobState) -> Value {
@@ -412,7 +440,7 @@ async fn screenshot(
         };
     }
     let save = args["save"].as_bool().unwrap_or(false);
-    let lease = match lease(state, grant).await {
+    let lease = match lease(state, grant, true).await {
         Ok(lease) => lease,
         Err(outcome) => return outcome,
     };
@@ -704,6 +732,11 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("command is required."), None);
             };
             let timeout = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
+            if wants_desktop(&command)
+                && let Err(outcome) = lease(state, grant, true).await
+            {
+                return outcome;
+            }
             let (mut env, _) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
@@ -781,6 +814,11 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                     }
                 },
             };
+            if wants_desktop(&command)
+                && let Err(outcome) = lease(state, grant, true).await
+            {
+                return outcome;
+            }
             let (mut env, names) = match secrets_for(state, args).await {
                 Ok(found) => found,
                 Err(outcome) => return outcome,
@@ -848,7 +886,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             if content.len() > 65_536 {
                 return (tool_error("content is over 64 KB."), None);
             }
-            let lease = match lease(state, grant).await {
+            let lease = match lease(state, grant, false).await {
                 Ok(lease) => lease,
                 Err(outcome) => return outcome,
             };
@@ -869,7 +907,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 return (tool_error("path is required."), None);
             };
             let offset = args["offset"].as_u64().unwrap_or(0);
-            let lease = match lease(state, grant).await {
+            let lease = match lease(state, grant, false).await {
                 Ok(lease) => lease,
                 Err(outcome) => return outcome,
             };
@@ -913,7 +951,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
             let Some(path) = text("path") else {
                 return (tool_error("path is required."), None);
             };
-            let lease = match lease(state, grant).await {
+            let lease = match lease(state, grant, false).await {
                 Ok(lease) => lease,
                 Err(outcome) => return outcome,
             };
@@ -960,7 +998,7 @@ async fn execute(state: &AppState, grant: &Grant, name: &str, args: &Value) -> O
                 "text" | "title" => {}
                 _ => return (tool_error("unknown action."), None),
             }
-            let lease = match lease(state, grant).await {
+            let lease = match lease(state, grant, true).await {
                 Ok(lease) => lease,
                 Err(outcome) => return outcome,
             };

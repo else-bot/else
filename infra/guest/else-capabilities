@@ -17,7 +17,7 @@ jq -n \
     runtimes: {node: $node, npm: $npm, python: $python, pip: $pip, rustc: $rustc, cargo: $cargo},
     tools: {git: $git, gcc: $gcc, make: $make, chromium: $chromium,
             other: ["curl", "jq", "pkg-config", "tar", "gzip", "bzip2", "xz", "zip", "unzip", "time"]},
-    browser: {cdp: "http://127.0.0.1:9222 (guest loopback only; the visible Chromium the owner sees over VNC)",
+    browser: {cdp: "http://127.0.0.1:9222 (guest loopback only; the visible Chromium the owner sees over VNC; it starts on first use: the helpers start it; run else-desktop before connecting any other way)",
               ready: $cdp_ready,
               node_helper: "/usr/local/lib/elsebot/cdp/cdp.mjs (import { connect } from it; no dependencies)",
               python_helper: "/usr/local/lib/elsebot/cdp/elsecdp.py (sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp)",
