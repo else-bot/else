@@ -4,4 +4,4 @@ for variable in $(git rev-parse --local-env-vars); do
 	unset "$variable"
 done
 cargo fmt --all -- --check
-exec cargo check --workspace --all-targets --locked
+exec scripts/check-clippy.sh
