@@ -25,12 +25,11 @@ The Linux desktop needs a working Vulkan driver. On macOS, install Xcode with th
 ```sh
 git clone https://github.com/else-bot/else.git
 cd else
-git config --local extensions.worktreeConfig true
-git config --worktree core.hooksPath .githooks
+git config core.hooksPath .githooks
 cargo build --workspace --locked
 ```
 
-The pre-commit hook runs `cargo fmt --all -- --check` and `cargo check --workspace --all-targets --locked`. The pre-push hook runs `cargo test --workspace --locked`. Fix failures before committing or pushing. Git does not enable repository hooks on clone, so run the hook configuration commands once per checkout. For an existing linked worktree, run `git config --worktree core.hooksPath .githooks` there.
+The pre-commit hook runs `cargo fmt --all -- --check` and `scripts/check-clippy.sh`. The pre-push hook runs `cargo test --workspace --locked`. Fix failures before committing or pushing. Pull requests only need to be up to date with main to merge; CI still runs the slower checks but does not block on them, so these hooks are the gate. Git does not enable repository hooks on clone, so run the hook configuration command once per clone. It applies to every linked worktree of that clone, including agent worktrees.
 
 For real provider replies, install Codex, Claude Code, or Grok Build and sign in as your development user. Set `ELSE_CODEX_BIN`, `ELSE_CLAUDE_BIN`, or `ELSE_GROK_BIN` if a CLI is outside `PATH`.
 
@@ -181,7 +180,7 @@ The `release-ready` check tests the release tooling and installers and rejects a
 
 ### Branch protection
 
-In the [Main pull requests and checks ruleset](https://github.com/else-bot/else/rules/26617470), require `cargo-check`, `cargo-test`, and `release-ready` from GitHub Actions. Keep **Require branches to be up to date before merging** enabled. These jobs run on every PR to `main` without path filters. A skipped Rust suite does not provide test coverage.
+In the [Main pull requests and checks ruleset](https://github.com/else-bot/else/rules/26617470), require only `up-to-date` from GitHub Actions and keep **Require branches to be up to date before merging** enabled. GitHub enforces that setting through required checks, and `up-to-date` finishes in seconds. `cargo-check`, `cargo-test`, and `release-ready` still run on every PR to `main` without path filters, but merging does not wait for them; the repository hooks run the same Rust checks before each commit and push. Read a red check before merging anyway.
 
 Fetch `origin/main` and rebase before the first push and again before merging. Rerun `python3 scripts/check_migrations.py` after rebasing. An up-to-date branch runs main's workflow and scripts against its own changes. Force pushes, branch deletion, and non-linear history on `main` are blocked.
 
@@ -216,6 +215,16 @@ python3 scripts/test-e2e.py macos-arm64 ubuntu-arm64
 These lanes need an ARM64 host, Docker with Compose, and the platform build dependencies. Choose one lane to run it alone. Use `--suite application`, `--suite installer`, or `--suite verification` for a focused run. Results go under `target/e2e`.
 
 Add tests for observable behavior when a change needs coverage. Reuse existing fixtures. Avoid source-text assertions, tests of test runners, and tests that repeat a tool's own checks. Keep useful comments about external constraints and public contracts; make the rest clear through names and code structure.
+
+## Follow main on a test machine
+
+The dev update channel installs every commit of `main` instead of tagged releases, building the app, the server, and the guest image on the machine itself. Nothing waits for release assets. Switch once with the installer from `main`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/else-bot/else/main/install.sh | bash -s -- --channel dev
+```
+
+After that, `elsebot update` and the app's Updates screen offer each new commit of `main`. The installer saves the channel in `~/.else/config/update-channel` and keeps each build in `~/.else/versions/dev-<commit>`. Builds reuse `~/.else/build`, so only the first one compiles everything. When a commit changes `infra/guest` and Docker is running, the installer builds that guest image locally and points bot computers at it; otherwise they keep the published image. Return to tagged releases with `elsebot update --channel stable`. Releases older than the dev channel refuse to replace a dev build, so the first return works once a release includes it. A server that applied database migrations from `main` cannot start an older release until a release includes those migrations; the installer then rolls back to the dev build.
 
 ## Work on bot computers
 

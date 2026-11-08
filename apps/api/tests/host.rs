@@ -341,10 +341,10 @@ fn startup_config_checks_skip_only_clis_without_the_required_flags() {
 }
 
 #[test]
-#[should_panic(expected = "/bin/false --help: exit status: 1")]
+#[should_panic(expected = "/usr/bin/false --help: exit status: 1")]
 fn a_broken_codex_cli_does_not_skip_startup_config_checks() {
     let fx = fixture();
-    codex_supports_startup_config(&fx.host, Path::new("/bin/false"));
+    codex_supports_startup_config(&fx.host, Path::new("/usr/bin/false"));
 }
 
 type Recorded = Arc<Mutex<Vec<serde_json::Value>>>;

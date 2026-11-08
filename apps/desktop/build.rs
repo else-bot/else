@@ -14,6 +14,17 @@ fn main() {
         "cargo:rustc-env=ELSE_VERSION={}",
         release_version::version(&manifest_dir, &workspace)
     );
+    // The installer builds from a detached checkout, so HEAD changes with
+    // every build; release_version already reruns this script when it does.
+    let commit = std::process::Command::new("git")
+        .current_dir(&manifest_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=ELSE_COMMIT={}", commit.trim());
     println!("cargo:rerun-if-env-changed=ELSE_MICROSOFT_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=ELSE_GOOGLE_OAUTH_CONFIG");
     println!("cargo:rerun-if-changed=build.rs");

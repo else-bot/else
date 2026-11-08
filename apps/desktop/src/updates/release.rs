@@ -14,6 +14,98 @@ pub const REPO: &str = "https://github.com/else-bot/else.git";
 const MAX_LISTING: u64 = 1 << 20;
 const MAX_ERROR: u64 = 4096;
 
+/// Which builds this installation follows, saved by `install.sh --channel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Channel {
+    /// Tagged `vX.Y.Z` releases.
+    #[default]
+    Stable,
+    /// Every commit of main, built on this machine.
+    Dev,
+}
+
+const CHANNEL_FILE: &str = "config/update-channel";
+
+impl Channel {
+    pub fn saved(home: &Path) -> Result<Self, String> {
+        let path = home.join(CHANNEL_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match text.trim() {
+                "stable" => Ok(Self::Stable),
+                "dev" => Ok(Self::Dev),
+                other => Err(format!(
+                    "{} names an unknown update channel ({other:?}).",
+                    path.display()
+                )),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::Stable),
+            Err(err) => Err(format!("Cannot read {}: {err}.", path.display())),
+        }
+    }
+}
+
+/// An installable build: what `versions/<id>` holds and `install.sh
+/// --version <id>` installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    Stable(Version),
+    Dev(Commit),
+}
+
+impl Release {
+    pub fn id(&self) -> String {
+        match self {
+            Self::Stable(version) => version.plain(),
+            Self::Dev(commit) => format!("dev-{}", commit.0),
+        }
+    }
+
+    /// Whether installing `self` changes an installation running `installed`.
+    /// Stable never offers an older release, but always leaves a dev build.
+    pub fn replaces(&self, installed: &Release) -> bool {
+        match (self, installed) {
+            (Self::Stable(latest), Self::Stable(installed)) => latest > installed,
+            (Self::Stable(_), Self::Dev(_)) => true,
+            (Self::Dev(_), _) => self != installed,
+        }
+    }
+}
+
+/// `vX.Y.Z`, or `main@abcdef1` for a dev build.
+impl fmt::Display for Release {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stable(version) => version.fmt(f),
+            Self::Dev(commit) => write!(f, "main@{}", &commit.0[..7]),
+        }
+    }
+}
+
+impl FromStr for Release {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, ()> {
+        match text.strip_prefix("dev-") {
+            Some(commit) => commit.parse().map(Self::Dev),
+            None => text.parse().map(Self::Stable),
+        }
+    }
+}
+
+/// A full commit ID: 40 lowercase hex digits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit(String);
+
+impl FromStr for Commit {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, ()> {
+        (text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            .then(|| Self(text.to_owned()))
+            .ok_or(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version(u64, u64, u64);
 
@@ -23,7 +115,7 @@ impl Version {
         format!("{}.{}.{}", self.0, self.1, self.2)
     }
 
-    pub fn from_tag(tag: &str) -> Option<Self> {
+    fn from_tag(tag: &str) -> Option<Self> {
         tag.strip_prefix('v')?.parse().ok()
     }
 }
@@ -69,8 +161,16 @@ pub fn newest(listing: &str) -> Option<Version> {
         .max()
 }
 
+/// The newest commit of main in `git ls-remote <repo> refs/heads/main` output.
+pub fn main_head(listing: &str) -> Option<Commit> {
+    listing.lines().find_map(|line| {
+        let (commit, name) = line.split_once('\t')?;
+        (name == "refs/heads/main").then(|| commit.parse().ok())?
+    })
+}
+
 /// The component's activated release, falling back to an unmigrated installation.
-pub fn installed(home: &Path, component: super::Component) -> Result<Version, String> {
+pub fn installed(home: &Path, component: super::Component) -> Result<Release, String> {
     let link = crate::launch::component_directory(home, component.pointer());
     let target = std::fs::read_link(&link).map_err(|err| {
         format!(
@@ -90,16 +190,48 @@ pub fn installed(home: &Path, component: super::Component) -> Result<Version, St
         })
 }
 
-/// The newest release at `repo`. Git never prompts: it has no terminal and
-/// no stdin, and it is stopped after `limit`.
+/// The newest stable release at `repo`.
 pub async fn latest(
     git: &Path,
     repo: &str,
     env: Vec<(OsString, OsString)>,
     limit: Duration,
 ) -> Result<Version, String> {
+    let listing = ls_remote(git, repo, &["--tags", "--refs", repo, "v*"], env, limit).await?;
+    newest(&listing).ok_or_else(|| format!("No else.bot release (vX.Y.Z tag) was found at {repo}."))
+}
+
+/// The newest build on `channel` at `repo`.
+pub async fn latest_on(
+    git: &Path,
+    repo: &str,
+    channel: Channel,
+    env: Vec<(OsString, OsString)>,
+    limit: Duration,
+) -> Result<Release, String> {
+    match channel {
+        Channel::Stable => latest(git, repo, env, limit).await.map(Release::Stable),
+        Channel::Dev => {
+            let listing = ls_remote(git, repo, &[repo, "refs/heads/main"], env, limit).await?;
+            main_head(&listing)
+                .map(Release::Dev)
+                .ok_or_else(|| format!("{repo} has no main branch."))
+        }
+    }
+}
+
+/// Git never prompts: it has no terminal and no stdin, and it is stopped
+/// after `limit`.
+async fn ls_remote(
+    git: &Path,
+    repo: &str,
+    args: &[&str],
+    env: Vec<(OsString, OsString)>,
+    limit: Duration,
+) -> Result<String, String> {
     let mut child = tokio::process::Command::new(git)
-        .args(["ls-remote", "--tags", "--refs", repo, "v*"])
+        .arg("ls-remote")
+        .args(args)
         .current_dir("/")
         .env_clear()
         .envs(env)
@@ -144,8 +276,7 @@ pub async fn latest(
             .unwrap_or("");
         return Err(format!("Cannot reach {repo} ({}).", why.trim()));
     }
-    newest(&String::from_utf8_lossy(&out))
-        .ok_or_else(|| format!("No else.bot release (vX.Y.Z tag) was found at {repo}."))
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 async fn capped(pipe: Option<impl AsyncRead + Unpin>, max: u64) -> Vec<u8> {
@@ -176,6 +307,81 @@ mod tests {
         }
     }
 
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn releases_name_their_version_directories() {
+        let stable: Release = "0.0.21".parse().unwrap();
+        assert_eq!(stable, Release::Stable(v("0.0.21")));
+        assert_eq!(
+            (stable.id(), stable.to_string()),
+            ("0.0.21".into(), "v0.0.21".into())
+        );
+        let dev: Release = format!("dev-{COMMIT}").parse().unwrap();
+        assert_eq!(dev.id(), format!("dev-{COMMIT}"));
+        assert_eq!(dev.to_string(), "main@0123456");
+        for bad in [
+            "dev-0123",
+            "dev-0123456789ABCDEF0123456789abcdef01234567",
+            "dev-",
+            "v0.0.1",
+        ] {
+            assert!(bad.parse::<Release>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn stable_never_downgrades_but_dev_follows_any_other_commit() {
+        let stable = |text: &str| Release::Stable(v(text));
+        let dev = |commit: &str| Release::Dev(commit.parse().unwrap());
+        let other = "1123456789abcdef0123456789abcdef01234567";
+        assert!(stable("0.0.21").replaces(&stable("0.0.20")));
+        assert!(!stable("0.0.20").replaces(&stable("0.0.20")));
+        assert!(!stable("0.0.19").replaces(&stable("0.0.20")));
+        assert!(stable("0.0.19").replaces(&dev(COMMIT)), "leaving dev");
+        assert!(dev(COMMIT).replaces(&stable("0.0.20")), "joining dev");
+        assert!(dev(other).replaces(&dev(COMMIT)));
+        assert!(!dev(COMMIT).replaces(&dev(COMMIT)));
+    }
+
+    #[test]
+    fn the_dev_channel_reads_the_head_of_main() {
+        let listing = format!("{COMMIT}\trefs/heads/main\n");
+        assert_eq!(main_head(&listing), COMMIT.parse().ok());
+        assert_eq!(main_head(&format!("{COMMIT}\trefs/heads/mainline\n")), None);
+        assert_eq!(main_head("abc\trefs/heads/main\n"), None);
+    }
+
+    #[test]
+    fn the_saved_channel_defaults_to_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Channel::saved(dir.path()), Ok(Channel::Stable));
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let file = dir.path().join(CHANNEL_FILE);
+        std::fs::write(&file, "dev\n").unwrap();
+        assert_eq!(Channel::saved(dir.path()), Ok(Channel::Dev));
+        std::fs::write(&file, "nightly\n").unwrap();
+        assert!(
+            Channel::saved(dir.path())
+                .unwrap_err()
+                .contains("unknown update channel")
+        );
+    }
+
+    #[test]
+    fn a_dev_build_is_installed_by_its_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            format!("versions/dev-{COMMIT}"),
+            dir.path().join("app-current"),
+        )
+        .unwrap();
+        assert_eq!(
+            installed(dir.path(), super::super::Component::App),
+            Ok(Release::Dev(COMMIT.parse().unwrap()))
+        );
+    }
+
     #[test]
     fn the_newest_stable_tag_wins() {
         let listing = "\
@@ -198,7 +404,7 @@ a8\trefs/tags/release-9.9.9
         std::os::unix::fs::symlink("versions/0.0.20", dir.path().join("current")).unwrap();
         assert_eq!(
             installed(dir.path(), super::super::Component::App),
-            Ok(v("0.0.20"))
+            Ok(Release::Stable(v("0.0.20")))
         );
         let other = tempfile::tempdir().unwrap();
         assert!(
@@ -219,8 +425,11 @@ a8\trefs/tags/release-9.9.9
         ] {
             std::os::unix::fs::symlink(target, dir.path().join(pointer)).unwrap();
         }
-        assert_eq!(installed(dir.path(), App), Ok(v("0.0.20")));
-        assert_eq!(installed(dir.path(), Server), Ok(v("0.0.10")));
+        assert_eq!(installed(dir.path(), App), Ok(Release::Stable(v("0.0.20"))));
+        assert_eq!(
+            installed(dir.path(), Server),
+            Ok(Release::Stable(v("0.0.10")))
+        );
         std::fs::remove_file(dir.path().join("app-current")).unwrap();
         std::os::unix::fs::symlink("missing", dir.path().join("app-current")).unwrap();
         assert!(

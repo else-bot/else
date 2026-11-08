@@ -26,7 +26,8 @@ use crate::api::{Client, ClientError};
 use crate::config::OwnerToken;
 use crate::launch::{Installation, Launch, LocalServer, service_env};
 
-use release::Version;
+pub use release::Channel;
+use release::{Release, Version};
 
 const OUTPUT_CAP: usize = 64 * 1024;
 const UPDATE_LOG: &str = "logs/desktop-update.log";
@@ -91,6 +92,7 @@ pub enum Operation {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub channel: Channel,
     pub check: Check,
     pub latest: Option<String>,
     pub work: Work,
@@ -105,6 +107,7 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn initial() -> Self {
         Self {
+            channel: Channel::Stable,
             check: Check::Checking,
             latest: None,
             work: Work::Checking,
@@ -304,6 +307,33 @@ struct Settings {
     work_limit: Duration,
     relaunch: Relaunch,
     parent_pid: u32,
+    running: Running,
+}
+
+/// The build this app runs, to notice an app installed from a terminal.
+#[derive(Debug, Clone)]
+struct Running {
+    version: Option<Version>,
+    commit: Option<release::Commit>,
+}
+
+impl Running {
+    fn current() -> Self {
+        Self {
+            version: env!("ELSE_VERSION").parse().ok(),
+            commit: env!("ELSE_COMMIT").parse().ok(),
+        }
+    }
+
+    fn replaced_by(&self, installed: &Release) -> bool {
+        match installed {
+            Release::Stable(installed) => self.version.is_some_and(|running| *installed > running),
+            Release::Dev(installed) => self
+                .commit
+                .as_ref()
+                .is_some_and(|running| running != installed),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -322,6 +352,7 @@ impl Default for Settings {
             check_limit: Duration::from_secs(30),
             work_limit: Duration::from_secs(10),
             parent_pid: std::process::id(),
+            running: Running::current(),
             relaunch: if cfg!(target_os = "macos") {
                 Relaunch::Bundle
             } else {
@@ -377,6 +408,7 @@ fn start_with(
         events: events_tx,
         log: output::Log::new(OUTPUT_CAP),
         client: None,
+        available: None,
         ready: None,
         checking: false,
         counting: false,
@@ -395,12 +427,19 @@ fn start_with(
 
 #[derive(Debug)]
 enum Event {
-    Checked(Result<(Version, Version), String>),
+    Checked(Result<Checked, String>),
     Work(Work),
     Operation(Operation),
     Output(Vec<u8>),
-    Installed(Result<Version, String>),
+    Installed(Result<Release, String>),
     RestartScheduled(Result<(), String>),
+}
+
+#[derive(Debug)]
+struct Checked {
+    channel: Channel,
+    latest: Release,
+    installed: Release,
 }
 
 struct Actor {
@@ -412,7 +451,9 @@ struct Actor {
     events: mpsc::Sender<Event>,
     log: output::Log,
     client: Option<(OwnerToken, Arc<Client>)>,
-    ready: Option<Version>,
+    /// What the last check offers to install.
+    available: Option<Release>,
+    ready: Option<Release>,
     checking: bool,
     counting: bool,
 }
@@ -474,35 +515,46 @@ impl Actor {
         match event {
             Event::Checked(result) => {
                 self.checking = false;
-                let running = env!("ELSE_VERSION").parse::<Version>().ok();
                 let awaiting_restart = result
                     .as_ref()
                     .ok()
-                    .map(|(_, installed)| *installed)
+                    .map(|checked| checked.installed.clone())
                     .filter(|_| self.component == Component::App)
-                    .filter(|installed| running.is_some_and(|running| *installed > running))
+                    .filter(|installed| self.settings.running.replaced_by(installed))
                     .filter(|_| matches!(self.state.borrow().operation, Operation::Idle));
-                if let Some(installed) = awaiting_restart {
-                    self.ready = Some(installed);
+                if let Some(installed) = &awaiting_restart {
+                    self.ready = Some(installed.clone());
                 }
-                let latest = result.as_ref().ok().map(|(latest, _)| latest.to_string());
-                let check = match result {
-                    Ok((latest, installed)) if latest > installed => Check::Available {
-                        latest: latest.to_string(),
+                let channel = result.as_ref().ok().map(|checked| checked.channel);
+                let latest = result
+                    .as_ref()
+                    .ok()
+                    .map(|checked| checked.latest.to_string());
+                self.available = result
+                    .as_ref()
+                    .ok()
+                    .filter(|checked| checked.latest.replaces(&checked.installed))
+                    .map(|checked| checked.latest.clone());
+                let check = match (result, &self.available) {
+                    (Ok(checked), Some(_)) => Check::Available {
+                        latest: checked.latest.to_string(),
                     },
-                    Ok((latest, _)) => Check::Current {
-                        latest: latest.to_string(),
+                    (Ok(checked), None) => Check::Current {
+                        latest: checked.latest.to_string(),
                     },
-                    Err(why) => Check::Failed(why),
+                    (Err(why), _) => Check::Failed(why),
                 };
-                let available = matches!(check, Check::Available { .. });
+                let available = self.available.is_some();
                 self.state.send_modify(|state| {
                     if !matches!(check, Check::Failed(_)) {
                         state.checked_at = Some(SystemTime::now());
                     }
+                    if let Some(channel) = channel {
+                        state.channel = channel;
+                    }
                     state.check = check;
                     state.latest = latest;
-                    if let Some(installed) = awaiting_restart {
+                    if let Some(installed) = &awaiting_restart {
                         state.operation = Operation::Ready {
                             version: installed.to_string(),
                         };
@@ -536,7 +588,7 @@ impl Actor {
                 self.ready = result
                     .as_ref()
                     .ok()
-                    .copied()
+                    .cloned()
                     .filter(|_| self.component == Component::App);
                 self.log.finish();
                 let text = self.log.text().to_owned();
@@ -569,12 +621,22 @@ impl Actor {
         );
         tokio::spawn(async move {
             let result = async {
+                let channel = Channel::saved(&home)?;
                 let installed = release::installed(&home, component)?;
                 let env = service_env(std::env::vars_os(), &home);
-                let latest =
-                    release::latest(&settings.git, &settings.repo, env, settings.check_limit)
-                        .await?;
-                Ok((latest, installed))
+                let latest = release::latest_on(
+                    &settings.git,
+                    &settings.repo,
+                    channel,
+                    env,
+                    settings.check_limit,
+                )
+                .await?;
+                Ok(Checked {
+                    channel,
+                    latest,
+                    installed,
+                })
             }
             .await;
             let _ = events.send(Event::Checked(result)).await;
@@ -625,13 +687,11 @@ impl Actor {
     }
 
     fn install(&mut self) {
-        let Some(target) = ({
-            let state = self.state.borrow();
-            match (&state.check, state.install_refusal()) {
-                (Check::Available { latest }, None) => Version::from_tag(latest),
-                _ => None,
-            }
-        }) else {
+        let Some(target) = self
+            .available
+            .clone()
+            .filter(|_| self.state.borrow().install_refusal().is_none())
+        else {
             return;
         };
         self.log = output::Log::new(OUTPUT_CAP);
@@ -662,7 +722,7 @@ impl Actor {
             return;
         }
         let ready = self.state.borrow().restart_refusal().is_none();
-        let Some(version) = self.ready.filter(|_| ready) else {
+        let Some(version) = self.ready.clone().filter(|_| ready) else {
             return;
         };
         self.state
@@ -799,9 +859,9 @@ fn detached(
 async fn run_installer(
     home: &Path,
     component: Component,
-    target: Version,
+    target: Release,
     events: &mpsc::Sender<Event>,
-) -> Result<Version, String> {
+) -> Result<Release, String> {
     let (path, log) = private_log(home, component.log(), true)?;
     let program = home.join("bin/elsebot");
     let mut child = detached(&program, home, &log)
@@ -812,7 +872,7 @@ async fn run_installer(
                     "--yes",
                     component.flag(),
                     "--version",
-                    &target.plain(),
+                    &target.id(),
                 ])
                 .spawn()
         })
@@ -1302,6 +1362,101 @@ mod tests {
         assert_eq!(mode & 0o077, 0, "the update log is private");
     }
 
+    fn head(repo: &str) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn a_build_installed_from_a_terminal_needs_a_restart() {
+        let a: release::Commit = "a".repeat(40).parse().unwrap();
+        let b: Release = format!("dev-{}", "b".repeat(40)).parse().unwrap();
+        let running = Running {
+            version: "0.0.20".parse().ok(),
+            commit: Some(a.clone()),
+        };
+        assert!(running.replaced_by(&b));
+        assert!(!running.replaced_by(&Release::Dev(a)));
+        assert!(running.replaced_by(&"0.0.21".parse().unwrap()));
+        assert!(!running.replaced_by(&"0.0.20".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn the_dev_channel_follows_main_commits_and_installs_them_by_commit() {
+        let home = Home::new(
+            "for arg; do case \"$arg\" in dev-*) ln -sfn \"versions/$arg\" \"$ELSE_HOME/app-current\" ;; esac; done",
+        );
+        git(Path::new(&home.repo), &["branch", "-M", "main"]);
+        std::fs::create_dir_all(home.home().join("config")).unwrap();
+        std::fs::write(home.home().join("config/update-channel"), "dev\n").unwrap();
+        let first = head(&home.repo);
+        let (commands, mut state) = home.start(None);
+        let offered = until(&mut state, "the head of main is offered", |s| {
+            matches!(s.check, Check::Available { .. })
+        })
+        .await;
+        assert_eq!(offered.channel, Channel::Dev);
+        assert_eq!(
+            offered.check,
+            Check::Available {
+                latest: format!("main@{}", &first[..7])
+            }
+        );
+
+        commands.install().unwrap();
+        let ready = until(&mut state, "installed", |s| {
+            matches!(s.operation, Operation::Ready { .. } | Operation::Failed(_))
+        })
+        .await;
+        assert_eq!(
+            ready.operation,
+            Operation::Ready {
+                version: format!("main@{}", &first[..7])
+            }
+        );
+        assert!(
+            home.calls()[0].starts_with(&format!("update --yes --app-only --version dev-{first} ")),
+            "{:?}",
+            home.calls()
+        );
+        until(&mut state, "current at the head of main", |s| {
+            matches!(s.check, Check::Current { .. })
+        })
+        .await;
+
+        git(
+            Path::new(&home.repo),
+            &["commit", "-q", "--allow-empty", "-m", "y"],
+        );
+        let second = head(&home.repo);
+        commands.check().unwrap();
+        until(&mut state, "a new commit is offered", |s| {
+            s.check
+                == Check::Available {
+                    latest: format!("main@{}", &second[..7]),
+                }
+        })
+        .await;
+
+        std::fs::write(home.home().join("config/update-channel"), "stable\n").unwrap();
+        commands.check().unwrap();
+        let stable = until(&mut state, "back on stable", |s| {
+            s.channel == Channel::Stable && matches!(s.check, Check::Available { .. })
+        })
+        .await;
+        assert_eq!(
+            stable.check,
+            Check::Available {
+                latest: "v0.0.20".into()
+            },
+            "leaving the dev channel offers the newest release"
+        );
+    }
+
     #[tokio::test]
     async fn an_app_update_ignores_busy_local_server_and_leaves_its_release_alone() {
         let home = Home::new(SWITCH);
@@ -1318,13 +1473,13 @@ mod tests {
         assert_eq!(
             release::installed(&home.home(), Component::App)
                 .unwrap()
-                .plain(),
+                .id(),
             "0.0.20"
         );
         assert_eq!(
             release::installed(&home.home(), Component::Server)
                 .unwrap()
-                .plain(),
+                .id(),
             "0.0.9"
         );
         assert!(home.calls()[0].contains("--app-only"));
@@ -1564,13 +1719,13 @@ mod tests {
         assert_eq!(
             release::installed(&home.home(), Component::App)
                 .unwrap()
-                .plain(),
+                .id(),
             "0.0.9"
         );
         assert_eq!(
             release::installed(&home.home(), Component::Server)
                 .unwrap()
-                .plain(),
+                .id(),
             "0.0.20"
         );
     }

@@ -7,6 +7,10 @@ Usage: install.sh [options]      (or: curl -fsSL …/install.sh | bash -s -- [op
 
   -y, --yes            do not ask for confirmation (sudo may still ask for a password)
   --version X.Y.Z      install or update to this release instead of the latest
+                       (dev-COMMIT builds that commit of main)
+  --channel CHANNEL    stable: tagged releases (the default)
+                       dev: build the newest commit of main here, guest image included;
+                       the choice is saved for later updates
   --both               the server and the app (the default on a fresh machine)
   --server-only        the server only (home hardware or a VPS)
   --app-only           the app only, connecting to a server elsewhere
@@ -36,6 +40,7 @@ COMPONENTS_FLAG=""
 SKIP_GUEST=0
 AUTOSTART="${ELSE_AUTOSTART:-}"
 FROM_SOURCE=0
+CHANNEL_FLAG=""
 ARGS=("$@")
 
 SRC="$ELSE_HOME/src"
@@ -61,6 +66,7 @@ DATA="$ELSE_HOME/data"
 LOGS="$ELSE_HOME/logs"
 ENV_FILE="$CONFIG/.env"
 COMPONENTS_FILE="$CONFIG/components"
+CHANNEL_FILE="$CONFIG/update-channel"
 APP="$ELSE_HOME/Applications/else.bot.app"
 [ "$ELSE_HOME" = "$HOME/.else" ] && APP="$HOME/Applications/else.bot.app"
 export RUSTUP_HOME="$TOOLCHAIN/rustup"
@@ -169,6 +175,36 @@ version_ge() {
 	[ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
 }
 
+# Installed versions are X.Y.Z releases or dev-COMMIT builds of main; each
+# names its directory in $VERSIONS.
+dev_build() { [[ "$1" =~ ^dev-[0-9a-f]{40}$ ]]; }
+source_ref() { if dev_build "$1"; then echo "${1#dev-}"; else echo "v$1"; fi; }
+release_name() { if dev_build "$1"; then echo "main@${1:4:7}"; else echo "v$1"; fi; }
+
+saved_channel() {
+	[ -f "$CHANNEL_FILE" ] || { echo stable; return 0; }
+	case "$(cat "$CHANNEL_FILE")" in
+	stable) echo stable ;;
+	dev) echo dev ;;
+	*) die "invalid saved update channel in $CHANNEL_FILE" ;;
+	esac
+}
+
+installed_dev_build() {
+	local pointer
+	for pointer in "$APP_CURRENT" "$SERVER_CURRENT"; do
+		if dev_build "$(basename "$(readlink "$pointer" 2>/dev/null || true)")"; then return 0; fi
+	done
+	return 1
+}
+
+remember_channel() {
+	[ -n "$CHANNEL_FLAG" ] || return 0
+	mkdir -p "$CONFIG"
+	printf '%s\n' "$CHANNEL_FLAG" >"$CHANNEL_FILE.tmp"
+	mv -f "$CHANNEL_FILE.tmp" "$CHANNEL_FILE"
+}
+
 SUDO=""
 SUDO_READY=0
 sudo_ready() {
@@ -269,6 +305,7 @@ ensure_bootstrap_tools() {
 apt_packages() {
 	local list="curl ca-certificates git jq tar gzip sqlite3"
 	if [ "$FROM_SOURCE" = 1 ]; then list="$list build-essential pkg-config"; fi
+	if dev_build "$WANT_VERSION" && want_server; then list="$list python3"; fi
 	if want_app; then
 		if [ "$FROM_SOURCE" = 1 ]; then
 			list="$list libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libx11-dev libfontconfig-dev libfreetype-dev libvulkan1 libzstd-dev"
@@ -282,6 +319,7 @@ apt_packages() {
 pacman_packages() {
 	local list="curl ca-certificates git jq tar gzip sqlite"
 	if [ "$FROM_SOURCE" = 1 ]; then list="$list base-devel pkgconf"; fi
+	if dev_build "$WANT_VERSION" && want_server; then list="$list python"; fi
 	if want_app; then
 		list="$list libxkbcommon libxkbcommon-x11 wayland libxcb libx11 fontconfig freetype2 vulkan-icd-loader zstd"
 	fi
@@ -444,10 +482,17 @@ release_platform() {
 }
 
 # The latest release is the newest stable vX.Y.Z tag, also before its
-# binaries are published: the installer then builds it from source.
+# binaries are published: the installer then builds it from source. On the
+# dev channel it is the newest commit of main, always built here.
 resolve_release() {
+	local channel="$CHANNEL_FLAG" head
+	[ -n "$channel" ] || channel="$(saved_channel)"
 	if [ -n "$WANT_VERSION" ]; then
 		WANT_VERSION="${WANT_VERSION#v}"
+	elif [ "$channel" = dev ]; then
+		head="$(git ls-remote "$REPO_URL" refs/heads/main)" || die "cannot reach $REPO_URL"
+		WANT_VERSION="dev-$(printf '%s\n' "$head" | awk '$2 == "refs/heads/main" {print $1}')"
+		dev_build "$WANT_VERSION" || die "$REPO_URL has no main branch"
 	else
 		local tags
 		tags="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
@@ -456,11 +501,17 @@ resolve_release() {
 			sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' |
 			sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
 	fi
-	[[ "$WANT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot resolve a release version (expected X.Y.Z)"
+	[[ "$WANT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || dev_build "$WANT_VERSION" ||
+		die "cannot resolve a release version (expected X.Y.Z or dev-COMMIT)"
+	if dev_build "$WANT_VERSION"; then FROM_SOURCE=1; fi
 }
 
+PREVIOUS_SOURCE=""
 fetch_source() {
-	step "Source v$WANT_VERSION ($SRC)"
+	local ref
+	ref="$(source_ref "$WANT_VERSION")"
+	PREVIOUS_SOURCE="$(git -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null || true)"
+	step "Source $(release_name "$WANT_VERSION") ($SRC)"
 	mkdir -p "$ELSE_HOME"
 	if [ -d "$SRC/.git" ]; then
 		git -C "$SRC" remote set-url origin "$REPO_URL"
@@ -469,17 +520,24 @@ fetch_source() {
 		rm -rf "$SRC"
 		git clone -q --no-checkout "$REPO_URL" "$SRC"
 	fi
-	git -C "$SRC" rev-parse -q --verify "refs/tags/v$WANT_VERSION" >/dev/null ||
-		die "release v$WANT_VERSION does not exist at $REPO_URL"
-	git -C "$SRC" -c advice.detachedHead=false checkout -q --force "v$WANT_VERSION"
+	if dev_build "$WANT_VERSION"; then
+		git -C "$SRC" cat-file -e "$ref^{commit}" 2>/dev/null || git -C "$SRC" fetch -q origin "$ref" ||
+			die "commit $ref does not exist at $REPO_URL"
+	else
+		git -C "$SRC" rev-parse -q --verify "refs/tags/$ref" >/dev/null ||
+			die "release $ref does not exist at $REPO_URL"
+	fi
+	git -C "$SRC" -c advice.detachedHead=false checkout -q --force "$ref"
 	git -C "$SRC" clean -q -fdx
-	ok "checked out v$WANT_VERSION"
+	ok "checked out $(release_name "$WANT_VERSION")"
 }
 
 installed_version() {
-	local pointer="$APP_CURRENT" bin=else-desktop
+	local pointer="$APP_CURRENT" bin=else-desktop directory
 	if want_server; then pointer="$SERVER_CURRENT"; bin=else-api; fi
 	[ -x "$pointer/bin/$bin" ] || return 1
+	directory="$(basename "$(readlink "$pointer")")"
+	if dev_build "$directory"; then echo "$directory"; return 0; fi
 	"$pointer/bin/$bin" --version 2>/dev/null | awk '{print $2}'
 }
 
@@ -584,8 +642,12 @@ build_release() {
 	ensure_rust
 	info "Building $* ($BUILD_PROFILE); the first build takes several minutes"
 	for pkg in "$@"; do args="$args -p $pkg"; done
+	# Dev builds follow main commit by commit; incremental codegen rebuilds
+	# only what each commit changed.
+	local incremental=0
+	if dev_build "$version"; then incremental=1; fi
 	# shellcheck disable=SC2086
-	if ! (cd "$SRC" && CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
+	if ! (cd "$SRC" && CARGO_INCREMENTAL="$incremental" CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
 		tail -20 "$log" >&2
 		die "the build failed; the full log is $log"
 	fi
@@ -598,8 +660,9 @@ install_release() (
 	local built_profile stage payload
 	built_profile="$(cat "$dest/.build-profile" 2>/dev/null || echo release)"
 	for pkg in $(want_server && echo else-api) $(want_app && echo else-desktop); do
+		# A dev build reports the release it follows; its directory names its commit.
 		if [ "$built_profile" != "$BUILD_PROFILE" ] || ! [ -x "$dest/bin/$pkg" ] ||
-			[ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+			{ ! dev_build "$version" && [ "$("$dest/bin/$pkg" --version 2>/dev/null | awk '{print $2}')" != "$version" ]; }; then
 			missing="$missing $pkg"
 		fi
 	done
@@ -912,6 +975,7 @@ refresh_provider_paths() {
 }
 
 GUEST_IMAGE_STATE=missing
+GUEST_BUILD=0
 decide_guest_image() {
 	if [ "$DISTRO" = macos ] && [ "$ARCH" != aarch64 ]; then
 		warn "bot computers need Apple silicon (Microsandbox has no Intel macOS build); they will report unavailable"
@@ -922,18 +986,38 @@ decide_guest_image() {
 		GUEST_IMAGE_STATE=skip
 		return 0
 	fi
-	local manifest="$SRC/infra/guest-image.json" schema
+	local manifest="$SRC/infra/guest-image.json" schema published="" source
 	[ -f "$manifest" ] || die "the release has no guest image manifest: $manifest"
 	if [ "$DISTRO" = macos ]; then
 		schema="$(plutil -extract schema raw -o - "$manifest")" || die "invalid guest image manifest: $manifest"
-		GUEST_IMAGE="$(plutil -extract image raw -o - "$manifest")" || die "the release has no published guest image; use --skip-guest-image to install without bot desktops"
+		published="$(plutil -extract source_sha256 raw -o - "$manifest" 2>/dev/null || true)"
+		GUEST_IMAGE="$(plutil -extract image raw -o - "$manifest" 2>/dev/null || true)"
 	else
 		schema="$(jq -er '.schema' "$manifest")" || die "invalid guest image manifest: $manifest"
-		GUEST_IMAGE="$(jq -er '.image | strings' "$manifest")" || die "the release has no published guest image; use --skip-guest-image to install without bot desktops"
+		published="$(jq -r '.source_sha256 | strings' "$manifest")"
+		GUEST_IMAGE="$(jq -r '.image | strings' "$manifest")"
 	fi
 	[ "$schema" = 1 ] || die "unsupported guest image manifest schema: $schema"
-	[[ "$GUEST_IMAGE" =~ ^ghcr\.io/else-bot/else-guest@sha256:[0-9a-f]{64}$ ]] ||
-		die "the guest image must be pinned to a GHCR digest in $manifest"
+	# A dev build whose guest inputs changed since the published image builds
+	# its own; without Docker it keeps the published one.
+	if dev_build "$WANT_VERSION"; then
+		source="$(cd "$SRC" && python3 scripts/guest_release.py hash)" || die "cannot hash the guest image inputs in $SRC"
+		if [ "$source" != "$published" ]; then
+			# The app starts updates with the minimal PATH of a macOS login item.
+			[ "$DISTRO" != macos ] || PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.orbstack/bin"
+			if have docker && docker info >/dev/null 2>&1; then
+				GUEST_IMAGE="else-guest:dev-${source:0:12}"
+				GUEST_BUILD=1
+			else
+				warn "the guest image changed on main, but Docker is not running to build it; bot computers keep the published image"
+			fi
+		fi
+	fi
+	if [ "$GUEST_BUILD" = 0 ]; then
+		[ -n "$GUEST_IMAGE" ] || die "the release has no published guest image; use --skip-guest-image to install without bot desktops"
+		[[ "$GUEST_IMAGE" =~ ^ghcr\.io/else-bot/else-guest@sha256:[0-9a-f]{64}$ ]] ||
+			die "the guest image must be pinned to a GHCR digest in $manifest"
+	fi
 	GUEST_IMAGE_STATE=missing
 	local home="$DATA/microsandbox" images
 	[ -d "$home" ] || return 0
@@ -943,7 +1027,7 @@ decide_guest_image() {
 		images="$(MSB_HOME="$home" "$MSB" image list --format json)" ||
 			die "could not list the guest images in $home with $MSB"
 	fi
-	case "$images" in *"\"$GUEST_IMAGE\""*) GUEST_IMAGE_STATE=cached ;; esac
+	case "$images" in *"\"$GUEST_IMAGE\""* | *"/$GUEST_IMAGE\""*) GUEST_IMAGE_STATE=cached ;; esac
 }
 
 prepare_guest_image() {
@@ -953,16 +1037,25 @@ prepare_guest_image() {
 		ok "not needed (no guest image)"
 		return 0
 		;;
-	cached) ok "already downloaded" ;;
+	cached) ok "already in $DATA/microsandbox ($GUEST_IMAGE)" ;;
 	missing)
-		info "Downloading $GUEST_IMAGE into $DATA/microsandbox"
 		local log="$LOGS/guest-image.log"
 		mkdir -p "$DATA/microsandbox"
-		MSB_HOME="$DATA/microsandbox" "$MSB" pull "$GUEST_IMAGE" >"$log" 2>&1 || {
-			tail -20 "$log" >&2
-			die "the guest image download failed; the full log is $log"
-		}
-		ok "downloaded"
+		if [ "$GUEST_BUILD" = 1 ]; then
+			info "Building $GUEST_IMAGE with Docker into $DATA/microsandbox"
+			ELSE_GUEST_LOAD_TAG="$GUEST_IMAGE" ELSE_MSB_BIN="$MSB" bash "$SRC/scripts/build-guest-image.sh" "$DATA" >"$log" 2>&1 || {
+				tail -20 "$log" >&2
+				die "the guest image build failed; the full log is $log"
+			}
+			ok "built"
+		else
+			info "Downloading $GUEST_IMAGE into $DATA/microsandbox"
+			MSB_HOME="$DATA/microsandbox" "$MSB" pull "$GUEST_IMAGE" >"$log" 2>&1 || {
+				tail -20 "$log" >&2
+				die "the guest image download failed; the full log is $log"
+			}
+			ok "downloaded"
+		fi
 		;;
 	esac
 	config_set ELSE_VM_IMAGE "$GUEST_IMAGE"
@@ -1104,7 +1197,7 @@ prepare_running_api() {
 
 backup_if_migrating() {
 	local from="$1" to="$2" added
-	added="$(git -C "$SRC" diff --name-only --diff-filter=A "v$from" "v$to" -- apps/api/migrations 2>/dev/null || echo unknown)"
+	added="$(git -C "$SRC" diff --name-only --diff-filter=A "$(source_ref "$from")" "$(source_ref "$to")" -- apps/api/migrations 2>/dev/null || echo unknown)"
 	[ -z "$added" ] && return 0
 	step "Backup before the database changes"
 	local log="$LOGS/backup-before-$to.log"
@@ -1162,8 +1255,13 @@ macos_prerequisites() {
 NO_MSB=0
 stage2() {
 	local target installed mode database_url=""
-	target="$(source_version)"
-	[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
+	if dev_build "$WANT_VERSION"; then
+		target="$WANT_VERSION"
+		[ "$(git -C "$SRC" rev-parse HEAD)" = "${target#dev-}" ] || die "the source is not at $(release_name "$target")"
+	else
+		target="$(source_version)"
+		[ "$target" = "$WANT_VERSION" ] || die "the source at v$WANT_VERSION reports version $target"
+	fi
 	migrate_pointers
 	choose_components
 	OLD_APP="$(readlink "$APP_CURRENT" 2>/dev/null || true)"
@@ -1229,6 +1327,7 @@ stage2() {
 		next "on first launch, enter your server's address and owner token (on the server: cat ~/.else/data/owner-token)"
 	fi
 	remember_components
+	remember_channel
 	return 0
 }
 
@@ -1314,6 +1413,13 @@ main() {
 		--server-only) set_components_flag server ;;
 		--app-only) set_components_flag app ;;
 		--from-source) FROM_SOURCE=1 ;;
+		--channel)
+			case "${2:-}" in
+			stable | dev) CHANNEL_FLAG="$2" ;;
+			*) die "--channel needs stable or dev" ;;
+			esac
+			shift
+			;;
 		--autostart) AUTOSTART=1 ;;
 		--no-autostart) AUTOSTART=0 ;;
 		--skip-guest-image) SKIP_GUEST=1 ;;
@@ -1323,6 +1429,7 @@ main() {
 		shift
 	done
 	detect_platform
+	if dev_build "${WANT_VERSION#v}"; then FROM_SOURCE=1; fi
 	if [ "$FROM_SOURCE" = 0 ]; then
 		release_platform >/dev/null
 		[ "$BUILD_PROFILE" = release ] || die "ELSE_INSTALL_TEST_PROFILE requires --from-source"
@@ -1334,9 +1441,25 @@ main() {
 		lock_installation
 		resolve_release
 		fetch_source
-		local installer_help inventory
+		local installer_help inventory remember_here=0
 		installer_help="$(bash "$SRC/install.sh" --help 2>/dev/null)"
 		inventory="$(installed_components)"
+		if ! printf '%s' "$installer_help" | grep -q -- '--channel'; then
+			# Releases before the dev channel mistake a dev build of the same
+			# version for themselves and skip the server's restart and rollback.
+			if installed_dev_build; then
+				[ -z "$PREVIOUS_SOURCE" ] || git -C "$SRC" -c advice.detachedHead=false checkout -q --force "$PREVIOUS_SOURCE"
+				die "v$WANT_VERSION predates the dev channel and cannot replace a dev build; after the next release, run: elsebot update --channel stable"
+			fi
+			local argument skip=0 forwarded=()
+			for argument in ${ARGS[@]+"${ARGS[@]}"}; do
+				if [ "$skip" = 1 ]; then skip=0; continue; fi
+				if [ "$argument" = --channel ]; then skip=1; continue; fi
+				forwarded+=("$argument")
+			done
+			ARGS=(${forwarded[@]+"${forwarded[@]}"})
+			remember_here=1
+		fi
 		if ! printf '%s' "$installer_help" | grep -q -- 'app-current'; then
 			if [ -L "$APP_CURRENT" ] || [ -L "$SERVER_CURRENT" ]; then
 				die "this release's installer predates component pointers; choose a release that supports component updates"
@@ -1371,6 +1494,7 @@ main() {
 		fi
 		export ELSE_INSTALL_STAGE=2 ELSE_VERSION="$WANT_VERSION"
 		bash "$SRC/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+		if [ "$remember_here" = 1 ]; then remember_channel; fi
 		return
 	fi
 

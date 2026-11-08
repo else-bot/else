@@ -1,5 +1,7 @@
 use super::*;
-use crate::updates::{Check as UpdateCheck, Commands, Operation, Snapshot, Work};
+use crate::updates::{
+    Channel as UpdateChannel, Check as UpdateCheck, Commands, Operation, Snapshot, Work,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -309,6 +311,10 @@ impl Shell {
         let view = self.update_view();
         let snapshot = &view.snapshot;
         let output_visible = view.show_output || !snapshot.output.is_empty();
+        let (target, source) = match snapshot.channel {
+            UpdateChannel::Stable => ("latest stable release", "Stable releases"),
+            UpdateChannel::Dev => ("newest commit of main", "Dev builds of main"),
+        };
         let (title, description, icon, tone) = match &snapshot.operation {
             Operation::Preparing => (
                 "Checking for ongoing work",
@@ -361,19 +367,19 @@ impl Shell {
             Operation::Idle => match &snapshot.check {
                 UpdateCheck::Checking => (
                     "Checking for updates",
-                    "Looking for the latest stable release.".to_owned(),
+                    format!("Looking for the {target}."),
                     IconName::RefreshCw,
                     theme.muted_foreground,
                 ),
                 UpdateCheck::Current { .. } => (
                     "You're up to date",
-                    "You're running the latest stable release.".to_owned(),
+                    format!("You're running the {target}."),
                     IconName::Check,
                     theme.success,
                 ),
                 UpdateCheck::Available { .. } => (
                     "A new version is available",
-                    "Install the latest stable release when you're ready.".to_owned(),
+                    format!("Install the {target} when you're ready."),
                     IconName::Download,
                     theme.foreground,
                 ),
@@ -394,7 +400,7 @@ impl Shell {
         let loading = view.busy() || matches!(snapshot.check, UpdateCheck::Checking);
         let last_check = snapshot.checked_at.map(|at| {
             let at: chrono::DateTime<chrono::Local> = at.into();
-            format!("Stable releases · Checked {}", at.format("%H:%M"))
+            format!("{source} · Checked {}", at.format("%H:%M"))
         });
         let mut content = v_flex()
             .gap_5()

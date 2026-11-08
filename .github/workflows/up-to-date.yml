@@ -1,0 +1,17 @@
+name: up-to-date
+
+# The only required check on main. GitHub enforces "branch must be up to date
+# before merging" through required checks, so this one finishes in seconds;
+# the slower checks still run on every pull request but do not block merging.
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  up-to-date:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - run: echo "GitHub merges this pull request only while it contains the head of main."

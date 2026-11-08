@@ -576,6 +576,94 @@ while [ "$#" -gt 0 ]; do
 done
 ''')
 
+    def commit_main(self, message, path="notes", text=None):
+        file = self.repo / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text or message)
+        self.git("add", "-A")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def test_dev_channel_builds_each_main_commit_and_is_remembered(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.source_toolchain()
+        first = self.commit_main("first")
+        self.requests.clear()
+        self.run_installer("--yes", "--app-only", "--channel", "dev")
+        self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{first}"))
+        self.assertEqual(self.pointer("app-previous"), Path("versions/0.0.2"))
+        self.assertEqual((self.installation / "config/update-channel").read_text(), "dev\n")
+        self.assertEqual((self.installation / "build/compiled").read_text().split(), ["else-desktop"])
+        self.assertIn("build-essential", (self.root / "packages").read_text().split())
+        self.assertEqual(self.requests, [], "dev builds never download release binaries")
+
+        (self.installation / "build/compiled").unlink()
+        self.run_installer("--yes", "--app-only")
+        self.assertFalse((self.installation / "build/compiled").exists(), "the installed commit is not rebuilt")
+
+        second = self.commit_main("second")
+        self.run_installer("--yes", "--app-only")
+        self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{second}"))
+        self.assertEqual(self.pointer("app-previous"), Path(f"versions/dev-{first}"))
+
+        self.run_installer("--yes", "--app-only", "--channel", "stable")
+        self.assertEqual(self.pointer("app-current"), Path("versions/0.0.2"))
+        self.assertEqual((self.installation / "config/update-channel").read_text(), "stable\n")
+
+    def test_desktop_installs_a_dev_build_by_commit(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.source_toolchain()
+        commit = self.commit_main("pinned")
+        self.commit_main("newer")
+        self.run_installer("--yes", "--app-only", "--version", f"dev-{commit}")
+        self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{commit}"))
+        self.assertFalse((self.installation / "config/update-channel").exists(), "a pinned build keeps the channel")
+        self.run_installer("--yes", "--app-only", "--version", "dev-0123", success=False)
+
+    def test_dev_server_update_backs_up_only_when_main_adds_a_migration(self):
+        self.install_both("0.0.2")
+        self.source_toolchain()
+        quiet = self.commit_main("no migration")
+        self.run_installer("--yes", "--server-only", "--channel", "dev", TEST_SERVER="1")
+        self.assertEqual(self.pointer("server-current"), Path(f"versions/dev-{quiet}"))
+        self.assertFalse((self.installation / f"logs/backup-before-dev-{quiet}.log").exists())
+        self.assertIn("python3", (self.root / "packages").read_text().split(), "dev guest images hash with Python")
+        migrating = self.commit_main("migration", "apps/api/migrations/0001_example.sql", "select 1;\n")
+        self.run_installer("--yes", "--server-only", TEST_SERVER="1")
+        self.assertEqual(self.pointer("server-current"), Path(f"versions/dev-{migrating}"))
+        self.assertTrue((self.installation / f"logs/backup-before-dev-{migrating}.log").exists())
+
+    def tag_channelless_installer(self, version):
+        (self.repo / "install.sh").write_text(
+            'if [ "${1:-}" = --help ]; then echo --from-source app-current without binaries yet; exit 0; fi\n'
+            'echo "$*" > "$ELSE_HOME/old-installer-args"\n')
+        (self.repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+        self.git("add", "-A")
+        self.git("commit", "-qm", version)
+        self.git("tag", f"v{version}")
+
+    def test_a_release_before_the_dev_channel_never_replaces_a_dev_build(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.source_toolchain()
+        commit = self.commit_main("dev")
+        self.run_installer("--yes", "--app-only", "--channel", "dev")
+        self.tag_channelless_installer("0.0.3")
+        result = self.run_installer("--yes", "--app-only", "--channel", "stable", success=False)
+        self.assertIn("predates the dev channel", result.stderr)
+        self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{commit}"))
+        self.assertEqual((self.installation / "config/update-channel").read_text(), "dev\n")
+        head = subprocess.run(["git", "-C", self.installation / "src", "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(head, commit, "the dev installer stays in place for the next update")
+        self.assertFalse((self.installation / "old-installer-args").exists())
+
+    def test_a_release_before_the_dev_channel_still_saves_the_channel(self):
+        self.run_installer("--yes", "--app-only", "--version", "0.0.2")
+        self.tag_channelless_installer("0.0.3")
+        self.run_installer("--yes", "--app-only", "--channel", "stable")
+        self.assertNotIn("--channel", (self.installation / "old-installer-args").read_text())
+        self.assertEqual((self.installation / "config/update-channel").read_text(), "stable\n")
+
     def test_explicit_source_build_skips_downloads(self):
         self.source_toolchain()
         self.run_installer("--yes", "--app-only", "--from-source", "--version", "0.0.2")
