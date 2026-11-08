@@ -50,13 +50,7 @@ pub static DEFINITION: Definition = Definition {
 
 fn build(wiring: &super::Wiring) -> super::Built {
     let home = grok_home::host_home();
-    let program = match wiring.config.grok_bin.as_deref() {
-        Some(setting) => super::executable(Some(setting), "grok"),
-        None => choose(
-            super::executable(None, "grok"),
-            home.as_deref().and_then(installed),
-        ),
-    };
+    let program = lookup(wiring.config.grok_bin.as_deref(), home.as_deref());
     let grok = Grok {
         ready: Grok::ready(Some(wiring.host.clone()), program, home),
         tool_url: None,
@@ -77,6 +71,13 @@ fn installed(home: &Path) -> Option<PathBuf> {
     path.metadata()
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .then_some(path)
+}
+
+fn lookup(configured: Option<&Path>, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    match configured {
+        Some(setting) => super::executable(Some(setting), "grok"),
+        None => choose(super::executable(None, "grok"), home.and_then(installed)),
+    }
 }
 
 /// A native `grok` from `PATH`, else the installed binary when there is one.
