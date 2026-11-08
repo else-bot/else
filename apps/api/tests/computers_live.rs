@@ -970,7 +970,7 @@ async fn a_coordinated_backup_restores_the_assistant_into_a_new_installation() {
         "{:?}",
         summary.manifest.coverage
     );
-    assert_eq!(summary.manifest.artifacts.len(), 3);
+    assert_eq!(summary.manifest.artifacts.len(), 4);
     assert_eq!(
         manager
             .runtime_state(&ComputerManager::runtime_name(beta))
