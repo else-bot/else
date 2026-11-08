@@ -42,7 +42,7 @@ env:
 jobs:
   plan:
     if: github.ref == 'refs/heads/main'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -54,7 +54,7 @@ jobs:
       guest_hash: ${{ steps.plan.outputs.guest_hash }}
       guest_image: ${{ steps.plan.outputs.guest_image }}
     steps:
-      - uses: useblacksmith/checkout@v1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -76,9 +76,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubuntu-24.04
           - arch: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -86,12 +86,12 @@ jobs:
     env:
       HASH: ${{ needs.plan.outputs.guest_hash }}
     steps:
-      - uses: useblacksmith/checkout@v1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
       - name: Check out the release tooling
-        uses: useblacksmith/checkout@v1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-tools
@@ -124,7 +124,7 @@ jobs:
 
   guest-index:
     needs: [plan, guest-build]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -133,12 +133,12 @@ jobs:
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:
-      - uses: useblacksmith/checkout@v1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
       - name: Check out the release tooling
-        uses: useblacksmith/checkout@v1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-tools
@@ -161,18 +161,18 @@ jobs:
   prepare:
     needs: [plan, guest-index]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.state == 'release' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
       candidate: ${{ steps.commit.outputs.candidate }}
     steps:
-      - uses: useblacksmith/checkout@v1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
       - name: Check out the release tooling
-        uses: useblacksmith/checkout@v1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-tools
@@ -213,15 +213,15 @@ jobs:
       matrix:
         include:
           - platform: linux-amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubuntu-24.04
             container: debian:12
             target: x86_64-unknown-linux-gnu
           - platform: linux-arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
             container: debian:12
             target: aarch64-unknown-linux-gnu
           - platform: macos-arm64
-            runner: blacksmith-6vcpu-macos-15
+            runner: macos-15
             container: ''
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -367,16 +367,16 @@ jobs:
   publish:
     needs: [plan, prepare, build, cargo-test, release-ready]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.state != '' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: useblacksmith/checkout@v1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.candidate || needs.plan.outputs.candidate }}
           fetch-depth: 0
       - name: Check out the release tooling
-        uses: useblacksmith/checkout@v1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-tools
