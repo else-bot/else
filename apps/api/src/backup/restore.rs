@@ -216,7 +216,10 @@ fn validate_artifacts(manifest: &Manifest) -> Result<(), BackupError> {
         };
         if computer.carries_image {
             carried.insert(computer.image.as_str());
-        } else if manifest.schema_version < 3 || !carried.contains(computer.image.as_str()) {
+        } else if manifest.schema_version < 3
+            || !crate::computers::pinned_image(&computer.image)
+            || !carried.contains(computer.image.as_str())
+        {
             return invalid("a computer archive without its image follows no archive that has it");
         }
     }

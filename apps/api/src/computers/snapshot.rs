@@ -13,7 +13,9 @@ impl ComputerManager {
     /// started. A held or transitioning computer is `Busy`: the backup
     /// defers rather than capturing live work. The archive includes the
     /// computer's image unless it is one of `carried`, images another
-    /// archive of the same set already holds.
+    /// archive of the same set already holds; only a digest-pinned image can
+    /// be shared, since computers created from one tag may run different
+    /// images.
     pub async fn capture_disk(
         &self,
         bot_id: Uuid,
@@ -34,7 +36,7 @@ impl ComputerManager {
             "missing" => return Ok(DiskCapture::Missing),
             _ => self.stop_for_disk(bot_id, &row).await?,
         }
-        let carries_image = !carried.contains(&row.image);
+        let carries_image = !(super::pinned_image(&row.image) && carried.contains(&row.image));
         self.runtime
             .export_disk(&row.runtime_name, archive, carries_image)
             .await?;

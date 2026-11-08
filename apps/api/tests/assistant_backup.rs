@@ -221,7 +221,13 @@ async fn setup() -> Setup {
     setup_with(false).await
 }
 
+const PINNED: &str = "ghcr.io/else-bot/else-guest@sha256:2688c7291a6fb4b0efb77a09966ce013851939affdd994ac679036b3712daaaf";
+
 async fn setup_with(projects: bool) -> Setup {
+    setup_image(projects, PINNED).await
+}
+
+async fn setup_image(projects: bool, image: &str) -> Setup {
     let db = TestDb::migrated().await;
     else_api::db::installation::setup(&db.pool).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -234,6 +240,7 @@ async fn setup_with(projects: bool) -> Setup {
             state_dir: dir.path().join("state"),
             idle_after: Duration::from_secs(3600),
             projects_dir: projects.then(|| dir.path().join("bots")),
+            image: image.into(),
             ..ComputerConfig::default()
         },
     ));
@@ -1229,4 +1236,29 @@ async fn a_computer_archive_without_its_image_must_follow_one_that_has_it() {
         panic!("a set whose archives all lack their image opened");
     };
     assert!(err.to_string().contains("without its image"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn computers_from_a_tag_keep_their_own_image() {
+    let s = setup_image(true, "python:3.12-slim").await;
+    let (a, b) = computers_with_projects(&s).await;
+    let summary = worker(&s, Duration::from_secs(5)).run_once().await.unwrap();
+    let carried: Vec<bool> = summary
+        .manifest
+        .bots
+        .iter()
+        .filter_map(|e| e.computer.as_ref().map(|c| c.carries_image))
+        .collect();
+    assert_eq!(
+        carried,
+        [true, true],
+        "a tag can name different images, so each archive keeps its own"
+    );
+    let (fresh, _) = restore_fresh(&s, &summary.path, "restored-tag").await;
+    for (bot, disk) in [(a, "alpha disk"), (b, "beta disk")] {
+        assert_eq!(
+            fresh.disk(&ComputerManager::runtime_name(bot)).unwrap(),
+            disk
+        );
+    }
 }

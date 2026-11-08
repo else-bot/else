@@ -195,7 +195,7 @@ fn omitted() -> String {
     "omitted".into()
 }
 
-/// A bot computer captured as a standalone disk archive.
+/// A bot computer captured as a disk archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerEntry {

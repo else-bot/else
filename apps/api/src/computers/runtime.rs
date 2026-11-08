@@ -155,7 +155,7 @@ pub trait ComputerRuntime: Send + Sync {
     async fn copy_out(&self, name: &str, guest: &str, host: &Path) -> Result<(), RuntimeError>;
 
     /// Export a stopped computer's disk to an archive at `archive`, with its
-    /// image when `with_image` (standalone). An archive without its image
+    /// image when `with_image`. An archive without its image
     /// restores only where the image is already cached, such as after
     /// importing an archive that carries it. The computer is not started.
     async fn export_disk(

@@ -742,8 +742,9 @@ async fn capture_into(
             provider_state: "omitted-reauth-required".into(),
             whole_assistant: complete,
             note: if complete {
-                "Whole assistant: the database, every active bot's computer (standalone disk \
-                 archives with their images), every bot's project directory, and the shared MCP \
+                "Whole assistant: the database, every active bot's computer (disk archives; \
+                 each image is stored once, in the first archive that uses it, which a restore \
+                 imports first), every bot's project directory, and the shared MCP \
                  skills, documentation and config. Native provider \
                  sessions are not included: conversations are rebuilt from SQLite and \
                  providers may need a fresh login."

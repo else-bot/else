@@ -198,6 +198,14 @@ pub enum DiskCapture {
     Missing,
 }
 
+/// The image reference names one image by digest (`name@sha256:...`),
+/// unlike a tag, which can move between computers' creation.
+pub fn pinned_image(image: &str) -> bool {
+    image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
+        !name.is_empty() && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
 const RESERVING: &str = "('creating', 'starting', 'running', 'pausing', 'paused', 'resuming', \
                          'stopping', 'error')";
 
@@ -730,6 +738,22 @@ impl ComputerManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_digest_references_pin_an_image() {
+        let digest = "a".repeat(64);
+        assert!(super::pinned_image(&format!(
+            "ghcr.io/else-bot/else-guest@sha256:{digest}"
+        )));
+        for tag in [
+            "python:3.12-slim".to_owned(),
+            "else-guest:2".to_owned(),
+            format!("@sha256:{digest}"),
+            "ghcr.io/x@sha256:abc123".to_owned(),
+        ] {
+            assert!(!super::pinned_image(&tag), "{tag}");
+        }
+    }
+
     #[test]
     fn errors_are_cut_by_bytes_on_character_boundaries() {
         let text = "é".repeat(1500);
