@@ -492,21 +492,18 @@ impl SocialsView {
         let revision = self.begin(window, cx);
         let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
-            let (result, detail) = futures_util::future::join(
+            let (result, detail) = tokio::join!(
                 client.clone().social_destinations(id),
                 client.social_connection(id),
-            )
-            .await;
+            );
             let _ = this.update_in(cx, |view, _, cx| {
                 if view.revision != revision {
                     return;
                 }
                 view.busy = false;
                 if let Some(access) = view.form.as_mut().and_then(|form| form.editor.access_mut()) {
-                    if let Ok(detail) = detail {
-                        access.reloaded(detail.connection);
-                    }
-                    if let Err(error) = access.discovered(result) {
+                    let reloaded = detail.map(|detail| access.reloaded(detail.connection));
+                    if let Err(error) = access.discovered(result).and(reloaded) {
                         view.error = Some(error.to_string());
                     }
                 }
