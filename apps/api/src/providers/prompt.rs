@@ -373,7 +373,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          tools/call. mcp_connect starts the owner's sign-in card; auth_required with parked \
          true means end this attempt. Never request tokens in chat or open sign-in URLs \
          yourself. For git with github.com in your computer, pass the GitHub MCP's id as \
-         github on computer_run or computer_job_start instead of a token. Each attempt ends \
+         github on computer_run or computer_job_start instead of a token. Pushing a release, a \
+         tag, or to the default branch is external and deleting a remote branch or tag is \
+         destructive; run a release script as one external call whose context lists every ref \
+         it may push or delete. Each attempt ends \
          after {attempt_minutes} minutes, so when a tools/call starts a job that keeps \
          running, park on it with mcp_wait instead of waiting or polling. When the owner asks \
          to install an MCP, use mcp_install; never write into else.bot's MCP directory or \

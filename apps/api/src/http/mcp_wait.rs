@@ -21,32 +21,17 @@ use crate::mcp::{Error, Library, PackageId};
 
 pub const NAME: &str = "mcp_wait";
 
-const ATTEMPT_MINUTES: u64 = crate::providers::cli::attempt::TURN_DEADLINE.as_secs() / 60;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const CONCURRENT_CHECKS: usize = 4;
 
 pub fn schema() -> Value {
     json!({
         "name": NAME,
-        "description": format!("Wait for a long-running job you started in an installed MCP, such \
-            as a delegated task or thread run that returned an id to check later. Each attempt \
-            ends after {minutes} minutes, delegated tasks included, so never wait for a job \
-            inside the attempt: no repeated status calls, sleeps, or blocking wait tools called \
-            through mcp_request, such as T3 Code's t3_thread_wait. Use this tool instead. Name the MCP's read-only status tool and its \
-            arguments, a JSON pointer to the status field in its result, and the values that \
-            mean the job still runs. The status is read from the tool's structuredContent, or \
-            else from the JSON in its first text content block. The status call runs once now: \
-            if the job already stopped, the result returns at once and nothing waits. Otherwise \
-            this returns parked: end this attempt. else.bot repeats the status call without \
-            you and continues this request once the status leaves running_values, the checks \
-            fail three times in a row, or the timeout passes. The continuation gets the last \
-            status result. The status tool must be one its server declares read-only, or \
-            non-destructive and idempotent, such as T3 Code's task_status; any other tool is \
-            refused with NOT_REPEATABLE. If the MCP has no such tool, do not poll: reply with \
-            the job id and how to check it later. One wait per attempt. It works in the \
-            owner's conversation and in delegated tasks. In a delegated task, the delegating \
-            bot gets your reply only when the task ends, so it keeps waiting while you do.",
-            minutes = ATTEMPT_MINUTES),
+        "description": "Park until a job you started through mcp_request stops, instead of polling or \
+            blocking (such as T3 Code's t3_thread_wait): name the MCP's read-only status tool \
+            (such as task_status) and arguments, a JSON pointer to the status, and the values \
+            meaning it still runs. If still running, this parks and else.bot rechecks for you, \
+            in delegated tasks too. Other tools fail NOT_REPEATABLE.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -268,8 +253,8 @@ async fn qualify(library: &Library, mcp_id: &str, tool: &str) -> Result<(), Refu
         Ok(Some(_)) => Err(refuse(
             format!(
                 "NOT_REPEATABLE: {mcp_id} does not declare {tool} read-only, or non-destructive \
-                 and idempotent, so else.bot will not repeat it. Use that MCP's documented way \
-                 to learn when the job ends."
+                 and idempotent, so else.bot will not repeat it. Do not poll it yourself: \
+                 reply with the job id and how to check it later."
             ),
             true,
         )),
@@ -531,17 +516,7 @@ mod tests {
     #[test]
     fn bots_learn_the_attempt_deadline_and_what_to_use_instead_of_polling() {
         let wait = schema()["description"].as_str().unwrap().to_owned();
-        let request = crate::http::shared_mcp::schemas()
-            .into_iter()
-            .find(|tool| tool["name"] == "mcp_request")
-            .unwrap()["description"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let deadline = format!("{ATTEMPT_MINUTES} minutes");
-        assert_eq!(deadline, "30 minutes");
         for needle in [
-            &deadline,
             "t3_thread_wait",
             "task_status",
             "NOT_REPEATABLE",
@@ -549,10 +524,26 @@ mod tests {
         ] {
             assert!(wait.contains(needle), "mcp_wait lacks {needle}: {wait}");
         }
+        let request = crate::http::shared_mcp::schemas()
+            .into_iter()
+            .find(|tool| tool["name"] == "mcp_request")
+            .unwrap();
         assert!(
-            request.contains(&deadline) && request.contains("mcp_wait"),
-            "{request}"
+            request["description"]
+                .as_str()
+                .unwrap()
+                .contains("mcp_wait")
         );
+        // The deadline is stated once, in the instructions every turn gets.
+        let mut input = crate::providers::cli::session::tests::input();
+        input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
+        let rules = crate::providers::prompt::instructions(&input, "/p");
+        let minutes = crate::providers::cli::attempt::TURN_DEADLINE.as_secs() / 60;
+        assert!(
+            rules.contains(&format!("ends after {minutes} minutes")),
+            "{rules}"
+        );
+        assert!(rules.contains("mcp_wait"));
     }
 
     #[test]

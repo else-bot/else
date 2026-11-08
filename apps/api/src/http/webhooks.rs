@@ -160,12 +160,11 @@ fn fields() -> Value {
 pub fn create_schema() -> Value {
     json!({
         "name": "webhook_create",
-        "description": format!("Save a webhook: a task you are woken for in your conversation \
-            with the owner when an event fires it, such as a watched value crossing a \
-            threshold. Wakes keep a human pace: events while a wake is waiting or running \
-            combine into one wake, and wakes are at least min_interval_minutes apart. Returns \
-            the webhook and its token, shown only once. {HOW_TO_FIRE} Repeating the same call \
-            in this request returns the same webhook without the token."),
+        "description": "Save a webhook: a task you are woken for in your owner conversation when an event \
+            fires it. Events during a pending wake combine, and wakes stay min_interval_minutes \
+            apart. Fire it from a job by passing webhook_id to computer_job_start and exiting 0 \
+            on the event, or POST /webhooks/v1/<id> with its Bearer token from the API host or \
+            tailnet. The token is shown once.",
         "inputSchema": {
             "type": "object",
             "properties": fields(),

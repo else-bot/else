@@ -270,14 +270,11 @@ fn tool_list() -> Value {
         },
         {
             "name": "create_bot",
-            "description": "Register a new else.bot specialist in your owner conversation for an owner request, with \
-                the installation's default model unless the owner named one, the task secrets stored \
-                on this server, and no shared memory or other access. Returns its bot_id at once; you may delegate to it in this \
-                attempt. Repeating the same name in this owner request returns the same bot. \
-                The bot learns its responsibilities from the tasks it receives, so give its \
-                first task with delegate. Supply its purpose, required for non-main bots. The server \
-                saves the purpose in the new bot's memory and acknowledges creation to the main bot. \
-                Optional category_id comes from list_bots.",
+            "description": "Register a new else.bot specialist for an owner request, with no shared memory or \
+                access. Pass its purpose, which is saved to its memory, and model only when the \
+                owner named one. Returns its bot_id at once: delegate its first task to it in this \
+                attempt. Repeating the same name in this request returns the same bot. category_id \
+                comes from list_bots.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -287,11 +284,9 @@ fn tool_list() -> Value {
                     "purpose": { "type": "string", "minLength": 1, "maxLength": crate::app::bots::MAX_PURPOSE_CHARS },
                     "category_id": { "type": "string", "format": "uuid" },
                     "model": { "type": "string", "maxLength": super::routines::MAX_MODEL_CHARS,
-                               "description": "Only when the owner named the model the new bot runs \
-                                   on: its ID or name, such as grok-4.7, Grok 4.7, or Claude Opus 5.5. \
-                                   It also selects the provider. Omit it for the installation's \
-                                   default. A name that matches no single available model creates \
-                                   nothing and the error lists the models." },
+                               "description": "Only when the owner named the model: its ID or name, such as grok-4.7 or Claude Opus \
+                                   5.5; it selects the provider. Omit it for the default. An unmatched name creates \
+                                   nothing; the error lists models." },
                     "provider_id": { "type": "string",
                                      "description": format!(
                                          "With model, only when the owner named the provider ({}).",
@@ -1300,3 +1295,4 @@ async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         }
     }
 }
+

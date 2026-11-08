@@ -32,11 +32,9 @@ fn schemas() -> [Value; 2] {
         json!({
             "name": FIND,
             "description": format!(
-                "Find else.bot tools that are not in your tool list. Returns up to {MAX_FOUND} \
-                 matching tools with their description and input schema; run one with use_tool. \
-                 Search by a tool's name or a few words about what you need. Tools reached this \
-                 way: {}.",
-                DEFERRED_TOOLS.join(", ")
+                "Find else.bot tools that are not in your tool list; use_tool's name lists them. \
+                 Search by a tool's name or a few words about the need. Returns up to \
+                 {MAX_FOUND} tools with their description and input schema; run one with use_tool."
             ),
             "inputSchema": {
                 "type": "object",
@@ -230,6 +228,36 @@ mod tests {
                     "{name} declares approved_draft"
                 );
             }
+        }
+    }
+
+    /// AGENTS.md: a tool description says what the tool does and its one
+    /// gotcha; policy lives in the instructions and situational guidance in
+    /// results.
+    #[test]
+    fn every_description_stays_short() {
+        fn properties(name: &str, schema: &Value, path: &str) {
+            match schema {
+                Value::Object(map) => {
+                    if let Some(text) = map.get("description").and_then(Value::as_str) {
+                        assert!(text.len() <= 200, "{name}{path}: {} chars", text.len());
+                    }
+                    for (key, value) in map {
+                        properties(name, value, &format!("{path}/{key}"));
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|v| properties(name, v, path)),
+                _ => {}
+            }
+        }
+        for tool in listed(super::super::mcp::all_tools())
+            .into_iter()
+            .chain(super::super::mcp::all_tools())
+        {
+            let name = tool["name"].as_str().unwrap();
+            let text = tool["description"].as_str().unwrap();
+            assert!(text.len() <= 400, "{name}: {} chars", text.len());
+            properties(name, &tool["inputSchema"], "");
         }
     }
 }

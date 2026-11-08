@@ -6,6 +6,10 @@ use crate::app::questions::Kind;
 pub(super) const MAX_PURPOSE: usize = 300;
 const MAX_PREVIEW: usize = 2000;
 
+/// The advertised `effect` description. The instructions define the three
+/// effects; the full definition comes back only with an EFFECT_REQUIRED error.
+pub(super) const EFFECT_ADVERTISED: &str = "local, destructive, or external, as your \
+    instructions define them. Required; a missing effect is refused, never assumed local.";
 pub(super) const EFFECT_DESCRIPTION: &str = "What this does: local (reads and routine reversible work, \
     including creating or updating tickets, notes, and documents locally or in connected services); destructive (deletes, overwrites, \
     or changes something hard to undo, here or on a remote service: deleting a remote git \
