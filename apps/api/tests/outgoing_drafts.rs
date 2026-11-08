@@ -1571,7 +1571,7 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
 /// A task the main bot delegated to another bot while serving an owner
 /// message, running: the bot's ID, the root turn, the delegation, and the
 /// task's turn.
-async fn delegated_task(app: &TestApp) -> (String, Uuid, Uuid, Uuid) {
+async fn delegated_task(app: &TestApp, task: &str) -> (String, Uuid, Uuid, Uuid) {
     let main = app.main_bot().await;
     let leaf = app.create_bot("Telegram").await;
     let warm = app
@@ -1599,7 +1599,7 @@ async fn delegated_task(app: &TestApp) -> (String, Uuid, Uuid, Uuid) {
         app,
         &parent,
         "delegate",
-        json!({ "target_bot_id": leaf, "task": SLOW }),
+        json!({ "target_bot_id": leaf, "task": task }),
     )
     .await;
     let task: Uuid = tool_text(&delegated)["task_id"]
@@ -1628,16 +1628,17 @@ async fn a_chat_approval_before_the_task_parks_still_answers_the_delegating_requ
 
 async fn chat_approval_of_a_delegated_draft(parked: bool) {
     let Harness { app, .. } = harness().await;
-    let (leaf, root, task, child) = delegated_task(&app).await;
+    // A hanging task never ends its attempt by itself, so only the owner's
+    // reply can stop it before it parks.
+    let work = if parked {
+        SLOW
+    } else {
+        "[synthetic:hang] email Ada about lunch"
+    };
+    let (leaf, root, task, child) = delegated_task(&app, work).await;
     let id = draft(&app, &grant(&app, child).await, lunch()).await;
     if parked {
         wait(&app, child, "waiting").await;
-    } else {
-        assert_eq!(
-            status(&app, child).await,
-            "running",
-            "the card is out before the task parks"
-        );
     }
 
     let (reply, token) = running(
