@@ -190,14 +190,19 @@ impl ProfilePicker {
                         .ghost()
                         .small()
                         .w_full()
-                        .justify_start()
                         .px_2()
-                        .text_color(theme.muted_foreground)
-                        .label(if expanded {
-                            "Show fewer".to_owned()
-                        } else {
-                            format!("Show {hidden} more")
-                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_left()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(if expanded {
+                                    "Show fewer".to_owned()
+                                } else {
+                                    format!("Show {hidden} more")
+                                }),
+                        )
                         .accessibility_label(format!(
                             "{} {} models",
                             if expanded { "Show fewer" } else { "Show more" },
@@ -258,7 +263,11 @@ impl ProfilePicker {
                 .flex_basis(px(0.))
                 .min_w_0()
                 .px_0()
-                .label(effort_label(effort).to_owned())
+                .label(if effort == "xhigh" {
+                    "X-High".to_owned()
+                } else {
+                    effort_label(effort).to_owned()
+                })
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .disabled(self.disabled)
                 .on_click(cx.listener(move |picker, _, _, cx| {
