@@ -49,6 +49,7 @@ pub(crate) fn input() -> TurnInput {
         handoff: None,
         jobs: Vec::new(),
         run: None,
+        rules: None,
     }
 }
 

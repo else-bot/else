@@ -57,6 +57,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
         handoff: None,
         jobs: Vec::new(),
         run: None,
+        rules: None,
     }
 }
 

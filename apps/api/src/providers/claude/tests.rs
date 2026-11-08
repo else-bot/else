@@ -450,6 +450,7 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         handoff: None,
         jobs: Vec::new(),
         run: None,
+        rules: None,
     }
 }
 

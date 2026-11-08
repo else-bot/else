@@ -19,6 +19,7 @@ pub(crate) mod outgoing_tools;
 mod owner_tools;
 pub mod questions;
 pub mod routines;
+pub mod rules;
 pub mod settings;
 mod shared_mcp;
 mod social_tools;
@@ -177,6 +178,7 @@ pub fn router(config: &Config, state: Arc<AppState>) -> Router {
         .merge(questions::routes())
         .merge(outgoing_drafts::routes())
         .merge(routines::routes())
+        .merge(rules::routes())
         .merge(maintenance::routes())
         .merge(onboarding::routes())
         .fallback(|| async { ApiError::not_found() })

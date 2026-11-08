@@ -46,6 +46,9 @@ pub enum Tool {
     /// Manage the bot's own routines (work rooted in an owner message,
     /// including a task delegated for one; never a routine run or its tasks).
     Routines,
+    /// Edit the bot's own rules file (a turn answering the owner in the
+    /// bot's own conversation only).
+    Rules,
     /// Discover and use shared MCP packages in host-enabled tasks.
     Mcp,
     /// Install shared MCP packages for an owner request.
