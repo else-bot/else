@@ -1073,8 +1073,9 @@ async fn desktop_upgrades_close_chromium_with_sigint_before_the_stop() {
 
 /// A desktop computer boots at its small size for commands. Its screen
 /// starts, and it grows to the desktop size, only when something needs the
-/// desktop, once per boot. The growth is admitted against the budget and
-/// held until the computer stops; its next start boots small again.
+/// desktop, once per boot. Growth is admitted against the budget and held
+/// until the computer stops; without room the screen runs at the boot size
+/// and grows once room frees. Its next start boots small again.
 #[tokio::test(flavor = "multi_thread")]
 async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
     let app = TestApp::installed().await;
@@ -1135,12 +1136,16 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
     manager.acquire_desktop(a, "test:a").await.unwrap();
     assert_eq!((count("grow"), count("desktop")), (1, 1), "once per boot");
 
-    let refused = manager.acquire_desktop(b, "test:b").await.unwrap();
-    assert!(
-        matches!(&refused, Acquire::Queued { reason } if reason.contains("desktop")),
-        "{refused:?}"
+    let small = manager.acquire_desktop(b, "test:b").await.unwrap();
+    assert!(matches!(small, Acquire::Ready { .. }), "{small:?}");
+    assert_eq!(
+        (
+            count(&format!("grow {name_b}")),
+            count(&format!("desktop {name_b}"))
+        ),
+        (0, 1),
+        "a screen at the boot size without room to grow"
     );
-    assert_eq!(count("desktop"), 1, "no screen without room for it");
     manager
         .exec(
             lease_b,
@@ -1159,9 +1164,12 @@ async fn desktop_computers_boot_small_and_grow_only_for_the_screen() {
         Acquire::Ready { .. }
     ));
     assert_eq!(
-        count(&format!("desktop {name_b}")),
-        1,
-        "room once the grown one stopped"
+        (
+            count(&format!("grow {name_b}")),
+            count(&format!("desktop {name_b}"))
+        ),
+        (1, 1),
+        "grown once room freed, its screen kept"
     );
 
     ready(&manager, a, "test:a2").await;

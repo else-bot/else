@@ -154,10 +154,11 @@ impl ComputerManager {
         Ok(acquired)
     }
 
-    /// Start the desktop of the computer `lease` holds, once per boot. The
-    /// first start grows the computer to its desktop size, admitted against
-    /// the budget first; it keeps that size, and its reservation, until it
-    /// stops. A lease from an earlier boot starts nothing.
+    /// Start the desktop of the computer `lease` holds, once per boot, and
+    /// grow the computer to its desktop size when the budget has room. It
+    /// keeps that size, and its reservation, until it stops. Without room the
+    /// desktop runs at the boot size, and a later use grows it once room
+    /// frees. A lease from an earlier boot starts nothing.
     pub(super) async fn ensure_desktop(
         &self,
         bot_id: Uuid,
@@ -186,20 +187,15 @@ impl ComputerManager {
                 reason: "the computer restarted; try again".into(),
             }));
         };
-        if started {
-            return Ok(Ok(()));
-        }
         let row = Self::row(&mut tx, bot_id).await?.expect("leased");
         let (max_cpus, max_memory) = row.max();
-        let grows = !grown && (max_cpus, max_memory) != (row.cpus as u32, row.memory_mib as u32);
+        let grows = !grown
+            && (max_cpus, max_memory) != (row.cpus as u32, row.memory_mib as u32)
+            && self.admits(&mut tx, bot_id, max_cpus, max_memory).await?;
+        if started && !grows {
+            return Ok(Ok(()));
+        }
         if grows {
-            if !self.admits(&mut tx, bot_id, max_cpus, max_memory).await? {
-                return Ok(Err(Acquire::Queued {
-                    reason: "the computer budget has no room for the desktop yet; waiting for \
-                             capacity"
-                        .into(),
-                }));
-            }
             sqlx::query("UPDATE bot_computers SET grown_generation = ?2 WHERE bot_id = ?1")
                 .bind(bot_id)
                 .bind(generation)
@@ -209,6 +205,9 @@ impl ComputerManager {
         tx.commit().await?;
         if grows && let Err(err) = self.runtime.grow(&name, max_cpus, max_memory).await {
             tracing::warn!(bot = %bot_id, error = %err, "the desktop runs at the boot size");
+        }
+        if started {
+            return Ok(Ok(()));
         }
         self.ensure_services(bot_id, &name).await?;
         let started = self

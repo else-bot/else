@@ -241,7 +241,10 @@ async fn guest_tools_desktop_and_isolation() {
     let idle = services().await;
     assert!(idle.contains("supervisord"), "{idle}");
     for service in ["Xvfb", "x11vnc", "websockify", "chromium", "openbox"] {
-        assert!(!idle.contains(service), "{service} runs before any use: {idle}");
+        assert!(
+            !idle.contains(service),
+            "{service} runs before any use: {idle}"
+        );
     }
     assert!(matches!(
         manager.acquire_desktop(bot, "test:turn").await.unwrap(),
