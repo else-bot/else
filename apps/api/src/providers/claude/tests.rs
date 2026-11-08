@@ -101,6 +101,13 @@ fn the_result_reports_token_usage_with_cache_reads_and_writes_in_input() {
 }
 
 #[test]
+fn a_compact_boundary_reports_compaction() {
+    let events = tracker().on(&json!({"type":"system","subtype":"compact_boundary",
+        "compact_metadata":{"trigger":"auto","pre_tokens":150000}}));
+    assert_eq!(events, Ok(vec![Event::Compacted]));
+}
+
+#[test]
 fn an_agent_tool_extra_server_or_malformed_inventory_is_refused() {
     let mut tools = claude_home::tool_names();
     tools.push("Agent".into());

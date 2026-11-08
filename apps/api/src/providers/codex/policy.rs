@@ -191,6 +191,10 @@ impl Protocol for TurnEvents<'_> {
                 events.push(Event::Parked);
             }
             "item/started" => self.check_item(&params["item"])?,
+            "thread/compacted" => events.push(Event::Compacted),
+            "item/completed" if params["item"]["type"] == "contextCompaction" => {
+                events.push(Event::Compacted);
+            }
             "model/rerouted" => {
                 let to = params["toModel"].as_str().unwrap_or_default();
                 if to != self.profile.model {

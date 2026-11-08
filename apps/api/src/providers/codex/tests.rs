@@ -1007,3 +1007,44 @@ fn token_usage_of_this_turn_is_reported_per_model_request() {
     assert!(matches!(reported.as_slice(), [Event::Usage(u)] if *u == usage));
     assert!(events.on(&update("other")).unwrap().is_empty());
 }
+
+#[test]
+fn context_compaction_is_reported_once_per_signal() {
+    use crate::providers::cli::attempt::{Event, Protocol};
+    let profile = Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "medium".into(),
+        service_tier: "priority".into(),
+    };
+    let mut events = super::policy::TurnEvents {
+        thread_id: "th",
+        native_turn: "tu",
+        profile: &profile,
+        host_tools: true,
+        elsebot_tools: true,
+        current_message: None,
+    };
+    let note = |method: &str, params: Value| crate::providers::codex_rpc::Incoming::Notification {
+        method: method.into(),
+        params,
+    };
+    let item = note(
+        "item/completed",
+        json!({ "threadId": "th", "turnId": "tu",
+        "item": { "id": "c1", "type": "contextCompaction" } }),
+    );
+    assert!(matches!(
+        events.on(&item).unwrap().as_slice(),
+        [Event::Compacted]
+    ));
+    let thread = note(
+        "thread/compacted",
+        json!({ "threadId": "th", "turnId": "tu" }),
+    );
+    assert!(matches!(
+        events.on(&thread).unwrap().as_slice(),
+        [Event::Compacted]
+    ));
+    let other = note("thread/compacted", json!({ "threadId": "elsewhere" }));
+    assert!(events.on(&other).unwrap().is_empty());
+}

@@ -599,7 +599,7 @@ impl SinkState {
                 Some(id) => {
                     sqlx::query(
                         "UPDATE provider_sessions SET considered_through_turn = ?2,
-                             memory_revision = coalesce(?3, memory_revision), default_skills = ?4,
+                             memory_revision = ?3, default_skills = ?4,
                              context_receipts = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
                          WHERE id = ?1",
                     )

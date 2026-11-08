@@ -35,6 +35,8 @@ pub struct PreparedTurn<'a> {
     pub packet: String,
     selection: Selection,
     advance: Option<Advance>,
+    /// The provider compacted the session during this turn.
+    compacted: bool,
 }
 
 impl<'a> PreparedTurn<'a> {
@@ -81,6 +83,7 @@ impl<'a> PreparedTurn<'a> {
             packet,
             selection,
             advance: Some(advance),
+            compacted: false,
         }
     }
 
@@ -119,8 +122,31 @@ impl<'a> PreparedTurn<'a> {
         self.session.memory_revision = advance.memory_revision;
         self.session.default_skills = advance.default_skills;
         self.session.context = advance.context;
+        if self.compacted {
+            self.forget_given();
+        }
         sink.session(&self.session).await?;
         sink.reported(reported, native_turn).await
+    }
+}
+
+impl PreparedTurn<'_> {
+    /// The provider compacted the session: its summary may have dropped the
+    /// memory, default skills, and context blocks, so the next turn sends
+    /// them again. History stays considered; compaction summarized it.
+    /// Recorded at once, so a turn the provider never accepts cannot leave a
+    /// resumable session with stale receipts; accept() forgets them again
+    /// after recording what this turn sent.
+    pub async fn compacted(&mut self, sink: &dyn TurnSink) -> Result<(), Fenced> {
+        self.compacted = true;
+        self.forget_given();
+        sink.session(&self.session).await
+    }
+
+    fn forget_given(&mut self) {
+        self.session.memory_revision = None;
+        self.session.default_skills.clear();
+        self.session.context.clear();
     }
 }
 

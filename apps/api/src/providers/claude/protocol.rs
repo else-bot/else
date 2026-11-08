@@ -258,6 +258,7 @@ impl Protocol for Tracker {
         match required(&event["type"], "event")? {
             "system" => match text(&event["subtype"], "system event")?.unwrap_or_default() {
                 "init" => self.on_init(event)?,
+                "compact_boundary" => events.push(Event::Compacted),
                 sub if sub.starts_with("task_") || sub.contains("agent") => {
                     return Err(Violation::policy(format!(
                         "Claude reported native agent activity ({sub})"

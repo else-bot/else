@@ -143,6 +143,53 @@ async fn a_fresh_session_gets_all_history_and_memory_and_advances_once_on_accept
 }
 
 #[tokio::test]
+async fn compaction_makes_the_next_turn_resend_what_the_session_was_given() {
+    let mut input = input();
+    input.delegation.origin = crate::app::providers::Origin::OwnerRequest;
+    let sink = Log::default();
+
+    // Compacted before acceptance: recorded at once, in case acceptance never
+    // comes, and forgotten again when accept() records what was sent.
+    let mut early = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n1".into()));
+    early.compacted(&sink).await.unwrap();
+    let unaccepted = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(unaccepted.considered_through_turn, 0, "no history advance");
+    assert!(unaccepted.context.is_empty() && unaccepted.memory_revision.is_none());
+    early.accept(&sink, &json!({}), "t").await.unwrap();
+    let session = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        session.considered_through_turn, 3,
+        "history stays considered"
+    );
+    assert_eq!(session.memory_revision, None);
+    assert!(session.default_skills.is_empty() && session.context.is_empty());
+
+    // Compacted after acceptance: the session is recorded again at once.
+    let mut late = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n2".into()));
+    late.accept(&sink, &json!({}), "t").await.unwrap();
+    assert!(
+        !sink
+            .sessions
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .context
+            .is_empty()
+    );
+    late.compacted(&sink).await.unwrap();
+    let forgotten = sink.sessions.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(forgotten.memory_revision, None);
+    assert!(forgotten.context.is_empty());
+
+    input.turn_no = 4;
+    let next = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&forgotten));
+    assert!(next.packet.contains("likes tea"));
+    assert!(next.packet.contains("[else.bot default skills]"));
+    assert!(next.packet.contains("[else.bot saved permissions]"));
+}
+
+#[tokio::test]
 async fn a_warm_session_gets_only_what_it_lacks() {
     let mut input = input();
     let fresh = PreparedTurn::new(&input, "fp".into(), Opened::Fresh("n1".into()));
