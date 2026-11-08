@@ -118,12 +118,13 @@ impl Host {
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         // A file, not a pipe: a background child that keeps stderr open must
-        // not hold the probe until it exits.
-        let mut stderr = probe_stderr().map_err(|e| format!("could not start ({e})"))?;
+        // not hold the probe until it exits. Only a failure's reason needs it.
+        let mut stderr = probe_stderr();
         command.stderr(
             stderr
-                .try_clone()
-                .map_err(|e| format!("could not start ({e})"))?,
+                .as_ref()
+                .and_then(|f| f.try_clone().ok())
+                .map_or_else(Stdio::null, Stdio::from),
         );
         let mut retries = 5;
         let output = loop {
@@ -138,9 +139,11 @@ impl Host {
         };
         if !output.status.success() {
             let mut text = String::new();
-            let _ = stderr
-                .seek(SeekFrom::Start(0))
-                .and_then(|_| stderr.read_to_string(&mut text));
+            if let Some(file) = stderr.as_mut() {
+                let _ = file
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| file.read_to_string(&mut text));
+            }
             return Err(match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
                 Some(line) => {
                     let line: String = line.chars().take(200).collect();
@@ -313,23 +316,36 @@ pub fn project_dir(root: &Path, bot_id: Uuid) -> std::io::Result<PathBuf> {
 }
 
 /// An anonymous file for a probe's stderr: created private, then unlinked.
-fn probe_stderr() -> std::io::Result<fs::File> {
+/// `None` if the temporary directory cannot hold one.
+fn probe_stderr() -> Option<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "else-probe-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
-    fs::remove_file(&path)?;
-    Ok(file)
+    for _ in 0..8 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "else-probe-{}-{}-{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                let _ = fs::remove_file(&path);
+                return Some(file);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn passed_env() -> impl Iterator<Item = (OsString, OsString)> {
