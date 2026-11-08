@@ -1,22 +1,14 @@
 use super::conversation::TranscriptRow;
-use super::row_text::RowText;
 use super::{ElseApp, RowKey};
 use crate::avatar::bot_avatar;
 use crate::model::{BotCreated, BotReplyStatus, Conversation, Item};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum Disclosure {
-    Activity(Uuid),
-    Message(Uuid),
-    Prompt(Uuid),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BotActivity {
@@ -74,41 +66,6 @@ pub(super) fn group_activity(
 }
 
 impl ElseApp {
-    fn bot_disclosure_button(
-        &self,
-        disclosure: Disclosure,
-        item: Uuid,
-        label: String,
-        cx: &mut Context<Self>,
-    ) -> Button {
-        let expanded = self
-            .view
-            .as_ref()
-            .is_some_and(|view| view.bot_disclosures.contains(&disclosure));
-        Button::new(SharedString::from(format!("bot-{disclosure:?}")))
-            .ghost()
-            .small()
-            .focus_ring(false)
-            .cursor_pointer()
-            .accessibility_label(format!(
-                "{} {label}",
-                if expanded { "Collapse" } else { "Expand" }
-            ))
-            .icon(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .on_click(cx.listener(move |app, _, _, cx| {
-                if let Some(view) = app.view.as_mut()
-                    && !view.bot_disclosures.remove(&disclosure)
-                {
-                    view.bot_disclosures.insert(disclosure);
-                }
-                app.remeasure_row(RowKey::Item(item), cx);
-            }))
-    }
-
     pub(super) fn render_bot_activity(
         &mut self,
         row: &TranscriptRow,
@@ -118,7 +75,6 @@ impl ElseApp {
         let conversation = view.conversation.as_ref()?;
         let activity = row.activity.as_ref()?;
         let &anchor = activity.items.first()?;
-        let expanded = view.bot_disclosures.contains(&Disclosure::Activity(anchor));
         let theme = cx.theme().clone();
         let mut participants = Vec::new();
         for id in &activity.items {
@@ -139,37 +95,20 @@ impl ElseApp {
             .collect::<Vec<_>>()
             .join(" & ");
         let count = activity.items.len();
-        let mut header = h_flex().w_full().items_center().gap_2();
-        for (id, _) in participants.iter().take(3) {
-            if let Some(bot) = self.bots.iter().find(|bot| bot.id == *id) {
-                header = header.child(
-                    bot_avatar(
-                        SharedString::from(format!("activity-{anchor}-{id}")),
-                        bot.avatar,
-                        px(20.),
-                    )
-                    .still(),
-                );
-            }
-        }
-        header = header.child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .items_start()
-                .gap_1()
-                .child(div().w_full().truncate().text_sm().child(names.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "{count} bot {}",
-                            if count == 1 { "message" } else { "messages" }
-                        )),
-                ),
-        );
         let last = conversation.item(*activity.items.last()?)?;
+        let (_, last_sender, _) = exchange_sender(last)?;
+        let last_text = last
+            .bot_task
+            .as_ref()
+            .map_or(last.text.as_str(), |task| task.prompt.as_str())
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let preview = if last_text.is_empty() {
+            format!("{last_sender} finished without a reply.")
+        } else {
+            format!("{last_sender}: {last_text}")
+        };
         let status = if !activity.failed.is_empty() {
             format!("{} failed", activity.failed.len())
         } else if !activity.stopped.is_empty() {
@@ -179,34 +118,102 @@ impl ElseApp {
         } else {
             "Task received".to_owned()
         };
-        header = header.child(
-            div()
-                .text_xs()
-                .text_color(if activity.failed.is_empty() {
-                    theme.muted_foreground
-                } else {
-                    theme.danger
-                })
-                .child(status),
+        let messages = format!(
+            "{count} {}",
+            if count == 1 { "message" } else { "messages" }
         );
+        let mut avatars = h_flex().flex_none().items_center().gap_1();
+        for (id, _) in participants.iter().take(3) {
+            if let Some(bot) = self.bots.iter().find(|bot| bot.id == *id) {
+                avatars = avatars.child(
+                    bot_avatar(
+                        SharedString::from(format!("activity-{anchor}-{id}")),
+                        bot.avatar,
+                        px(20.),
+                    )
+                    .still(),
+                );
+            }
+        }
+        let header = h_flex()
+            .w_full()
+            .min_w_0()
+            .items_start()
+            .gap_3()
+            .child(avatars.mt(px(1.)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .text_left()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(names.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(if activity.failed.is_empty() {
+                                        theme.muted_foreground
+                                    } else {
+                                        theme.danger
+                                    })
+                                    .child(format!("{status} · {messages}")),
+                            )
+                            .child(
+                                Icon::new(IconName::ChevronRight)
+                                    .xsmall()
+                                    .flex_none()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(preview),
+                    ),
+            );
+        let title = names.clone();
         let mut card = v_flex()
             .w_full()
             .min_w_0()
-            .gap_2()
-            .p_3()
             .rounded(theme.radius_lg)
             .bg(theme.secondary.opacity(0.5))
             .child(
-                self.bot_disclosure_button(
-                    Disclosure::Activity(anchor),
-                    anchor,
-                    format!("bot activity with {names}"),
-                    cx,
-                )
-                .w_full()
-                .h_auto()
-                .child(header),
+                Button::new(SharedString::from(format!("bot-activity-{anchor}")))
+                    .ghost()
+                    .focus_ring(false)
+                    .cursor_pointer()
+                    .w_full()
+                    .h_auto()
+                    .px_3p5()
+                    .py_2p5()
+                    .rounded(theme.radius_lg)
+                    .accessibility_label(format!(
+                        "Open conversation between {names}, {messages}, {status}"
+                    ))
+                    .child(header)
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.open_bot_exchange(anchor, title.clone(), window, cx);
+                    })),
             );
+        let mut notes = v_flex().w_full().gap_2().px_3p5().pb_3();
+        let mut noted = false;
         for (ids, label, color) in [
             (&activity.failed, "Reply failed", theme.danger),
             (&activity.stopped, "Reply stopped", theme.muted_foreground),
@@ -219,7 +226,8 @@ impl ElseApp {
                     .lines()
                     .find(|line| !line.trim().is_empty())
                     .unwrap_or("No reply text.");
-                card = card.child(
+                noted = true;
+                notes = notes.child(
                     v_flex()
                         .gap_1()
                         .text_xs()
@@ -229,116 +237,10 @@ impl ElseApp {
                 );
             }
         }
-        if expanded {
-            for id in &activity.items {
-                let mut message = row.clone();
-                message.key = RowKey::Item(*id);
-                message.activity = None;
-                message.footer_stamp = None;
-                card = card.children(self.render_row_content(&message, cx));
-            }
+        if noted {
+            card = card.child(notes);
         }
         Some(card.into_any_element())
-    }
-
-    pub(super) fn render_bot_message(
-        &self,
-        item: &Item,
-        text: &RowText,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let view = self.view.as_ref()?;
-        let (sender, name, kind) = exchange_sender(item)?;
-        let recipient = self
-            .bots
-            .iter()
-            .find(|bot| bot.id == view.bot_id)
-            .map_or("Bot", |bot| bot.name.as_str());
-        let expanded = view.bot_disclosures.contains(&Disclosure::Message(item.id));
-        let theme = cx.theme().clone();
-        let label = format!("{name} → {recipient} · {kind}");
-        let mut header = h_flex().w_full().min_w_0().items_center().gap_1p5();
-        if let Some(bot) = self.bots.iter().find(|bot| bot.id == sender) {
-            header = header.child(
-                bot_avatar(
-                    SharedString::from(format!("exchange-{}", item.id)),
-                    bot.avatar,
-                    px(18.),
-                )
-                .still(),
-            );
-        }
-        header = header.child(div().flex_1().min_w_0().truncate().child(label.clone()));
-        let mut card = div()
-            .w_full()
-            .p_2()
-            .rounded(theme.radius)
-            .bg(theme.sidebar.opacity(0.5))
-            .child(
-                self.bot_disclosure_button(Disclosure::Message(item.id), item.id, label, cx)
-                    .w_full()
-                    .child(header),
-            );
-        let body = item
-            .bot_task
-            .as_ref()
-            .map_or(item.text.as_str(), |task| task.prompt.as_str());
-        if expanded {
-            card = card.child(div().pt_2().child(
-                if item.bot_reply.is_some() && body.trim().is_empty() {
-                    div()
-                        .text_sm()
-                        .child("Finished without a reply.")
-                        .into_any_element()
-                } else {
-                    text.render(cx)
-                },
-            ));
-            if let Some(reply) = item.bot_reply.as_ref() {
-                let prompt_open = view.bot_disclosures.contains(&Disclosure::Prompt(item.id));
-                card = card.child(
-                    h_flex().pt_2().child(
-                        self.bot_disclosure_button(
-                            Disclosure::Prompt(item.id),
-                            item.id,
-                            "original task".into(),
-                            cx,
-                        )
-                        .xsmall()
-                        .label("Original task"),
-                    ),
-                );
-                if prompt_open {
-                    card = card.child(
-                        div()
-                            .pt_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(reply.prompt.clone()),
-                    );
-                }
-            }
-        } else {
-            let preview = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            // Clipped, not `line_clamp`: GPUI caches a clamped line under the
-            // same key as the unclamped one, so the expanded reply would
-            // reuse this preview's unwrapped lines.
-            card = card.child(
-                div()
-                    .mt_1()
-                    .text_sm()
-                    .line_height(rems(1.25))
-                    .max_h(rems(2.5))
-                    .overflow_hidden()
-                    .text_color(theme.muted_foreground)
-                    .child(if preview.is_empty() {
-                        "Finished without a reply.".to_owned()
-                    } else {
-                        preview
-                    }),
-            );
-        }
-        Some(card)
     }
 }
 

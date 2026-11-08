@@ -10,7 +10,7 @@ use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
 use chrono::{DateTime, Utc};
 use gpui_kit::base::HoverCard;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
@@ -1009,8 +1009,15 @@ impl ElseApp {
                         Button::new("delete-bot")
                             .focus_ring(false)
                             .cursor_pointer()
+                            .icon(gpui_kit::assets::IconName::Trash)
                             .label("Delete bot")
-                            .danger()
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .foreground(theme.danger)
+                                    .hover(theme.danger.opacity(0.08))
+                                    .active(theme.danger.opacity(0.14)),
+                            )
+                            .small()
                             .w_full()
                             .disabled(
                                 self.connection != Connection::Connected

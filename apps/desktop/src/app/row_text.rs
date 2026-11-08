@@ -121,6 +121,7 @@ pub(super) struct RowText {
     files: HashMap<Uuid, Attachment>,
     owner: WeakEntity<ElseApp>,
     bot: Uuid,
+    key: RowKey,
     images: Entity<MessageImages>,
     _observe_images: Subscription,
 }
@@ -204,6 +205,7 @@ impl RowText {
             parts,
             owner: cx.entity().downgrade(),
             bot,
+            key,
             images,
             _observe_images: observe_images,
         }
@@ -426,10 +428,12 @@ impl RowText {
     }
 
     fn render_quote_preview(&self, cx: &App) -> Option<AnyElement> {
-        let quote = self.quote.as_ref()?;
         let reply = QuotedReply::parse(&self.source)?;
-        let state = quote.markdown_state()?.clone();
-        let mentions = quote.mentions.clone();
+        let original = reply.original();
+        let owner = self.owner.clone();
+        let bot = self.bot;
+        let from = self.key;
+        let author_kind = reply.author;
         let author = match reply.author {
             Author::Owner => "You".to_owned(),
             Author::Bot => self.bots.name(self.bot)?.to_owned(),
@@ -445,7 +449,7 @@ impl RowText {
                 .min_w_0()
                 .p_0()
                 .text_color(theme.muted_foreground)
-                .accessibility_label(format!("Show original message from {author}"))
+                .accessibility_label(format!("Go to original message from {author}"))
                 .child(
                     h_flex()
                         .w_full()
@@ -465,46 +469,36 @@ impl RowText {
                 )
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    let state = state.clone();
-                    let author = author.clone();
-                    let mentions = mentions.clone();
-                    window.open_dialog(cx, move |dialog, _, cx| {
-                        dialog.title(format!("Message from {author}")).child(
-                            div()
-                                .id("original-message")
-                                .w_full()
-                                .max_h(px(440.))
-                                .overflow_y_scroll()
-                                .child(
-                                    TextView::new(&state)
-                                        .style(TextViewStyle::from_theme(
-                                            &gpui_kit::base::Theme::global(cx),
-                                        ))
-                                        .w_full()
-                                        .scrollable(false)
-                                        .selectable(true)
-                                        .markdown_extensions(
-                                            MarkdownExtensions::default()
-                                                .plugin(MentionPlugin(mentions.clone()))
-                                                .plugin(UnavailableImage),
-                                        )
-                                        .image_source(|_| {
-                                            ImageSource::Custom(Arc::new(|_, _| None))
-                                        })
-                                        .on_link_click(|url, event, _, cx| {
-                                            if activates_link(event)
-                                                && let Some(target) = LinkTarget::parse(url)
-                                            {
-                                                target.open(cx);
-                                            }
-                                        }),
-                                ),
-                        )
+                    let original = original.clone();
+                    let _ = owner.update(cx, |app, cx| {
+                        app.reveal_quoted(bot, from, author_kind, &original, window, cx)
                     });
                 })
                 .into_any_element(),
         )
     }
+}
+
+/// A read-only markdown view for text outside the transcript's rows.
+pub(super) fn markdown_view(state: &Entity<TextViewState>, cx: &App) -> TextView {
+    TextView::new(state)
+        .style(TextViewStyle::from_theme(&gpui_kit::base::Theme::global(
+            cx,
+        )))
+        .w_full()
+        .text_sm()
+        .line_height(rems(1.375))
+        .scrollable(false)
+        .selectable(true)
+        .markdown_extensions(MarkdownExtensions::default().plugin(UnavailableImage))
+        .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+        .on_link_click(|url, event, _, cx| {
+            if activates_link(event)
+                && let Some(target) = LinkTarget::parse(url)
+            {
+                target.open(cx);
+            }
+        })
 }
 
 fn file_map(parts: &[MessagePart]) -> HashMap<Uuid, Attachment> {

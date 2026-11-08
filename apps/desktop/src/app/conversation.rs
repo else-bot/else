@@ -1,11 +1,12 @@
 use super::ElseApp;
-use super::bot_activity::{BotActivity, Disclosure, group_activity};
+use super::bot_activity::{BotActivity, group_activity};
 use super::reply::Author;
 use super::row_text::{RowFormat, RowSource, RowText};
-use super::task_reply::state::{TaskReply, task_replies};
+use super::task_reply::state::{ReplyState, TaskReply, task_replies};
 use crate::api::{ClientError, LiveCommand, ReplyPosition, StreamMessage};
 use crate::model::{Applied, Conversation, Snapshot};
 use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -227,11 +228,14 @@ pub(super) struct ConversationView {
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
-    pub(super) bot_disclosures: HashSet<Disclosure>,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
     pub(super) reply_layout: Option<ReplyLayout>,
+    /// The row the last "go to original message" landed on, and when.
+    pub(super) revealed: Option<(RowKey, std::time::Instant)>,
+    /// A quoted message to find once older history arrives.
+    pending_reveal: Option<(RowKey, Author, String)>,
     pub(super) _load: Option<Task<()>>,
     pub(super) _older: Option<Task<()>>,
 }
@@ -274,11 +278,12 @@ impl ConversationView {
             expanded_drafts: HashSet::new(),
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
-            bot_disclosures: HashSet::new(),
             reply_transitions: HashMap::new(),
             _reply_clock: None,
             latest_seen: false,
             reply_layout: None,
+            revealed: None,
+            pending_reveal: None,
             _load: None,
             _older: None,
         }
@@ -392,6 +397,67 @@ impl ElseApp {
         }
     }
 
+    /// Scrolls to the message a reply quotes, loading older pages until it
+    /// is found or the history runs out.
+    pub(super) fn reveal_quoted(
+        &mut self,
+        bot: Uuid,
+        from: RowKey,
+        author: Author,
+        original: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.view.as_mut().filter(|v| v.bot_id == bot) else {
+            return;
+        };
+        view.pending_reveal = None;
+        let Some(conversation) = view.conversation.as_ref() else {
+            return;
+        };
+        let before = match from {
+            RowKey::Item(id) => conversation.item(id).map(|item| item.seq),
+            _ => None,
+        };
+        let target = conversation
+            .items()
+            .rev()
+            .filter(|item| before.is_none_or(|seq| item.seq < seq))
+            .find(|item| {
+                Author::of(&item.kind) == Some(author)
+                    && item.text.trim_end().lines().eq(original.lines())
+            })
+            .map(|item| item.id);
+        if let Some(target) = target
+            && let Some(ix) = view.row_index(RowKey::Item(target))
+        {
+            let row = &view.rows[ix];
+            if let Some(task) = &row.task
+                && (task.history.contains(&target)
+                    || (task.latest == Some(target)
+                        && !task.latest_kept
+                        && matches!(task.state, ReplyState::Queued | ReplyState::Working)))
+            {
+                view.expanded_tasks.insert(task.turn);
+                view.list.remeasure_items(ix..ix + 1);
+            }
+            view.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.),
+            });
+            view.revealed = Some((row.key, std::time::Instant::now()));
+            cx.notify();
+        } else if conversation.older_before_seq.is_some() {
+            view.pending_reveal = Some((from, author, original.to_owned()));
+            self.load_older(window, cx);
+        } else {
+            window.push_notification(
+                "The original message is no longer in this conversation.",
+                cx,
+            );
+        }
+    }
+
     pub(super) fn load_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let Some(view) = self.view.as_mut() else {
@@ -417,7 +483,11 @@ impl ElseApp {
                         if let Some(conversation) = view.conversation.as_mut() {
                             conversation.merge_older(page);
                         }
+                        let pending = view.pending_reveal.take();
                         app.sync_rows(window, cx);
+                        if let Some((from, author, original)) = pending {
+                            app.reveal_quoted(bot, from, author, &original, window, cx);
+                        }
                     }
                     Err(err) => {
                         app.notice = Some(format!("Could not load older messages: {err}"));

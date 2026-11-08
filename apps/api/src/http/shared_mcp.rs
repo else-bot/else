@@ -48,7 +48,7 @@ fn api_error(error: Error) -> ApiError {
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let packages = library(&state).list().await.map_err(api_error)?;
+    let packages = library(&state).listings().await.map_err(api_error)?;
     Ok(Json(json!({"mcps": packages})))
 }
 

@@ -7,10 +7,16 @@ use gpui_kit::component::{Disableable as _, FocusableExt as _, Icon, Sizable as 
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Favicons by MCP origin: `None` while loading or when the service has
+/// none, so each origin is fetched once per visit.
+type Icons = HashMap<String, Option<Arc<Image>>>;
+
 pub(super) struct View {
     id: Uuid,
     client: Arc<Client>,
     entries: Option<Vec<InstalledMcp>>,
+    icons: Icons,
+    _icon_loads: Vec<Task<()>>,
     search: Entity<InputState>,
     revision: u64,
     removing: Option<String>,
@@ -59,6 +65,7 @@ impl Shell {
                             Ok(entries) => {
                                 view.entries = Some(entries);
                                 view.poll_error = None;
+                                Self::load_mcp_icons(view, cx);
                             }
                             Err(error) => view.poll_error = Some(error.to_string()),
                         }
@@ -76,6 +83,8 @@ impl Shell {
             id,
             client,
             entries: None,
+            icons: HashMap::new(),
+            _icon_loads: Vec::new(),
             search,
             revision: 0,
             removing: None,
@@ -86,6 +95,35 @@ impl Shell {
             _remove: None,
         });
         cx.notify();
+    }
+
+    fn load_mcp_icons(view: &mut View, cx: &mut Context<Self>) {
+        let id = view.id;
+        let websites: Vec<String> = view
+            .entries
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.website.clone())
+            .filter(|website| !view.icons.contains_key(website))
+            .collect();
+        for website in websites {
+            view.icons.insert(website.clone(), None);
+            let client = view.client.clone();
+            view._icon_loads.push(cx.spawn(async move |this, cx| {
+                let Some(png) = client.service_icon(website.clone()).await else {
+                    return;
+                };
+                let _ = this.update(cx, |shell, cx| {
+                    if let Some(view) = shell.mcp.as_mut().filter(|view| view.id == id) {
+                        view.icons.insert(
+                            website,
+                            Some(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
+                        );
+                        cx.notify();
+                    }
+                });
+            }));
+        }
     }
 
     fn confirm_remove_mcp(
@@ -291,6 +329,10 @@ impl Shell {
         for entry in filtered {
             let removal_entry = entry.clone();
             let initials = entry.name.chars().take(2).collect::<String>();
+            let icon = entry
+                .website
+                .as_ref()
+                .and_then(|website| view.icons.get(website).cloned().flatten());
             let installed = chrono::DateTime::parse_from_rfc3339(&entry.installed_at)
                 .map(|at| format!(" · {}", at.format("%b %-d")))
                 .unwrap_or_default();
@@ -312,7 +354,13 @@ impl Shell {
                                 .justify_center()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(initials),
+                                .child(match icon {
+                                    Some(icon) => img(icon)
+                                        .size_5()
+                                        .object_fit(ObjectFit::Contain)
+                                        .into_any_element(),
+                                    None => initials.into_any_element(),
+                                }),
                         )
                         .child(
                             v_flex()

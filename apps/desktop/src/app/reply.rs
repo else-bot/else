@@ -112,6 +112,20 @@ impl<'a> QuotedReply<'a> {
         })
     }
 
+    /// The quoted message's text as the conversation stored it.
+    pub(super) fn original(&self) -> String {
+        self.quote
+            .lines()
+            .skip(1)
+            .map(|line| {
+                line.strip_prefix("> ")
+                    .or_else(|| line.strip_prefix('>'))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub(super) fn excerpt(&self) -> String {
         self.quote
             .lines()
@@ -225,6 +239,18 @@ mod tests {
             .unwrap();
         assert!(own.starts_with("Replying to my earlier message:\n> Use tabs.\n\n"));
         assert!(bots.starts_with("Replying to your earlier message:\n> Use tabs.\n\n"));
+        let original = "Use tabs.\n\n  Indented, kept.";
+        let message = draft(
+            "Sure.",
+            Some(MessageReference {
+                item: Uuid::nil(),
+                author: Author::Bot,
+                text: format!("{original}\n"),
+            }),
+        )
+        .message()
+        .unwrap();
+        assert_eq!(QuotedReply::parse(&message).unwrap().original(), original);
     }
 
     #[test]

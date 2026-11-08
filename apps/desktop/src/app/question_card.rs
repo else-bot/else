@@ -228,10 +228,10 @@ impl ElseApp {
         };
         let mut card = v_flex()
             .w_full()
-            .gap_3()
-            .p_4()
             .rounded(theme.radius_lg)
-            .bg(theme.secondary);
+            .bg(theme.secondary)
+            .when(pending, |card| card.gap_3().p_4());
+        let mut extra: Vec<AnyElement> = Vec::new();
         if pending {
             let mut buttons = h_flex()
                 .flex_shrink_0()
@@ -352,7 +352,12 @@ impl ElseApp {
                     .small()
                     .w_full()
                     .h_auto()
-                    .p_0()
+                    .px_4()
+                    .py_3()
+                    .rounded(theme.radius_lg)
+                    .when(expanded && question.context.is_some(), |button| {
+                        button.rounded_b(px(0.))
+                    })
                     .cursor_pointer()
                     .accessibility_label(format!(
                         "{} {}",
@@ -404,7 +409,7 @@ impl ElseApp {
         }
         if expanded {
             if let Some(context) = &question.context {
-                card = card.child(
+                extra.push(
                     div()
                         .w_full()
                         .p_3()
@@ -412,26 +417,33 @@ impl ElseApp {
                         .bg(theme.background)
                         .text_sm()
                         .whitespace_normal()
-                        .child(context.clone()),
+                        .child(context.clone())
+                        .into_any_element(),
                 );
             }
             if pending {
-                card = card.child(note(match question.kind.as_str() {
+                extra.push(note(match question.kind.as_str() {
                     _ if question.choices.iter().any(|c| c.id == APPROVE_TASK) => "Always allow remembers this task, target, and action type for future chats with this bot.".to_owned(),
                     _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Always allow remembers this integration tool and action type for this bot's chat requests.".to_owned(),
                     _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task. Changing the task clears this permission.".to_owned(),
                     _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Always allow lets this bot take destructive actions without asking.".to_owned(),
                     _ => "Approval covers exactly this action, once.".to_owned(),
-                }));
+                }).into_any_element());
             }
         }
         if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
-            card = card.child(
+            extra.push(
                 div()
                     .text_xs()
                     .text_color(theme.danger)
-                    .child(error.clone()),
+                    .child(error.clone())
+                    .into_any_element(),
             );
+        }
+        if pending {
+            card = card.children(extra);
+        } else if !extra.is_empty() {
+            card = card.child(v_flex().w_full().gap_3().px_4().pb_4().children(extra));
         }
         card.into_any_element()
     }

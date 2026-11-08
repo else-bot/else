@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{
@@ -14,19 +13,11 @@ use gpui_kit::*;
 use crate::api::{Capabilities, ProfileChoice, ProviderInfo};
 
 const FAST: &str = "priority";
-pub(crate) const CATALOG_CONTEXT: &str = "ProfilePickerCatalog";
-
-enum PickerView {
-    Settings,
-    Catalog { provider: Option<String> },
-}
 
 pub struct ProfilePicker {
     providers: Vec<ProviderInfo>,
     choice: Option<ProfileChoice>,
     search: Entity<InputState>,
-    model_focus: FocusHandle,
-    view: PickerView,
     expanded_providers: HashSet<String>,
     disabled: bool,
     _search: Subscription,
@@ -61,12 +52,10 @@ impl ProfilePicker {
             }
         });
         Self {
-            view: PickerView::Settings,
             expanded_providers: HashSet::new(),
             choice,
             providers,
             search,
-            model_focus: cx.focus_handle(),
             disabled: false,
             _search: subscription,
         }
@@ -92,24 +81,14 @@ impl ProfilePicker {
         self.providers.iter().find(|p| p.id == choice.provider_id)
     }
 
-    fn choose_model(
-        &mut self,
-        provider: &str,
-        model: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let info = self.providers.iter().find(|p| p.id == provider).unwrap();
+    fn choose_model(&mut self, provider: &str, model: String, cx: &mut Context<Self>) {
+        let Some(info) = self.providers.iter().find(|p| p.id == provider) else {
+            return;
+        };
         self.choice = catalog_choice(info, self.choice.as_ref()).map(|mut choice| {
             choice.model = model;
             choice
         });
-        self.show_settings(window, cx);
-    }
-
-    fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.view = PickerView::Settings;
-        self.model_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -118,16 +97,16 @@ impl ProfilePicker {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let mut groups = v_flex()
             .id("model-catalog")
-            .max_h(px(240.))
+            .w_full()
+            .max_h(px(260.))
             .overflow_y_scroll()
-            .p_1();
+            .p_1()
+            .gap_0p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border);
         let mut found = false;
         for provider in &self.providers {
-            if let PickerView::Catalog { provider: Some(id) } = &self.view
-                && provider.id != *id
-            {
-                continue;
-            }
             let expanded = self.expanded_providers.contains(&provider.id);
             let models = visible_models(provider, self.choice.as_ref(), &query, expanded);
             if models.is_empty() {
@@ -135,24 +114,30 @@ impl ProfilePicker {
             }
             found = true;
             groups = groups.child(
-                v_flex()
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
                     .px_2()
                     .pt_2()
                     .pb_1()
-                    .gap_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .flex_none()
+                            .font_weight(FontWeight::MEDIUM)
                             .child(provider.label.clone()),
                     )
                     .children(provider.cli_unavailable_reason.as_ref().map(|reason| {
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(reason.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("· {reason}"))
                     })),
             );
+            let available = provider.cli_available;
             for model in models {
                 let selected = self.choice.as_ref().is_some_and(|choice| {
                     choice.provider_id == provider.id && choice.model == *model
@@ -162,48 +147,43 @@ impl ProfilePicker {
                 groups = groups.child(
                     Button::new(SharedString::from(format!("model-{provider_id}-{model}")))
                         .focus_ring(false)
-                        .cursor_pointer()
+                        .when(available && !self.disabled, |button| {
+                            button.cursor_pointer()
+                        })
                         .ghost()
                         .selected(selected)
-                        .toggled(selected)
                         .small()
                         .w_full()
-                        .px_3()
-                        .disabled(self.disabled || !provider.cli_available)
+                        .h_8()
+                        .px_2()
+                        .disabled(self.disabled || !available)
                         .accessibility_label(format!("{} · {}", model_label(model), provider.label))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
+                                .truncate()
                                 .text_left()
+                                .text_sm()
                                 .child(model_label(model)),
                         )
-                        .child(
-                            Icon::new(if selected {
-                                IconName::Check
-                            } else {
-                                IconName::Circle
-                            })
-                            .size_3()
-                            .text_color(if selected {
-                                theme.primary
-                            } else {
-                                theme.border
-                            }),
-                        )
-                        .on_click(cx.listener(move |picker, _, window, cx| {
-                            picker.choose_model(&provider_id, model_id.clone(), window, cx);
+                        .children(selected.then(|| {
+                            Icon::new(IconName::Check)
+                                .size_3p5()
+                                .text_color(theme.primary)
+                        }))
+                        .on_click(cx.listener(move |picker, _, _, cx| {
+                            picker.choose_model(&provider_id, model_id.clone(), cx);
                         })),
                 );
             }
-            if query.is_empty()
-                && !provider.catalog.featured_models.is_empty()
-                && provider
-                    .catalog
-                    .models
-                    .iter()
-                    .any(|model| !provider.catalog.featured_models.contains(model))
-            {
+            let hidden = provider
+                .catalog
+                .models
+                .iter()
+                .filter(|model| !provider.catalog.featured_models.contains(model))
+                .count();
+            if query.is_empty() && !provider.catalog.featured_models.is_empty() && hidden > 0 {
                 let provider_id = provider.id.clone();
                 groups = groups.child(
                     Button::new(SharedString::from(format!("more-models-{provider_id}")))
@@ -212,22 +192,24 @@ impl ProfilePicker {
                         .ghost()
                         .small()
                         .w_full()
-                        .label(if expanded {
-                            "Fewer models"
-                        } else {
-                            "More models"
-                        })
-                        .icon(if expanded {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
+                        .px_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_left()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(if expanded {
+                                    "Show fewer".to_owned()
+                                } else {
+                                    format!("Show {hidden} more")
+                                }),
+                        )
                         .accessibility_label(format!(
                             "{} {} models",
                             if expanded { "Show fewer" } else { "Show more" },
                             provider.label
                         ))
-                        .toggled(expanded)
                         .disabled(self.disabled)
                         .on_click(cx.listener(move |picker, _, _, cx| {
                             if !picker.expanded_providers.remove(&provider_id) {
@@ -247,64 +229,9 @@ impl ProfilePicker {
                     .child("No matching models."),
             );
         }
-        let filters = std::iter::once((None, "All".to_owned()))
-            .chain(
-                self.providers
-                    .iter()
-                    .map(|p| (Some(p.id.clone()), p.label.clone())),
-            )
-            .map(|(provider, label)| {
-                let selected = matches!(
-                    &self.view,
-                    PickerView::Catalog { provider: current } if *current == provider
-                );
-                Button::new(SharedString::from(format!(
-                    "provider-{}",
-                    provider.as_deref().unwrap_or("all")
-                )))
-                .focus_ring(false)
-                .cursor_pointer()
-                .ghost()
-                .small()
-                .selected(selected)
-                .toggled(selected)
-                .label(label.clone())
-                .accessibility_label(format!("Filter {label} models"))
-                .disabled(self.disabled)
-                .on_click(cx.listener(move |picker, _, _, cx| {
-                    picker.view = PickerView::Catalog {
-                        provider: provider.clone(),
-                    };
-                    cx.notify();
-                }))
-            });
         v_flex()
             .w_full()
             .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        Button::new("model-back")
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowLeft)
-                            .label("Model settings")
-                            .accessibility_label("Back to model settings")
-                            .disabled(self.disabled)
-                            .on_click(cx.listener(|picker, _, window, cx| {
-                                picker.show_settings(window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Choose a model"),
-                    ),
-            )
             .child(
                 Input::new(&self.search)
                     .focus_ring(false)
@@ -313,7 +240,6 @@ impl ProfilePicker {
                     .aria_label("Find a model")
                     .disabled(self.disabled),
             )
-            .child(h_flex().flex_wrap().gap_1().children(filters))
             .child(groups)
             .into_any_element()
     }
@@ -339,7 +265,11 @@ impl ProfilePicker {
                 .flex_basis(px(0.))
                 .min_w_0()
                 .px_0()
-                .label(effort_label(effort).to_owned())
+                .label(if effort == "xhigh" {
+                    "X-High".to_owned()
+                } else {
+                    effort_label(effort).to_owned()
+                })
                 .accessibility_label(format!("{} reasoning", effort_label(effort)))
                 .disabled(self.disabled)
                 .on_click(cx.listener(move |picker, _, _, cx| {
@@ -366,12 +296,6 @@ impl ProfilePicker {
                 .toggled(selected)
                 .icon(icon)
                 .label(label)
-                .when(selected, |button| {
-                    button
-                        .bg(theme.primary.opacity(0.1))
-                        .text_color(theme.primary)
-                        .border_color(theme.primary.opacity(0.4))
-                })
                 .accessibility_label(format!("{label} speed"))
                 .disabled(self.disabled || (tier == FAST && !fast_offered))
                 .on_click(cx.listener(move |picker, _, _, cx| {
@@ -379,58 +303,47 @@ impl ProfilePicker {
                     cx.notify();
                 }))
         });
+        let row = |label: &'static str, options: AnyElement| {
+            h_flex()
+                .w_full()
+                .gap_3()
+                .child(
+                    div()
+                        .w(px(72.))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(options))
+        };
+        let segmented = || {
+            h_flex()
+                .w_full()
+                .gap_1()
+                .p_0p5()
+                .bg(theme.muted.opacity(0.3))
+                .rounded(theme.radius)
+        };
         v_flex()
-            .gap_4()
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::SlidersHorizontal).size_3())
-                            .child("Reasoning"),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1()
-                            .p_1()
-                            .bg(theme.muted.opacity(0.3))
-                            .rounded(theme.radius)
-                            .children(efforts),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Zap).size_3())
-                            .child("Speed"),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1()
-                            .p_1()
-                            .bg(theme.muted.opacity(0.3))
-                            .rounded(theme.radius)
-                            .children(speeds),
-                    )
-                    .when(!fast_offered, |settings| {
-                        settings.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("Fast mode is not available through this provider."),
-                        )
-                    }),
-            )
+            .gap_2()
+            .child(row(
+                "Reasoning",
+                segmented().children(efforts).into_any_element(),
+            ))
+            .child(row(
+                "Speed",
+                segmented().children(speeds).into_any_element(),
+            ))
+            .when(!fast_offered, |settings| {
+                settings.child(
+                    div()
+                        .pl(px(84.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Fast mode is not available through this provider."),
+                )
+            })
             .into_any_element()
     }
 }
@@ -531,96 +444,22 @@ pub fn effort_label(id: &str) -> &str {
 
 impl Render for ProfilePicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let mut body = v_flex().w_full().gap_4();
-        if matches!(self.view, PickerView::Catalog { .. }) {
-            return body
-                .key_context(CATALOG_CONTEXT)
-                .capture_action(cx.listener(|picker, _: &Cancel, window, cx| {
-                    picker.show_settings(window, cx);
-                    cx.stop_propagation();
-                }))
-                .child(self.render_catalog(cx));
-        }
-        let choice = self.choice.as_ref();
-        let model = choice
-            .map(|c| model_label(&c.model))
-            .unwrap_or_else(|| "Choose a model".into());
-        body = body.child(
-            Button::new("pick-model")
-                .focus_ring(false)
-                .cursor_pointer()
-                .secondary()
-                .w_full()
-                .h_auto()
-                .p_3()
-                .rounded(theme.radius)
-                .track_focus(&self.model_focus)
-                .disabled(self.disabled)
-                .accessibility_label(format!("Choose model: {model}"))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size_8()
-                                .flex_none()
-                                .rounded(theme.radius)
-                                .bg(theme.primary.opacity(0.1))
-                                .text_color(theme.primary)
-                                .child(Icon::new(IconName::Cpu).size_4()),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .text_left()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(model),
-                                )
-                                .children(self.current().map(|provider| {
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(provider.label.clone())
-                                })),
-                        )
-                        .child(
-                            Icon::new(IconName::ChevronRight)
-                                .size_4()
-                                .text_color(theme.muted_foreground),
-                        ),
+        let danger = cx.theme().danger;
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(self.render_catalog(cx))
+            .when(!self.any_available(), |body| {
+                body.child(
+                    div()
+                        .text_xs()
+                        .text_color(danger)
+                        .child("No provider is available on this computer yet."),
                 )
-                .on_click(cx.listener(|picker, _, window, cx| {
-                    picker.view = PickerView::Catalog { provider: None };
-                    picker.expanded_providers.clear();
-                    picker
-                        .search
-                        .update(cx, |search, cx| search.set_value("", window, cx));
-                    picker.search.read(cx).focus_handle(cx).focus(window, cx);
-                    cx.notify();
-                })),
-        );
-        if !self.any_available() {
-            body = body.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child("No provider is available on this computer yet."),
-            );
-        }
-        if choice.is_some() {
-            body = body.child(self.render_settings(cx));
-        }
-        body
+            })
+            .when(self.choice.is_some(), |body| {
+                body.child(self.render_settings(cx))
+            })
     }
 }
 
