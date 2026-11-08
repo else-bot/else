@@ -89,7 +89,7 @@ pub fn named_response(found: Vec<Value>, names: &[String]) -> Value {
     let mut tools = Vec::new();
     let mut omitted = Vec::new();
     let mut used = 0;
-    for tool in found {
+    for tool in found.into_iter().map(advertised_tool) {
         let size = tool.to_string().len();
         let fits = used + size <= RESULT_BUDGET || (tools.is_empty() && size <= SCHEMA_CAP);
         if fits {
@@ -114,6 +114,89 @@ pub fn named_response(found: Vec<Value>, names: &[String]) -> Value {
         );
     }
     response
+}
+
+/// A named tool as the bot reads it: its input schema compacted, and its
+/// output schema left out, since results arrive whole anyway. The MCP server
+/// still validates every call against its own full schema.
+fn advertised_tool(mut tool: Value) -> Value {
+    if let Some(map) = tool.as_object_mut() {
+        map.remove("outputSchema");
+        if let Some(schema) = map.get_mut("inputSchema") {
+            *schema = compact_schema(std::mem::take(schema));
+        }
+    }
+    tool
+}
+
+/// Drops JSON Schema noise that generated schemas carry and that a model
+/// does not need to call a tool: `$schema`, `$id`, schema titles,
+/// `additionalProperties: true`, safe-integer bounds, and nested `anyOf` or
+/// `oneOf`. A single-branch union is unwrapped only when its keys do not
+/// collide with the parent's. Null branches stay: an optional nullable field
+/// often means "omit to keep, null to clear". Literal values (`enum`,
+/// `const`, `default`, `examples`) and property names are never rewritten.
+fn compact_schema(schema: Value) -> Value {
+    const SAFE_MAX: i64 = 9_007_199_254_740_991;
+    const LITERAL: [&str; 4] = ["enum", "const", "default", "examples"];
+    match schema {
+        Value::Array(items) => Value::Array(items.into_iter().map(compact_schema).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                let noise = matches!(key.as_str(), "$schema" | "$id" | "title")
+                    || (key == "additionalProperties" && value == Value::Bool(true))
+                    || (key == "maximum" && value == json!(SAFE_MAX))
+                    || (key == "minimum" && value == json!(-SAFE_MAX));
+                if noise {
+                    continue;
+                }
+                let value = match key.as_str() {
+                    k if LITERAL.contains(&k) => value,
+                    "properties" | "patternProperties" | "$defs" | "definitions" => match value {
+                        Value::Object(props) => Value::Object(
+                            props
+                                .into_iter()
+                                .map(|(name, prop)| (name, compact_schema(prop)))
+                                .collect(),
+                        ),
+                        other => other,
+                    },
+                    _ => compact_schema(value),
+                };
+                out.insert(key, value);
+            }
+            for union in ["anyOf", "oneOf"] {
+                let Some(Value::Array(branches)) = out.remove(union) else {
+                    continue;
+                };
+                let flat: Vec<Value> = branches
+                    .into_iter()
+                    .flat_map(|b| match b {
+                        Value::Object(ref o)
+                            if o.len() == 1 && o.get(union).is_some_and(Value::is_array) =>
+                        {
+                            o[union].as_array().cloned().unwrap_or_default()
+                        }
+                        other => vec![other],
+                    })
+                    .collect();
+                match <[Value; 1]>::try_from(flat) {
+                    Ok([Value::Object(only)]) if only.keys().all(|k| !out.contains_key(k)) => {
+                        out.extend(only);
+                    }
+                    Ok([only]) => {
+                        out.insert(union.to_owned(), json!([only]));
+                    }
+                    Err(flat) => {
+                        out.insert(union.to_owned(), Value::Array(flat));
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        other => other,
+    }
 }
 
 /// The tools of one `tools/list` page whose names were asked for.
@@ -431,5 +514,45 @@ mod tests {
     fn a_budget_below_the_preview_envelope_still_holds() {
         let value = json!({ "result": "x".repeat(1_000) });
         assert!(fit(value, 40).to_string().len() <= 40);
+    }
+
+    #[test]
+    fn named_schemas_lose_generated_noise_but_keep_their_meaning() {
+        let tool = json!({ "name": "search", "outputSchema": { "type": "object" }, "inputSchema": {
+            "$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+            "additionalProperties": true, "required": ["query"],
+            "properties": {
+                "query": { "title": "Query", "type": "string" },
+                "limit": { "type": "integer", "maximum": 9_007_199_254_740_991_i64 },
+                "state": { "anyOf": [{ "anyOf": [{ "enum": ["open"] }, { "enum": ["closed"] }] }] },
+                "cursor": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "title": { "const": { "title": "Report" }, "default": { "$id": "kept" } },
+            } } });
+        let compact = advertised_tool(tool);
+        assert!(compact.get("outputSchema").is_none());
+        assert_eq!(
+            compact["inputSchema"],
+            json!({ "type": "object", "required": ["query"],
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" },
+                "state": { "anyOf": [{ "enum": ["open"] }, { "enum": ["closed"] }] },
+                "cursor": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "title": { "const": { "title": "Report" }, "default": { "$id": "kept" } },
+            } }),
+            "a property named title stays; literals are untouched; null branches stay"
+        );
+        let colliding = json!({ "type": "object", "required": ["a"],
+            "oneOf": [{ "required": ["b"], "properties": { "b": { "type": "string" } } }] });
+        assert_eq!(
+            compact_schema(colliding.clone()),
+            colliding,
+            "a colliding branch stays a union"
+        );
+        let lone = json!({ "oneOf": [{ "type": "string" }], "description": "Id." });
+        assert_eq!(
+            compact_schema(lone),
+            json!({ "type": "string", "description": "Id." })
+        );
     }
 }
