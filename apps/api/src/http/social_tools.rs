@@ -144,7 +144,9 @@ async fn set_trigger(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Err
     })?;
     input.validate()?;
     if let (Some(destination), Some(m)) = (input.destination.as_mut(), s.socials.as_ref()) {
-        *destination = m.resolve(input.connection_id, destination).await?;
+        *destination = m
+            .resolve(input.connection_id, g.bot_id, g.turn_id, destination)
+            .await?;
     }
     let change = store::set_trigger(&s.db, g.turn_id, &input).await?;
     reconnect(s, &change).await;
@@ -180,10 +182,18 @@ pub(super) async fn reconnect<T>(s: &AppState, change: &store::TriggerChange<T>)
 }
 
 async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
-    let input: Action = serde_json::from_value(args.clone())
+    let mut input: Action = serde_json::from_value(args.clone())
         .map_err(|_| Error::Invalid("Use connection_id, command, and action_id for a mutation."))?;
     input.command.validate()?;
     let manager = s.socials.as_ref().ok_or(Error::Crypto)?;
+    let mut args = args.clone();
+    if let Some(destination) = input.command.destination_mut() {
+        *destination = manager
+            .resolve(input.connection_id, g.bot_id, g.turn_id, destination)
+            .await?;
+        args["command"]["destination"] = json!(destination);
+    }
+    let args = &args;
     if input.command.mutates() {
         if input.action_id.is_none() {
             return Err(Error::Invalid("Mutations require a stable action_id."));

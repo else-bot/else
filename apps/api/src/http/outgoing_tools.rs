@@ -237,21 +237,39 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
             }
             Err(outcome) => Err(outcome),
         },
-        "draft_message" => {
-            draft(
-                state,
-                grant,
-                args,
-                Message::parse(args).map(Content::Message),
-            )
-            .await
-        }
+        "draft_message" => match social_destination(state, grant, Message::parse(args)).await {
+            Ok(content) => draft(state, grant, args, content).await,
+            Err(outcome) => Err(outcome),
+        },
         "confirm_draft_approval" => confirm(state, grant, args).await,
         "start_draft_send" => start(state, grant, args).await,
         "send_draft" => send(state, grant, args).await,
         _ => report(state, grant, args).await,
     };
     result.unwrap_or_else(|outcome| outcome)
+}
+
+/// A native social draft names its chat by ID, so the owner approves the
+/// chat it reaches even if a public username later moves.
+async fn social_destination(
+    state: &AppState,
+    grant: &Grant,
+    message: Result<Message, &'static str>,
+) -> Result<Result<Content, &'static str>, Outcome> {
+    let Ok(mut message) = message else {
+        return Ok(message.map(Content::Message));
+    };
+    if let (Some(account), Some(destination), Some(socials)) = (
+        message.account_id,
+        message.destination.as_mut(),
+        state.socials.as_ref(),
+    ) {
+        *destination = socials
+            .resolve(account, grant.bot_id, grant.turn_id, destination)
+            .await
+            .map_err(|e| (tool_error(&e.to_string()), None))?;
+    }
+    Ok(Ok(Content::Message(message)))
 }
 
 async fn draft(

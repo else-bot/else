@@ -23,12 +23,6 @@ impl Operation {
             Self::Send(message) => Some(&message.destination),
         }
     }
-    fn destination_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Self::Command(c) => c.destination_mut(),
-            Self::Send(message) => Some(&mut message.destination),
-        }
-    }
     fn mutates(&self) -> bool {
         match self {
             Self::Command(c) => c.mutates(),
@@ -196,17 +190,38 @@ impl Manager {
         store::save_destinations(&self.db, c.id, &list).await?;
         store::destinations(&self.db, c.id).await
     }
-    /// The chat ID `destination` names. A public `@username` or share link
-    /// is looked up once and saved as a seen chat, so triggers, woken-turn
-    /// scopes, and receipts keep matching the IDs incoming messages carry.
-    pub async fn resolve(self: &Arc<Self>, id: Uuid, destination: &str) -> Result<String, Error> {
+    /// The chat ID `destination` names. Tools resolve a public `@username`
+    /// or share link when the bot first names a chat, so the owner approves,
+    /// and triggers and receipts record, the ID incoming messages carry even
+    /// if the username later moves. Only work for the owner may look one up.
+    pub async fn resolve(
+        self: &Arc<Self>,
+        id: Uuid,
+        bot: Uuid,
+        turn: Uuid,
+        destination: &str,
+    ) -> Result<String, Error> {
         let Some(username) = public_username(destination)? else {
             return Ok(destination.to_owned());
         };
         let c = store::connection(&self.db, id).await?;
-        if c.state != "active" {
-            return Err(Error::Inactive);
+        let access = store::authorize(
+            &mut *self.db.acquire().await?,
+            &c,
+            bot,
+            turn,
+            None,
+            false,
+            false,
+        )
+        .await?;
+        if access != Access::Owner {
+            return Err(Error::Forbidden);
         }
+        let cancel = match &self.scheduler {
+            Some(scheduler) => scheduler.cancellation(turn).await.unwrap_or_default(),
+            None => CancellationToken::new(),
+        };
         let worker = self.worker(id).await?;
         let (reply, result) = oneshot::channel();
         worker
@@ -217,11 +232,14 @@ impl Manager {
                 reply,
             })
             .map_err(|_| Error::Busy)?;
-        let found = tokio::time::timeout(Duration::from_secs(30), result)
-            .await
+        let found = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Inactive),
+            r = tokio::time::timeout(Duration::from_secs(30), result) => r,
+        };
+        Ok(found
             .map_err(|_| Error::Platform)?
-            .map_err(|_| Error::Inactive)??;
-        Ok(found.id)
+            .map_err(|_| Error::Inactive)??
+            .id)
     }
     async fn resolve_session(
         &self,
@@ -244,11 +262,8 @@ impl Manager {
         bot: Uuid,
         turn: Uuid,
         action: Option<Uuid>,
-        mut operation: Operation,
+        operation: Operation,
     ) -> Result<Value, Error> {
-        if let Some(destination) = operation.destination_mut() {
-            *destination = self.resolve(id, destination).await?;
-        }
         let c = store::connection(&self.db, id).await?;
         if let Operation::Command(cmd) = &operation
             && !c.provider.supports(cmd.operation())
@@ -372,7 +387,7 @@ impl Manager {
                                 if reload { break true; }
                                 continue;
                             }
-                            WorkerRequest::Resolve { generation, username, reply } => {
+                            WorkerRequest::Resolve { generation, username, mut reply } => {
                                 if generation != c.generation || c.state != "active" {
                                     let _ = reply.send(Err(Error::Inactive));
                                     continue;
@@ -381,6 +396,7 @@ impl Manager {
                                     biased;
                                     _ = stop.cancelled() => (Err(Error::Inactive), true),
                                     _ = changed.changed() => (Err(Error::Inactive), true),
+                                    _ = reply.closed() => continue,
                                     result = self.resolve_session(&c, &session, &username) => (result, false),
                                 };
                                 let _ = reply.send(result);

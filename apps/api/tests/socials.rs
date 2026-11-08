@@ -1024,6 +1024,10 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     )
     .await;
     let draft = proposed["draft"]["draft_id"].as_str().unwrap();
+    assert_eq!(
+        proposed["draft"]["content"]["destination"], "-100777",
+        "the owner approves the chat the username named when drafted: {proposed}"
+    );
     let (status, approved) = http(
         &router,
         "POST",
@@ -1042,6 +1046,29 @@ async fn a_public_telegram_username_works_wherever_a_chat_id_does() {
     let result = rpc(&router, &grant, "send_draft", json!({"draft_id":draft})).await;
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(*fake.sent_to.lock().unwrap(), vec!["-100777".to_owned()]);
+
+    sqlx::query("UPDATE turns SET status='completed' WHERE id=?1")
+        .bind(turn)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let woken = crate::turn(&db, bot, "connector").await;
+    let grant = scheduler
+        .grants()
+        .issue(
+            bot,
+            conversation,
+            woken,
+            vec![Tool::Social],
+            Duration::from_secs(300),
+        )
+        .await;
+    let (_, refused) = http(&router, "POST", "/tools/v1/mcp", &grant, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"social_action","arguments":{"connection_id":connection,"command":{"operation":"chat","destination":"@other_channel"}}}})).await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("no permission"),
+        "a woken turn cannot look up another chat: {refused}"
+    );
     stop.cancel();
 }
 

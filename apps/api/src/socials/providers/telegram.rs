@@ -6,8 +6,8 @@ use teloxide_core::{
     payloads::*,
     prelude::Requester,
     types::{
-        AllowedUpdate, ChatId, ChatMemberKind, InputPollOption, MessageId, ReactionType, Recipient,
-        Restricted, UpdateKind, UserId,
+        AllowedUpdate, ChatId, ChatMemberKind, ChatPermissions, InputPollOption, MessageId,
+        ReactionType, Recipient, Restricted, UpdateKind, UserId,
     },
 };
 use tokio::sync::mpsc;
@@ -93,7 +93,10 @@ pub async fn resolve(c: &Connection, b: &Bot, username: &str) -> Result<Destinat
             can_send_messages,
             ..
         })) => is_member && can_send_messages,
-        Ok(member) => member.is_present(),
+        Ok(ChatMemberKind::Member(_)) => chat
+            .permissions()
+            .is_none_or(|p| p.contains(ChatPermissions::SEND_MESSAGES)),
+        Ok(member) => member.is_privileged(),
         Err(_) => false,
     };
     Ok(Destination {

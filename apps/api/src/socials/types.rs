@@ -107,27 +107,27 @@ pub struct Identity {
 /// an error for a private invite link, which a bot cannot look up.
 pub fn public_username(destination: &str) -> Result<Option<String>, Error> {
     let text = destination.trim();
-    let path = if let Some(name) = text.strip_prefix('@') {
+    let name = if let Some(name) = text.strip_prefix('@') {
         name
     } else {
         let host = text
             .strip_prefix("https://")
             .or_else(|| text.strip_prefix("http://"))
             .unwrap_or(text);
-        match ["t.me/", "telegram.me/", "www.t.me/", "www.telegram.me/"]
+        let Some(path) = ["t.me/", "telegram.me/", "www.t.me/", "www.telegram.me/"]
             .iter()
             .find_map(|prefix| host.strip_prefix(prefix))
-        {
-            Some(path) => path.strip_prefix("s/").unwrap_or(path),
-            None => return Ok(None),
+        else {
+            return Ok(None);
+        };
+        if path.starts_with('+') || path.starts_with("joinchat/") {
+            return Err(Error::Invalid(
+                "A private Telegram invite link has no public username. Post in the chat so it appears in social_connections, then use its chat ID.",
+            ));
         }
+        let path = path.strip_prefix("s/").unwrap_or(path);
+        path.split(['/', '?', '#']).next().unwrap_or_default()
     };
-    if path.starts_with('+') || path.starts_with("joinchat") {
-        return Err(Error::Invalid(
-            "A private Telegram invite link has no public username. Post in the chat so it appears in social_connections, then use its chat ID.",
-        ));
-    }
-    let name = path.split(['/', '?', '#']).next().unwrap_or_default();
     let valid = (4..=32).contains(&name.len())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if valid {
@@ -512,6 +512,11 @@ mod tests {
                 "{named}"
             );
         }
+        assert_eq!(
+            public_username("t.me/joinchat_news").unwrap().as_deref(),
+            Some("@joinchat_news"),
+            "a public username may start with joinchat"
+        );
         for id in ["-1001234567890", "100", "123456789012345678"] {
             assert_eq!(public_username(id).unwrap(), None, "{id}");
         }
