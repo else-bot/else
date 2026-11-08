@@ -30,6 +30,13 @@ impl Session {
 pub trait Transport: Send + Sync {
     async fn identity(&self, provider: Provider, token: &Token) -> Result<Identity, Error>;
     async fn destinations(&self, session: &Session) -> Result<Vec<Destination>, Error>;
+    /// Look up a chat the platform can address by public `@username`.
+    async fn resolve(
+        &self,
+        c: &Connection,
+        session: &Session,
+        username: &str,
+    ) -> Result<Destination, Error>;
     async fn execute(&self, session: &Session, command: &Command) -> Result<Value, Error>;
     async fn send(
         &self,
@@ -60,6 +67,19 @@ impl Transport for Native {
         match session {
             Session::Telegram(_) => Ok(vec![]),
             Session::Discord { http, .. } => discord::destinations(http).await,
+        }
+    }
+    async fn resolve(
+        &self,
+        c: &Connection,
+        session: &Session,
+        username: &str,
+    ) -> Result<Destination, Error> {
+        match session {
+            Session::Telegram(bot) => telegram::resolve(c, bot, username).await,
+            Session::Discord { .. } => Err(Error::Invalid(
+                "Use a Discord channel ID from social_connections.",
+            )),
         }
     }
     async fn execute(&self, session: &Session, cmd: &Command) -> Result<Value, Error> {

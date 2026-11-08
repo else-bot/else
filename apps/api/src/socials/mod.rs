@@ -61,6 +61,11 @@ enum WorkerRequest {
         generation: i64,
         reply: oneshot::Sender<Result<Vec<Destination>, Error>>,
     },
+    Resolve {
+        generation: i64,
+        username: String,
+        reply: oneshot::Sender<Result<Destination, Error>>,
+    },
 }
 impl WorkerRequest {
     fn reject(self) {
@@ -69,6 +74,9 @@ impl WorkerRequest {
                 let _ = request.reply.send(Err(Error::Inactive));
             }
             Self::Discover { reply, .. } => {
+                let _ = reply.send(Err(Error::Inactive));
+            }
+            Self::Resolve { reply, .. } => {
                 let _ = reply.send(Err(Error::Inactive));
             }
         }
@@ -181,6 +189,72 @@ impl Manager {
         .map_err(|_| Error::Platform)??;
         store::save_destinations(&self.db, c.id, &list).await?;
         store::destinations(&self.db, c.id).await
+    }
+    /// The chat ID `destination` names. Tools resolve a public `@username`
+    /// or share link when the bot first names a chat, so the owner approves,
+    /// and triggers and receipts record, the ID incoming messages carry even
+    /// if the username later moves. Only work for the owner may look one up.
+    pub async fn resolve(
+        self: &Arc<Self>,
+        id: Uuid,
+        bot: Uuid,
+        turn: Uuid,
+        destination: &str,
+    ) -> Result<String, Error> {
+        let Some(username) = public_username(destination)? else {
+            return Ok(destination.to_owned());
+        };
+        let c = store::connection(&self.db, id).await?;
+        let access = store::authorize(
+            &mut *self.db.acquire().await?,
+            &c,
+            bot,
+            turn,
+            None,
+            false,
+            false,
+        )
+        .await?;
+        if access != Access::Owner {
+            return Err(Error::Forbidden);
+        }
+        let cancel = match &self.scheduler {
+            Some(scheduler) => scheduler.cancellation(turn).await.unwrap_or_default(),
+            None => CancellationToken::new(),
+        };
+        let worker = self.worker(id).await?;
+        let (reply, result) = oneshot::channel();
+        worker
+            .commands
+            .try_send(WorkerRequest::Resolve {
+                generation: c.generation,
+                username,
+                reply,
+            })
+            .map_err(|_| Error::Busy)?;
+        let found = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Inactive),
+            r = tokio::time::timeout(Duration::from_secs(30), result) => r,
+        };
+        Ok(found
+            .map_err(|_| Error::Platform)?
+            .map_err(|_| Error::Inactive)??
+            .id)
+    }
+    async fn resolve_session(
+        &self,
+        c: &Connection,
+        session: &providers::Session,
+        username: &str,
+    ) -> Result<Destination, Error> {
+        let found = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.transport.resolve(c, session, username),
+        )
+        .await
+        .map_err(|_| Error::Platform)??;
+        store::save_destinations(&self.db, c.id, std::slice::from_ref(&found)).await?;
+        Ok(found)
     }
     async fn request(
         self: &Arc<Self>,
@@ -308,6 +382,22 @@ impl Manager {
                                     _ = stop.cancelled() => (Err(Error::Inactive), true),
                                     _ = changed.changed() => (Err(Error::Inactive), true),
                                     result = self.discover_session(&c, &session) => (result, false),
+                                };
+                                let _ = reply.send(result);
+                                if reload { break true; }
+                                continue;
+                            }
+                            WorkerRequest::Resolve { generation, username, mut reply } => {
+                                if generation != c.generation || c.state != "active" {
+                                    let _ = reply.send(Err(Error::Inactive));
+                                    continue;
+                                }
+                                let (result, reload) = tokio::select! {
+                                    biased;
+                                    _ = stop.cancelled() => (Err(Error::Inactive), true),
+                                    _ = changed.changed() => (Err(Error::Inactive), true),
+                                    _ = reply.closed() => continue,
+                                    result = self.resolve_session(&c, &session, &username) => (result, false),
                                 };
                                 let _ = reply.send(result);
                                 if reload { break true; }

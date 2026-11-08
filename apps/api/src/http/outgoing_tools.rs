@@ -94,7 +94,7 @@ pub(super) fn schemas() -> Vec<Value> {
             "name": "draft_message",
             "description": format!("Show the owner a message or post you drafted for a \
                 messaging or social platform: x for a post on X (Twitter), telegram for a \
-                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
+                Telegram message, discord for a Discord message. With a native social connection pass account_id and the exact destination ID from social_connections or a public Telegram @username or t.me link; sending uses send_draft. Use this whenever the owner asks to draft, write, revise, or \
                 send one you would send for the owner, instead of ask_permission or an approval \
                 card. It has no subject or addresses; use draft_email for email. They may edit \
                 its text. {REVIEW}"),
@@ -237,21 +237,39 @@ pub(super) async fn call(state: &AppState, grant: &Grant, name: &str, args: &Val
             }
             Err(outcome) => Err(outcome),
         },
-        "draft_message" => {
-            draft(
-                state,
-                grant,
-                args,
-                Message::parse(args).map(Content::Message),
-            )
-            .await
-        }
+        "draft_message" => match social_destination(state, grant, Message::parse(args)).await {
+            Ok(content) => draft(state, grant, args, content).await,
+            Err(outcome) => Err(outcome),
+        },
         "confirm_draft_approval" => confirm(state, grant, args).await,
         "start_draft_send" => start(state, grant, args).await,
         "send_draft" => send(state, grant, args).await,
         _ => report(state, grant, args).await,
     };
     result.unwrap_or_else(|outcome| outcome)
+}
+
+/// A native social draft names its chat by ID, so the owner approves the
+/// chat it reaches even if a public username later moves.
+async fn social_destination(
+    state: &AppState,
+    grant: &Grant,
+    message: Result<Message, &'static str>,
+) -> Result<Result<Content, &'static str>, Outcome> {
+    let Ok(mut message) = message else {
+        return Ok(message.map(Content::Message));
+    };
+    if let (Some(account), Some(destination), Some(socials)) = (
+        message.account_id,
+        message.destination.as_mut(),
+        state.socials.as_ref(),
+    ) {
+        *destination = socials
+            .resolve(account, grant.bot_id, grant.turn_id, destination)
+            .await
+            .map_err(|e| (tool_error(&e.to_string()), None))?;
+    }
+    Ok(Ok(Content::Message(message)))
 }
 
 async fn draft(

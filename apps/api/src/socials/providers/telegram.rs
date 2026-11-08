@@ -5,7 +5,10 @@ use teloxide_core::{
     ApiError, Bot, RequestError,
     payloads::*,
     prelude::Requester,
-    types::{AllowedUpdate, ChatId, InputPollOption, MessageId, ReactionType, UpdateKind},
+    types::{
+        AllowedUpdate, ChatId, ChatMemberKind, ChatPermissions, InputPollOption, MessageId,
+        ReactionType, Recipient, Restricted, UpdateKind, UserId,
+    },
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -39,9 +42,9 @@ fn poll_error(error: RequestError) -> Error {
     }
 }
 fn chat(s: &str) -> Result<ChatId, Error> {
-    s.parse::<i64>()
-        .map(ChatId)
-        .map_err(|_| Error::Invalid("Telegram destination must be a chat ID."))
+    s.parse::<i64>().map(ChatId).map_err(|_| {
+        Error::Invalid("Telegram destination must be a chat ID or a public @username.")
+    })
 }
 fn message(s: &str) -> Result<MessageId, Error> {
     s.parse::<i32>()
@@ -64,6 +67,43 @@ pub async fn identity(t: &Token) -> Result<Identity, Error> {
         id: me.id.to_string(),
         display_name: me.first_name.clone(),
         username: me.username.clone(),
+    })
+}
+/// Telegram addresses a public channel or supergroup by `@username`.
+/// `can_send` reports whether this bot may post there now.
+pub async fn resolve(c: &Connection, b: &Bot, username: &str) -> Result<Destination, Error> {
+    let chat = b
+        .get_chat(Recipient::ChannelUsername(username.to_owned()))
+        .await
+        .map_err(|error| match error {
+            RequestError::Api(ApiError::ChatNotFound) => Error::Invalid(
+                "Telegram has no public channel or group with that @username. Private chats need their chat ID from social_connections.",
+            ),
+            _ => Error::Platform,
+        })?;
+    let me = c
+        .remote_id
+        .parse()
+        .map(UserId)
+        .map_err(|_| Error::Platform)?;
+    let can_send = match b.get_chat_member(chat.id, me).await.map(|m| m.kind) {
+        Ok(member) if chat.is_channel() => member.can_post_messages(),
+        Ok(ChatMemberKind::Restricted(Restricted {
+            is_member,
+            can_send_messages,
+            ..
+        })) => is_member && can_send_messages,
+        Ok(ChatMemberKind::Member(_)) => chat
+            .permissions()
+            .is_none_or(|p| p.contains(ChatPermissions::SEND_MESSAGES)),
+        Ok(member) => member.is_privileged(),
+        Err(_) => false,
+    };
+    Ok(Destination {
+        id: chat.id.to_string(),
+        name: chat.title().unwrap_or(username).to_owned(),
+        kind: if chat.is_private() { "direct" } else { "group" }.into(),
+        can_send,
     })
 }
 pub async fn send(b: &Bot, d: &str, body: &str, reply: Option<&str>) -> Result<Value, Error> {
