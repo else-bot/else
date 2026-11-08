@@ -224,7 +224,8 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          every day, nights, or weekends, or the days and hours they asked for. Confirm the \
          schedule, its active hours, and the next run time from the result. routine_list, \
          routine_update, and routine_delete manage your routines; the owner can also switch \
-         them off in Bot settings. When the owner wants a routine on a specific model, pass \
+         them off in Bot settings. When the owner asks to run, rerun, or retry a routine now, \
+         queue it with routine_run instead of doing its task yourself. When the owner wants a routine on a specific model, pass \
          model (and reasoning_effort or service_tier only if they asked); otherwise omit it so \
          each run uses your model. If the result says the model was not applied, tell the \
          owner they can choose it in Bot details > Routines. Each run arrives as a scheduled \

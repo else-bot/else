@@ -768,6 +768,65 @@ async fn routine_runs_and_their_delegated_tasks_cannot_manage_routines() {
 }
 
 #[tokio::test]
+async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
+    let h = harness().await;
+    let main = h.app.main_bot().await;
+    let (setup, token) = h.running(&main, GATE).await;
+    const TASK: &str = "[gate] update the tickets after the deployment.";
+    let routine = create(&h.app, &token, digest(TASK)).await;
+    let id = routine["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        set_enabled(&h.app, &main, &id, false).await.status,
+        StatusCode::OK
+    );
+    let enabled = tool(
+        &h.app,
+        &token,
+        "routine_update",
+        json!({ "routine_id": id, "enabled": true }),
+    )
+    .await;
+    let next_run_at = enabled.result["routine"]["next_run_at"].clone();
+    assert!(next_run_at.is_string(), "{}", enabled.body);
+
+    let ran = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
+    assert!(!ran.error, "{}", ran.body);
+    assert_eq!(ran.result["queued"], true);
+    assert_eq!(ran.result["routine"]["last_run"]["status"], "queued");
+    assert_eq!(ran.result["routine"]["next_run_at"], next_run_at);
+    let retry = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
+    assert!(!retry.error, "{}", retry.body);
+    assert_eq!(retry.result["queued"], false, "a retry returns the same run");
+    let missing = tool(
+        &h.app,
+        &token,
+        "routine_run",
+        json!({ "routine_id": Uuid::new_v4() }),
+    )
+    .await;
+    assert_eq!(missing.code(), "NOT_FOUND", "{}", missing.body);
+    let all = runs(&h.app, &id).await;
+    assert_eq!(all.len(), 1);
+    let run = all[0].0.unwrap();
+
+    h.release(setup).await;
+    h.app.wait_turn(&setup.to_string(), &["completed"]).await;
+    let (_, run_token) = h.started(run).await;
+    let packet = h.packets().await.into_iter().last().unwrap();
+    assert!(packet.contains(TASK), "{packet}");
+    let refused = tool(&h.app, &run_token, "routine_run", json!({ "routine_id": id })).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    h.release(run).await;
+    h.app.wait_turn(&run.to_string(), &["completed"]).await;
+
+    let listed = owner_routines(&h.app, &main).await;
+    assert_eq!(listed[0]["last_run"]["status"], "completed");
+    assert_eq!(listed[0]["last_run"]["turn_id"], run.to_string().as_str());
+    assert_eq!(listed[0]["next_run_at"], next_run_at);
+    assert_eq!(listed[0]["enabled"], true);
+}
+
+#[tokio::test]
 async fn a_run_is_hidden_and_its_report_is_visible() {
     let h = harness().await;
     let main = h.app.main_bot().await;

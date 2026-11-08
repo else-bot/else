@@ -58,6 +58,18 @@ pub enum RoutineError {
     Conflict,
     #[error("a bot can have at most {MAX_PER_BOT} routines; delete one first")]
     Limit,
+    #[error(
+        "a run of this routine is already queued or in progress; it reports to the owner when it \
+         ends"
+    )]
+    AlreadyRunning,
+    #[error("the bot's queue is full; run the routine again once queued requests finish")]
+    QueueFull,
+    #[error(
+        "no provider can run this routine now; the owner can check it in Settings or choose \
+         another model for the routine"
+    )]
+    ProviderUnavailable,
     #[error(transparent)]
     Invalid(#[from] InvalidRoutine),
     #[error(transparent)]
@@ -623,6 +635,92 @@ pub async fn delete(pool: &SqlitePool, by: By, id: Uuid) -> Result<bool, Routine
             Ok(true)
         }
     }
+}
+
+/// Queue a run of a routine now, at the owner's request, outside its
+/// schedule and active hours. It leaves the schedule and the enabled state
+/// alone, and its outcome is reviewed like a scheduled run. One turn queues
+/// at most one run of each routine: a retry returns that run. Returns the
+/// routine and whether this call queued the run.
+pub async fn run_now(
+    pool: &SqlitePool,
+    registry: &Registry,
+    caller: Caller,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(Routine, bool), RoutineError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    authorized_owner_conversation(&mut tx, caller).await?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"routine-run-now\0");
+    hasher.update(caller.turn_id.as_bytes());
+    hasher.update(id.as_bytes());
+    let digest = hasher.finalize();
+    let run_id = Uuid::from_bytes(digest[..16].try_into().expect("a SHA-256 digest has 16 bytes"));
+    let row: Option<(Uuid, String, String, i64, Option<Json<RoutineModel>>, bool, bool)> =
+        sqlx::query_as(
+            "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
+                    EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3),
+                    EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+                            WHERE rr.routine_id = r.id
+                              AND (t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain')
+                                   OR NOT rr.reviewed))
+             FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(caller.bot_id)
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((conversation_id, name, prompt, prompt_revision, model, queued, busy)) = row else {
+        return Err(RoutineError::NotFound);
+    };
+    if queued {
+        let routine = load(&mut tx, id).await?;
+        tx.commit().await?;
+        return Ok((routine, false));
+    }
+    // An ended run awaiting review may still be retried; wait for it too.
+    if busy {
+        return Err(RoutineError::AlreadyRunning);
+    }
+    let run_on = match &model {
+        Some(Json(own)) => RunOn::Own(own, id),
+        None => RunOn::Bot,
+    };
+    let turn_id = match queue_saved_task(
+        &mut tx,
+        registry,
+        caller.bot_id,
+        conversation_id,
+        run_id,
+        b"routine-run-now\0",
+        &prompt,
+        run_on,
+    )
+    .await?
+    {
+        Ok(turn_id) => turn_id,
+        Err(Skip::QueueFull) => return Err(RoutineError::QueueFull),
+        Err(Skip::ProviderUnavailable) => return Err(RoutineError::ProviderUnavailable),
+        Err(Skip::Overlap) => return Err(RoutineError::AlreadyRunning),
+    };
+    sqlx::query(
+        "INSERT INTO routine_runs (id, routine_id, due_at, name, turn_id, prompt_revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(run_id)
+    .bind(id)
+    .bind(ts(now))
+    .bind(&name)
+    .bind(turn_id)
+    .bind(prompt_revision)
+    .execute(&mut *tx)
+    .await?;
+    events::turn_accepted(&mut tx, caller.bot_id, turn_id).await?;
+    let routine = load(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok((routine, true))
 }
 
 /// The routine run a turn executes, if it is one.
