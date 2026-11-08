@@ -406,7 +406,10 @@ pub(crate) async fn status(state: &AppState) -> serde_json::Value {
     let (configured, backups) = tokio::join!(configured_profiles(&state.db), async {
         let backups = state.backups.as_ref()?;
         let read = tokio::time::timeout(std::time::Duration::from_secs(2), backups.snapshot());
-        Some(read.await.map_err(|_| "backup status did not answer in 2 seconds".to_owned()))
+        Some(
+            read.await
+                .map_err(|_| "backup status did not answer in 2 seconds".to_owned()),
+        )
     });
     let providers: Vec<_> = state
         .scheduler
