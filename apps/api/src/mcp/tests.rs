@@ -359,3 +359,35 @@ async fn approved_replacement_keeps_sign_ins_only_for_the_same_connection() {
         Err(Error::Conflict)
     ));
 }
+
+#[tokio::test]
+async fn owner_listings_name_the_http_origin_without_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = Library::new(temp.path().join("mcp"), Arc::default());
+    let mut http = input("sentry");
+    http.config = Transport::Http {
+        url: "https://mcp.sentry.dev:8443/secret/mcp?token=private".into(),
+        headers: BTreeMap::new(),
+    };
+    let mut stdio = input("local");
+    stdio.config = Transport::Stdio {
+        command: "npx".into(),
+        args: vec!["server".into()],
+        env: BTreeMap::new(),
+    };
+    library.install(http, "Maple".into()).await.unwrap();
+    library.install(stdio, "Maple".into()).await.unwrap();
+    let listings = library.listings().await.unwrap();
+    let websites: Vec<_> = listings
+        .iter()
+        .map(|listing| (listing.manifest.id.0.as_str(), listing.website.as_deref()))
+        .collect();
+    assert_eq!(
+        websites,
+        [("local", None), ("sentry", Some("https://mcp.sentry.dev:8443"))]
+    );
+    let public = serde_json::to_value(&listings).unwrap();
+    assert_eq!(public[1]["name"], "T3 Code");
+    assert!(!public.to_string().contains("secret"));
+    assert!(!public.to_string().contains("private"));
+}

@@ -94,6 +94,19 @@ pub enum Transport {
 }
 
 impl Transport {
+    /// The HTTP server's origin, for the owner's settings to find its icon.
+    /// The path and query can hold credentials, so only the scheme, host and
+    /// port leave.
+    fn website(&self) -> Option<String> {
+        let Self::Http { url, .. } = self else {
+            return None;
+        };
+        let parsed = reqwest::Url::parse(url).ok()?;
+        matches!(parsed.scheme(), "http" | "https")
+            .then(|| parsed.origin().ascii_serialization())
+            .filter(|origin| origin != "null")
+    }
+
     fn label(&self) -> &'static str {
         match self {
             Self::Http { .. } => "http",
@@ -272,6 +285,14 @@ pub struct Summary {
     pub installed_by: String,
     pub installed_at: String,
     pub transport: String,
+}
+
+/// A package as the owner's settings list it.
+#[derive(Serialize)]
+pub struct Listing {
+    #[serde(flatten)]
+    pub manifest: Summary,
+    pub website: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -492,6 +513,25 @@ impl Library {
         })
         .await
         .map_err(|_| Error::Connection)?
+    }
+
+    pub async fn listings(&self) -> Result<Vec<Listing>, Error> {
+        let manifests = self.list().await?;
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            manifests
+                .into_iter()
+                .map(|manifest| {
+                    let website = read_file(&root.join(&manifest.id.0).join("config.json"))
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<Transport>(&text).ok())
+                        .and_then(|config| config.website());
+                    Listing { manifest, website }
+                })
+                .collect()
+        })
+        .await
+        .map_err(|_| Error::Connection)
     }
 
     pub async fn read(&self, id: &PackageId) -> Result<Package, Error> {
