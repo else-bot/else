@@ -312,6 +312,49 @@ async fn setup_requires_its_provider_bot_and_current_binding_and_requeues() {
 }
 
 #[tokio::test]
+async fn setup_completes_before_any_chat_is_chosen_and_grants_no_chat() {
+    let db = TestDb::migrated().await;
+    let bot = bot(&db).await;
+    let turn = turn(&db, bot, "user").await;
+    let request = store::request_setup(&db.pool, turn, Provider::Telegram, "Post updates")
+        .await
+        .unwrap();
+    let c = account(&db, "no-chats-yet").await;
+    let done = store::settle_setup(&db.pool, request.id, Some((c.id, access(&[]))))
+        .await
+        .unwrap();
+    assert_eq!(done.status, "connected");
+    let c = store::connection(&db.pool, c.id).await.unwrap();
+    let granted = store::authorize(
+        &mut db.pool.acquire().await.unwrap(),
+        &c,
+        bot,
+        turn,
+        None,
+        false,
+        false,
+    )
+    .await
+    .expect("the bot discovers the connection");
+    assert!(granted.destinations.is_empty());
+    destinations(&db, c.id).await;
+    assert!(
+        store::authorize(
+            &mut db.pool.acquire().await.unwrap(),
+            &c,
+            bot,
+            turn,
+            Some("100"),
+            false,
+            false
+        )
+        .await
+        .is_err(),
+        "a chat that arrives later stays excluded until the owner chooses it"
+    );
+}
+
+#[tokio::test]
 async fn action_receipts_reject_changed_retries_and_survive_crash_as_uncertain() {
     let db = TestDb::migrated().await;
     let c = account(&db, "actions").await;
