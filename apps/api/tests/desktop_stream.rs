@@ -207,11 +207,18 @@ async fn rfb_server(
     // A real server holds an incremental request until the screen changes;
     // this screen changes every 20 ms.
     let mut held: Option<tokio::time::Instant> = None;
+    let mut cursor_shapes = false;
+    let mut cursor_due = false;
     loop {
         let kind = tokio::select! {
             kind = io.take(1) => kind?[0],
             _ = tokio::time::sleep_until(held.unwrap_or_else(tokio::time::Instant::now)), if held.is_some() => {
                 held = None;
+                if cursor_due {
+                    cursor_due = false;
+                    io.send(&cursor_update()).await?;
+                    continue;
+                }
                 shade = shade.wrapping_add(40);
                 io.send(&full_update(shade)).await?;
                 continue;
@@ -224,7 +231,17 @@ async fn rfb_server(
             2 => {
                 let head = io.take(3).await?;
                 let n = u16::from_be_bytes([head[1], head[2]]) as usize;
-                io.take(n * 4).await?;
+                let encodings = io.take(n * 4).await?;
+                let shapes = encodings
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|e| i32::from_be_bytes(*e) == -239);
+                if shapes != cursor_shapes {
+                    cursor_shapes = shapes;
+                    cursor_due = shapes;
+                    log.push(format!("{server} cursor shapes {shapes}"));
+                }
             }
             3 => {
                 let request = io.take(9).await?;
@@ -251,6 +268,15 @@ async fn rfb_server(
             other => panic!("unexpected client message {other}"),
         }
     }
+}
+
+/// A 2x2 cursor shape with its hotspot at the origin.
+fn cursor_update() -> Vec<u8> {
+    let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 2];
+    update.extend_from_slice(&(-239i32).to_be_bytes());
+    update.extend_from_slice(&[255; 16]);
+    update.extend_from_slice(&[0b1100_0000, 0b1000_0000]);
+    update
 }
 
 fn full_update(shade: u8) -> Vec<u8> {
@@ -608,6 +634,44 @@ async fn control_sends_input_releases_it_and_excludes_other_controllers() {
     assert!(
         !s.log.lines().iter().any(|l| l.contains("key 98")),
         "input after leaving control is dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_native_cursor_is_named_only_while_controlling() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=control&cursor=native").await;
+    let cursor = loop {
+        let message = next_json(&mut socket).await;
+        if message["type"] == "cursor" {
+            break message;
+        }
+    };
+    assert_eq!(cursor, json!({"type":"cursor","style":"default"}));
+    s.wait_log("watch cursor shapes true").await;
+    send(&mut socket, json!({"type":"mode","mode":"watch"})).await;
+    s.wait_log("watch cursor shapes false").await;
+
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"watch"})
+    );
+
+    let mut painted = s.open("mode=control").await;
+    loop {
+        if next_json(&mut painted).await == json!({"type":"mode","mode":"control"}) {
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let asked = s.log.lines();
+    assert_eq!(
+        asked
+            .iter()
+            .filter(|l| *l == "watch cursor shapes true")
+            .count(),
+        1,
+        "a stream without cursor=native never asks for shapes: {asked:?}"
     );
 }
 

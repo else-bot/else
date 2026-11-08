@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Measure takeover latency against a real guest desktop in Docker: how long a
 # pointer move takes to reach the viewer's frames, and frames per second while
-# it moves. Writes the JSON report to the absolute path in $1.
+# it moves, and check the native cursor names for the guest's cursor shapes.
+# Writes the JSON report to the absolute path in $1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out="${1:-$PWD/desktop-latency.json}"
+shift || true
 name="else-desktop-latency-$$"
 port="${ELSE_DESKTOP_LATENCY_PORT:-46080}"
 password="latency1"
@@ -17,7 +19,8 @@ docker exec "$name" sh -c "printf '%s\n' '$password' > /etc/elsebot/vnc.pass"
 docker exec "$name" /usr/local/bin/else-desktop >/dev/null 2>&1 || true
 docker exec "$name" supervisorctl -c /etc/elsebot/supervisord.conf status x11vnc x11vnc-watch novnc
 ELSE_DESKTOP_LATENCY_GUEST="127.0.0.1:$port" \
+ELSE_DESKTOP_LATENCY_CONTAINER="$name" \
 ELSE_DESKTOP_LATENCY_PASSWORD="$password" \
 ELSE_DESKTOP_LATENCY_OUT="$out" \
-    cargo test --release --locked -p else-api --test desktop_latency_live -- --nocapture
+    cargo test --release --locked -p else-api --test desktop_live -- --nocapture --test-threads=1 "$@"
 echo "Report: $out"

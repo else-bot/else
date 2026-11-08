@@ -6,7 +6,9 @@
 //! server (see infra/guest/vnc): `else-watch` reaches the view-only server
 //! that the bot's input guard ignores; anything else reaches the controlling
 //! one. A watch connection asks for 32-bit pixels in Raw and CopyRect plus
-//! DesktopSize; a control connection only sends input.
+//! DesktopSize; a control connection only sends input. While the owner
+//! controls, the viewer can also ask for cursor shapes (RichCursor), which
+//! stops the server painting the cursor into the pixels.
 
 use des::cipher::{BlockEncrypt, KeyInit};
 use futures_util::{SinkExt, StreamExt};
@@ -89,11 +91,7 @@ pub async fn connect(port: u16, password: &str, target: Target) -> Result<Connec
         0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0,
     ];
     let mut negotiation = SET_PIXEL_FORMAT_RGBA.to_vec();
-    // SetEncodings: Raw, CopyRect, DesktopSize.
-    negotiation.extend_from_slice(&[2, 0, 0, 3]);
-    for encoding in [0i32, 1, -223] {
-        negotiation.extend_from_slice(&encoding.to_be_bytes());
-    }
+    negotiation.extend_from_slice(&set_encodings(false));
     writer.write_all(&negotiation).await?;
     Ok(Connection {
         reader,
@@ -214,6 +212,23 @@ pub fn vnc_auth_response(password: &str, challenge: [u8; 16]) -> [u8; 16] {
     out
 }
 
+/// SetEncodings: Raw, CopyRect, DesktopSize, and with `cursor` RichCursor.
+pub fn set_encodings(cursor: bool) -> Vec<u8> {
+    let encodings: &[i32] = if cursor {
+        &[0, 1, -223, -239]
+    } else {
+        &[0, 1, -223]
+    };
+    let mut message = vec![2, 0];
+    message.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
+    for encoding in encodings {
+        message.extend_from_slice(&encoding.to_be_bytes());
+    }
+    message
+}
+
+const MAX_CURSOR_SIDE: u16 = 256;
+
 /// What the server sent, in order.
 #[derive(Debug)]
 pub enum Event {
@@ -236,6 +251,15 @@ pub enum Event {
     Resize {
         width: u16,
         height: u16,
+    },
+    /// The cursor's shape: a mask bit per pixel, row-major with each row
+    /// padded to a byte, and its hotspot. Empty when the cursor is hidden.
+    Cursor {
+        hotspot_x: u16,
+        hotspot_y: u16,
+        width: u16,
+        height: u16,
+        mask: Vec<u8>,
     },
     /// The end of one framebuffer update.
     UpdateEnd,
@@ -281,6 +305,26 @@ pub async fn read_events<R: AsyncRead + Unpin>(
                         }
                         (width, height) = (w, h);
                         if !send(Event::Resize { width, height }).await {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    if encoding == -239 {
+                        if w > MAX_CURSOR_SIDE || h > MAX_CURSOR_SIDE {
+                            return Err(ViewerError::Protocol("cursor too large".into()));
+                        }
+                        let row = usize::from(w).div_ceil(8);
+                        skip(&mut reader, w as u64 * h as u64 * 4).await?;
+                        let mut mask = vec![0u8; row * usize::from(h)];
+                        reader.read_exact(&mut mask).await?;
+                        let cursor = Event::Cursor {
+                            hotspot_x: x,
+                            hotspot_y: y,
+                            width: w,
+                            height: h,
+                            mask,
+                        };
+                        if !send(cursor).await {
                             return Ok(());
                         }
                         continue;
@@ -436,7 +480,7 @@ impl Framebuffer {
                 }
             }
             Event::Resize { width, height } => *self = Self::new(width, height),
-            Event::UpdateEnd => {}
+            Event::Cursor { .. } | Event::UpdateEnd => {}
         }
     }
 

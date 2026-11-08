@@ -1,6 +1,6 @@
 use super::{Client, ClientError, ErrorBody};
 use futures_util::{SinkExt as _, StreamExt as _};
-use gpui_kit::RenderImage;
+use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Method, StatusCode};
@@ -50,9 +50,14 @@ pub enum DesktopCommand {
 
 #[derive(Debug)]
 pub enum DesktopEvent {
-    Size { width: u16, height: u16 },
+    Size {
+        width: u16,
+        height: u16,
+    },
     Frame(Arc<RenderImage>),
     Mode(DesktopMode),
+    /// The guest's cursor shape while controlling; frames then leave it out.
+    Cursor(CursorStyle),
     Error(String),
     Asleep,
     Notice(String),
@@ -119,6 +124,9 @@ enum ServerEvent {
     Mode {
         mode: DesktopMode,
     },
+    Cursor {
+        style: String,
+    },
     Error {
         #[serde(default)]
         code: String,
@@ -137,6 +145,34 @@ fn text_keysym(ch: char) -> Option<u32> {
         ch if (ch as u32) <= 0xff => ch as u32,
         ch => 0x0100_0000 | ch as u32,
     })
+}
+
+/// The native cursor for a CSS cursor name the server sends; an arrow for
+/// names this app does not know.
+fn native_cursor(style: &str) -> CursorStyle {
+    match style {
+        "pointer" => CursorStyle::PointingHand,
+        "text" => CursorStyle::IBeam,
+        "vertical-text" => CursorStyle::IBeamCursorForVerticalLayout,
+        "crosshair" => CursorStyle::Crosshair,
+        "grab" => CursorStyle::OpenHand,
+        "grabbing" => CursorStyle::ClosedHand,
+        "not-allowed" => CursorStyle::OperationNotAllowed,
+        "copy" => CursorStyle::DragCopy,
+        "alias" => CursorStyle::DragLink,
+        "context-menu" => CursorStyle::ContextualMenu,
+        "ew-resize" => CursorStyle::ResizeLeftRight,
+        "ns-resize" => CursorStyle::ResizeUpDown,
+        "nesw-resize" => CursorStyle::ResizeUpRightDownLeft,
+        "nwse-resize" => CursorStyle::ResizeUpLeftDownRight,
+        "col-resize" => CursorStyle::ResizeColumn,
+        "row-resize" => CursorStyle::ResizeRow,
+        "n-resize" => CursorStyle::ResizeUp,
+        "s-resize" => CursorStyle::ResizeDown,
+        "e-resize" => CursorStyle::ResizeRight,
+        "w-resize" => CursorStyle::ResizeLeft,
+        _ => CursorStyle::Arrow,
+    }
 }
 
 fn valid_dimensions(width: u32, height: u32) -> bool {
@@ -289,9 +325,9 @@ impl Client {
         let mut url = url::Url::parse(&self.origin.ws_url()).expect("validated API origin");
         url.set_path(&format!("/v1/bots/{bot}/desktop/stream"));
         url.set_query(Some(if wake {
-            "mode=watch&wake=true"
+            "mode=watch&wake=true&cursor=native"
         } else {
-            "mode=watch"
+            "mode=watch&cursor=native"
         }));
         let mut request = url.as_str().into_client_request().expect("valid WS URL");
         request
@@ -427,6 +463,9 @@ impl Client {
                                     mode = acknowledged;
                                     deliver!(DesktopEvent::Mode(mode));
                                 },
+                                ServerEvent::Cursor { style } => {
+                                    deliver!(DesktopEvent::Cursor(native_cursor(&style)));
+                                },
                                 ServerEvent::Error { code, message } => {
                                     if matches!(code.as_str(), "computer_stopped" | "computer_not_running") {
                                         deliver!(DesktopEvent::Asleep);
@@ -500,6 +539,17 @@ mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[test]
+    fn guest_cursor_names_map_to_native_cursors_and_unknown_ones_to_an_arrow() {
+        assert_eq!(native_cursor("pointer"), CursorStyle::PointingHand);
+        assert_eq!(
+            native_cursor("nwse-resize"),
+            CursorStyle::ResizeUpLeftDownRight
+        );
+        assert_eq!(native_cursor("default"), CursorStyle::Arrow);
+        assert_eq!(native_cursor("wait"), CursorStyle::Arrow);
     }
 
     #[test]
@@ -663,7 +713,10 @@ mod tests {
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
                 |request: &Request, response: Response| {
-                    assert_eq!(request.uri().query(), Some("mode=watch&wake=true"));
+                    assert_eq!(
+                        request.uri().query(),
+                        Some("mode=watch&wake=true&cursor=native")
+                    );
                     Ok(response)
                 },
             )
@@ -695,6 +748,7 @@ mod tests {
             for text in [
                 r#"{"type":"size","width":1,"height":1}"#,
                 r#"{"type":"mode","mode":"watch"}"#,
+                r#"{"type":"cursor","style":"text"}"#,
                 r#"{"type":"error","code":"control_failed","message":"The browser is busy."}"#,
             ] {
                 ws.send(Message::Text(text.into())).await.unwrap();
@@ -712,6 +766,10 @@ mod tests {
         assert!(matches!(
             stream.events.recv().await,
             Some(DesktopEvent::Mode(DesktopMode::Watch))
+        ));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Cursor(CursorStyle::IBeam))
         ));
         assert!(
             matches!(stream.events.recv().await,Some(DesktopEvent::Notice(message)) if message == "The browser is busy.")
@@ -781,7 +839,7 @@ mod tests {
                         request.uri().path(),
                         format!("/v1/bots/{bot}/desktop/stream")
                     );
-                    assert_eq!(request.uri().query(), Some("mode=watch"));
+                    assert_eq!(request.uri().query(), Some("mode=watch&cursor=native"));
                     assert_eq!(
                         request.headers()[AUTHORIZATION],
                         format!("Bearer {}", "T".repeat(43))

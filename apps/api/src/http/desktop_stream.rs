@@ -2,9 +2,10 @@
 //! PNG frames out and, in control mode, pointer and key input in.
 //!
 //! ```text
-//! GET /v1/bots/{id}/desktop/stream?mode=watch|control[&wake=true]
+//! GET /v1/bots/{id}/desktop/stream?mode=watch|control[&wake=true][&cursor=native]
 //! server → {"type":"size","width":W,"height":H}   first, and on every resize
 //! server → {"type":"mode","mode":"watch"|"control"}  initial mode and each ack
+//! server → {"type":"cursor","style":CSS_NAME}   with cursor=native, in control
 //! server → binary PNG of the whole screen, only when it changed
 //! server → {"type":"error","code":C,"message":M}   fatal ones close the stream
 //! client → {"type":"mode","mode":"watch"|"control"}
@@ -24,6 +25,9 @@
 //! keyboard batches fail with `OWNER_USING_DESKTOP` until control ends; at
 //! most one stream controls a bot. Leaving control, `release`, and every way
 //! a stream ends release what it pressed. In watch mode input is dropped.
+//! With `cursor=native`, frames leave out the cursor while the owner controls,
+//! and the stream names the guest's cursor shape whenever it changes, so the
+//! app shows it as its own native cursor; pointer moves then need no frames.
 //! The stream asks for the next screen update as soon as one arrives and
 //! encodes a frame once the previous one is on the socket, so the frame rate
 //! follows the guest and the owner's connection instead of a timer.
@@ -52,6 +56,7 @@ use uuid::Uuid;
 
 use super::AppState;
 use super::error::{ApiError, ApiPath};
+use crate::computers::cursors;
 use crate::computers::viewer::{self, Event, Framebuffer, Target};
 use crate::computers::{ComputerManager, ViewerLease, ViewerRefusal, ViewerTarget};
 
@@ -100,11 +105,21 @@ enum Mode {
     Control,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CursorMode {
+    #[default]
+    Painted,
+    Native,
+}
+
 #[derive(Deserialize)]
 pub(super) struct Params {
     mode: Mode,
     #[serde(default)]
     wake: bool,
+    #[serde(default)]
+    cursor: CursorMode,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +205,7 @@ async fn session(
                 target,
                 out.clone(),
                 frame_slot,
+                params.cursor,
                 stop.clone(),
             );
             let ended = session.run(params.mode, &mut incoming).await;
@@ -346,6 +362,10 @@ struct Session {
     target: ViewerTarget,
     out: mpsc::Sender<Message>,
     frame_slot: Arc<FrameSlot>,
+    cursor: CursorMode,
+    cursor_shapes: bool,
+    cursor_style: Option<&'static str>,
+    cursor_unsent: bool,
     mode: Mode,
     control_lease: Option<Uuid>,
     watch_server: Option<bool>,
@@ -373,6 +393,7 @@ impl Session {
         target: ViewerTarget,
         out: mpsc::Sender<Message>,
         frame_slot: Arc<FrameSlot>,
+        cursor: CursorMode,
         stop: CancellationToken,
     ) -> Self {
         Self {
@@ -383,6 +404,10 @@ impl Session {
             target,
             out,
             frame_slot,
+            cursor,
+            cursor_shapes: false,
+            cursor_style: None,
+            cursor_unsent: false,
             mode: Mode::Watch,
             control_lease: None,
             watch_server: None,
@@ -506,6 +531,7 @@ impl Session {
                     None
                 }
                 _ = frame_slot.written.notified() => {
+                    self.send_cursor();
                     self.encode();
                     None
                 }
@@ -599,6 +625,9 @@ impl Session {
                     if let Some(end) = self.sync_view().await {
                         return Some(end);
                     }
+                    if let Some(end) = self.sync_cursor().await {
+                        return Some(end);
+                    }
                     if self.watch_server == Some(false)
                         && let Some(end) = self.send(unsupported_message()).await
                     {
@@ -686,7 +715,10 @@ impl Session {
                     bridge: connection.bridge,
                 });
                 self.mode = Mode::Control;
-                self.sync_view().await
+                if let Some(end) = self.sync_view().await {
+                    return Some(end);
+                }
+                self.sync_cursor().await
             }
             Err(err) => {
                 tracing::warn!(bot = %self.bot, error = %err, "desktop control connection");
@@ -790,10 +822,63 @@ impl Session {
         });
         self.requested = false;
         self.full = true;
+        self.cursor_shapes = false;
+        self.cursor_style = None;
+        self.cursor_unsent = false;
+        if let Some(end) = self.sync_cursor().await {
+            return Some(end);
+        }
         if let Some(end) = self.frame_request().await {
             return Some(end);
         }
         self.send_size().await
+    }
+
+    /// Asks the view for cursor shapes exactly while a native-cursor owner
+    /// controls; otherwise the server paints the cursor into the frames.
+    async fn sync_cursor(&mut self) -> Option<End> {
+        let wanted = self.cursor == CursorMode::Native && self.mode == Mode::Control;
+        let Some(view) = &mut self.view else {
+            return None;
+        };
+        if wanted == self.cursor_shapes {
+            return None;
+        }
+        let mut encodings = viewer::set_encodings(wanted);
+        if !wanted {
+            // The server repaints the cursor into the pixels only where the
+            // screen changes next, so refresh all of it now.
+            encodings.extend_from_slice(&viewer::update_request(
+                false,
+                self.fb.width,
+                self.fb.height,
+            ));
+        }
+        let written = write_guest(&mut view.writer, &encodings);
+        match self.stop.run_until_cancelled(written).await {
+            None => return end("server_stopping", STOPPING),
+            Some(false) => return end("desktop_disconnected", "The desktop connection closed."),
+            Some(true) => {}
+        }
+        self.cursor_shapes = wanted;
+        self.cursor_style = None;
+        self.cursor_unsent = false;
+        None
+    }
+
+    /// Sends the latest cursor style without waiting on a busy socket; the
+    /// writer's next progress retries it, and newer styles replace it.
+    fn send_cursor(&mut self) {
+        let Some(style) = self.cursor_style.filter(|_| self.cursor_unsent) else {
+            return;
+        };
+        let message = json!({ "type": "cursor", "style": style }).to_string();
+        if !matches!(
+            self.out.try_send(Message::Text(message.into())),
+            Err(mpsc::error::TrySendError::Full(_))
+        ) {
+            self.cursor_unsent = false;
+        }
     }
 
     async fn send_size(&mut self) -> Option<End> {
@@ -813,6 +898,22 @@ impl Session {
     async fn apply(&mut self, event: Event) -> Option<End> {
         self.fb.apply(&event);
         match event {
+            Event::Cursor {
+                hotspot_x,
+                hotspot_y,
+                width,
+                height,
+                mask,
+            } => {
+                let style = cursors::style((hotspot_x, hotspot_y), (width, height), &mask);
+                if !self.cursor_shapes || self.cursor_style == Some(style) {
+                    return None;
+                }
+                self.cursor_style = Some(style);
+                self.cursor_unsent = true;
+                self.send_cursor();
+                None
+            }
             Event::Resize { .. } => {
                 if let Some(encoding) = self.encoding.take() {
                     encoding.abort();

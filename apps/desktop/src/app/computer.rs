@@ -49,6 +49,7 @@ pub(super) struct ComputerView {
     commands: Option<DesktopCommands>,
     mode: DesktopMode,
     mode_pending: bool,
+    guest_cursor: Option<CursorStyle>,
     notice: Option<String>,
     pub expanded: bool,
     focus: FocusHandle,
@@ -101,6 +102,7 @@ impl ComputerView {
             commands: None,
             mode: DesktopMode::Watch,
             mode_pending: false,
+            guest_cursor: None,
             notice: None,
             expanded: false,
             focus,
@@ -125,6 +127,7 @@ impl ComputerView {
         self.image = None;
         self.mode = DesktopMode::Watch;
         self.mode_pending = false;
+        self.guest_cursor = None;
         self.screen = if wake {
             Screen::Waking
         } else {
@@ -190,11 +193,18 @@ impl ComputerView {
                                     DesktopEvent::Mode(mode) => {
                                         view.mode = mode;
                                         view.mode_pending = false;
+                                        if mode != DesktopMode::Control {
+                                            view.guest_cursor = None;
+                                        }
+                                    }
+                                    DesktopEvent::Cursor(style) => {
+                                        view.guest_cursor = Some(style);
                                     }
                                     DesktopEvent::Asleep => {
                                         view.clear_input();
                                         view.image = None;
                                         view.screen = Screen::Asleep;
+                                        view.guest_cursor = None;
                                         view.mode = DesktopMode::Watch;
                                         view.mode_pending = false;
                                     }
@@ -242,6 +252,7 @@ impl ComputerView {
 
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
         self.notice = None;
+        self.guest_cursor = None;
         self.screen = Screen::Failed(error);
         self.image = None;
         self.mode = DesktopMode::Watch;
@@ -448,7 +459,7 @@ impl ComputerView {
                 .on_click(cx.listener(|view, _, _, cx| view.monitor(true, cx)));
         } else if self.controlling() {
             area = area
-                .cursor_pointer()
+                .cursor(self.guest_cursor.unwrap_or(CursorStyle::PointingHand))
                 .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, _cx| {
                     if let Some((x, y)) = screen_point(view.bounds, view.resolution, event.position)
                         && let Some(commands) = &view.commands
