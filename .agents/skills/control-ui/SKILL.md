@@ -35,3 +35,25 @@ harnesses and the current session's UI tools. Read the
 
 If no suitable driver exists, report the missing capability and the affected
 verification gap. Do not add an unrelated application stack just to run a probe.
+
+## Omabox command reference
+
+On Linux, read the installed omabox skill, then use `scripts/dev.py run` for
+an isolated API and desktop. Use `scripts/dev.py test` for Rust tests.
+Keep the printed box name and window address for all input and screenshots.
+Confirm installed syntax with `omabox help scroll` and `omabox help keys`.
+
+```sh
+omabox shot -b BOX --window WINDOW
+omabox scroll -b BOX --window WINDOW --wait X Y DY [DX]
+omabox keys -b BOX --window WINDOW --wait ctrl+shift+g
+omabox keys -b BOX --window WINDOW --wait -t 'Category name'
+omabox keys -b BOX --window WINDOW --wait Return
+```
+
+`scroll` takes the pointer coordinates first, then the vertical delta, then
+the optional horizontal delta. A delta of 15 is one wheel notch. `keys`
+takes options before the key sequence. Use `-t TEXT` for literal text and
+`ctrl+KEY` for a chord. Inspect the focused field before typing. Exit 124
+after `--wait` means input was sent but the screen did not settle in time.
+Inspect the result before sending input again.
