@@ -173,7 +173,7 @@ ELSE_LIVE_GROK=1 cargo test -p else-api --test grok_live --locked -- --nocapture
 
 This journey creates disposable bots and checks session reuse, host files, MCP calls, cancellation, and provider handoffs with the installed Grok CLI.
 
-Pull requests run two independent Rust jobs on Blacksmith Ubuntu runners. `cargo-check` runs formatting, checks all workspace targets, enforces strict Clippy, checks migration numbering, and tests bundled-icon coverage. `cargo-test` runs the full locked workspace suite, including API integration tests. Runtime assertions such as the memory tests can fail even when compilation passes, so the full suite also gates PRs. This costs another runner and test build per update. Separate caches and cancellation of superseded runs limit that cost without delaying the fast job behind the suite.
+Pull requests run two independent Rust jobs on GitHub-hosted Ubuntu runners. `cargo-check` runs formatting, checks all workspace targets, enforces strict Clippy, checks migration numbering, and tests bundled-icon coverage. `cargo-test` runs the full locked workspace suite, including API integration tests. Runtime assertions such as the memory tests can fail even when compilation passes, so the full suite also gates PRs. This costs another runner and test build per update. Separate caches and cancellation of superseded runs limit that cost without delaying the fast job behind the suite.
 
 The release workflow calls `cargo-test` against every release commit. Manual runs check the selected branch with both jobs.
 
