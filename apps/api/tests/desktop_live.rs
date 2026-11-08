@@ -548,7 +548,9 @@ async fn a_native_cursor_moves_without_frames_and_follows_the_guest_shape() {
         "the helper window closed"
     );
     assert!(
-        latest_frame(socket, Duration::from_millis(500)).await.is_none(),
+        latest_frame(socket, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the screen is still before watching"
     );
 
