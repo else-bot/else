@@ -1068,6 +1068,7 @@ impl ElseApp {
                 body = body
                     .child(self.render_details(bot.id, &entry.details, cx))
                     .child(self.render_model(bot.id, &entry.model, cx))
+                    .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
                     .child(self.render_social_triggers(bot.id, &entry.triggers, cx));
             } else {

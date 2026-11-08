@@ -18,6 +18,8 @@ pub struct Snapshot {
     pub routines: Vec<super::routines::Routine>,
     /// The bot's social triggers, at the same snapshot.
     pub social_triggers: Vec<crate::socials::types::Trigger>,
+    /// The bot's current rules version, at the same snapshot.
+    pub rules_version: i64,
 }
 
 /// Read history, turns, routines, and the event cursor at one database snapshot, so a
@@ -64,6 +66,7 @@ pub async fn snapshot(
     super::turns::attach_owner_requests(&mut tx, &mut turns).await?;
     let routines = super::routines::list(&mut tx, bot_id).await?;
     let social_triggers = crate::socials::store::triggers(&mut tx, bot_id).await?;
+    let rules_version = super::rules::version(&mut tx, bot_id).await?;
     tx.commit().await?;
     Ok(Some(Snapshot {
         bot,
@@ -73,5 +76,6 @@ pub async fn snapshot(
         older_before_seq,
         routines,
         social_triggers,
+        rules_version,
     }))
 }

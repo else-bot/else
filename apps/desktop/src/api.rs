@@ -786,6 +786,29 @@ impl Client {
         .map(|(_, v)| v.routine)
     }
 
+    /// The bot's rules file and every saved version.
+    pub async fn rules(self: Arc<Self>, bot: Uuid) -> Result<crate::model::RulesFile, ClientError> {
+        self.call::<crate::model::RulesFile>(Method::GET, format!("/v1/bots/{bot}/rules"), None)
+            .await
+            .map(|(_, file)| file)
+    }
+
+    /// Restore an earlier rules version as a new one; 0 is the empty file.
+    /// Restoring the current text is a no-op.
+    pub async fn restore_rules(
+        self: Arc<Self>,
+        bot: Uuid,
+        version: i64,
+    ) -> Result<(), ClientError> {
+        self.call::<serde_json::Value>(
+            Method::POST,
+            format!("/v1/bots/{bot}/rules/restore"),
+            Some(json!({ "version": version })),
+        )
+        .await
+        .map(drop)
+    }
+
     /// Forget a routine's failed runs. Repeating it is a no-op.
     pub async fn dismiss_routine_failures(
         self: Arc<Self>,

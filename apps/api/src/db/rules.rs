@@ -64,6 +64,14 @@ pub async fn current(
     .await
 }
 
+/// The current version number; 0 before the first rule.
+pub async fn version(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT coalesce(max(version), 0) FROM bot_rules WHERE bot_id = ?1")
+        .bind(bot_id)
+        .fetch_one(conn)
+        .await
+}
+
 /// Every version, newest first.
 pub async fn history(
     conn: &mut SqliteConnection,

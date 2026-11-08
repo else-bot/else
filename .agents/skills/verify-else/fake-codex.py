@@ -181,6 +181,19 @@ def stream(turn, latest, packet, stopped):
             outgoing_tool('ask_owner', args)
             finish(turn, stopped, 'completed')
             return
+        rules = {
+            '[ui:rule]': ('Start a thread for each new issue.',
+                'When: a new issue lands in Linear project ELSE\n'
+                'Do: start a T3 Code thread in `else` that describes the issue'),
+            '[ui:rule-change]': ('Just send fix issue ELSE-142, nothing else.',
+                'When: a new issue lands in Linear project ELSE\n'
+                'Do: start a T3 Code thread in `else` with exactly `fix issue {ISSUE_ID}`\n'
+                'Never: add words, a title, or context to that message.'),
+        }
+        if latest in rules:
+            words, content = rules[latest]
+            outgoing_tool('rules_update', {'section': 'New Linear issue', 'content': content,
+                                           'owner_words': words})
         if draft_reply(turn, latest, packet, stopped):
             return
     except Exception as error:

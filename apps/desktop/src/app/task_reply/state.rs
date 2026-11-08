@@ -150,7 +150,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             }
             reply.latest_kept = reaction.is_some() || has_file;
             reply.anchor = Some(item.id);
-        } else if item.bot_created.is_some() {
+        } else if item.bot_created.is_some() || item.rules_update.is_some() {
             notice_turns.insert(item.turn_id);
         } else if reply.latest.is_none() && item.routine_update.is_none() {
             reply.anchor = Some(item.id);

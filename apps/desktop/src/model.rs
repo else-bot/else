@@ -48,6 +48,82 @@ pub struct Item {
     pub routine_update: Option<RoutineUpdate>,
     #[serde(default)]
     pub bot_created: Option<BotCreated>,
+    #[serde(default)]
+    pub rules_update: Option<RulesUpdate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleChange {
+    Added,
+    Changed,
+    Removed,
+    Restored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffOp {
+    Same,
+    Add,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DiffLine {
+    pub op: DiffOp,
+    pub text: String,
+}
+
+/// The card for one saved version of a bot's rules.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RulesUpdate {
+    pub version: i64,
+    pub section: String,
+    pub change: RuleChange,
+    pub owner_words: String,
+    pub diff: Vec<DiffLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RuleSection {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RulesVersion {
+    pub version: i64,
+    pub section: String,
+    pub change: RuleChange,
+    pub owner_words: String,
+    /// `bot` or `owner`.
+    pub author: String,
+    pub restored_from: Option<i64>,
+    pub diff: Vec<DiffLine>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A bot's rules file with every saved version, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RulesFile {
+    pub version: i64,
+    pub markdown: String,
+    pub sections: Vec<RuleSection>,
+    pub history: Vec<RulesVersion>,
+}
+
+impl RulesFile {
+    /// Titles of the rules changed after version `seen`, lowercased.
+    pub fn changed_since(&self, seen: i64) -> std::collections::HashSet<String> {
+        self.history
+            .iter()
+            .filter(|v| {
+                v.version > seen && v.change != RuleChange::Removed && !v.section.is_empty()
+            })
+            .map(|v| v.section.to_lowercase())
+            .collect()
+    }
 }
 
 /// The main bot's notice that `creator_bot_id` created `bot_id`.
@@ -398,6 +474,9 @@ pub struct Snapshot {
     pub routines: Vec<Routine>,
     #[serde(default)]
     pub social_triggers: Vec<Trigger>,
+    /// Absent from servers without rules.
+    #[serde(default)]
+    pub rules_version: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +515,7 @@ pub struct Conversation {
     pub activity: Option<Activity>,
     routines: Vec<Routine>,
     social_triggers: Vec<Trigger>,
+    rules_version: i64,
 }
 
 fn split_cursor(cursor: &str) -> Option<(&str, i64)> {
@@ -457,6 +537,7 @@ impl Conversation {
             activity: Some(snapshot.activity),
             routines: snapshot.routines,
             social_triggers: snapshot.social_triggers,
+            rules_version: snapshot.rules_version,
         };
         for item in snapshot.items {
             conversation.upsert_item(item);
@@ -536,6 +617,9 @@ impl Conversation {
                 if let Some(routines) = data.get("routines") {
                     self.routines =
                         serde_json::from_value(routines.clone()).map_err(|_| Reset::Malformed)?;
+                }
+                if let Some(version) = data.get("rules_version").and_then(|v| v.as_i64()) {
+                    self.rules_version = version;
                 }
                 self.social_triggers = data
                     .get("social_triggers")
@@ -722,6 +806,10 @@ impl Conversation {
 
     pub fn routines(&self) -> &[Routine] {
         &self.routines
+    }
+
+    pub fn rules_version(&self) -> i64 {
+        self.rules_version
     }
 
     /// A routine from a change response. Only a newer version replaces the
@@ -1204,6 +1292,56 @@ mod tests {
             json!({ "bot": { "id": bot(), "name": "A" }, "routines": [{ "id": 1 }] }),
         );
         assert_eq!(c.apply(&malformed), Err(Reset::Malformed));
+    }
+
+    #[test]
+    fn the_rules_version_follows_the_snapshot_and_bot_updates() {
+        let mut first = snapshot(1, vec![], None);
+        first.rules_version = 2;
+        let mut c = Conversation::from_snapshot(first).unwrap();
+        assert_eq!(c.rules_version(), 2);
+        c.apply(&bot_updated(2, None)).unwrap();
+        assert_eq!(c.rules_version(), 2, "an older server sends no version");
+        let update = frame(
+            3,
+            "bot.updated",
+            json!({ "bot_id": bot(), "rules_version": 3, "bot": {
+                "id": bot(), "name": "Assistant",
+                "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 } } }),
+        );
+        c.apply(&update).unwrap();
+        assert_eq!(c.rules_version(), 3);
+    }
+
+    #[test]
+    fn a_rules_card_and_the_rules_file_parse_and_mark_changed_rules() {
+        let update: RulesUpdate = serde_json::from_value(json!({
+            "version": 2, "section": "New Linear issue", "change": "changed",
+            "owner_words": "Just send fix issue ELSE-142.",
+            "diff": [{ "op": "remove", "text": "Do: describe it" },
+                     { "op": "add", "text": "Do: send `fix issue {ID}`" }]
+        }))
+        .unwrap();
+        assert_eq!(update.change, RuleChange::Changed);
+        assert_eq!(update.diff[1].op, DiffOp::Add);
+        let file: RulesFile = serde_json::from_value(json!({
+            "version": 3, "markdown": "## New Linear issue\nDo: x\n\n## Tone\nShort.\n",
+            "sections": [{ "title": "New Linear issue", "body": "Do: x" },
+                         { "title": "Tone", "body": "Short." }],
+            "history": [
+                { "version": 3, "section": "New Linear issue", "change": "changed",
+                  "owner_words": "x", "author": "bot", "restored_from": null, "diff": [],
+                  "created_at": "2026-11-08T10:00:00Z" },
+                { "version": 2, "section": "Tone", "change": "added", "owner_words": "y",
+                  "author": "bot", "restored_from": null, "diff": [],
+                  "created_at": "2026-11-07T10:00:00Z" }
+            ]
+        }))
+        .unwrap();
+        let changed = file.changed_since(2);
+        assert!(changed.contains("new linear issue"));
+        assert!(!changed.contains("tone"));
+        assert!(file.changed_since(3).is_empty());
     }
 
     fn social_trigger(enabled: bool, provider: &str) -> serde_json::Value {

@@ -102,6 +102,21 @@ async fn a_bot_saves_a_rule_from_the_owner_and_reads_it_verbatim_next_turn() {
     assert_eq!(file["sections"][0]["title"], "New Linear issue");
     assert_eq!(file["sections"][0]["body"], NEW_RULE);
     assert_eq!(file["history"].as_array().unwrap().len(), 2);
+    let snapshot = h
+        .app
+        .owner("GET", &format!("/v1/bots/{main}/conversation"), None)
+        .await;
+    assert_eq!(snapshot.body["rules_version"], 2, "{}", snapshot.body);
+    let event: String = sqlx::query_scalar(
+        "SELECT data FROM bot_events WHERE kind = 'bot.updated' ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(&h.app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&event).unwrap()["rules_version"],
+        2
+    );
     h.release(turn).await;
     h.app.wait_turn(&turn.to_string(), &["completed"]).await;
 
