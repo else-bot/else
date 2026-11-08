@@ -5,7 +5,7 @@ use teloxide_core::{
     ApiError, Bot, RequestError,
     payloads::*,
     prelude::Requester,
-    types::{ChatId, InputPollOption, MessageId, ReactionType, UpdateKind},
+    types::{AllowedUpdate, ChatId, InputPollOption, MessageId, ReactionType, UpdateKind},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +29,10 @@ pub(super) fn bot(t: &Token) -> Bot {
 fn poll_error(error: RequestError) -> Error {
     match error {
         RequestError::Api(ApiError::CantGetUpdates | ApiError::TerminatedByOtherGetUpdates) => {
+            Error::ReceiverConflict
+        }
+        // teloxide 0.13 matches only an older, shorter webhook message.
+        RequestError::Api(ApiError::Unknown(text)) if text.contains("webhook is active") => {
             Error::ReceiverConflict
         }
         _ => Error::Platform,
@@ -157,7 +161,7 @@ pub async fn listen(
     stop: CancellationToken,
 ) -> Result<(), Error> {
     loop {
-        let updates = tokio::select! {biased;_ = stop.cancelled()=>return Ok(()),r=b.get_updates().offset(i32::try_from(offset).map_err(|_|Error::Platform)?).timeout(POLL_SECONDS)=>r.map_err(poll_error)?};
+        let updates = tokio::select! {biased;_ = stop.cancelled()=>return Ok(()),r=b.get_updates().offset(i32::try_from(offset).map_err(|_|Error::Platform)?).timeout(POLL_SECONDS).allowed_updates([AllowedUpdate::Message,AllowedUpdate::ChannelPost])=>r.map_err(poll_error)?};
         for update in updates {
             let next = i64::from(update.id.0) + 1;
             let m = match update.kind {
@@ -213,16 +217,26 @@ pub async fn listen(
 mod tests {
     use super::*;
 
+    #[derive(serde::Deserialize)]
+    struct Response {
+        data: ApiError,
+    }
+
     #[test]
     fn telegram_refusing_the_poll_to_another_receiver_is_a_conflict() {
-        for refused in [
-            ApiError::CantGetUpdates,
-            ApiError::TerminatedByOtherGetUpdates,
+        for text in [
+            "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first",
+            "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
         ] {
-            assert!(matches!(
-                poll_error(RequestError::Api(refused)),
-                Error::ReceiverConflict
-            ));
+            let refused: Response =
+                serde_json::from_value(serde_json::json!({ "data": text })).unwrap();
+            assert!(
+                matches!(
+                    poll_error(RequestError::Api(refused.data)),
+                    Error::ReceiverConflict
+                ),
+                "{text}"
+            );
         }
         assert!(matches!(
             poll_error(RequestError::Api(ApiError::InvalidToken)),

@@ -109,3 +109,29 @@ fn a_bot_whose_messages_go_elsewhere_says_so_instead_of_its_raw_health() {
     assert_eq!(conflicted.health_label(), "messages go elsewhere");
     assert_eq!(connection("connected").health_label(), "connected");
 }
+
+#[test]
+fn refreshing_updates_the_conflict_warning_and_keeps_owner_edits() {
+    let connection = |health: &str| Connection {
+        id: Uuid::from_u128(7),
+        provider: Provider::Telegram,
+        remote_id: "123".into(),
+        display_name: "Proliquid".into(),
+        username: Some("proliquid_bot".into()),
+        state: "active".into(),
+        health: health.into(),
+        generation: 3,
+        instructions: String::new(),
+    };
+    let mut access = Access::from_detail(
+        ConnectionDetail {
+            connection: connection("receiver_conflict"),
+            bindings: Vec::new(),
+        },
+        Some(Uuid::new_v4()),
+    );
+    access.draft.instructions = "Post only approved updates.".into();
+    access.reloaded(connection("connected"));
+    assert!(!access.connection.receiver_conflict());
+    assert_eq!(access.draft.instructions, "Post only approved updates.");
+}
