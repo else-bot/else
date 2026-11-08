@@ -1085,7 +1085,7 @@ async fn upgrading_turns_wake_access_into_triggers_and_drops_bindings() {
             else_api::db::MIGRATOR
                 .migrations
                 .iter()
-                .filter(|m| m.version < 32)
+                .filter(|m| m.version < 33)
                 .cloned()
                 .collect(),
         ),
