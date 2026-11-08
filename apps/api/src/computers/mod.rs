@@ -16,6 +16,7 @@
 //! that inspection has succeeded. Provider CLIs and credentials stay on the
 //! host.
 
+pub mod cursors;
 mod desktop;
 pub mod jobs;
 mod leases;

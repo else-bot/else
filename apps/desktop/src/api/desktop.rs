@@ -1,6 +1,6 @@
 use super::{Client, ClientError, ErrorBody};
 use futures_util::{SinkExt as _, StreamExt as _};
-use gpui_kit::RenderImage;
+use gpui_kit::{CursorStyle, RenderImage};
 use image::{ImageDecoder as _, ImageReader};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Method, StatusCode};
@@ -50,9 +50,14 @@ pub enum DesktopCommand {
 
 #[derive(Debug)]
 pub enum DesktopEvent {
-    Size { width: u16, height: u16 },
+    Size {
+        width: u16,
+        height: u16,
+    },
     Frame(Arc<RenderImage>),
     Mode(DesktopMode),
+    /// The guest's cursor shape while controlling; frames then leave it out.
+    Cursor(CursorStyle),
     Error(String),
     Asleep,
     Notice(String),
@@ -119,6 +124,9 @@ enum ServerEvent {
     Mode {
         mode: DesktopMode,
     },
+    Cursor {
+        style: String,
+    },
     Error {
         #[serde(default)]
         code: String,
@@ -137,6 +145,34 @@ fn text_keysym(ch: char) -> Option<u32> {
         ch if (ch as u32) <= 0xff => ch as u32,
         ch => 0x0100_0000 | ch as u32,
     })
+}
+
+/// The native cursor for a CSS cursor name the server sends; an arrow for
+/// names this app does not know.
+fn native_cursor(style: &str) -> CursorStyle {
+    match style {
+        "pointer" => CursorStyle::PointingHand,
+        "text" => CursorStyle::IBeam,
+        "vertical-text" => CursorStyle::IBeamCursorForVerticalLayout,
+        "crosshair" => CursorStyle::Crosshair,
+        "grab" => CursorStyle::OpenHand,
+        "grabbing" => CursorStyle::ClosedHand,
+        "not-allowed" => CursorStyle::OperationNotAllowed,
+        "copy" => CursorStyle::DragCopy,
+        "alias" => CursorStyle::DragLink,
+        "context-menu" => CursorStyle::ContextualMenu,
+        "ew-resize" => CursorStyle::ResizeLeftRight,
+        "ns-resize" => CursorStyle::ResizeUpDown,
+        "nesw-resize" => CursorStyle::ResizeUpRightDownLeft,
+        "nwse-resize" => CursorStyle::ResizeUpLeftDownRight,
+        "col-resize" => CursorStyle::ResizeColumn,
+        "row-resize" => CursorStyle::ResizeRow,
+        "n-resize" => CursorStyle::ResizeUp,
+        "s-resize" => CursorStyle::ResizeDown,
+        "e-resize" => CursorStyle::ResizeRight,
+        "w-resize" => CursorStyle::ResizeLeft,
+        _ => CursorStyle::Arrow,
+    }
 }
 
 fn valid_dimensions(width: u32, height: u32) -> bool {
@@ -173,6 +209,26 @@ fn decode_frame(bytes: &[u8], expected: Option<(u16, u16)>) -> Result<Arc<Render
         pixel.swap(0, 2);
     }
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+}
+
+type Decoding = tokio::task::JoinHandle<Result<Arc<RenderImage>, String>>;
+
+fn decode_later(
+    bytes: tokio_tungstenite::tungstenite::Bytes,
+    expected: Option<(u16, u16)>,
+) -> Decoding {
+    tokio::task::spawn_blocking(move || decode_frame(&bytes, expected))
+}
+
+async fn decoded(task: &mut Option<Decoding>) -> Result<Arc<RenderImage>, String> {
+    let Some(handle) = task else {
+        return std::future::pending().await;
+    };
+    let frame = handle
+        .await
+        .map_err(|_| "Cannot decode the desktop frame.".to_owned());
+    *task = None;
+    frame?
 }
 
 impl Client {
@@ -269,9 +325,9 @@ impl Client {
         let mut url = url::Url::parse(&self.origin.ws_url()).expect("validated API origin");
         url.set_path(&format!("/v1/bots/{bot}/desktop/stream"));
         url.set_query(Some(if wake {
-            "mode=watch&wake=true"
+            "mode=watch&wake=true&cursor=native"
         } else {
-            "mode=watch"
+            "mode=watch&cursor=native"
         }));
         let mut request = url.as_str().into_client_request().expect("valid WS URL");
         request
@@ -336,6 +392,11 @@ impl Client {
         }
         let mut last_sequence = 0;
         let mut typing: Option<std::vec::IntoIter<u32>> = None;
+        // The socket keeps being read while a frame decodes; only the newest
+        // frame that arrived meanwhile is decoded next, so a slow decode skips
+        // stale frames instead of falling behind the screen.
+        let mut decoding: Option<Decoding> = None;
+        let mut newest = None;
         loop {
             tokio::select! {
                 biased;
@@ -389,12 +450,21 @@ impl Client {
                                     if !valid_dimensions(u32::from(width), u32::from(height)) {
                                         return Err("The desktop size exceeds the image limit.".into());
                                     }
+                                    if dimensions != Some((width, height)) {
+                                        if let Some(stale) = decoding.take() {
+                                            stale.abort();
+                                        }
+                                        newest = None;
+                                    }
                                     dimensions = Some((width, height));
                                     deliver!(DesktopEvent::Size { width, height });
                                 },
                                 ServerEvent::Mode { mode: acknowledged } => {
                                     mode = acknowledged;
                                     deliver!(DesktopEvent::Mode(mode));
+                                },
+                                ServerEvent::Cursor { style } => {
+                                    deliver!(DesktopEvent::Cursor(native_cursor(&style)));
                                 },
                                 ServerEvent::Error { code, message } => {
                                     if matches!(code.as_str(), "computer_stopped" | "computer_not_running") {
@@ -410,10 +480,11 @@ impl Client {
                             }
                         },
                         Ok(Some(Ok(Message::Binary(bytes)))) => {
-                            let frame = tokio::task::spawn_blocking(move || decode_frame(&bytes, dimensions))
-                                .await
-                                .map_err(|_| "Cannot decode the desktop frame.")??;
-                            deliver!(DesktopEvent::Frame(frame));
+                            if decoding.is_some() {
+                                newest = Some((bytes, dimensions));
+                            } else {
+                                decoding = Some(decode_later(bytes, dimensions));
+                            }
                         },
                         Ok(Some(Ok(Message::Ping(bytes)))) => send!(Message::Pong(bytes)),
                         Ok(Some(Ok(Message::Pong(_)))) => {},
@@ -425,6 +496,11 @@ impl Client {
                         },
                         Ok(Some(Ok(_))) => {},
                     }
+                },
+                frame = decoded(&mut decoding) => {
+                    let frame = frame?;
+                    decoding = newest.take().map(|(bytes, expected)| decode_later(bytes, expected));
+                    deliver!(DesktopEvent::Frame(frame));
                 },
                 () = std::future::ready(()), if typing.is_some() => {
                     let next = typing.as_mut().and_then(Iterator::next);
@@ -463,6 +539,17 @@ mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[test]
+    fn guest_cursor_names_map_to_native_cursors_and_unknown_ones_to_an_arrow() {
+        assert_eq!(native_cursor("pointer"), CursorStyle::PointingHand);
+        assert_eq!(
+            native_cursor("nwse-resize"),
+            CursorStyle::ResizeUpLeftDownRight
+        );
+        assert_eq!(native_cursor("default"), CursorStyle::Arrow);
+        assert_eq!(native_cursor("wait"), CursorStyle::Arrow);
     }
 
     #[test]
@@ -626,7 +713,10 @@ mod tests {
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
                 |request: &Request, response: Response| {
-                    assert_eq!(request.uri().query(), Some("mode=watch&wake=true"));
+                    assert_eq!(
+                        request.uri().query(),
+                        Some("mode=watch&wake=true&cursor=native")
+                    );
                     Ok(response)
                 },
             )
@@ -658,6 +748,7 @@ mod tests {
             for text in [
                 r#"{"type":"size","width":1,"height":1}"#,
                 r#"{"type":"mode","mode":"watch"}"#,
+                r#"{"type":"cursor","style":"text"}"#,
                 r#"{"type":"error","code":"control_failed","message":"The browser is busy."}"#,
             ] {
                 ws.send(Message::Text(text.into())).await.unwrap();
@@ -676,6 +767,10 @@ mod tests {
             stream.events.recv().await,
             Some(DesktopEvent::Mode(DesktopMode::Watch))
         ));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Cursor(CursorStyle::IBeam))
+        ));
         assert!(
             matches!(stream.events.recv().await,Some(DesktopEvent::Notice(message)) if message == "The browser is busy.")
         );
@@ -683,6 +778,43 @@ mod tests {
             stream.events.recv().await,
             Some(DesktopEvent::Frame(_))
         ));
+        drop(stream);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_frames_ends_on_the_newest_without_going_back() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Message::Text(
+                r#"{"type":"size","width":1,"height":1}"#.into(),
+            ))
+            .await
+            .unwrap();
+            for shade in 0..40 {
+                ws.send(Message::Binary(png(1, 1, vec![shade, 0, 0, 255]).into()))
+                    .await
+                    .unwrap();
+            }
+            ws.send(Message::Text(r#"{"type":"mode","mode":"watch"}"#.into()))
+                .await
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        });
+        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let mut shades = Vec::new();
+        let mut mode = false;
+        while !(mode && shades.last() == Some(&39)) {
+            match stream.events.recv().await.unwrap() {
+                DesktopEvent::Frame(image) => shades.push(image.as_bytes(0).unwrap()[2]),
+                DesktopEvent::Mode(DesktopMode::Watch) => mode = true,
+                _ => {}
+            }
+        }
+        assert!(shades.is_sorted_by(|a, b| a < b), "{shades:?}");
         drop(stream);
         server.await.unwrap();
     }
@@ -707,7 +839,7 @@ mod tests {
                         request.uri().path(),
                         format!("/v1/bots/{bot}/desktop/stream")
                     );
-                    assert_eq!(request.uri().query(), Some("mode=watch"));
+                    assert_eq!(request.uri().query(), Some("mode=watch&cursor=native"));
                     assert_eq!(
                         request.headers()[AUTHORIZATION],
                         format!("Bearer {}", "T".repeat(43))
