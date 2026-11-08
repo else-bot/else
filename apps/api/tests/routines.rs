@@ -796,7 +796,10 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     assert_eq!(ran.result["routine"]["next_run_at"], next_run_at);
     let retry = tool(&h.app, &token, "routine_run", json!({ "routine_id": id })).await;
     assert!(!retry.error, "{}", retry.body);
-    assert_eq!(retry.result["queued"], false, "a retry returns the same run");
+    assert_eq!(
+        retry.result["queued"], false,
+        "a retry returns the same run"
+    );
     let missing = tool(
         &h.app,
         &token,
@@ -814,7 +817,13 @@ async fn a_bot_runs_a_paused_routine_on_demand_without_moving_its_schedule() {
     let (_, run_token) = h.started(run).await;
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(packet.contains(TASK), "{packet}");
-    let refused = tool(&h.app, &run_token, "routine_run", json!({ "routine_id": id })).await;
+    let refused = tool(
+        &h.app,
+        &run_token,
+        "routine_run",
+        json!({ "routine_id": id }),
+    )
+    .await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
     h.release(run).await;
     h.app.wait_turn(&run.to_string(), &["completed"]).await;

@@ -637,6 +637,17 @@ pub async fn delete(pool: &SqlitePool, by: By, id: Uuid) -> Result<bool, Routine
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct OnDemand {
+    conversation_id: Uuid,
+    name: String,
+    prompt: String,
+    prompt_revision: i64,
+    model: Option<Json<RoutineModel>>,
+    queued: bool,
+    busy: bool,
+}
+
 /// Queue a run of a routine now, at the owner's request, outside its
 /// schedule and active hours. It leaves the schedule and the enabled state
 /// alone, and its outcome is reviewed like a scheduled run. One turn queues
@@ -656,23 +667,35 @@ pub async fn run_now(
     hasher.update(caller.turn_id.as_bytes());
     hasher.update(id.as_bytes());
     let digest = hasher.finalize();
-    let run_id = Uuid::from_bytes(digest[..16].try_into().expect("a SHA-256 digest has 16 bytes"));
-    let row: Option<(Uuid, String, String, i64, Option<Json<RoutineModel>>, bool, bool)> =
-        sqlx::query_as(
-            "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
-                    EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3),
-                    EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
-                            WHERE rr.routine_id = r.id
-                              AND (t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain')
-                                   OR NOT rr.reviewed))
-             FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL",
-        )
-        .bind(id)
-        .bind(caller.bot_id)
-        .bind(run_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((conversation_id, name, prompt, prompt_revision, model, queued, busy)) = row else {
+    let run_id = Uuid::from_bytes(
+        digest[..16]
+            .try_into()
+            .expect("a SHA-256 digest has 16 bytes"),
+    );
+    let row: Option<OnDemand> = sqlx::query_as(
+        "SELECT r.conversation_id, r.name, r.prompt, r.prompt_revision, r.model,
+                EXISTS (SELECT 1 FROM routine_runs WHERE id = ?3) AS queued,
+                EXISTS (SELECT 1 FROM routine_runs rr JOIN turns t ON t.id = rr.turn_id
+                        WHERE rr.routine_id = r.id
+                          AND (t.status NOT IN ('completed', 'interrupted', 'failed', 'uncertain')
+                               OR NOT rr.reviewed)) AS busy
+         FROM routines r WHERE r.id = ?1 AND r.bot_id = ?2 AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(caller.bot_id)
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(OnDemand {
+        conversation_id,
+        name,
+        prompt,
+        prompt_revision,
+        model,
+        queued,
+        busy,
+    }) = row
+    else {
         return Err(RoutineError::NotFound);
     };
     if queued {
