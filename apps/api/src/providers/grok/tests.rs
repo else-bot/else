@@ -28,6 +28,25 @@ fn finish(t: &mut Tracker, event: &Value, stopping: Option<StopCause>) -> TurnOu
 }
 
 #[test]
+fn the_setting_wins_then_the_installed_binary_then_path() {
+    let home = tempfile::tempdir().unwrap();
+    let installed = home.path().join("bin").join("grok");
+    let setting = Path::new("/opt/grok");
+    assert_eq!(configured_program(None, Some(home.path())), None);
+    assert_eq!(configured_program(None, None), None);
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::write(&installed, "native").unwrap();
+    assert_eq!(configured_program(None, Some(home.path())), None);
+    let executable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&installed, executable).unwrap();
+    assert_eq!(configured_program(None, Some(home.path())), Some(installed));
+    assert_eq!(
+        configured_program(Some(setting), Some(home.path())),
+        Some(setting.to_path_buf())
+    );
+}
+
+#[test]
 fn text_is_streamed_once_and_only_a_terminal_result_completes() {
     let mut t = tracker(true);
     t.on(&init(true)).unwrap();

@@ -167,14 +167,17 @@ impl Claude {
             .as_ref()
             .map(claude_home::HostConfig::env)
             .unwrap_or_default();
-        let version = host
-            .probe(&program, &["--version"], &env)
-            .ok_or("Claude Code does not run (`claude --version` failed).")?;
+        let version = host.probe(&program, &["--version"], &env).map_err(|why| {
+            format!(
+                "Claude Code does not run (`{} --version`: {why}).",
+                program.display()
+            )
+        })?;
         let not_logged_in = "Claude Code is not logged in on the host (run `claude` and log in).";
         let config = config.ok_or(not_logged_in)?;
         if !host
             .probe(&program, &["auth", "status"], &env)
-            .is_some_and(|s| claude_home::logged_in(&s))
+            .is_ok_and(|s| claude_home::logged_in(&s))
         {
             return Err(not_logged_in.into());
         }

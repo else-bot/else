@@ -134,10 +134,13 @@ impl Codex {
         if !auth.is_file() {
             return Err("Codex is not logged in on the host (run `codex login`)".into());
         }
-        let version = host.probe(&program, &["--version"], &[]).ok_or(
-            "the codex executable does not run (`codex --version` failed); \
-             set ELSE_CODEX_BIN to the native codex binary",
-        )?;
+        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
+            format!(
+                "the codex executable does not run (`{} --version`: {why}); \
+                 set ELSE_CODEX_BIN to the native codex binary",
+                program.display()
+            )
+        })?;
         Ok(Ready {
             host,
             program,

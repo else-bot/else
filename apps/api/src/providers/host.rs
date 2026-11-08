@@ -101,16 +101,21 @@ impl Host {
     }
 
     /// Run `program args` with the passed environment plus `env` and return
-    /// its stdout, or `None` if it fails.
-    pub fn probe(&self, program: &Path, args: &[&str], env: &[(String, String)]) -> Option<String> {
+    /// its trimmed stdout, or why it did not run: it could not start, it
+    /// failed (with the last line of its stderr), or it printed nothing.
+    pub fn probe(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &[(String, String)],
+    ) -> Result<String, String> {
         let mut command = std::process::Command::new(program);
         command
             .args(args)
             .env_clear()
             .envs(passed_env())
             .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::null());
         let mut retries = 5;
         let output = loop {
             match command.output() {
@@ -119,14 +124,23 @@ impl Host {
                     retries -= 1;
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                result => break result.ok()?,
+                result => break result.map_err(|e| format!("could not start ({e})"))?,
             }
         };
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .filter(|s| !s.is_empty())
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(
+                match stderr.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+                    Some(line) => format!("{}: {line}", output.status),
+                    None => output.status.to_string(),
+                },
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if stdout.is_empty() {
+            return Err("printed nothing".into());
+        }
+        Ok(stdout)
     }
 
     /// Run a launch to completion like a provider run and return its stdout:

@@ -14,7 +14,7 @@
 mod protocol;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -49,11 +49,13 @@ pub static DEFINITION: Definition = Definition {
 };
 
 fn build(wiring: &super::Wiring) -> super::Built {
+    let home = grok_home::host_home();
+    let configured = configured_program(wiring.config.grok_bin.as_deref(), home.as_deref());
     let grok = Grok {
         ready: Grok::ready(
             Some(wiring.host.clone()),
-            super::executable(wiring.config.grok_bin.as_deref(), "grok"),
-            grok_home::host_home(),
+            super::executable(configured.as_deref(), "grok"),
+            home,
         ),
         tool_url: None,
     }
@@ -62,6 +64,21 @@ fn build(wiring: &super::Wiring) -> super::Built {
         provider: std::sync::Arc::new(grok),
         summarizer: None,
     }
+}
+
+/// `ELSE_GROK_BIN`, else the binary Grok's installers keep in the host's
+/// `GROK_HOME` (curl's install and the npm package's launcher both run it),
+/// else `None` to search `PATH`. The `grok` on `PATH` can be a launcher that
+/// needs node and would unpack its own copy into each bot's `GROK_HOME`.
+fn configured_program(setting: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    setting.map(Path::to_path_buf).or_else(|| {
+        home.map(|home| home.join("bin").join("grok"))
+            .filter(|path| {
+                use std::os::unix::fs::PermissionsExt;
+                path.metadata()
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+    })
 }
 
 /// A CLI that runs and a host login.
@@ -92,9 +109,12 @@ impl Grok {
     ) -> Result<Ready, String> {
         let host = host.ok_or("Grok CLI is not configured on this host.")?;
         let program = program?.ok_or("Grok CLI (`grok`) was not found on PATH.")?;
-        let version = host
-            .probe(&program, &["--version"], &[])
-            .ok_or("Grok CLI does not run (`grok --version` failed).")?;
+        let version = host.probe(&program, &["--version"], &[]).map_err(|why| {
+            format!(
+                "Grok CLI does not run (`{} --version`: {why}).",
+                program.display()
+            )
+        })?;
         let login = login
             .filter(|dir| dir.join("auth.json").is_file())
             .ok_or("Grok CLI is not logged in on the host (run `grok login`).")?;
