@@ -633,6 +633,43 @@ async fn a_task_delegated_for_an_owner_request_opens_a_social_connection_card_in
     assert_eq!(shown["social_setups"][0]["status"], "pending", "{shown}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_reply_in_the_bot_chat_takes_over_a_task_waiting_on_its_connection_card() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, child) = delegated_task(&app).await;
+    let child_token = grant(&app, child, vec![Tool::AskOwner]).await;
+    app.call(
+        "POST",
+        "/tools/v1/mcp",
+        Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": { "name": "social_connect",
+                                 "arguments": { "provider": "telegram", "reason": "Post updates." } } })),
+        Some(&child_token),
+    )
+    .await;
+    app.wait_turn_for(&child.to_string(), &["waiting"], Duration::from_secs(30))
+        .await;
+    let reply = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "Never mind, skip Telegram for now.",
+            Some("synthetic"),
+        )
+        .await;
+    let reply: Uuid = reply.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    let (takeover, setup): (Option<Uuid>, String) = sqlx::query_as(
+        "SELECT d.takeover_turn_id, s.status FROM delegations d
+         JOIN social_setups s ON s.turn_id = d.child_turn_id WHERE d.child_turn_id = ?1",
+    )
+    .bind(child)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(takeover, Some(reply), "the owner's reply answers the task");
+    assert_eq!(setup, "cancelled");
+}
+
 /// A running task the main bot delegated to a new bot while serving an owner
 /// message: the new bot's ID and the task's turn.
 async fn delegated_task(app: &TestApp) -> (String, Uuid) {

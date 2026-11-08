@@ -1567,3 +1567,105 @@ async fn a_connected_send_settles_from_its_mail_receipt_even_after_the_request_e
         "the test drove the action receipts itself"
     );
 }
+
+/// A task the main bot delegated to another bot while serving an owner
+/// message, running: the bot's ID, the root turn, the delegation, and the
+/// task's turn.
+async fn delegated_task(app: &TestApp) -> (String, Uuid, Uuid, Uuid) {
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Telegram").await;
+    let warm = app
+        .send(&leaf, Uuid::new_v4(), "hello", Some("synthetic"))
+        .await;
+    app.wait_turn(warm.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    let (root, _) = running(app, &main, SLOW, None).await;
+    let parent = app
+        .scheduler
+        .grants()
+        .issue(
+            main.parse().unwrap(),
+            sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id = ?1")
+                .bind(root)
+                .fetch_one(&app.db.pool)
+                .await
+                .unwrap(),
+            root,
+            vec![Tool::ReadMemory, Tool::Delegate],
+            DEFAULT_TTL,
+        )
+        .await;
+    let delegated = tool(
+        app,
+        &parent,
+        "delegate",
+        json!({ "target_bot_id": leaf, "task": SLOW }),
+    )
+    .await;
+    let task: Uuid = tool_text(&delegated)["task_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("delegated: {}", delegated.body))
+        .parse()
+        .unwrap();
+    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    wait(app, child, "running").await;
+    (leaf, root, task, child)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_approval_of_a_delegated_draft_answers_the_delegating_request() {
+    let Harness { app, .. } = harness().await;
+    let (leaf, root, task, child) = delegated_task(&app).await;
+    let id = draft(&app, &grant(&app, child).await, lunch()).await;
+    wait(&app, child, "waiting").await;
+
+    let (reply, token) = running(
+        &app,
+        &leaf,
+        "[synthetic:slow] Looks good, send it.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let takeover: Option<Uuid> =
+        sqlx::query_scalar("SELECT takeover_turn_id FROM delegations WHERE id = ?1")
+            .bind(task)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        takeover,
+        Some(reply),
+        "the owner's reply took over the task"
+    );
+    assert_eq!(status(&app, child).await, "interrupted");
+
+    let confirmed = tool(
+        &app,
+        &token,
+        "confirm_draft_approval",
+        json!({ "draft_id": id }),
+    )
+    .await;
+    assert_eq!(
+        tool_text(&confirmed)["status"],
+        "approved",
+        "{}",
+        confirmed.body
+    );
+    wait(&app, reply, "completed").await;
+    let outcome: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
+        .bind(task)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "completed");
+    assert_ne!(
+        status(&app, root).await,
+        "waiting",
+        "the delegating request continues"
+    );
+}
