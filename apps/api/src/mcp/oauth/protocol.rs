@@ -284,8 +284,8 @@ pub(super) async fn discover(resource: &str, challenge: &str) -> Result<Discover
     })
 }
 
-/// Providers such as PostHog advertise over 150 scopes. These bounds admit
-/// them while keeping the authorization URL under common 16 KiB request limits.
+/// Providers such as PostHog advertise over 150 scopes, all requested when the
+/// challenge names none.
 const MAX_SCOPES: usize = 512;
 const MAX_SCOPE_PARAMETER: usize = 8192;
 
