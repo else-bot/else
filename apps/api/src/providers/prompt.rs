@@ -254,10 +254,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
         ""
     };
     let rules_rules = if input.delegation.can_edit_rules() {
-        "Save each standing instruction from the owner (what to do whenever something happens, \
-         text to send in a fixed form, something to always or never do, or a change to a rule) \
-         with rules_update before you reply, quoting their exact words. Do not save one-off \
-         requests.\n\n"
+        "Call rules_update only when the owner says to remember or always or never do \
+         something, describes a recurring workflow, corrects your mistake, or changes a rule. \
+         Quote their exact words and save before you reply. Never save praise, a reaction, an \
+         inferred preference, or a one-off request.\n\n"
     } else {
         ""
     };
