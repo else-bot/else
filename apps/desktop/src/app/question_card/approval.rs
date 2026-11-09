@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::model::QuestionChoice;
+use gpui_kit::component::radio::Radio;
 
 /// How long an approval choice lasts, as the scope list shows it.
 fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, String) {
@@ -200,6 +201,11 @@ impl ElseApp {
                         .px_0()
                         .justify_start()
                         .cursor_pointer()
+                        .accessibility_label(if expanded {
+                            "Hide the rest of the command"
+                        } else {
+                            "Show the whole command"
+                        })
                         .child(
                             h_flex()
                                 .gap_1p5()
@@ -223,6 +229,7 @@ impl ElseApp {
         let mut grants: Vec<_> = question.choices.iter().filter(|c| c.id != DENY).collect();
         grants.sort_by_key(|choice| choice.id != APPROVE);
         let selected = submit
+            .filter(|s| s.locks())
             .and_then(|s| s.answer.single())
             .or_else(|| view.approval_scopes.get(&id).map(String::as_str))
             .and_then(|chosen| grants.iter().find(|c| c.id == chosen))
@@ -240,53 +247,36 @@ impl ElseApp {
                 let (title, detail) = scope(choice, question, bot_name);
                 let choice_id = choice.id.clone();
                 list = list.child(
-                    Button::new(SharedString::from(format!(
+                    Radio::new(SharedString::from(format!(
                         "question-scope-{id}-{}",
                         choice.id
                     )))
                     .focus_ring(false)
-                    .ghost()
                     .small()
+                    .checked(on)
+                    .disabled(locked)
                     .w_full()
-                    .h_auto()
                     .px_2p5()
                     .py_2()
-                    .disabled(locked)
+                    .gap_2p5()
+                    .rounded(theme.radius)
                     .when(!locked, |row| row.cursor_pointer())
                     .when(on, |row| row.bg(theme.muted))
+                    .when(!locked && !on, |row| {
+                        row.hover(|style| style.bg(theme.muted.opacity(0.5)))
+                    })
                     .accessibility_label(if detail.is_empty() {
                         title.clone()
                     } else {
                         format!("{title}. {detail}")
                     })
                     .child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .gap_2p5()
-                            .child(
-                                div()
-                                    .mt(px(2.))
-                                    .size(px(14.))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .map(|dot| {
-                                        if on {
-                                            dot.border(px(4.)).border_color(theme.foreground)
-                                        } else {
-                                            dot.border(px(1.5)).border_color(theme.muted_foreground)
-                                        }
-                                    }),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    .text_left()
-                                    .child(div().text_sm().whitespace_normal().child(title))
-                                    .when(!detail.is_empty(), |column| column.child(note(detail))),
-                            ),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().whitespace_normal().child(title))
+                            .when(!detail.is_empty(), |column| column.child(note(detail))),
                     )
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.choose_approval_scope(id, choice_id.clone(), cx);

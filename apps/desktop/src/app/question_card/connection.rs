@@ -22,6 +22,8 @@ enum Phase {
     CheckFailed(String),
     Cancelling,
     Recorded,
+    /// The server recorded the owner's cancel; the card settles next.
+    Cancelled,
 }
 
 impl ElseApp {
@@ -100,6 +102,7 @@ impl ElseApp {
             Ok(Resolution::Disconnected) => Phase::Ready(hint),
             Ok(Resolution::ConfirmationRequired(error)) => Phase::ConfirmationRequired(error),
             Ok(Resolution::Recorded) => Phase::Recorded,
+            Ok(Resolution::Cancelled) => Phase::Cancelled,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
         self.remeasure_row(RowKey::Question(flow.question), cx);
@@ -265,7 +268,10 @@ impl ElseApp {
         form.phase = Phase::Cancelling;
         let flow = form.flow.clone();
         form.request = Some(cx.spawn(async move |this, cx| {
-            let result = flow.cancel().await;
+            let result = flow.cancel().await.map(|resolution| match resolution {
+                Resolution::Recorded => Resolution::Cancelled,
+                other => other,
+            });
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
         self.remeasure_row(RowKey::Question(question), cx);
@@ -295,19 +301,25 @@ impl ElseApp {
             let connected = question.status == "answered"
                 && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE);
             let (title, outcome) = if connected {
-                (
-                    format!("{} connected{}", account.provider, account.address_suffix()),
-                    "Every bot can use it when you ask.".to_owned(),
-                )
+                match &account.address {
+                    Some(_) => (
+                        format!("{} connected", account.provider),
+                        "Every bot can use it when you ask.".to_owned(),
+                    ),
+                    None => (
+                        question.title.clone(),
+                        "Connected. Every bot can use it when you ask.".to_owned(),
+                    ),
+                }
             } else if question.status == "skipped" {
                 (
                     question.title.clone(),
-                    "Skipped: you sent a new message instead. Nothing was connected.".to_owned(),
+                    "Skipped: you sent a new message instead.".to_owned(),
                 )
             } else {
                 (
                     question.title.clone(),
-                    "Cancelled. Nothing was connected.".to_owned(),
+                    "Cancelled before the connection finished.".to_owned(),
                 )
             };
             let mut card = v_flex()
@@ -354,6 +366,7 @@ impl ElseApp {
                 pill(id, "Connecting", theme.info, true, still)
             }
             Phase::Recorded => pill(id, "Connected", theme.success, false, still),
+            Phase::Cancelled => pill(id, "Cancelled", theme.muted_foreground, false, still),
             Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true, still),
             _ => pill(id, "Checking", theme.muted_foreground, true, still),
         };
@@ -525,6 +538,7 @@ impl ElseApp {
             Phase::Confirming => Some(("Confirming…", None, false)),
             Phase::Cancelling => Some(("Cancelling…", None, false)),
             Phase::Recorded => Some(("Connected", None, false)),
+            Phase::Cancelled => None,
             Phase::SigningIn => None,
         };
         let mut footer = h_flex()
@@ -561,7 +575,7 @@ impl ElseApp {
                     .icon(IconName::ExternalLink)
                     .label("Reopen browser")
                     .small()
-                    .outline()
+                    .ghost()
                     .disabled(locked || !reopen)
                     .when(!locked && reopen, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |app, _, _, cx| app.reopen_signin(id, cx))),
@@ -633,13 +647,6 @@ impl Account {
             address: None,
             scopes: mcp.map(|c| c.scopes.clone()).unwrap_or_default(),
         }
-    }
-
-    fn address_suffix(&self) -> String {
-        self.address
-            .as_ref()
-            .map(|address| format!(" · {address}"))
-            .unwrap_or_default()
     }
 }
 #[cfg(test)]
