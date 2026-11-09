@@ -1419,3 +1419,85 @@ async fn settled(app: &TestApp, path: &str) -> serde_json::Value {
     }
     panic!("the upgrade did not finish");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_replacement() {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let config = || ComputerConfig {
+        image: "img:new".into(),
+        ..config(1)
+    };
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        config(),
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Shutdown").await.parse().unwrap();
+    let (turn, old_name) = ready(&manager, bot, "turn:gone").await;
+    manager.release(turn).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    *fake.create_delay.lock().unwrap() = Duration::from_secs(30);
+    let path = format!("/v1/bots/{bot}/computer");
+    assert_eq!(
+        app.owner("POST", &format!("{path}/upgrade"), None)
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    let replacement = loop {
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT to_runtime_name FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started'",
+        )
+        .bind(bot)
+        .fetch_optional(&app.db.pool)
+        .await
+        .unwrap();
+        if let Some(name) = name {
+            break name;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let cancel = never();
+    let maintenance = tokio::spawn(manager.clone().run(cancel.clone()));
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), maintenance)
+        .await
+        .expect("stopping waits for the upgrade to be interrupted, not to finish")
+        .unwrap();
+    let image: String = sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
+        .bind(bot)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(image, "img:old", "the bot stays on its old computer");
+
+    *fake.create_delay.lock().unwrap() = Duration::ZERO;
+    fake.computers.lock().unwrap().insert(
+        replacement.clone(),
+        Computer {
+            state: RuntimeState::Running,
+            files: HashMap::new(),
+        },
+    );
+    let _restarted = self::manager(&app, &fake, config()).await;
+    assert!(
+        !fake.computers.lock().unwrap().contains_key(&replacement),
+        "the next start removes the interrupted replacement"
+    );
+    assert!(fake.computers.lock().unwrap().contains_key(&old_name));
+    let failed = app.owner("GET", &path, None).await.body;
+    assert_eq!(failed["upgrade"]["state"], "failed", "{failed}");
+}

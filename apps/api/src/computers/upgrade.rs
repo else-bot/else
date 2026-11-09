@@ -25,7 +25,8 @@
 //! update waits for it; it ends the owner's desktop sessions first, and
 //! while it runs, new leases and viewers are refused. A started upgrade's
 //! computers count against the budget though the bot's row says stopped.
-//! Startup removes the replacement of an upgrade a restart interrupted.
+//! Maintenance removes the replacement of an upgrade that a restart
+//! interrupted or whose cleanup failed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,6 +169,9 @@ impl ComputerManager {
                 "the computer runtime has not been inspected yet".into(),
             ));
         }
+        if self.upgrade_stop.is_cancelled() {
+            return Err(ComputerError::Busy("the API is stopping".into()));
+        }
         let current: Option<String> =
             sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
                 .bind(bot_id)
@@ -195,11 +199,15 @@ impl ComputerManager {
             return Err(refused("an upgrade is already running"));
         }
         let this = self.clone();
-        tokio::spawn(async move {
+        self.upgrade_tasks.spawn(async move {
             let _admission = admission;
-            let upgraded = match this.end_desktop_sessions(bot_id).await {
-                Ok(()) => this.upgrade_image(bot_id, &image, None).await,
-                Err(err) => Err(err),
+            let upgrade = async {
+                this.end_desktop_sessions(bot_id).await?;
+                this.upgrade_image(bot_id, &image, None).await
+            };
+            let upgraded = tokio::select! {
+                upgraded = upgrade => upgraded,
+                () = this.upgrade_stop.cancelled() => Err(refused("the API stopped during the upgrade")),
             };
             let failed = match upgraded {
                 Ok(_) => None,
@@ -222,6 +230,36 @@ impl ComputerManager {
                 })
                 .await;
         });
+        Ok(())
+    }
+
+    /// Interrupt running upgrades and wait until they have ended, so the
+    /// API's singleton lock outlives them. An interrupted upgrade has not
+    /// switched the bot (the switch is one transaction), and startup removes
+    /// its replacement.
+    pub(super) async fn stop_upgrades(&self) {
+        self.upgrade_stop.cancel();
+        self.upgrade_tasks.close();
+        self.upgrade_tasks.wait().await;
+    }
+
+    /// Remove the replacements of upgrades a restart interrupted, or whose
+    /// removal failed when they did, so their rows stop reserving budget.
+    /// Holding the bot's operation lock means no upgrade of it is running.
+    pub(super) async fn clear_stranded_upgrades(&self) -> Result<(), ComputerError> {
+        let bots: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT bot_id FROM computer_upgrades WHERE state = 'started'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for bot_id in bots {
+            let Some(_op) = self.try_op(bot_id).await else {
+                continue;
+            };
+            if let Err(err) = self.clear_interrupted_upgrades(bot_id).await {
+                tracing::warn!(bot = %bot_id, error = %err, "removing a failed upgrade's replacement failed");
+            }
+        }
         Ok(())
     }
 
@@ -271,19 +309,6 @@ impl ComputerManager {
         .await?;
         for job in running {
             self.job(bot_id, job).await?;
-        }
-        Ok(())
-    }
-
-    pub(super) async fn clear_all_interrupted_upgrades(&self) -> Result<(), ComputerError> {
-        let bots: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT bot_id FROM computer_upgrades WHERE state = 'started'",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        for bot_id in bots {
-            tracing::warn!(bot = %bot_id, "removing an interrupted upgrade's replacement");
-            self.clear_interrupted_upgrades(bot_id).await?;
         }
         Ok(())
     }

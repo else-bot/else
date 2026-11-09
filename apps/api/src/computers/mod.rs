@@ -301,6 +301,8 @@ pub struct ComputerManager {
     input_batches: Actor<HashMap<Uuid, u32>>,
     controllers: Actor<HashMap<Uuid, Uuid>>,
     upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
+    upgrade_tasks: tokio_util::task::TaskTracker,
+    upgrade_stop: tokio_util::sync::CancellationToken,
 }
 
 impl ComputerManager {
@@ -321,6 +323,8 @@ impl ComputerManager {
             input_batches: Actor::default(),
             controllers: Actor::default(),
             upgrades: Actor::default(),
+            upgrade_tasks: tokio_util::task::TaskTracker::new(),
+            upgrade_stop: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -373,8 +377,22 @@ impl ComputerManager {
     }
 
     async fn op(&self, bot_id: Uuid) -> OwnedSemaphorePermit {
-        let semaphore = self
-            .ops
+        self.op_semaphore(bot_id)
+            .await
+            .acquire_owned()
+            .await
+            .expect("computer operation semaphore stays open")
+    }
+
+    /// The bot's operation lock if no operation holds it, for maintenance
+    /// that should retry later rather than wait (an upgrade holds it for
+    /// minutes).
+    async fn try_op(&self, bot_id: Uuid) -> Option<OwnedSemaphorePermit> {
+        self.op_semaphore(bot_id).await.try_acquire_owned().ok()
+    }
+
+    async fn op_semaphore(&self, bot_id: Uuid) -> Arc<Semaphore> {
+        self.ops
             .call(move |ops| {
                 ops.retain(|_, weak| weak.strong_count() > 0);
                 if let Some(semaphore) = ops.get(&bot_id).and_then(std::sync::Weak::upgrade) {
@@ -384,11 +402,7 @@ impl ComputerManager {
                 ops.insert(bot_id, Arc::downgrade(&semaphore));
                 semaphore
             })
-            .await;
-        semaphore
-            .acquire_owned()
             .await
-            .expect("computer operation semaphore stays open")
     }
 
     async fn row(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<Row>, sqlx::Error> {

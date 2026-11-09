@@ -221,10 +221,9 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            if self.upgrading(bot).await {
+            let Some(_op) = self.try_op(bot).await else {
                 continue;
-            }
-            let _op = self.op(bot).await;
+            };
             self.observe(bot).await?;
         }
         if let Err(err) = self.poll_jobs(cancel).await {
@@ -241,10 +240,9 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            if self.upgrading(bot).await {
+            let Some(_op) = self.try_op(bot).await else {
                 continue;
-            }
-            let _op = self.op(bot).await;
+            };
             self.stop_held(bot, Reason::MustStop).await?;
         }
         let idle_states: Vec<&str> = match self.config.idle_action {
@@ -266,13 +264,13 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            if self.upgrading(bot).await {
+            let Some(_op) = self.try_op(bot).await else {
                 continue;
-            }
-            let _op = self.op(bot).await;
+            };
             self.stop_held(bot, Reason::Idle(self.config.idle_action))
                 .await?;
         }
+        self.clear_stranded_upgrades().await?;
         crate::db::stop::settle_all(&self.pool).await?;
         Ok(())
     }
@@ -346,10 +344,7 @@ impl ComputerManager {
             .execute(&self.pool)
             .await?;
         }
-        if let Err(err) = self.clear_all_interrupted_upgrades().await {
-            tracing::warn!(error = %err, "an interrupted upgrade's replacement was not removed");
-            return Ok(());
-        }
+        self.clear_stranded_upgrades().await?;
         sqlx::query(
             "UPDATE computer_leases AS l SET generation = c.generation
              FROM bot_computers c
@@ -385,7 +380,10 @@ impl ComputerManager {
                 tracing::warn!(error = %err, "computer maintenance failed");
             }
             tokio::select! {
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => {
+                    self.stop_upgrades().await;
+                    return;
+                }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
