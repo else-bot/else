@@ -9,7 +9,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, Theme, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -22,6 +22,7 @@ use crate::model::{
     QuestionAnswer,
 };
 
+mod approval;
 mod choice;
 pub(super) mod connection;
 
@@ -42,14 +43,6 @@ pub(super) enum SubmitState {
 impl QuestionForm {
     fn locks(&self) -> bool {
         matches!(self.state, SubmitState::Sending | SubmitState::Recorded)
-    }
-}
-
-fn heading(question: &Question, bot_name: &str) -> String {
-    match question.kind.as_str() {
-        "destructive" => format!("{bot_name} · Hard to undo"),
-        "external" => format!("{bot_name} · Approval needed"),
-        _ => format!("{bot_name} has a question"),
     }
 }
 
@@ -109,6 +102,11 @@ impl ElseApp {
         };
         let conversation = view.conversation.as_ref();
         view.question_submits.retain(|id, _| {
+            conversation
+                .and_then(|c| c.question(*id))
+                .is_some_and(Question::is_pending)
+        });
+        view.approval_scopes.retain(|id, _| {
             conversation
                 .and_then(|c| c.question(*id))
                 .is_some_and(Question::is_pending)
@@ -195,263 +193,160 @@ impl ElseApp {
             return div().into_any_element();
         };
         let submit = view.question_submits.get(&id);
-        if question.mcp_connection().is_some() || question.email_connection().is_some() {
-            return self.render_connection_card(question, cx);
-        }
         if !question.is_approval() {
             return self.render_choice_card(question, submit, cx);
         }
-        let theme = cx.theme().clone();
         let bot_name = self
             .bots
             .iter()
             .find(|b| b.id == view.bot_id)
             .map(|b| b.name.clone())
             .unwrap_or_default();
-        let note = |text: String| {
-            div()
-                .text_xs()
-                .text_left()
-                .whitespace_normal()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        let pending = question.is_pending();
-        let locked = !pending
-            || submit.is_some_and(QuestionForm::locks)
-            || self.connection != Connection::Connected;
-        let expanded = view.expanded_questions.contains(&id);
-        let chevron = if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        };
-        let mut card = v_flex()
-            .w_full()
-            .rounded(theme.radius_lg)
-            .bg(theme.secondary)
-            .when(pending, |card| card.gap_3().p_4());
-        let mut extra: Vec<AnyElement> = Vec::new();
-        if pending {
-            let mut buttons = h_flex()
-                .flex_shrink_0()
-                .max_w(relative(0.5))
-                .flex_wrap()
-                .justify_end()
-                .gap_2();
-            let mut choices: Vec<_> = question.choices.iter().collect();
-            choices.sort_by_key(|choice| choice.id == APPROVE);
-            for choice in choices {
-                let label = match submit
-                    .filter(|s| s.answer.contains(&choice.id))
-                    .map(|s| &s.state)
-                {
-                    Some(SubmitState::Sending) => "Sending…".to_owned(),
-                    Some(SubmitState::Recorded) => "Recorded".to_owned(),
-                    _ if choice.id == APPROVE_FOREVER => "Always allow for this bot".to_owned(),
-                    _ => choice.label.clone(),
-                };
-                let choice_id = choice.id.clone();
-                let button =
-                    Button::new(SharedString::from(format!("question-{id}-{}", choice.id)))
-                        .focus_ring(false)
-                        .when(!locked, |button| button.cursor_pointer())
-                        .accessibility_label(label.clone())
-                        .label(label)
-                        .small()
-                        .disabled(locked)
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.answer_question(
-                                id,
-                                QuestionAnswer::Single(choice_id.clone()),
-                                window,
-                                cx,
-                            )
-                        }));
-                let button = if choice.id == APPROVE {
-                    button.primary()
-                } else {
-                    button.ghost()
-                };
-                buttons = buttons.child(button);
-            }
-            let mut title = v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .font_semibold()
-                        .whitespace_normal()
-                        .child(question.title.clone()),
-                )
-                .child(note(heading(question, &bot_name)));
-            if let Some(scope) = question.task_scope() {
-                title = title.child(note(format!("{} · {}", scope.task, scope.target)));
-            } else if let Some((integration, tool)) = question.mcp_tool_scope() {
-                title = title.child(note(format!("{integration} · {tool}")));
-            }
-            card = card.child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_3()
-                    .child(
-                        Icon::new(IconName::Terminal)
-                            .size_4()
-                            .mt_1()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(title)
-                    .child(buttons),
-            );
-            if question.context.is_some() {
-                card = card.child(
-                    div()
-                        .w_full()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .pt_2()
-                        .child(
-                            Button::new(SharedString::from(format!("question-details-{id}")))
-                                .focus_ring(false)
-                                .ghost()
-                                .small()
-                                .justify_start()
-                                .px_0()
-                                .cursor_pointer()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_2()
-                                        .child(Icon::new(chevron).size_3())
-                                        .child(div().text_left().child("Command & explanation")),
-                                )
-                                .accessibility_label(if expanded {
-                                    "Hide command and explanation"
-                                } else {
-                                    "Show command and explanation"
-                                })
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.toggle_question_details(id, cx);
-                                })),
-                        ),
-                );
-            }
-        } else {
-            let approved = question.status == "answered"
-                && question
-                    .answer
-                    .as_ref()
-                    .and_then(QuestionAnswer::single)
-                    .is_some_and(|answer| answer != DENY);
-            card = card.child(
-                Button::new(SharedString::from(format!("question-receipt-{id}")))
-                    .focus_ring(false)
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .h_auto()
-                    .px_4()
-                    .py_3()
-                    .rounded(theme.radius_lg)
-                    .when(expanded && question.context.is_some(), |button| {
-                        button.rounded_b(px(0.))
-                    })
-                    .cursor_pointer()
-                    .accessibility_label(format!(
-                        "{} {}",
-                        question.title,
-                        outcome(question, &bot_name)
-                    ))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_3()
-                            .child(
-                                Icon::new(if approved {
-                                    IconName::Check
-                                } else {
-                                    IconName::CircleOff
-                                })
-                                .size_4()
-                                .text_color(if approved {
-                                    theme.success
-                                } else {
-                                    theme.muted_foreground
-                                }),
-                            )
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_medium()
-                                            .text_left()
-                                            .whitespace_normal()
-                                            .child(question.title.clone()),
-                                    )
-                                    .child(note(outcome(question, &bot_name))),
-                            )
-                            .child(
-                                Icon::new(chevron)
-                                    .size_3()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.toggle_question_details(id, cx);
-                    })),
-            );
+        if question.mcp_connection().is_some() || question.email_connection().is_some() {
+            return self.render_connection_card(question, &bot_name, cx);
         }
-        if expanded {
-            if let Some(context) = &question.context {
-                extra.push(
-                    div()
-                        .w_full()
-                        .p_3()
-                        .rounded(theme.radius)
-                        .bg(theme.background)
-                        .text_sm()
-                        .whitespace_normal()
-                        .child(context.clone())
-                        .into_any_element(),
-                );
-            }
-            if pending {
-                extra.push(note(match question.kind.as_str() {
-                    _ if question.choices.iter().any(|c| c.id == APPROVE_TASK) => "Always allow remembers this task, target, and action type for future chats with this bot.".to_owned(),
-                    _ if question.choices.iter().any(|c| c.id == APPROVE_TOOL) => "Always allow remembers this integration tool and action type for this bot's chat requests.".to_owned(),
-                    _ if question.choices.iter().any(|c| c.id == APPROVE_ROUTINE) => "Always allow for this routine remembers destructive approval for its saved task. Changing the task clears this permission.".to_owned(),
-                    _ if question.choices.iter().any(|c| c.id == APPROVE_FOREVER) => "Always allow lets this bot take destructive actions without asking.".to_owned(),
-                    _ => "Approval covers exactly this action, once.".to_owned(),
-                }).into_any_element());
-            }
-        }
-        if let Some(SubmitState::Failed(error)) = submit.map(|s| &s.state) {
-            extra.push(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone())
-                    .into_any_element(),
-            );
-        }
-        if pending {
-            card = card.children(extra);
-        } else if !extra.is_empty() {
-            card = card.child(v_flex().w_full().gap_3().px_4().pb_4().children(extra));
-        }
-        card.into_any_element()
+        self.render_approval_card(question, submit, &bot_name, cx)
     }
+}
+
+/// The rounded, tinted square that leads every card header.
+fn tile(icon: IconName, color: Hsla) -> Div {
+    h_flex()
+        .size_9()
+        .flex_none()
+        .justify_center()
+        .rounded(px(9.))
+        .bg(color.opacity(0.16))
+        .text_color(color)
+        .child(Icon::new(icon).size_4())
+}
+
+/// A status pill in the task card's style, with working dots while busy.
+fn pill(id: Uuid, label: &'static str, color: Hsla, working: bool, still: bool) -> Div {
+    h_flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.3))
+        .bg(color.opacity(0.08))
+        .text_xs()
+        .text_color(color)
+        .child(label)
+        .when(working, |pill| {
+            pill.child(super::view::working_dots(id, color, still))
+        })
+}
+
+/// The one-line summary a settled card folds into; clicking it shows the
+/// card's context.
+fn receipt(
+    id: Uuid,
+    done: bool,
+    title: String,
+    outcome: String,
+    expanded: bool,
+    theme: &Theme,
+) -> Button {
+    Button::new(SharedString::from(format!("question-receipt-{id}")))
+        .focus_ring(false)
+        .ghost()
+        .small()
+        .w_full()
+        .h_auto()
+        .px_4()
+        .py_3()
+        .rounded(theme.radius_lg)
+        .cursor_pointer()
+        .accessibility_label(format!("{title} {outcome}"))
+        .child(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .child(
+                    Icon::new(if done {
+                        IconName::Check
+                    } else {
+                        IconName::CircleOff
+                    })
+                    .size_4()
+                    .text_color(if done {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_left()
+                                .whitespace_normal()
+                                .when(!done, |title| title.text_color(theme.muted_foreground))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_left()
+                                .whitespace_normal()
+                                .text_color(theme.muted_foreground)
+                                .child(outcome),
+                        ),
+                )
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_3()
+                    .text_color(theme.muted_foreground),
+                ),
+        )
+}
+
+/// An inset block for a card's exact command, request, or explanation.
+fn inset(text: String, theme: &Theme) -> Div {
+    div()
+        .w_full()
+        .px_3()
+        .py_2p5()
+        .rounded(theme.radius)
+        .bg(theme.background)
+        .font_family(theme.mono_font_family.clone())
+        .text_xs()
+        .line_height(relative(1.6))
+        .whitespace_normal()
+        .child(text)
+}
+
+/// A red callout for an error the owner can act on.
+fn callout(text: String, theme: &Theme) -> Div {
+    h_flex()
+        .w_full()
+        .items_start()
+        .gap_2p5()
+        .px_3()
+        .py_2p5()
+        .rounded(theme.radius)
+        .bg(theme.danger.opacity(0.1))
+        .text_color(theme.danger)
+        .text_xs()
+        .child(Icon::new(IconName::TriangleAlert).size_4().flex_none())
+        .child(div().flex_1().min_w_0().whitespace_normal().child(text))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{heading, letter, outcome};
+    use super::{letter, outcome};
     use crate::model::{APPROVE, DENY, Question, QuestionAnswer, QuestionChoice};
     use uuid::Uuid;
 
@@ -509,9 +404,6 @@ mod tests {
         );
         assert!(outcome(&question("choice", "cancelled", None), "Mail").starts_with("Withdrawn"));
         assert_eq!(outcome(&question("choice", "pending", None), "Mail"), "");
-        assert!(
-            heading(&question("external", "pending", None), "Mail").contains("Approval needed")
-        );
         assert_eq!(letter("c"), "C");
     }
 
