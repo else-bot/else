@@ -238,6 +238,22 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
     let denied = tool(&h.app, &forged, "set_bot_model", model).await;
     assert!(denied.error, "{}", denied.body);
+    let profile = else_api::app::providers::Profile {
+        model: "gpt-6.1-sol".into(),
+        reasoning_effort: "high".into(),
+        service_tier: "default".into(),
+    };
+    assert!(matches!(
+        bots::set_model_for_turn(
+            &h.app.db.pool,
+            routine,
+            main.parse().unwrap(),
+            "codex",
+            &profile
+        )
+        .await,
+        Err(BotError::Refused(Refusal::NotOwnerRequest))
+    ));
     let profiles: i64 = sqlx::query_scalar("SELECT count(*) FROM bot_profiles WHERE bot_id = ?1")
         .bind(main.parse::<Uuid>().unwrap())
         .fetch_one(&h.app.db.pool)

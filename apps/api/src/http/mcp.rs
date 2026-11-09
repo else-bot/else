@@ -336,10 +336,10 @@ fn tool_list() -> Value {
                     "target_bot_id": { "type": "string", "format": "uuid" },
                     "model": { "type": "string", "minLength": 1,
                                "maxLength": super::routines::MAX_MODEL_CHARS,
-                               "description": "Its ID or name, such as gpt-6.1-sol or Claude Opus 5.5; it selects the provider." },
+                               "description": "Its ID or name, such as gpt-6.1-sol or Claude Opus 5.5; it selects the provider. Omit to keep the bot's model." },
                     "provider_id": { "type": "string",
                                      "description": format!(
-                                         "Only when the owner named the provider ({}).",
+                                         "With model, only when the owner named the provider ({}).",
                                          crate::providers::definitions::id_list()
                                      ) },
                     "reasoning_effort": { "type": "string",
@@ -347,7 +347,7 @@ fn tool_list() -> Value {
                     "service_tier": { "type": "string",
                                       "description": "priority is the Fast tier, default the standard one. Omit to keep the bot's current tier." },
                 },
-                "required": ["target_bot_id", "model"],
+                "required": ["target_bot_id"],
                 "additionalProperties": false,
             },
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
@@ -1348,6 +1348,19 @@ async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     }
 }
 
+/// The provider and model a bot's next turn would use, if it has one.
+async fn current_model(
+    state: &AppState,
+    bot_id: Uuid,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    let Some(provider) = crate::db::bot_profiles::provider_for(&state.db, bot_id).await? else {
+        return Ok(None);
+    };
+    let mut conn = state.db.acquire().await?;
+    let profile = crate::db::bot_profiles::effective(&mut conn, bot_id, &provider).await?;
+    Ok(profile.map(|(_, profile)| (provider, profile.0.model)))
+}
+
 /// The tool error code for a refused bot edit, or `None` for a failure to log.
 fn edit_refusal(err: &crate::db::bots::BotError) -> Option<&'static str> {
     use crate::db::bots::{BotError, Refusal};
@@ -1367,7 +1380,7 @@ fn edit_refusal(err: &crate::db::bots::BotError) -> Option<&'static str> {
 #[serde(deny_unknown_fields)]
 struct SetBotModelArgs {
     target_bot_id: Uuid,
-    model: String,
+    model: Option<String>,
     provider_id: Option<String>,
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
@@ -1384,18 +1397,43 @@ async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     let Ok(parsed) = serde_json::from_value::<SetBotModelArgs>(args.clone()) else {
         return reject(
             "INVALID_ARGUMENTS",
-            "pass a target_bot_id UUID and a model, and optionally provider_id, \
-             reasoning_effort, and service_tier.",
+            "pass a target_bot_id UUID, and model, provider_id, reasoning_effort, or \
+             service_tier.",
         );
     };
+    let current = match parsed.model {
+        Some(_) => None,
+        None => match current_model(state, parsed.target_bot_id).await {
+            Ok(Some(current)) => Some(current),
+            Ok(None) => {
+                return reject(
+                    "MODEL_REQUIRED",
+                    "this bot has no model yet; pass the model the owner wants.",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "reading a bot's model failed");
+                return reject(
+                    "UNAVAILABLE",
+                    "bot models cannot be changed right now; try again shortly.",
+                );
+            }
+        },
+    };
     let request = super::routines::ModelRequest {
-        model: &parsed.model,
-        provider_id: parsed.provider_id.as_deref(),
+        model: parsed
+            .model
+            .as_deref()
+            .or(current.as_ref().map(|(_, model)| model.as_str()))
+            .unwrap_or_default(),
+        provider_id: parsed
+            .provider_id
+            .as_deref()
+            .or(current.as_ref().map(|(provider, _)| provider.as_str())),
         reasoning_effort: parsed.reasoning_effort.as_deref(),
         service_tier: parsed.service_tier.as_deref(),
     };
-    let model = match super::routines::resolve(state, Some(parsed.target_bot_id), &request).await
-    {
+    let model = match super::routines::resolve(state, Some(parsed.target_bot_id), &request).await {
         Ok(model) => model,
         Err(reason) => {
             return reject(

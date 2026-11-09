@@ -729,7 +729,10 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     .await;
     let text = unknown.result.as_str().unwrap_or_default();
     assert!(text.starts_with("MODEL_NOT_AVAILABLE"), "{}", unknown.body);
-    assert!(text.contains("gpt-6.1-sol"), "the error lists models: {text}");
+    assert!(
+        text.contains("gpt-6.1-sol"),
+        "the error lists models: {text}"
+    );
     assert_eq!(profile(dev.clone()).await, before, "nothing was saved");
 
     let args = json!({ "target_bot_id": dev, "model": "GPT 6.1 Sol",
@@ -747,6 +750,30 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     assert_eq!(saved["own"], true, "{saved}");
     assert_eq!(saved["model"], "gpt-6.1-sol");
     assert_eq!(saved["revision"], 1, "the retry kept the revision");
+    let updated = || {
+        count(
+            &h.app,
+            "SELECT count(*) FROM bot_events WHERE bot_id = ?1 AND kind = 'bot.updated'",
+            &dev,
+        )
+    };
+    assert_eq!(updated().await, 1, "one change tells clients once");
+
+    let effort = tool(
+        &h.app,
+        &token,
+        "set_bot_model",
+        json!({ "target_bot_id": dev, "reasoning_effort": "low" }),
+    )
+    .await;
+    assert!(!effort.error, "{}", effort.body);
+    assert_eq!(
+        effort.result["model"]["model"], "gpt-6.1-sol",
+        "the model is kept"
+    );
+    assert_eq!(effort.result["model"]["reasoning_effort"], "low");
+    assert_eq!(effort.result["model"]["service_tier"], "default");
+    assert_eq!(updated().await, 2);
 
     let own = tool(
         &h.app,
@@ -770,5 +797,5 @@ async fn a_bot_sets_another_bots_model_and_its_next_turn_runs_on_it() {
     assert_eq!(provider, "codex");
     let used: Value = serde_json::from_str(&used).unwrap();
     assert_eq!(used["model"], "gpt-6.1-sol");
-    assert_eq!(used["reasoning_effort"], "high");
+    assert_eq!(used["reasoning_effort"], "low");
 }

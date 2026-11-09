@@ -561,12 +561,16 @@ pub async fn set_model_for_turn(
     if current.status != BotStatus::Active {
         return Err(BotError::Deleted);
     }
+    let before = super::bot_profiles::own(&mut tx, bot_id).await?;
     let saved = super::bot_profiles::put_in(&mut tx, bot_id, provider_id, profile)
         .await
         .map_err(|err| match err {
             super::bot_profiles::BotProfileError::Db(err) => BotError::Db(err),
             super::bot_profiles::BotProfileError::NotFound => BotError::Deleted,
         })?;
+    if before.as_ref() != Some(&saved) {
+        super::events::bot_updated(&mut tx, bot_id).await?;
+    }
     tx.commit().await?;
     Ok(saved)
 }
