@@ -93,3 +93,12 @@ fn a_render_laid_over_the_bubble_is_opaque() {
     assert_eq!(pixel(&rendered, 5, 5), [128, 0, 127, 255]);
     assert_eq!(pixel(&rendered, 250, 5), [0, 0, 255, 255]);
 }
+
+#[test]
+fn a_huge_visual_renders_at_a_lower_scale_within_the_pixel_budget() {
+    let html = r#"<div style="height: 4000px; background: red"></div>"#;
+    let rendered = render(html, 1600, 3.0, &Theme::standard(true)).unwrap();
+    assert!(rendered.width * rendered.height <= 16 * 1024 * 1024);
+    assert!(rendered.width >= 1600);
+    assert_eq!(rendered.content_height, 4000);
+}

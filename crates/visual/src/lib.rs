@@ -20,6 +20,9 @@ pub const MAX_WIDTH: u32 = 1600;
 /// Content below this many CSS pixels is cut off.
 pub const MAX_HEIGHT: u32 = 4000;
 const MAX_SCALE: f32 = 3.0;
+/// Device pixels one render may allocate (64 MiB of RGBA). A larger visual
+/// renders at a lower scale instead.
+const MAX_PIXELS: f32 = 16.0 * 1024.0 * 1024.0;
 
 pub const SANS: &str = "Inter";
 pub const MONO: &str = "JetBrains Mono";
@@ -277,7 +280,8 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
         return Err(Error::Empty);
     }
     let height = content_height.min(MAX_HEIGHT);
-    let device = |css: u32| (css as f32 * scale).round() as u32;
+    let scale = scale.min((MAX_PIXELS / (width * height) as f32).sqrt());
+    let device = |css: u32| (css as f32 * scale).floor().max(1.0) as u32;
     let bitmap = takumi::render(options(
         Viewport::new((device(width), device(height))).with_device_pixel_ratio(scale),
     ))
