@@ -8,7 +8,9 @@
 //! and continues that turn. An owner message sent while a draft is open
 //! carries the owner's edits atomically and binds that version to the new
 //! request; the bot there may revise it (a new revision supersedes the old
-//! one) or, when the message approves it, confirm that exact version. An
+//! one) or, when the message approves it, confirm that exact version. If
+//! that request ends having done neither, the reply moved on and the draft
+//! closes as discarded (a trigger). An
 //! approval lets one call of the send request send it: an external computer
 //! tool call naming the draft, or `start_draft_send` before a host send. No
 //! second approval card is shown for that call. Only the bot's report for
@@ -46,6 +48,9 @@ pub struct OutgoingDraft {
     pub status: Status,
     /// Pending, and its turn is still live, so the Approve button works.
     pub can_approve: bool,
+    /// Pending and handed to the live request of the owner message it was
+    /// sent with: that request revises, confirms, or closes it.
+    pub in_reply: bool,
     pub approval_source: Option<ApprovalSource>,
     pub approved_version: Option<i64>,
     /// The owner message that approved it, for a chat approval.
@@ -69,6 +74,8 @@ const SELECT: &str = "SELECT d.id, d.lineage_id, d.revision, d.bot_id, d.turn_id
         d.version, d.status,
         d.status = 'pending' AND t.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')
             AS can_approve,
+        d.status = 'pending' AND EXISTS (SELECT 1 FROM turns c WHERE c.id = d.context_turn_id
+            AND c.status IN ('queued', 'preparing', 'sending', 'running', 'waiting')) AS in_reply,
         d.approval_source, d.approved_version, d.approved_item_id, d.approved_at, d.delivery,
         d.result_detail, d.superseded_by, d.created_at, d.updated_at, d.settled_at,
         d.send_turn_id, d.context_turn_id, d.context_version

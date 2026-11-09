@@ -138,7 +138,34 @@ pub async fn turn_changed(
     append(conn, bot_id, "turn.updated", data).await?;
     bot_updated(conn, bot_id).await?;
     crate::db::delegations::publish_reply(conn, turn_id).await?;
-    root_changed(conn, turn_id).await
+    root_changed(conn, turn_id).await?;
+    reply_drafts_changed(conn, turn_id).await
+}
+
+/// Republish the turns showing drafts handed to `reply_turn`, so each card
+/// follows the reply that holds it until that reply closes it.
+async fn reply_drafts_changed(
+    conn: &mut SqliteConnection,
+    reply_turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    let shown: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT d.bot_id, d.turn_id, c.id FROM outgoing_drafts d
+         JOIN conversations c ON c.bot_id = d.bot_id AND c.kind = 'owner'
+         WHERE d.context_turn_id = ?1 AND d.turn_id <> ?1",
+    )
+    .bind(reply_turn)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (bot_id, turn_id, conversation_id) in shown {
+        let turn = turns::load_turn(conn, turn_id).await?;
+        let data = json!({
+            "bot_id": bot_id,
+            "conversation_id": conversation_id,
+            "turn": turn_json(&turn),
+        });
+        append(conn, bot_id, "turn.updated", data).await?;
+    }
+    Ok(())
 }
 
 /// Republish the delegating turns of `task_turn`, a child turn or the owner

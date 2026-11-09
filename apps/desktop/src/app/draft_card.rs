@@ -90,7 +90,7 @@ impl ElseApp {
             .iter()
             .flat_map(|c| c.turns_in_order())
             .flat_map(|t| &t.outgoing_drafts)
-            .filter(|d| d.status == DraftStatus::Pending)
+            .filter(|d| d.is_open())
             .cloned()
             .collect();
         view.draft_forms
@@ -282,7 +282,7 @@ impl ElseApp {
             .bg(theme.secondary)
             .overflow_hidden();
         let expanded = view.expanded_drafts.contains(&id);
-        if draft.status != DraftStatus::Pending {
+        if !draft.is_open() {
             let color = match draft.status {
                 DraftStatus::Sent => theme.success,
                 DraftStatus::Failed => theme.danger,
@@ -309,7 +309,7 @@ impl ElseApp {
                         .font_medium()
                         .child(draft.content.label().to_owned()),
                 )
-                .child(muted(draft.status.label(&draft.content).into()))
+                .child(muted(draft.label().into()))
                 .child(
                     div()
                         .flex_1()
@@ -355,6 +355,11 @@ impl ElseApp {
                                 .child(draft.content.body().to_owned()),
                         ),
                 );
+            }
+            if draft.status == DraftStatus::Discarded
+                && let Some(detail) = &draft.result_detail
+            {
+                card = card.child(div().px_4().pb_3().child(muted(detail.clone())));
             }
             if matches!(draft.status, DraftStatus::Failed | DraftStatus::Uncertain) {
                 card = card.child(
