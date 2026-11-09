@@ -32,6 +32,13 @@ pub fn moved(ids: &[Uuid], dragged: Uuid, target: Uuid) -> Option<Vec<Uuid>> {
     Some(ids)
 }
 
+/// Whether dropping `dragged` onto `target` places it below `target`:
+/// a category moving down lands after its target, one moving up before it.
+pub fn lands_below(ids: &[Uuid], dragged: Uuid, target: Uuid) -> bool {
+    let at = |id| ids.iter().position(|i| *i == id);
+    matches!((at(dragged), at(target)), (Some(from), Some(to)) if from < to)
+}
+
 /// A desktop-local order from before the server kept one: its known
 /// categories first, then the rest in the server's order.
 pub fn carried_order(categories: &[Category], local: &[Uuid]) -> Vec<Uuid> {
@@ -254,6 +261,19 @@ mod tests {
         assert_eq!(last, [ids[1], ids[2], ids[0]]);
         assert_eq!(moved(&last, ids[0], ids[1]).unwrap(), ids);
         assert_eq!(moved(&ids, ids[0], Uuid::from_u128(9)), None);
+    }
+
+    #[test]
+    fn the_drop_edge_matches_where_the_category_lands() {
+        let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
+        for (dragged, target) in [(0, 2), (2, 0), (1, 2), (1, 0)] {
+            let order = moved(&ids, ids[dragged], ids[target]).unwrap();
+            let at = |id| order.iter().position(|i| *i == id).unwrap();
+            assert_eq!(
+                lands_below(&ids, ids[dragged], ids[target]),
+                at(ids[dragged]) > at(ids[target]),
+            );
+        }
     }
 
     #[test]

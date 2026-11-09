@@ -83,6 +83,7 @@ impl ElseApp {
         let layout = self.sidebar_layout();
         let can_edit = self.connection == Connection::Connected;
         let owner = cx.entity().downgrade();
+        let category_order: std::rc::Rc<[Uuid]> = self.categories.iter().map(|c| c.id).collect();
         if let Some(notice) = self.category_notice.clone() {
             list = list.child(
                 div()
@@ -172,9 +173,16 @@ impl ElseApp {
                         },
                         |drag, _, _, cx| cx.new(|_| drag.clone()),
                     );
+                    let order = category_order.clone();
+                    let target = category.id;
                     zone = zone
-                        .drag_over::<CategoryDrag>(|style, _, _, cx| {
-                            style.bg(cx.theme().drop_target)
+                        .drag_over::<CategoryDrag>(move |style, drag, _, cx| {
+                            let style = style.rounded_none().border_color(cx.theme().drag_border);
+                            if crate::sidebar::lands_below(&order, drag.id, target) {
+                                style.border_b_2()
+                            } else {
+                                style.border_t_2()
+                            }
                         })
                         .on_drop(cx.listener(move |app, drag: &CategoryDrag, _, cx| {
                             app.reorder_category(drag.id, category.id, cx);
