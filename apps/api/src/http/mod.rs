@@ -30,6 +30,7 @@ pub mod task_secrets;
 mod tool_search;
 pub mod tools;
 pub mod turns;
+mod visual_tools;
 pub mod webhooks;
 pub mod ws;
 

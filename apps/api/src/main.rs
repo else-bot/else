@@ -37,6 +37,10 @@ version  print this build's version\n  \
 context  print representative bot instructions, tool schemas, and byte counts as JSON\n";
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
+        else_visual::isolate::run_worker();
+    }
+    else_visual::isolate::use_this_executable();
     if std::env::args().nth(1).as_deref() == Some("context") {
         if std::env::args().len() != 2 {
             eprintln!("{USAGE}");

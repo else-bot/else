@@ -641,3 +641,81 @@ async fn reading_a_reply_as_streamed_survives_attaching_its_files() {
         "{state}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_html_file_shown_as_an_image_attaches_as_a_visual_and_a_linked_one_as_a_download() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app(
+        directory.path(),
+        vec![
+            "![Digest](viz/digest.html) [Report](report.html) ![Broken](empty.html) ![Text](notes.txt)"
+                .into(),
+        ],
+        TurnOutcome::Completed,
+    )
+    .await;
+    let bot = app.main_bot().await;
+    let project = directory.path().join(&bot);
+    std::fs::create_dir_all(project.join("viz")).unwrap();
+    let visual = r#"<div style="padding: 12px; background: var(--card)">Revenue $70.37</div>"#;
+    std::fs::write(project.join("viz/digest.html"), visual).unwrap();
+    std::fs::write(project.join("report.html"), visual).unwrap();
+    std::fs::write(project.join("empty.html"), "").unwrap();
+    std::fs::write(project.join("notes.txt"), "plain").unwrap();
+    send(&app, &bot, "completed").await;
+    let messages = replies(&app, &bot).await;
+    assert_eq!(
+        messages[0]["text"],
+        "[File: digest.html] [File: report.html] ![Broken](empty.html) ![Text](notes.txt)"
+    );
+    let parts = messages[0]["parts"].as_array().unwrap();
+    assert_eq!(parts[0]["file"]["media_type"], else_visual::MEDIA_TYPE);
+    assert_eq!(parts[2]["file"]["media_type"], "text/html");
+    let id = parts[0]["file"]["id"].as_str().unwrap().parse().unwrap();
+    let (_, saved) = else_api::db::attachments::read(&app.db.pool, bot.parse().unwrap(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved, visual.as_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_html_file_can_be_both_a_download_and_a_visual_in_either_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app(
+        directory.path(),
+        vec![
+            "[Source](chart.html) ![Chart](chart.html)".into(),
+            "![Chart](chart.html) [Source](chart.html)".into(),
+        ],
+        TurnOutcome::Completed,
+    )
+    .await;
+    let bot = app.main_bot().await;
+    let project = directory.path().join(&bot);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("chart.html"),
+        r#"<div style="height: 20px">Chart</div>"#,
+    )
+    .unwrap();
+    send(&app, &bot, "completed").await;
+    let messages = replies(&app, &bot).await;
+    for (message, order) in messages.iter().zip([
+        ["text/html", else_visual::MEDIA_TYPE],
+        [else_visual::MEDIA_TYPE, "text/html"],
+    ]) {
+        let files: Vec<&Value> = message["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|part| part["type"] == "file")
+            .collect();
+        let types: Vec<&str> = files
+            .iter()
+            .map(|part| part["file"]["media_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, order, "{message}");
+        assert_ne!(files[0]["file"]["id"], files[1]["file"]["id"], "{message}");
+    }
+}

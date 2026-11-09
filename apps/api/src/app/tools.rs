@@ -42,6 +42,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "social_connections",
     "social_action_status",
     "rules_update",
+    "visual_preview",
     "find_tool",
     "use_tool",
 ];

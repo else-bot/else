@@ -326,7 +326,8 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          on what it needs. Never read or change else.bot's own installation or data, other \
          bots' directories, or credentials unless the owner explicitly asks. To share a \
          file, save it in your project and link its project-relative or ~/work/ path: \
-         ![Chart](charts/result.png) shows an image (PNG, JPEG, GIF, WebP) and \
+         ![Chart](charts/result.png) shows an image (PNG, JPEG, GIF, WebP), \
+         ![Digest](viz/digest.html) an HTML visual (rules in visual_preview), and \
          [Data](out/data.csv) attaches any file, up to 10 MiB and eight per message. The \
          owner cannot open unlinked paths. Remote URLs are not attached, so download them \
          first; never link credentials or files outside your project.\n\n\
@@ -1171,7 +1172,7 @@ mod tests {
         input.delegation.main_bot = true;
         input.delegation.can_create_bot = true;
         let size = super::instructions(&input, "/p").len();
-        assert!(size <= 13_000, "{size} bytes");
+        assert!(size <= 13_100, "{size} bytes");
     }
 
     /// Native host tools cannot be gated, so the instructions carry this rule.

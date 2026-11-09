@@ -22,6 +22,8 @@ impl TestDb {
         }
     }
     pub async fn migrated() -> Self {
+        // In-process test servers render visuals with the real API binary's worker.
+        else_visual::isolate::use_worker(env!("CARGO_BIN_EXE_else-api").into());
         let db = Self::empty().await;
         else_api::db::migrate(&db.pool).await.unwrap();
         db

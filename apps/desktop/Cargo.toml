@@ -9,6 +9,7 @@ uuid = "1.29.0"
 
 [dependencies]
 else-tailnet = { path = "../../crates/tailnet" }
+else-visual = { path = "../../crates/visual" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22.1"

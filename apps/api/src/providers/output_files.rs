@@ -50,7 +50,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
         .open(project)
         .ok()?;
     let mut files = Vec::new();
-    let mut saved = HashMap::<PathBuf, Attachment>::new();
+    let mut saved = HashMap::<(PathBuf, bool), Attachment>::new();
     let mut parts = Vec::new();
     let mut offset = 0;
     for (range, url, reference) in candidates {
@@ -67,10 +67,15 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
             .components()
             .filter(|component| *component != Component::CurDir)
             .collect();
-        let file = if let Some(file) = saved.get(&key) {
-            if reference == Reference::Image && !is_image(&file.media_type) {
-                continue;
-            }
+        let reused = match reference {
+            Reference::Image => saved.get(&(key.clone(), true)),
+            Reference::Link => saved.get(&(key.clone(), false)).or_else(|| {
+                saved
+                    .get(&(key.clone(), true))
+                    .filter(|file| file.media_type != else_visual::MEDIA_TYPE)
+            }),
+        };
+        let file = if let Some(file) = reused {
             file.clone()
         } else {
             if files.len() == MAX_MESSAGE_FILES {
@@ -80,7 +85,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
                 continue;
             };
             let file = output.file.clone();
-            saved.insert(key, file.clone());
+            saved.insert((key, is_shown(&file.media_type)), file.clone());
             files.push(output);
             file
         };
@@ -212,6 +217,7 @@ fn read_file(root: &File, path: &Path, reference: Reference) -> Option<OutputFil
     }
     let media_type = match (image_type(&data), reference) {
         (Some(image), _) => image.to_owned(),
+        (None, Reference::Image) if is_visual(name, &data) => else_visual::MEDIA_TYPE.to_owned(),
         (None, Reference::Image) => return None,
         (None, Reference::Link) => guessed_type(name),
     };
@@ -233,6 +239,55 @@ fn guessed_type(name: &str) -> String {
         Some(Ok(guessed)) if !is_image(&guessed) => guessed,
         _ => "application/octet-stream".to_owned(),
     }
+}
+
+/// The source of the visual at `url` in `project`, as `![alt](url)` would
+/// attach it.
+pub(crate) fn read_visual(project: &Path, url: &str) -> Result<String, &'static str> {
+    const NOT_FOUND: &str = "No regular file at that path in your project.";
+    let path = relative_path(project, url).ok_or("Give a path in your project.")?;
+    if !is_html_name(path) {
+        return Err("A visual is an .html file.");
+    }
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(project)
+        .map_err(|_| NOT_FOUND)?;
+    let file = open_beneath(&root, path).ok_or(NOT_FOUND)?;
+    let metadata = file.metadata().map_err(|_| NOT_FOUND)?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(NOT_FOUND);
+    }
+    let mut html = String::new();
+    file.take(else_visual::MAX_BYTES as u64 + 1)
+        .read_to_string(&mut html)
+        .map_err(|_| "The file is not UTF-8 text.")?;
+    Ok(html)
+}
+
+fn is_html_name(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+}
+
+/// An `.html` file shown with image syntax is a visual when it renders.
+fn is_visual(name: &str, data: &[u8]) -> bool {
+    is_html_name(Path::new(name))
+        && std::str::from_utf8(data).is_ok_and(|html| {
+            else_visual::isolate::render(
+                html,
+                else_visual::REFERENCE_WIDTH,
+                1.0,
+                &else_visual::Theme::standard(true),
+            )
+            .is_ok()
+        })
+}
+
+fn is_shown(media_type: &str) -> bool {
+    is_image(media_type) || media_type == else_visual::MEDIA_TYPE
 }
 
 fn is_image(media_type: &str) -> bool {

@@ -19,6 +19,32 @@ lock = threading.Lock()
 stopped = None
 thread_id = 'desktop-fixture-thread'
 turn_id = None
+project = None
+VISUAL = """<style>
+.kpis { display: flex; flex-wrap: wrap; gap: 8px; }
+.kpi { flex: 1 1 140px; min-width: 0; padding: 12px 14px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+.label { color: var(--muted-foreground); font-size: 12px; }
+.value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.down { color: var(--danger); font-size: 12px; } .flat { color: var(--muted-foreground); font-size: 12px; }
+.section { margin-top: 12px; padding: 14px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+.row { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; }
+.name { width: 110px; color: var(--muted-foreground); }
+.track { flex: 1; height: 10px; background: var(--muted); border-radius: 5px; overflow: hidden; }
+.bar { height: 10px; border-radius: 5px; }
+</style>
+<div>
+<div class="kpis">
+<div class="kpi"><div class="label">Revenue 24h</div><div class="value">$70.37</div><div class="flat">7d avg $72.39</div></div>
+<div class="kpi"><div class="label">Signups 24h</div><div class="value">2</div><div class="down">-74% vs 7d avg</div></div>
+<div class="kpi"><div class="label">Landing visitors</div><div class="value">139</div><div class="flat">Nov 8: 140</div></div>
+</div>
+<div class="section">
+<div class="row"><span class="name">Organic search</span><div class="track"><div class="bar" style="width: 59%; background: var(--chart-1)"></div></div><span>44</span></div>
+<div class="row"><span class="name">Paid (X Ads)</span><div class="track"><div class="bar" style="width: 41%; background: var(--chart-2)"></div></div><span>30</span></div>
+<svg width="100%" height="48" viewBox="0 0 300 48" preserveAspectRatio="none" style="display: block; margin-top: 10px"><polyline fill="none" stroke="var(--chart-3)" stroke-width="2" points="0,36 50,26 100,30 150,14 200,18 250,6 300,22"/></svg>
+</div>
+</div>
+"""
 
 def send(value):
     with lock:
@@ -205,6 +231,17 @@ def stream(turn, latest, packet, stopped):
         return
     if latest == '[ui:hang]':
         return
+    if latest == '[ui:visual]':
+        viz = Path(project) / 'viz'
+        viz.mkdir(exist_ok=True)
+        (viz / 'digest.html').write_text(VISUAL)
+        preview = outgoing_tool('visual_preview', {'path': 'viz/digest.html'})
+        reply = (f"Growth digest, previewed at {preview['content_height']}px.\n\n"
+                 "![Growth digest](viz/digest.html)\n\nSignups are down; revenue is flat.")
+        event('item/agentMessage/delta', {'threadId': thread_id, 'turnId': turn,
+              'itemId': 'fixture-visual', 'delta': reply})
+        finish(turn, stopped, 'completed')
+        return
     pause = 4.0 if '[ui:slow]' in packet else 1.0
     for text in ['Fixture ', 'reply ', '✓ ', 'from ', 'the ', 'desktop ', 'composer.']:
         if stopped.wait(pause):
@@ -228,6 +265,7 @@ for line in sys.stdin:
         result = {'account':{'type':'chatgpt','email':'desktop-fixture@example.invalid'}}
     elif method in ['thread/start','thread/resume']:
         thread_id = params.get('threadId', thread_id)
+        project = params.get('cwd', project)
         result = {'thread':{'id':thread_id},'model':params.get('model'),'reasoningEffort':params.get('config',{}).get('model_reasoning_effort'),'serviceTier':params.get('serviceTier')}
     elif method == 'turn/start':
         turn_id = str(uuid.uuid4())
