@@ -161,7 +161,13 @@ impl RowText {
         let format = body.format;
         let mut mentions = format.mentions(&visible, bots);
         let content = plain_content(&visible, &visible_parts, &mut mentions);
-        let display = MentionDisplay::new(&visible, &mentions, &format.hard_breaks(&visible));
+        let files = file_map(&parts);
+        let display = MentionDisplay::new(
+            &visible,
+            &mentions,
+            &file_links(&content, &files),
+            &format.hard_breaks(&visible),
+        );
         let widget = match format {
             RowFormat::Plain | RowFormat::Quoted { .. } => Widget::Plain(cx.new(|cx| {
                 let mut state = TextareaState::new(window, cx)
@@ -201,7 +207,7 @@ impl RowText {
             format,
             widget,
             quote,
-            files: file_map(&parts),
+            files,
             parts,
             owner: cx.entity().downgrade(),
             bot,
@@ -293,7 +299,13 @@ impl RowText {
         {
             return false;
         }
-        let display = MentionDisplay::new(&visible, &mentions, &self.format.hard_breaks(&visible));
+        let files = file_map(&parts);
+        let display = MentionDisplay::new(
+            &visible,
+            &mentions,
+            &file_links(&content, &files),
+            &self.format.hard_breaks(&visible),
+        );
         match &self.widget {
             Widget::Plain(state) => {
                 state.update(cx, |state, cx| state.set_value(content, window, cx))
@@ -304,7 +316,7 @@ impl RowText {
             }),
         }
         self.source = source;
-        self.files = file_map(&parts);
+        self.files = files;
         self.parts = parts;
         self.mentions = mentions;
         self.display = display;
@@ -315,7 +327,10 @@ impl RowText {
         let mentions = self.mentions.clone();
         let files = self.files.clone();
         let preview_files = files.clone();
+        let link_files = files.clone();
+        let tooltip_files = files.clone();
         let owner = self.owner.clone();
+        let link_owner = owner.clone();
         let bot = self.bot;
         let body = match &self.widget {
             Widget::Plain(state) => Textarea::new(state)
@@ -402,16 +417,24 @@ impl RowText {
                 .scrollable(false)
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-                .on_link_click(|url, event, _, cx| {
-                    if activates_link(event)
-                        && let Some(target) = LinkTarget::parse(url)
-                    {
+                .on_link_click(move |url, event, window, cx| {
+                    if !activates_link(event) {
+                        return;
+                    }
+                    if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
+                        let file = file.clone();
+                        let _ = link_owner
+                            .update(cx, |app, cx| app.preview_attachment(bot, file, window, cx));
+                    } else if let Some(target) = LinkTarget::parse(url) {
                         target.open(cx);
                     }
                 })
-                .link_tooltip(|url, window, cx| {
-                    let destination = LinkTarget::parse(url)
-                        .map_or_else(|| url.to_string(), |target| target.destination());
+                .link_tooltip(move |url, window, cx| {
+                    let destination = match linked_file(url).and_then(|id| tooltip_files.get(&id)) {
+                        Some(file) => format!("{} · {}", file.name, file_size(file.size)),
+                        None => LinkTarget::parse(url)
+                            .map_or_else(|| url.to_string(), |target| target.destination()),
+                    };
                     Tooltip::element(move |_, _| div().max_w(rems(32.)).child(destination.clone()))
                         .build(window, cx)
                 })
@@ -511,6 +534,37 @@ fn file_map(parts: &[MessagePart]) -> HashMap<Uuid, Attachment> {
         .collect()
 }
 
+const FILE_LINK: &str = "else-file:";
+
+/// Files as Markdown links, since a Markdown row cannot show file chips.
+fn file_links(
+    content: &InputContent,
+    files: &HashMap<Uuid, Attachment>,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    content
+        .tokens()
+        .iter()
+        .filter_map(|span| {
+            let file = files.get(&file_id(span.token().id())?)?;
+            let name: String = file
+                .name
+                .chars()
+                .flat_map(|c| {
+                    c.is_ascii_punctuation()
+                        .then_some('\\')
+                        .into_iter()
+                        .chain([c])
+                })
+                .collect();
+            Some((span.range(), format!("[{name}]({FILE_LINK}{})", file.id)))
+        })
+        .collect()
+}
+
+fn linked_file(url: &str) -> Option<Uuid> {
+    url.strip_prefix(FILE_LINK)?.parse().ok()
+}
+
 fn plain_content(
     source: &str,
     parts: &[MessagePart],
@@ -569,7 +623,7 @@ fn activates_link(event: &ClickEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowFormat, RowSource, plain_content};
+    use super::{RowFormat, RowSource, file_links, file_map, linked_file, plain_content};
     use crate::api::Bot;
     use crate::app::bot_mention::MentionDisplay;
     use crate::app::bot_mention::{BotMention, MentionRegistry};
@@ -656,7 +710,7 @@ mod tests {
         let bots = MentionRegistry::new(&[scout]);
         let mentions = RowFormat::OwnerMarkdown.mentions(source, &bots);
         let breaks = RowFormat::OwnerMarkdown.hard_breaks(source);
-        let display = MentionDisplay::new(source, &mentions, &breaks);
+        let display = MentionDisplay::new(source, &mentions, &[], &breaks);
         assert_eq!(
             display.text,
             format!(
@@ -680,7 +734,7 @@ mod tests {
         ] {
             let breaks = RowFormat::OwnerMarkdown.hard_breaks(typed);
             assert_eq!(
-                kinds(&MentionDisplay::new(typed, &[], &breaks).text),
+                kinds(&MentionDisplay::new(typed, &[], &[], &breaks).text),
                 expected,
                 "{typed:?}"
             );
@@ -758,6 +812,46 @@ mod tests {
             assert_eq!(file_id(content.tokens()[0].token().id()), Some(file.id));
             assert_eq!(&body[content.tokens()[0].range()], file.fallback());
         }
+    }
+
+    #[test]
+    fn bot_files_render_as_links_to_their_attachments() {
+        fn links(node: &markdown::mdast::Node, found: &mut Vec<(String, String)>) {
+            if let markdown::mdast::Node::Link(link) = node {
+                found.push((node.to_string(), link.url.clone()));
+            }
+            for child in node.children().into_iter().flatten() {
+                links(child, found);
+            }
+        }
+        let file = Attachment {
+            id: Uuid::new_v4(),
+            name: "daily_counts [utc]*.csv".into(),
+            media_type: "text/csv".into(),
+            size: 3,
+        };
+        let text = format!("**Revised:** {} done", file.fallback());
+        let parts = vec![
+            MessagePart::Text {
+                text: "**Revised:** ".into(),
+            },
+            MessagePart::File { file: file.clone() },
+            MessagePart::Text {
+                text: " done".into(),
+            },
+        ];
+        let content = plain_content(&text, &parts, &mut Vec::new());
+        let display =
+            MentionDisplay::new(&text, &[], &file_links(&content, &file_map(&parts)), &[]);
+        let mut found = Vec::new();
+        links(
+            &markdown::to_mdast(&display.text, &markdown::ParseOptions::gfm()).unwrap(),
+            &mut found,
+        );
+        assert_eq!(found.len(), 1, "{}", display.text);
+        assert_eq!(found[0].0, file.name);
+        assert_eq!(linked_file(&found[0].1), Some(file.id));
+        assert_eq!(display.source_bytes(display.text.len()), text.len());
     }
 
     #[test]

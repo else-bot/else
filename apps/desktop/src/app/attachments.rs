@@ -488,12 +488,12 @@ impl ElseApp {
                 return;
             }
             if let Some(image) = &draft_file.image {
-                show_preview(file, Preview::Image(image.clone()), window, cx);
+                show_preview(file, Preview::Image(image.clone()), None, window, cx);
                 return;
             }
             if let Some(PasteSource::Bytes(bytes)) = &draft_file.source {
                 let preview = Preview::from_bytes(&file, bytes.as_ref().clone());
-                show_preview(file, preview, window, cx);
+                show_preview(file, preview, Some(bytes.clone()), window, cx);
                 return;
             }
             if matches!(draft_file.state, UploadState::Uploading) {
@@ -507,7 +507,9 @@ impl ElseApp {
             let result = client.attachment_bytes(bot, file.id).await;
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(bytes) => {
-                    show_preview(file.clone(), Preview::from_bytes(&file, bytes), window, cx)
+                    let bytes = Arc::new(bytes);
+                    let preview = Preview::from_bytes(&file, bytes.as_ref().clone());
+                    show_preview(file, preview, Some(bytes), window, cx)
                 }
                 Err(error) => {
                     app.notice = Some(format!("Could not open {}: {error}", file.name));

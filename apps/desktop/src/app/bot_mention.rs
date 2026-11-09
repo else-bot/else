@@ -216,7 +216,12 @@ pub(super) struct MentionDisplay {
 }
 
 impl MentionDisplay {
-    pub(super) fn new(source: &str, mentions: &[BotMention], hard_breaks: &[usize]) -> Self {
+    pub(super) fn new(
+        source: &str,
+        mentions: &[BotMention],
+        links: &[(Range<usize>, String)],
+        hard_breaks: &[usize],
+    ) -> Self {
         let mut edits: Vec<_> = mentions
             .iter()
             .map(|mention| {
@@ -225,6 +230,7 @@ impl MentionDisplay {
                     format!("[bot](bot-mention:{}:{})", mention.id, mention.range.start),
                 )
             })
+            .chain(links.iter().cloned())
             .chain(hard_breaks.iter().map(|&at| (at..at, "  ".to_owned())))
             .collect();
         edits.sort_by_key(|(range, _)| range.start);
@@ -358,7 +364,7 @@ mod tests {
         let matches = BotMention::in_markdown(source, &bots);
         assert_eq!(matches.len(), 1);
         assert_eq!(&source[matches[0].range.clone()], "@Scout Comp");
-        let display = MentionDisplay::new(source, &matches, &[]);
+        let display = MentionDisplay::new(source, &matches, &[], &[]);
         assert!(display.text.contains("**[bot](bot-mention:"));
         assert!(display.text.contains("`@Scout Comp`"));
         assert!(
@@ -375,7 +381,7 @@ mod tests {
             source,
             &MentionRegistry::new(&[bot(1, "Scout"), bot(2, "日報")]),
         );
-        let display = MentionDisplay::new(source, &matches, &[]);
+        let display = MentionDisplay::new(source, &matches, &[], &[]);
         assert_eq!(display.source_bytes(0), 0);
         for (original, replacement) in &display.replacements {
             assert_eq!(display.source_bytes(replacement.start), original.start);
@@ -383,7 +389,7 @@ mod tests {
             assert_eq!(display.source_bytes(replacement.end), original.end);
         }
         assert_eq!(display.source_bytes(display.text.len()), source.len());
-        let plain = MentionDisplay::new("no mentions ✓", &[], &[]);
+        let plain = MentionDisplay::new("no mentions ✓", &[], &[], &[]);
         assert_eq!(plain.source_bytes(plain.text.len()), "no mentions ✓".len());
     }
 

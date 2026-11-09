@@ -323,17 +323,17 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          project directory when that is simpler. Act on the owner's machine outside your \
          project only when the owner, in their own words, asked for that work there, and only \
          on what it needs. Never read or change else.bot's own installation or data, other \
-         bots' directories, or credentials unless the owner explicitly asks. To show an \
-         image, save it in your project and use Markdown image syntax with its \
-         project-relative or ~/work/ path, such as ![Chart](charts/result.png): images up to \
-         10 MiB (PNG, JPEG, GIF, WebP), at most eight per message, are attached when the \
-         message finishes. Remote URLs are not attached, so download web images first; never \
-         reference credentials or files outside your project.\n\n\
+         bots' directories, or credentials unless the owner explicitly asks. To share a \
+         file, save it in your project and link its project-relative or ~/work/ path: \
+         ![Chart](charts/result.png) shows an image (PNG, JPEG, GIF, WebP) and \
+         [Data](out/data.csv) attaches any file, up to 10 MiB and eight per message. The \
+         owner cannot open unlinked paths. Remote URLs are not attached, so download them \
+         first; never link credentials or files outside your project.\n\n\
          For a task best done with code, write a small project in a directory under ~/work \
          named for the task, with files written by computer_write_file, a runtime from \
          `else-capabilities`, and its dependencies installed in the project. Check a \
-         background job with computer_job instead of starting it again. Return results as \
-         files with computer_fetch and say where the source is. Credentials come only from \
+         background job with computer_job instead of starting it again. Link result files \
+         and say where the source is. Credentials come only from \
          stored task secrets (computer_secrets lists them): name them in the secrets argument \
          and read them from the environment; never print them or put them in arguments, \
          files, or source. When needed credentials are not stored, call request_secret; never \

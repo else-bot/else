@@ -97,9 +97,9 @@ impl SqliteSink {
 }
 
 impl SinkState {
-    async fn prepare_images(
+    async fn prepare_files(
         &self,
-    ) -> Result<Option<crate::providers::output_images::ImageReply>, sqlx::Error> {
+    ) -> Result<Option<crate::providers::output_files::FileReply>, sqlx::Error> {
         let Some(project) = self.project.clone() else {
             return Ok(None);
         };
@@ -114,32 +114,32 @@ impl SinkState {
         };
         text.push_str(&self.pending);
         Ok(tokio::task::spawn_blocking(move || {
-            crate::providers::output_images::prepare(&project, &text)
+            crate::providers::output_files::prepare(&project, &text)
         })
         .await
         .ok()
         .flatten())
     }
 
-    async fn write_images(
+    async fn write_files(
         &self,
         tx: &mut SqliteConnection,
         item: Uuid,
-        reply: &crate::providers::output_images::ImageReply,
+        reply: &crate::providers::output_files::FileReply,
         allowed: &str,
     ) -> Result<(), sqlx::Error> {
         if self.guard(tx, allowed).await?.is_none() {
             return Ok(());
         }
-        for image in &reply.images {
-            let file = &image.file;
+        for output in &reply.files {
+            let file = &output.file;
             super::attachments::store_in(
                 tx,
                 self.bot_id,
                 file.id,
                 &file.name,
                 &file.media_type,
-                &image.data,
+                &output.data,
             )
             .await
             .map_err(|error| match error {
@@ -340,8 +340,8 @@ impl SinkState {
     /// deleted; visible history is not appended in that case. On error
     /// nothing is lost and the call can be retried.
     pub async fn finish(&mut self, outcome: &TurnOutcome) -> Result<(), sqlx::Error> {
-        let images = if matches!(outcome, TurnOutcome::Completed) && !self.fenced {
-            self.prepare_images().await?
+        let files = if matches!(outcome, TurnOutcome::Completed) && !self.fenced {
+            self.prepare_files().await?
         } else {
             None
         };
@@ -374,8 +374,8 @@ impl SinkState {
                 .execute(&mut *tx)
                 .await?;
         }
-        if let (Some(item), Some(reply)) = (wrote_item.or(self.assistant_item), images.as_ref()) {
-            self.write_images(&mut tx, item, reply, ACTIVE_STATUSES)
+        if let (Some(item), Some(reply)) = (wrote_item.or(self.assistant_item), files.as_ref()) {
+            self.write_files(&mut tx, item, reply, ACTIVE_STATUSES)
                 .await?;
         }
         crate::db::delegations::lock_targets_of_root(&mut tx, self.turn_id).await?;
@@ -734,10 +734,10 @@ impl SinkState {
         if self.pending.is_empty() {
             let result: Result<(), sqlx::Error> = async {
                 if let (Some(item), Some(reply)) =
-                    (self.assistant_item, self.prepare_images().await?)
+                    (self.assistant_item, self.prepare_files().await?)
                 {
                     let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                    self.write_images(&mut tx, item, &reply, "('sending', 'running')")
+                    self.write_files(&mut tx, item, &reply, "('sending', 'running')")
                         .await?;
                     tx.commit().await?;
                 }
@@ -745,7 +745,7 @@ impl SinkState {
             }
             .await;
             if let Err(error) = result {
-                tracing::warn!(turn = %self.turn_id, error = %error, "attaching assistant images failed");
+                tracing::warn!(turn = %self.turn_id, error = %error, "attaching assistant files failed");
             }
             self.assistant_item = None;
         } else {

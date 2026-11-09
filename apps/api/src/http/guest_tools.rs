@@ -155,8 +155,9 @@ pub fn tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "computer_fetch",
-            "description": "Copy a file (up to 10 MB) out of your computer into the owner's \
-                artifact store; returns its artifact_id, size, SHA-256, and a text preview.",
+            "description": "Copy a file (up to 10 MB) out of your computer into a host store \
+                the owner cannot open; returns its artifact_id, size, SHA-256, and a text preview. \
+                To send the owner a file, link it from ~/work instead.",
             "inputSchema": { "type": "object", "properties": {
                 "path": { "type": "string", "minLength": 1, "maxLength": 1024 } },
                 "required": ["path"], "additionalProperties": false },

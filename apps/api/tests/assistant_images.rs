@@ -529,3 +529,69 @@ async fn ordinary_camera_photos_become_attachments() {
         matches!(&parts[0], MessagePart::File { file } if file.name == "photo.jpg" && file.media_type == "image/jpeg")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_project_files_attach_and_other_links_stay() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("outside.csv"), "secret").unwrap();
+    let app = app(
+        directory.path(),
+        vec![
+            "Files: [Revised daily CSV](evidence/daily_counts_utc.csv) · [Report](~/work/report.md) \
+             · [Evidence ZIP](/home/elsebot/work/evidence.zip) · [chart](chart.png) · [data][csv] \
+             ![Chart](chart.png). \
+             See [site](https://example.com), [missing](missing.csv), [outside](../outside.csv), \
+             [folder](evidence) and `[code](report.md)`.\n\n[csv]: evidence/daily_counts_utc.csv"
+                .into(),
+        ],
+        TurnOutcome::Completed,
+    )
+    .await;
+    let bot = app.main_bot().await;
+    let project = directory.path().join(&bot);
+    std::fs::create_dir_all(project.join("evidence")).unwrap();
+    let csv = b"day,count\n2026-11-08,3\n".to_vec();
+    std::fs::write(project.join("evidence/daily_counts_utc.csv"), &csv).unwrap();
+    std::fs::write(project.join("report.md"), "# Report").unwrap();
+    std::fs::write(project.join("evidence.zip"), b"PK\x03\x04").unwrap();
+    std::fs::write(project.join("chart.png"), png()).unwrap();
+    send(&app, &bot, "completed").await;
+    let messages = replies(&app, &bot).await;
+    assert_eq!(
+        messages[0]["text"],
+        "Files: [File: daily_counts_utc.csv] · [File: report.md] · [File: evidence.zip] \
+         · [File: chart.png] · [File: daily_counts_utc.csv] [File: chart.png]. See \
+         [site](https://example.com), \
+         [missing](missing.csv), [outside](../outside.csv), [folder](evidence) and \
+         `[code](report.md)`.\n\n[csv]: evidence/daily_counts_utc.csv"
+    );
+    let parts: Vec<MessagePart> = serde_json::from_value(messages[0]["parts"].clone()).unwrap();
+    let files: Vec<_> = parts
+        .into_iter()
+        .filter_map(|part| match part {
+            MessagePart::File { file } => Some(file),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| (file.name.as_str(), file.media_type.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("daily_counts_utc.csv", "text/csv"),
+            ("report.md", "text/markdown"),
+            ("evidence.zip", "application/zip"),
+            ("chart.png", "image/png"),
+            ("daily_counts_utc.csv", "text/csv"),
+            ("chart.png", "image/png"),
+        ]
+    );
+    assert_eq!(files[0].id, files[4].id);
+    assert_eq!(files[3].id, files[5].id);
+    let saved = else_api::db::attachments::read(&app.db.pool, bot.parse().unwrap(), files[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.1, csv);
+}
