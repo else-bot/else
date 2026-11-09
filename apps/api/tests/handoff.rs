@@ -242,6 +242,25 @@ async fn a_missing_target_session_is_rebuilt_from_the_full_conversation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_turn_reaches_the_next_message_with_its_error() {
+    let Two { app, a, b } = two().await;
+    let bot = app.create_bot("Scout").await;
+    say(&app, &bot, A, "Plain first turn.").await;
+    let (_, status) = say(&app, &bot, A, "Benchmark daily [synthetic:refuse]").await;
+    assert_eq!(status, "failed");
+    let (_, status) = say(&app, &bot, A, "What went wrong?").await;
+    assert_eq!(status, "completed");
+    let packet = last(&a.packets().await);
+    assert!(
+        packet.contains(
+            "[turn 2, failed: The synthetic provider refused the message.] Owner: Benchmark daily"
+        ),
+        "{packet}"
+    );
+    let _ = b;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
     let Two { app, a, b } = two().await;
     let bot = app.create_bot("Planner").await;
