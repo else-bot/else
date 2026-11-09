@@ -642,10 +642,11 @@ build_release() {
 	ensure_rust
 	info "Building $* ($BUILD_PROFILE); the first build takes several minutes"
 	for pkg in "$@"; do args="$args -p $pkg"; done
-	# Dev builds follow main commit by commit; incremental codegen rebuilds
-	# only what each commit changed.
+	# Compiler wrappers such as sccache reject incremental codegen.
+	local wrapper="${RUSTC_WRAPPER-${CARGO_BUILD_RUSTC_WRAPPER:-}}"
+	local workspace_wrapper="${RUSTC_WORKSPACE_WRAPPER-${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER:-}}"
 	local incremental=0
-	if dev_build "$version"; then incremental=1; fi
+	if dev_build "$version" && [ -z "$wrapper$workspace_wrapper" ]; then incremental=1; fi
 	# shellcheck disable=SC2086
 	if ! (cd "$SRC" && CARGO_INCREMENTAL="$incremental" CARGO_TARGET_DIR="$BUILD" "$CARGO_HOME/bin/cargo" build --profile "$BUILD_PROFILE" --locked $args) >"$log" 2>&1; then
 		tail -20 "$log" >&2

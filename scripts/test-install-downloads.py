@@ -576,6 +576,35 @@ while [ "$#" -gt 0 ]; do
 done
 ''')
 
+    def test_dev_builds_with_compiler_wrappers(self):
+        self.source_toolchain()
+        cargo = self.installation / "toolchain/cargo/bin/cargo"
+        cargo.write_text(cargo.read_text().replace("set -eu\n", '''set -eu
+wrapper="${RUSTC_WRAPPER-${CARGO_BUILD_RUSTC_WRAPPER:-}}"
+workspace_wrapper="${RUSTC_WORKSPACE_WRAPPER-${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER:-}}"
+for compiler_wrapper in "$wrapper" "$workspace_wrapper"; do
+    if [ -n "$compiler_wrapper" ]; then "$compiler_wrapper"; fi
+done
+''', 1))
+        wrapper = self.root / "compiler-wrapper"
+        executable(wrapper, '''#!/bin/sh
+if [ "${CARGO_INCREMENTAL:-0}" = 1 ]; then
+    echo 'sccache: incremental compilation is prohibited' >&2
+    exit 1
+fi
+echo used >> "$ELSE_HOME/wrapper-calls"
+''')
+        variables = ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                     "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+        for variable in variables:
+            self.environment.pop(variable, None)
+        for variable in variables:
+            with self.subTest(wrapper=variable):
+                commit = self.commit_main(variable)
+                self.run_installer("--yes", "--app-only", "--channel", "dev", **{variable: str(wrapper)})
+                self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{commit}"))
+        self.assertEqual((self.installation / "wrapper-calls").read_text().split(), ["used"] * len(variables))
+
     def commit_main(self, message, path="notes", text=None):
         file = self.repo / path
         file.parent.mkdir(parents=True, exist_ok=True)
