@@ -605,6 +605,46 @@ echo used >> "$ELSE_HOME/wrapper-calls"
                 self.assertEqual(self.pointer("app-current"), Path(f"versions/dev-{commit}"))
         self.assertEqual((self.installation / "wrapper-calls").read_text().split(), ["used"] * len(variables))
 
+    @unittest.skipUnless(shutil.which("cargo") and shutil.which("rustc"), "Rust toolchain required")
+    def test_dev_build_with_inherited_cargo_config_wrapper(self):
+        source = self.home / "source"
+        (source / "src").mkdir(parents=True)
+        (source / "src/main.rs").write_text("fn main() {}\n")
+        (source / "Cargo.toml").write_text('[package]\nname = "else-api"\nversion = "0.0.1"\nedition = "2021"\n')
+        (source / "Cargo.lock").write_text('version = 4\n[[package]]\nname = "else-api"\nversion = "0.0.1"\n')
+        wrapper = self.home / "compiler-wrapper"
+        executable(wrapper, '''#!/bin/sh
+if [ "${CARGO_INCREMENTAL:-0}" = 1 ]; then
+    echo 'sccache: incremental compilation is prohibited' >&2
+    exit 1
+fi
+echo used >> "$ELSE_HOME/wrapper-calls"
+exec "$@"
+''')
+        config = self.home / ".cargo/config.toml"
+        config.parent.mkdir()
+        config.write_text(f'[build]\nrustc-wrapper = "{wrapper}"\n')
+        cargo_home = self.installation / "toolchain/cargo"
+        (cargo_home / "bin").mkdir(parents=True)
+        (cargo_home / "bin/cargo").symlink_to(shutil.which("cargo"))
+        destination = self.installation / "bin"
+        destination.mkdir()
+        environment = dict(self.environment, TEST_SOURCE=str(source),
+                           TEST_RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")))
+        for variable in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
+                         "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "CARGO_INCREMENTAL"):
+            environment.pop(variable, None)
+        result = subprocess.run(["bash", "-c", '''
+source "$TEST_INSTALLER"
+SRC="$TEST_SOURCE"
+RUSTUP_HOME="$TEST_RUSTUP_HOME"
+ensure_rust() { :; }
+build_release dev-0000000000000000000000000000000000000000 "$BIN" else-api
+'''], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((destination / "else-api").is_file())
+        self.assertTrue((self.installation / "wrapper-calls").is_file(), "Cargo must use the inherited wrapper")
+
     def commit_main(self, message, path="notes", text=None):
         file = self.repo / path
         file.parent.mkdir(parents=True, exist_ok=True)
