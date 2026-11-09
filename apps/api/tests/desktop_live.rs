@@ -1,6 +1,7 @@
 //! The owner's desktop stream against a real guest desktop: how long a
 //! pointer move takes to show up in the frames, how many frames arrive while
-//! it moves, and the native cursor names for the guest's cursor shapes.
+//! it moves, the native cursor names for the guest's cursor shapes, and
+//! that pasted text reaches a guest app intact.
 //!
 //! Run with scripts/measure-desktop-latency.sh, which starts the guest image
 //! in Docker and sets ELSE_DESKTOP_LATENCY_GUEST to its noVNC address and
@@ -388,7 +389,7 @@ async fn every_native_cursor_name_matches_its_guest_shape() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let (width, height) = (connection.width, connection.height);
     writer
-        .write_all(&viewer::set_encodings(true))
+        .write_all(&viewer::set_encodings(true, false))
         .await
         .unwrap();
     writer
@@ -565,4 +566,92 @@ async fn a_native_cursor_moves_without_frames_and_follows_the_guest_shape() {
             .is_some(),
         "watching paints the cursor into the frames again"
     );
+}
+
+/// A focused X window that, on each Ctrl+V, asks for CLIPBOARD as UTF-8 the
+/// way an app pastes, and prints what it got as JSON once it gets text.
+const PASTE_TARGET: &str = r#"
+import ctypes, json, struct, sys
+x = ctypes.cdll.LoadLibrary("libX11.so.6")
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XDefaultRootWindow.restype = ctypes.c_ulong
+x.XCreateSimpleWindow.restype = ctypes.c_ulong
+x.XInternAtom.restype = ctypes.c_ulong
+x.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long,
+    ctypes.c_long, ctypes.c_int, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+    ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+dpy = ctypes.c_void_p(x.XOpenDisplay(None))
+root = ctypes.c_ulong(x.XDefaultRootWindow(dpy))
+win = ctypes.c_ulong(x.XCreateSimpleWindow(dpy, root, 0, 0, 300, 300, 0, 0, 0))
+x.XSelectInput(dpy, win, ctypes.c_long(1 | 1 << 17))
+x.XMapRaised(dpy, win)
+atom = lambda name: ctypes.c_ulong(x.XInternAtom(dpy, name.encode(), 0))
+clipboard, utf8, prop = atom("CLIPBOARD"), atom("UTF8_STRING"), atom("ELSE_PASTE")
+ev = ctypes.create_string_buffer(192)
+while True:
+    x.XNextEvent(dpy, ev)
+    kind = struct.unpack_from("i", ev.raw, 0)[0]
+    if kind == 19:
+        x.XSetInputFocus(dpy, win, 2, ctypes.c_ulong(0))
+        x.XSync(dpy, 0)
+        print("ready", flush=True)
+    elif kind == 2:
+        state, keycode = struct.unpack_from("II", ev.raw, 80)
+        if state & 4 and x.XKeycodeToKeysym(dpy, keycode, 0) == ord("v"):
+            x.XConvertSelection(dpy, clipboard, utf8, prop, win, ctypes.c_ulong(0))
+    elif kind == 31:
+        kind_ = ctypes.c_ulong(); fmt = ctypes.c_int(); n = ctypes.c_ulong(); left = ctypes.c_ulong()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        x.XGetWindowProperty(dpy, win.value, prop.value, 0, 1 << 20, 1, 0, ctypes.byref(kind_),
+            ctypes.byref(fmt), ctypes.byref(n), ctypes.byref(left), ctypes.byref(data))
+        if n.value:
+            print(json.dumps(bytes(data[:n.value]).decode()), flush=True)
+            sys.exit(0)
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pasted_text_reaches_a_guest_app_as_utf8() {
+    let Ok(container) = std::env::var("ELSE_DESKTOP_LATENCY_CONTAINER") else {
+        eprintln!("skipped: run scripts/measure-desktop-latency.sh");
+        return;
+    };
+    let Some(mut live) = open("mode=control").await else {
+        return;
+    };
+    let socket = &mut live.socket;
+    use tokio::io::AsyncBufReadExt;
+    let mut helper = tokio::process::Command::new("docker")
+        .args(["exec", "-u", "elsebot", "-e", "DISPLAY=:99", &container])
+        .args(["python3", "-c", PASTE_TARGET])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(helper.stdout.take().unwrap()).lines();
+    assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("ready"));
+
+    let text = "héllo ‘quoted’ 漢字 🙂\nsecond line";
+    // x11vnc takes the selection 8 to 45 seconds after it starts, so a guest
+    // that just booted needs a few tries.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let pasted = loop {
+        assert!(Instant::now() < deadline, "the paste never arrived");
+        for body in [
+            json!({ "type": "clipboard", "text": text }),
+            json!({ "type": "key", "key": 0xffe3, "down": true }),
+            json!({ "type": "key", "key": 0x76, "down": true }),
+            json!({ "type": "key", "key": 0x76, "down": false }),
+            json!({ "type": "key", "key": 0xffe3, "down": false }),
+        ] {
+            socket
+                .send(Message::Text(body.to_string().into()))
+                .await
+                .unwrap();
+        }
+        if let Ok(line) = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await {
+            break line.unwrap().expect("the helper printed the paste");
+        }
+    };
+    assert_eq!(serde_json::from_str::<String>(&pasted).unwrap(), text);
 }

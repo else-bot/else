@@ -31,6 +31,7 @@ pub mod socials;
 pub use desktop::MAX_TEXT_CHARS;
 pub use desktop::{
     ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode,
+    MAX_CLIPBOARD_BYTES,
 };
 use serde_json::json;
 

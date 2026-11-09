@@ -12,6 +12,7 @@
 //! client → {"type":"pointer","x":X,"y":Y,"buttons":MASK}   RFB button mask
 //! client → {"type":"key","key":KEYSYM,"down":BOOL}          X11 keysym
 //! client → {"type":"release"}   release every held key and button
+//! client → {"type":"clipboard","text":TEXT}   set the guest's clipboard
 //! ```
 //!
 //! Authenticated like every `/v1` route. Without `wake` the stream attaches
@@ -25,6 +26,10 @@
 //! keyboard batches fail with `OWNER_USING_DESKTOP` until control ends; at
 //! most one stream controls a bot. Leaving control, `release`, and every way
 //! a stream ends release what it pressed. In watch mode input is dropped.
+//! Clipboard text is input too: in control it becomes the guest's CLIPBOARD
+//! and PRIMARY selections before any later key arrives, as UTF-8 where the
+//! guest's x11vnc takes ExtendedClipboard and as Latin-1 otherwise. Text too
+//! long, or outside Latin-1 for an older guest, is refused with a notice.
 //! With `cursor=native`, frames leave out the cursor while the owner controls,
 //! and the stream names the guest's cursor shape whenever it changes, so the
 //! app shows it as its own native cursor; pointer moves then need no frames.
@@ -60,7 +65,11 @@ use crate::computers::cursors;
 use crate::computers::viewer::{self, Event, Framebuffer, Target};
 use crate::computers::{ComputerManager, ViewerLease, ViewerRefusal, ViewerTarget};
 
-const MAX_MESSAGE: usize = 4 * 1024;
+/// Room for the longest clipboard text even when JSON escapes all of it.
+const MAX_MESSAGE: usize = 8 * viewer::MAX_CLIPBOARD_BYTES;
+/// How long a paste outside Latin-1 waits, from taking control, for the guest
+/// to offer UTF-8 before it counts as an older guest.
+const CLIPBOARD_CAPS_WAIT: Duration = Duration::from_secs(1);
 const LEASE_CHECK: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
@@ -129,6 +138,7 @@ enum ClientMessage {
     Pointer { x: u16, y: u16, buttons: u8 },
     Key { key: u32, down: bool },
     Release,
+    Clipboard { text: String },
 }
 
 pub(super) async fn stream(
@@ -337,8 +347,11 @@ struct View {
 
 struct Control {
     writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    drain: JoinHandle<Result<(), viewer::ViewerError>>,
+    events: mpsc::Receiver<Event>,
+    reader: JoinHandle<Result<(), viewer::ViewerError>>,
     bridge: JoinHandle<()>,
+    connected: Instant,
+    clipboard_utf8: bool,
 }
 
 async fn close(
@@ -512,9 +525,16 @@ impl Session {
                     Some(event) => self.apply(event).await,
                     None => end("desktop_disconnected", "The desktop connection closed."),
                 },
-                _ = control_ended(&mut self.control) => {
-                    end("desktop_disconnected", "The desktop connection closed.")
-                }
+                update = control_update(&mut self.control) => match update {
+                    Some(Event::ClipboardUtf8) => {
+                        if let Some(control) = &mut self.control {
+                            control.clipboard_utf8 = true;
+                        }
+                        None
+                    }
+                    Some(_) => None,
+                    None => end("desktop_disconnected", "The desktop connection closed."),
+                },
                 png = encoded(&mut self.encoding) => {
                     match png {
                         Some(png) => {
@@ -661,7 +681,49 @@ impl Session {
                 input(control, &viewer::key_event(key, down)).await
             }
             ClientMessage::Release => self.release_input().await,
+            ClientMessage::Clipboard { text } => self.paste(&text).await,
         }
+    }
+
+    async fn paste(&mut self, text: &str) -> Option<End> {
+        let Some(control) = &mut self.control else {
+            return None;
+        };
+        let text = text.replace("\r\n", "\n");
+        if text.len() > viewer::MAX_CLIPBOARD_BYTES {
+            return self
+                .send(error_message(
+                    "clipboard_too_large",
+                    "The clipboard holds more text than the desktop takes (256 KB).",
+                ))
+                .await;
+        }
+        let latin1 = viewer::clipboard_latin1(&text);
+        if latin1.is_none() && !control.clipboard_utf8 {
+            let waiting = tokio::time::timeout_at(
+                (control.connected + CLIPBOARD_CAPS_WAIT).into(),
+                wait_for_utf8(control),
+            );
+            if self.stop.run_until_cancelled(waiting).await.is_none() {
+                return end("server_stopping", STOPPING);
+            }
+        }
+        let Some(control) = &mut self.control else {
+            return None;
+        };
+        let message = if control.clipboard_utf8 {
+            viewer::clipboard_utf8(&text)
+        } else if let Some(latin1) = latin1 {
+            latin1
+        } else {
+            return self
+                .send(error_message(
+                    "clipboard_unsupported",
+                    "This text has characters this computer cannot paste. Upgrade the computer to paste it.",
+                ))
+                .await;
+        };
+        input(control, &message).await
     }
 
     async fn enter_control(&mut self) -> Option<End> {
@@ -703,16 +765,20 @@ impl Session {
         self.control_lease = Some(lease);
         match connect(&self.target, Target::Control, &self.stop).await {
             Ok(connection) => {
-                let drain = tokio::spawn(viewer::read_events(
+                let (tx, events) = mpsc::channel(4);
+                let reader = tokio::spawn(viewer::read_events(
                     connection.reader,
                     connection.width,
                     connection.height,
-                    None,
+                    Some(tx),
                 ));
                 self.control = Some(Control {
                     writer: connection.writer,
-                    drain,
+                    events,
+                    reader,
                     bridge: connection.bridge,
+                    connected: Instant::now(),
+                    clipboard_utf8: false,
                 });
                 self.mode = Mode::Control;
                 if let Some(end) = self.sync_view().await {
@@ -736,7 +802,7 @@ impl Session {
     async fn leave_control(&mut self) {
         let _ = self.release_input().await;
         if let Some(control) = self.control.take() {
-            close(control.writer, control.drain, control.bridge).await;
+            close(control.writer, control.reader, control.bridge).await;
         }
         self.held_keys.clear();
         self.buttons = 0;
@@ -844,7 +910,7 @@ impl Session {
         if wanted == self.cursor_shapes {
             return None;
         }
-        let mut encodings = viewer::set_encodings(wanted);
+        let mut encodings = viewer::set_encodings(wanted, view.target == Target::Control);
         if !wanted {
             // The server repaints the cursor into the pixels only where the
             // screen changes next, so refresh all of it now.
@@ -1001,15 +1067,29 @@ async fn next_event(view: &mut Option<View>) -> Option<Event> {
     }
 }
 
-async fn control_ended(control: &mut Option<Control>) {
-    match control {
-        Some(control) => {
-            if !control.bridge.is_finished() {
-                let _ = (&mut control.bridge).await;
-            }
-        }
-        None => std::future::pending().await,
+/// The next event the control connection announces on its own (it requests
+/// no screen updates), or `None` once the connection closed.
+async fn control_update(control: &mut Option<Control>) -> Option<Event> {
+    let Some(control) = control else {
+        return std::future::pending().await;
+    };
+    if control.bridge.is_finished() {
+        return None;
     }
+    tokio::select! {
+        Some(event) = control.events.recv() => Some(event),
+        _ = &mut control.bridge => None,
+    }
+}
+
+async fn wait_for_utf8(control: &mut Control) {
+    while let Some(event) = control.events.recv().await {
+        if matches!(event, Event::ClipboardUtf8) {
+            control.clipboard_utf8 = true;
+            return;
+        }
+    }
+    std::future::pending().await
 }
 
 async fn encoded(task: &mut Option<JoinHandle<Vec<u8>>>) -> Option<Vec<u8>> {

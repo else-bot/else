@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::api::{
     Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
-    DesktopEvent, DesktopMode,
+    DesktopEvent, DesktopMode, MAX_CLIPBOARD_BYTES,
 };
 
 #[cfg(target_os = "macos")]
@@ -68,6 +68,8 @@ pub(super) struct ComputerView {
     buttons: u8,
     keys: HashMap<String, u32>,
     modifiers: Modifiers,
+    /// The host clipboard text the guest last received in this control session.
+    shared_clipboard: Option<String>,
     #[cfg(target_os = "macos")]
     marked_text: Option<String>,
     scroll: Point<f32>,
@@ -97,7 +99,9 @@ impl ComputerView {
         let focus = cx.focus_handle();
         let blur = cx.on_blur(&focus, window, |view, _, cx| view.release(cx));
         let activation = cx.observe_window_activation(window, |view, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                view.share_clipboard(cx);
+            } else {
                 view.release(cx);
             }
         });
@@ -123,6 +127,7 @@ impl ComputerView {
             buttons: 0,
             keys: HashMap::new(),
             modifiers: Modifiers::default(),
+            shared_clipboard: None,
             #[cfg(target_os = "macos")]
             marked_text: None,
             scroll: point(0., 0.),
@@ -220,7 +225,10 @@ impl ComputerView {
                                     DesktopEvent::Mode(mode) => {
                                         view.mode = mode;
                                         view.mode_pending = false;
-                                        if mode != DesktopMode::Control {
+                                        view.shared_clipboard = None;
+                                        if mode == DesktopMode::Control {
+                                            view.share_clipboard(cx);
+                                        } else {
                                             view.guest_cursor = None;
                                         }
                                     }
@@ -497,6 +505,31 @@ impl ComputerView {
         }
     }
 
+    /// Gives the guest the host clipboard's text when it changed since the
+    /// guest last received it, so text copied inside the guest stays until
+    /// something new is copied on the host. False when the host text is too
+    /// long, so a paste does not insert the guest's older text instead.
+    fn share_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.controlling() {
+            return true;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return true;
+        };
+        if text.is_empty() || self.shared_clipboard.as_ref() == Some(&text) {
+            return true;
+        }
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            self.notice =
+                Some("The clipboard holds more text than the desktop takes (256 KB).".into());
+            cx.notify();
+            return false;
+        }
+        self.send(DesktopCommand::Clipboard { text: text.clone() }, cx);
+        self.shared_clipboard = Some(text);
+        true
+    }
+
     fn sync_modifiers(&mut self, next: Modifiers, cx: &mut Context<Self>) {
         for (before, after, key) in [
             (self.modifiers.control, next.control, 0xffe3),
@@ -515,7 +548,25 @@ impl ComputerView {
         if !self.controlling() {
             return;
         }
+        if down && pastes(stroke) && !self.share_clipboard(cx) {
+            return;
+        }
         self.sync_modifiers(stroke.modifiers, cx);
+        #[cfg(target_os = "macos")]
+        if down && stroke.modifiers.platform && !stroke.modifiers.control && stroke.key == "v" {
+            // The guest pastes with Ctrl+V. Cmd stays held, so it is pressed again after.
+            for (key, down) in [
+                (0xffeb, false),
+                (0xffe3, true),
+                (0x76, true),
+                (0x76, false),
+                (0xffe3, false),
+                (0xffeb, true),
+            ] {
+                self.send(DesktopCommand::Key { key, down }, cx);
+            }
+            return;
+        }
         let key = if down {
             let Some(key) = keysym(stroke) else {
                 return;
@@ -665,6 +716,10 @@ impl ComputerView {
                         button,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                             view.focus.focus(window, cx);
+                            if button == MouseButton::Middle && !view.share_clipboard(cx) {
+                                cx.stop_propagation();
+                                return;
+                            }
                             view.sync_modifiers(event.modifiers, cx);
                             view.pointer(event.position, view.buttons | button_mask(button), cx);
                             cx.stop_propagation();
@@ -906,6 +961,17 @@ fn screen_point(
     (x >= 0. && y >= 0. && x < width as f32 && y < height as f32).then_some((x as u16, y as u16))
 }
 
+/// Whether `stroke` pastes in a Linux app: Ctrl+V (with Shift in terminals),
+/// Shift+Insert, or the Mac's Cmd+V.
+fn pastes(stroke: &Keystroke) -> bool {
+    let modifiers = stroke.modifiers;
+    match stroke.key.as_str() {
+        "v" => modifiers.control || modifiers.platform,
+        "insert" => modifiers.shift && !modifiers.control,
+        _ => false,
+    }
+}
+
 fn keysym(stroke: &Keystroke) -> Option<u32> {
     let named = match stroke.key.as_str() {
         "backspace" => 0xff08,
@@ -944,7 +1010,7 @@ fn keysym(stroke: &Keystroke) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{keysym, screen_point};
+    use super::{keysym, pastes, screen_point};
     use gpui_kit::{Bounds, Keystroke, point, px, size};
     #[test]
     fn pointer_maps_letterboxed_screen_and_refuses_margins() {
@@ -977,5 +1043,15 @@ mod tests {
         assert_eq!(keysym(&Keystroke::parse("enter").unwrap()), Some(0xff0d));
         assert_eq!(keysym(&Keystroke::parse("f12").unwrap()), Some(0xffc9));
         assert_eq!(keysym(&Keystroke::parse("é").unwrap()), Some(0xe9));
+    }
+
+    #[test]
+    fn paste_shortcuts_share_the_clipboard_and_other_chords_do_not() {
+        for paste in ["ctrl-v", "ctrl-shift-v", "cmd-v", "shift-insert"] {
+            assert!(pastes(&Keystroke::parse(paste).unwrap()), "{paste}");
+        }
+        for other in ["v", "shift-v", "ctrl-c", "insert", "ctrl-insert"] {
+            assert!(!pastes(&Keystroke::parse(other).unwrap()), "{other}");
+        }
     }
 }

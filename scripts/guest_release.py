@@ -73,7 +73,8 @@ BASE = Kind(
     repo=os.environ.get("ELSE_GUEST_BASE_REPO", "ghcr.io/else-bot/else-guest-base"),
     label="bot.else.guest-base.source_sha256",
     dockerfile=f"{CONTEXT}/base.Dockerfile",
-    inputs=(f"{CONTEXT}/base.Dockerfile", f"{CONTEXT}/apt-downloads.conf", f"{CONTEXT}/x11vnc/keymap-settle.patch"),
+    inputs=(f"{CONTEXT}/base.Dockerfile", f"{CONTEXT}/apt-downloads.conf", f"{CONTEXT}/x11vnc/keymap-settle.patch",
+            f"{CONTEXT}/x11vnc/clipboard-utf8.patch"),
     build_args={},
     publisher="publish it once with scripts/build-guest-base.sh and commit the pin",
 )

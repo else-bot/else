@@ -16,15 +16,15 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.s
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dpkg-dev fakeroot \
  && DEBIAN_FRONTEND=noninteractive apt-get build-dep -y --no-install-recommends x11vnc=0.9.17-1
 WORKDIR /build
-COPY x11vnc/keymap-settle.patch /build/
+COPY x11vnc/keymap-settle.patch x11vnc/clipboard-utf8.patch /build/
 RUN apt-get source --only-source x11vnc=0.9.17-1 \
  && cd x11vnc-0.9.17 \
- && cp ../keymap-settle.patch debian/patches/ \
- && echo keymap-settle.patch >> debian/patches/series \
- && { printf 'x11vnc (0.9.17-1+else1) trixie; urgency=medium\n\n  * Settle and recycle added keysyms, drop presses after hang-up.\n\n -- else.bot <noreply@else.bot>  Thu, 05 Nov 2026 00:00:00 +0000\n\n'; cat debian/changelog; } > ../changelog \
+ && cp ../keymap-settle.patch ../clipboard-utf8.patch debian/patches/ \
+ && printf 'keymap-settle.patch\nclipboard-utf8.patch\n' >> debian/patches/series \
+ && { printf 'x11vnc (0.9.17-1+else2) trixie; urgency=medium\n\n  * Settle and recycle added keysyms, drop presses after hang-up.\n  * Accept UTF-8 clipboard text from ExtendedClipboard viewers.\n\n -- else.bot <noreply@else.bot>  Mon, 09 Nov 2026 00:00:00 +0000\n\n'; cat debian/changelog; } > ../changelog \
  && mv ../changelog debian/changelog \
  && DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us \
- && mv ../x11vnc_0.9.17-1+else1_*.deb /build/x11vnc.deb
+ && mv ../x11vnc_0.9.17-1+else2_*.deb /build/x11vnc.deb
 
 FROM runtime
 COPY --from=x11vnc /build/x11vnc.deb /tmp/x11vnc.deb
