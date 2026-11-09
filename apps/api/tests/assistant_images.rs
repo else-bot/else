@@ -595,3 +595,49 @@ async fn linked_project_files_attach_and_other_links_stay() {
         .unwrap();
     assert_eq!(saved.1, csv);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_a_reply_as_streamed_survives_attaching_its_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let streamed =
+        "The [2026-11-09T1845-observations.md](notes/2026-11-09T1845-observations.md) is saved.";
+    let app = app(
+        directory.path(),
+        vec![streamed.into()],
+        TurnOutcome::Completed,
+    )
+    .await;
+    let bot = app.main_bot().await;
+    let project = directory.path().join(&bot);
+    std::fs::create_dir_all(project.join("notes")).unwrap();
+    std::fs::write(
+        project.join("notes/2026-11-09T1845-observations.md"),
+        "# Notes",
+    )
+    .unwrap();
+    send(&app, &bot, "completed").await;
+    let reply = replies(&app, &bot).await.pop().unwrap();
+    let stored = reply["text"].as_str().unwrap();
+    assert_eq!(
+        stored,
+        "The [File: 2026-11-09T1845-observations.md] is saved."
+    );
+
+    let read = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{bot}/read"),
+            Some(serde_json::json!({
+                "action": "through",
+                "position": { "item_seq": reply["seq"], "text_bytes": streamed.len() },
+            })),
+        )
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
+    let state = &read.body["bot"]["read_state"];
+    assert_eq!(state["unread"], false, "{state}");
+    assert_eq!(
+        state["read_through"], state["latest"]["position"],
+        "{state}"
+    );
+}
