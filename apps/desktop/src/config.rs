@@ -183,6 +183,13 @@ pub struct SavedServer {
     pub profile: Profile,
 }
 
+impl SavedServer {
+    /// Whether the name is the one the desktop made up from the address.
+    pub fn has_default_name(&self) -> bool {
+        self.name == default_server_name(&self.profile.origin)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerRegistry {
     pub servers: Vec<SavedServer>,
@@ -237,6 +244,17 @@ impl ServerRegistry {
         let name = name.unwrap_or_else(|| default_server_name(&profile.origin));
         self.servers.push(SavedServer { id, name, profile });
         Ok(id)
+    }
+
+    pub fn rename(&mut self, id: ServerId, name: &str) -> Result<(), String> {
+        let name = server_name(name)?;
+        let server = self
+            .servers
+            .iter_mut()
+            .find(|server| server.id == id)
+            .ok_or("This saved server no longer exists.")?;
+        server.name = name;
+        Ok(())
     }
 
     pub fn remove(&mut self, id: ServerId) -> Result<(), String> {

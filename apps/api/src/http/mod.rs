@@ -324,10 +324,11 @@ async fn readiness(
 }
 
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let (configured, defaults, onboarding_required) = tokio::join!(
+    let (configured, defaults, onboarding_required, server_name) = tokio::join!(
         configured_profiles(&state.db),
         settings::defaults(&state),
         onboarding::required(&state),
+        crate::db::installation::server_name(&state.db),
     );
     let providers: Vec<_> = state
         .scheduler
@@ -350,6 +351,7 @@ async fn capabilities(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         "api_version": "v1",
         "bot_avatar_on_create": true,
         "server_instance_id": state.server_instance_id,
+        "server": { "name": server_name.ok().flatten() },
         "default_provider_id": default_id,
         "defaults": defaults,
         "onboarding_required": onboarding_required,
