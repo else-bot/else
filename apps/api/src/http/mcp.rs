@@ -106,7 +106,7 @@ pub async fn endpoint(
                     | "mcp_connection_status",
                 ) => Tool::Mcp,
                 Some("create_bot") => Tool::CreateBot,
-                Some("rename_bot") => Tool::RenameBot,
+                Some("rename_bot" | "set_bot_model") => Tool::EditBot,
                 Some("rules_update") => Tool::Rules,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_permission") => Tool::AskPermission,
@@ -324,6 +324,35 @@ fn tool_list() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": false,
                              "idempotentHint": true, "openWorldHint": false },
         },
+        {
+            "name": "set_bot_model",
+            "description": "Set an else.bot's own model, reasoning effort, and service tier when the owner asks, \
+                including yours or another bot's, by exact target_bot_id. Its next turn uses it; a \
+                running turn and routines with their own model keep theirs. An unmatched model \
+                changes nothing and the error lists models. Confirm the saved model from the result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target_bot_id": { "type": "string", "format": "uuid" },
+                    "model": { "type": "string", "minLength": 1,
+                               "maxLength": super::routines::MAX_MODEL_CHARS,
+                               "description": "Its ID or name, such as gpt-6.1-sol or Claude Opus 5.5; it selects the provider." },
+                    "provider_id": { "type": "string",
+                                     "description": format!(
+                                         "Only when the owner named the provider ({}).",
+                                         crate::providers::definitions::id_list()
+                                     ) },
+                    "reasoning_effort": { "type": "string",
+                                          "description": "low, medium, high, xhigh, or max. Omit to keep the bot's current effort for that provider." },
+                    "service_tier": { "type": "string",
+                                      "description": "priority is the Fast tier, default the standard one. Omit to keep the bot's current tier." },
+                },
+                "required": ["target_bot_id", "model"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false,
+                             "idempotentHint": true, "openWorldHint": false },
+        },
         super::rules::schema(),
         super::owner_tools::secret_schema(),
         super::owner_tools::choice_schema(),
@@ -512,6 +541,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "list_bots" => list_bots(state, grant, args).await,
         "create_bot" => create_bot(state, grant, args).await,
         "rename_bot" => rename_bot(state, grant, args).await,
+        "set_bot_model" => set_bot_model(state, grant, args).await,
         "request_secret" => super::owner_tools::request_secret(state, grant, args).await,
         "social_connect"
         | "social_connections"
@@ -1280,7 +1310,7 @@ struct RenameBotArgs {
 
 async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
     use crate::app::bots::BotName;
-    use crate::db::bots::{self, BotError, Refusal};
+    use crate::db::bots;
     let reject = |code: &str, message: &str| {
         (
             tool_error(&format!("{code}: {message}")),
@@ -1306,23 +1336,113 @@ async fn rename_bot(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             )
         }
         Err(err) => {
-            let code = match &err {
-                BotError::NotFound => "BOT_NOT_FOUND",
-                BotError::Deleted => "BOT_UNAVAILABLE",
-                BotError::Refused(
-                    Refusal::NotOwnerConversation
-                    | Refusal::NotOwnerRequest
-                    | Refusal::PurposeRequired,
-                ) => "NOT_ALLOWED",
-                BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
-                BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
-                _ => {
-                    tracing::warn!(error = %err, "renaming a bot from a turn failed");
-                    return reject(
-                        "UNAVAILABLE",
-                        "bots cannot be renamed right now; try again shortly.",
-                    );
-                }
+            let Some(code) = edit_refusal(&err) else {
+                tracing::warn!(error = %err, "renaming a bot from a turn failed");
+                return reject(
+                    "UNAVAILABLE",
+                    "bots cannot be renamed right now; try again shortly.",
+                );
+            };
+            reject(code, &err.to_string())
+        }
+    }
+}
+
+/// The tool error code for a refused bot edit, or `None` for a failure to log.
+fn edit_refusal(err: &crate::db::bots::BotError) -> Option<&'static str> {
+    use crate::db::bots::{BotError, Refusal};
+    Some(match err {
+        BotError::NotFound => "BOT_NOT_FOUND",
+        BotError::Deleted => "BOT_UNAVAILABLE",
+        BotError::Refused(
+            Refusal::NotOwnerConversation | Refusal::NotOwnerRequest | Refusal::PurposeRequired,
+        ) => "NOT_ALLOWED",
+        BotError::Refused(Refusal::NotRunning) => "NOT_RUNNING",
+        BotError::Refused(Refusal::AttemptDelegated) => "ATTEMPT_PARKED",
+        _ => return None,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetBotModelArgs {
+    target_bot_id: Uuid,
+    model: String,
+    provider_id: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+}
+
+async fn set_bot_model(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::db::bots;
+    let reject = |code: &str, message: &str| {
+        (
+            tool_error(&format!("{code}: {message}")),
+            Some(format!("rejected {code}")),
+        )
+    };
+    let Ok(parsed) = serde_json::from_value::<SetBotModelArgs>(args.clone()) else {
+        return reject(
+            "INVALID_ARGUMENTS",
+            "pass a target_bot_id UUID and a model, and optionally provider_id, \
+             reasoning_effort, and service_tier.",
+        );
+    };
+    let request = super::routines::ModelRequest {
+        model: &parsed.model,
+        provider_id: parsed.provider_id.as_deref(),
+        reasoning_effort: parsed.reasoning_effort.as_deref(),
+        service_tier: parsed.service_tier.as_deref(),
+    };
+    let model = match super::routines::resolve(state, Some(parsed.target_bot_id), &request).await
+    {
+        Ok(model) => model,
+        Err(reason) => {
+            return reject(
+                "MODEL_NOT_AVAILABLE",
+                &format!(
+                    "the model \"{}\" was not applied: {reason}. Nothing changed; retry with an \
+                     available model or tell the owner.",
+                    request.requested()
+                ),
+            );
+        }
+    };
+    match bots::set_model_for_turn(
+        &state.db,
+        grant.turn_id,
+        parsed.target_bot_id,
+        &model.provider_id,
+        &model.profile,
+    )
+    .await
+    {
+        Ok(saved) => {
+            let log = format!(
+                "set {} to {} on {} ({} reasoning, {} tier)",
+                parsed.target_bot_id,
+                saved.profile.model,
+                saved.provider_id,
+                saved.profile.reasoning_effort,
+                saved.profile.service_tier,
+            );
+            (
+                tool_result(json!({
+                    "bot_id": parsed.target_bot_id,
+                    "model": super::settings::choice_json(&saved.provider_id, &saved.profile),
+                    "next": "Its next turn uses this model. Routines with their own model keep \
+                        it; to change one, delegate to that bot asking it to update the routine.",
+                })),
+                Some(log),
+            )
+        }
+        Err(err) => {
+            let Some(code) = edit_refusal(&err) else {
+                tracing::warn!(error = %err, "setting a bot's model from a turn failed");
+                return reject(
+                    "UNAVAILABLE",
+                    "bot models cannot be changed right now; try again shortly.",
+                );
             };
             reject(code, &err.to_string())
         }

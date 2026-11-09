@@ -227,7 +227,7 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
             main.parse().unwrap(),
             conversation,
             routine,
-            vec![Tool::RenameBot],
+            vec![Tool::EditBot],
             DEFAULT_TTL,
         )
         .await;
@@ -238,13 +238,12 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
     let denied = tool(&h.app, &forged, "set_bot_model", model).await;
     assert!(denied.error, "{}", denied.body);
-    assert_eq!(
-        h.app
-            .owner("GET", &format!("/v1/bots/{main}/profile"), None)
-            .await
-            .body["profile"]["own"],
-        false
-    );
+    let profiles: i64 = sqlx::query_scalar("SELECT count(*) FROM bot_profiles WHERE bot_id = ?1")
+        .bind(main.parse::<Uuid>().unwrap())
+        .fetch_one(&h.app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(profiles, 0, "no model was saved");
     assert_eq!(snapshot(&h.app, &main).await["name"], "Assistant");
     h.release(routine).await;
 }
