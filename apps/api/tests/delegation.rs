@@ -922,7 +922,13 @@ async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply
     wait_status(&app, root, "interrupted").await;
     wait_status(&app, follow, "running").await;
     let token = grant_delegate(&app, follow).await;
-    let reply = delegate(&app, &token, &scout, "Explain how to generate VIP4 redeem links.").await;
+    let reply = delegate(
+        &app,
+        &token,
+        &scout,
+        "Explain how to generate VIP4 redeem links.",
+    )
+    .await;
     let links_id: Uuid = tool_text(&reply)["task_id"]
         .as_str()
         .unwrap()
