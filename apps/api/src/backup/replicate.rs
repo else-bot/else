@@ -2,7 +2,7 @@
 //!
 //! Remote layout: `<prefix>sets/<set id>/complete.json` and
 //! `<prefix>sets/<set id>/index.json.age` per set, and the chunks every set
-//! shares at `<prefix>chunks/<id>` (see [`super::chunks`]). For each
+//! shares at `<prefix>chunks/<key id>/<id>` (see [`super::chunks`]). For each
 //! completed local set without a verified remote completion, the worker
 //! cuts every artifact into chunks, uploads only the chunks the bucket does
 //! not list (create-only), verifies each new chunk by readback, uploads the
@@ -100,8 +100,8 @@ impl Replicator {
         self.s3.key(&format!("sets/{set_id}/{object}"))
     }
 
-    fn chunk_key(&self, id: &str) -> String {
-        self.s3.key(&format!("{CHUNKS}{id}"))
+    fn chunk_key(&self, keys: &ChunkKeys, id: &str) -> String {
+        self.s3.key(&format!("{}{id}", keys.root()))
     }
 
     async fn record(
@@ -195,7 +195,7 @@ impl Replicator {
         };
         let prepared = async {
             self.refuse_expiring_rules().await?;
-            run.known = self.chunk_listing().await?.into_keys().collect();
+            run.known = self.chunk_listing(run.keys).await?.into_keys().collect();
             self.check_sample(&mut run).await
         }
         .await;
@@ -232,8 +232,11 @@ impl Replicator {
     }
 
     /// Chunks in the bucket by ID.
-    async fn chunk_listing(&self) -> Result<HashMap<String, super::s3::Object>, BackupError> {
-        let root = self.s3.key(CHUNKS);
+    async fn chunk_listing(
+        &self,
+        keys: &ChunkKeys,
+    ) -> Result<HashMap<String, super::s3::Object>, BackupError> {
+        let root = self.s3.key(&keys.root());
         Ok(self
             .s3
             .list(&root)
@@ -254,7 +257,7 @@ impl Replicator {
     ) -> Result<Option<Vec<u8>>, BackupError> {
         let sealed = match self
             .s3
-            .get_bytes(&self.chunk_key(id), chunks::MAX_SEALED_CHUNK)
+            .get_bytes(&self.chunk_key(keys, id), chunks::MAX_SEALED_CHUNK)
             .await
         {
             Ok(sealed) => sealed,
@@ -298,7 +301,7 @@ impl Replicator {
         run.stats.checked += picked.len();
         for id in self.unreadable(run.keys, picked).await? {
             tracing::warn!(chunk = %id, "a damaged chunk was removed from the bucket");
-            self.s3.delete(&self.chunk_key(&id)).await?;
+            self.s3.delete(&self.chunk_key(run.keys, &id)).await?;
             run.known.remove(&id);
             run.stats.damaged += 1;
         }
@@ -387,8 +390,6 @@ impl Replicator {
         for object in self.s3.list(&leftovers).await? {
             self.s3.delete(&object.key).await?;
         }
-        // Chunks this set uploads count as present for later sets only once
-        // they are verified.
         let before = run.known.clone();
         let stored = match self
             .upload_verified(&set_id, set_dir, &manifest, &identity, run)
@@ -482,7 +483,7 @@ impl Replicator {
         let failed = self.unreadable(run.keys, fresh).await?;
         if let Some(id) = failed.first() {
             for id in &failed {
-                self.s3.delete(&self.chunk_key(id)).await?;
+                self.s3.delete(&self.chunk_key(run.keys, id)).await?;
             }
             return Err(BackupError::Invalid(format!(
                 "the remote copy of chunk {id} does not match; the set is not complete"
@@ -522,10 +523,13 @@ impl Replicator {
                 (split, known)
             })
         };
-        let uploads = futures_util::stream::poll_fn(|cx| rx.poll_recv(cx))
+        let keys = run.keys;
+        let uploads = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx))
             .map(|(id, sealed)| async move {
                 let bytes = sealed.len() as u64;
-                self.s3.put(&self.chunk_key(&id), sealed, true).await?;
+                self.s3
+                    .put(&self.chunk_key(keys, &id), sealed, true)
+                    .await?;
                 if crate::faults::hit("replication.after_chunk") {
                     return Err(BackupError::Interrupted);
                 }
@@ -682,7 +686,7 @@ impl Replicator {
         indexes: &[(String, Index)],
         run: &mut Upload<'_>,
     ) -> Result<(), BackupError> {
-        let listing = self.chunk_listing().await?;
+        let listing = self.chunk_listing(run.keys).await?;
         let referenced: HashSet<&str> = indexes.iter().flat_map(|(_, i)| i.chunk_ids()).collect();
         let now = chrono::Utc::now();
         for (id, object) in &listing {
@@ -747,36 +751,42 @@ impl Replicator {
                     continue;
                 }
                 let set_dir = dir.join(set_id);
-                let found = match super::restore::open_set(&set_dir, key) {
-                    Ok((_, manifest, identity)) => {
-                        let artifact = manifest
-                            .artifacts
-                            .into_iter()
-                            .find(|a| a.object == stored.object);
-                        let (keys, encoding) = (run.keys.clone(), stored.encoding);
-                        tokio::task::spawn_blocking(move || {
-                            extract(&set_dir, artifact, &identity, encoding, &keys, &wanted)
-                        })
-                        .await
-                        .map_err(|e| BackupError::Io(e.to_string()))?
-                    }
-                    Err(err) => Err(err),
-                };
-                let found = match found {
-                    Ok(found) => found,
+                let (_, manifest, identity) = match super::restore::open_set(&set_dir, key) {
+                    Ok(opened) => opened,
                     Err(err) => {
                         tracing::warn!(set = %set_id, error = %err, "a local set could not repair the bucket");
                         continue;
                     }
                 };
-                for (id, sealed) in found {
-                    run.stats.uploaded_bytes += sealed.len() as u64;
-                    self.s3.put(&self.chunk_key(&id), sealed, false).await?;
-                    if self.fetch_chunk(run.keys, &id).await?.is_some() {
-                        run.known.insert(id.clone());
-                        restored.insert(id);
-                        run.stats.repaired += 1;
+                let artifact = manifest
+                    .artifacts
+                    .into_iter()
+                    .find(|a| a.object == stored.object);
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(PARALLEL);
+                let reader = {
+                    let (keys, encoding) = (run.keys.clone(), stored.encoding);
+                    tokio::task::spawn_blocking(move || {
+                        extract(&set_dir, artifact, &identity, encoding, &keys, &wanted, tx)
+                    })
+                };
+                let upload = async {
+                    while let Some((id, sealed)) = rx.recv().await {
+                        run.stats.uploaded_bytes += sealed.len() as u64;
+                        self.s3
+                            .put(&self.chunk_key(run.keys, &id), sealed, false)
+                            .await?;
+                        if self.fetch_chunk(run.keys, &id).await?.is_some() {
+                            run.known.insert(id.clone());
+                            restored.insert(id);
+                            run.stats.repaired += 1;
+                        }
                     }
+                    Ok::<_, BackupError>(())
+                };
+                let (uploaded, read) = tokio::join!(upload, reader);
+                uploaded?;
+                if let Err(err) = read.map_err(|e| BackupError::Io(e.to_string()))? {
+                    tracing::warn!(set = %set_id, error = %err, "a local set could not repair the bucket");
                 }
             }
         }
@@ -794,7 +804,7 @@ pub fn expiring_rule_message(rule: &str) -> String {
 }
 
 /// Read the chunks at `wanted` (offset in the stored stream, chunk) from a
-/// local set's artifact and seal those whose bytes still match.
+/// local set's artifact and send those whose bytes still match, sealed.
 fn extract(
     set_dir: &Path,
     artifact: Option<super::Artifact>,
@@ -802,13 +812,13 @@ fn extract(
     encoding: Encoding,
     keys: &ChunkKeys,
     wanted: &[(u64, ChunkRef)],
-) -> Result<Vec<(String, Vec<u8>)>, BackupError> {
+    found: tokio::sync::mpsc::Sender<(String, Vec<u8>)>,
+) -> Result<(), BackupError> {
     use std::io::Read;
     let artifact =
         artifact.ok_or_else(|| BackupError::Invalid("the local set lacks the artifact".into()))?;
     chunks::read_stored(set_dir, &artifact, identity, encoding, |input| {
         let mut position = 0u64;
-        let mut found = Vec::new();
         for (offset, chunk) in wanted {
             let skip = offset - position;
             std::io::copy(&mut input.take(skip), &mut std::io::sink())
@@ -819,10 +829,12 @@ fn extract(
                 .map_err(|e| BackupError::Io(e.to_string()))?;
             position = offset + chunk.bytes as u64;
             if keys.id(&bytes) == chunk.id {
-                found.push((chunk.id.clone(), keys.seal(&bytes)?));
+                found
+                    .blocking_send((chunk.id.clone(), keys.seal(&bytes)?))
+                    .map_err(|_| BackupError::Interrupted)?;
             }
         }
-        Ok(found)
+        Ok(())
     })
 }
 
@@ -935,7 +947,6 @@ async fn download_chunked(
             })
         };
         let fetch = async {
-            // Owned here, so the rebuild sees the end when fetching stops.
             let tx = tx;
             let mut chunks = futures_util::stream::iter(&stored.chunks)
                 .map(|chunk| fetch_for_restore(s3, &keys, chunk))
@@ -1010,7 +1021,7 @@ async fn fetch_for_restore(
 ) -> Result<Vec<u8>, BackupError> {
     let sealed = s3
         .get_bytes(
-            &s3.key(&format!("{CHUNKS}{}", chunk.id)),
+            &s3.key(&format!("{}{}", keys.root(), chunk.id)),
             chunks::MAX_SEALED_CHUNK,
         )
         .await?;

@@ -125,14 +125,24 @@ fn set_key(s3: &S3, set: &str, object: &str) -> String {
     s3.key(&format!("sets/{set}/{object}"))
 }
 
-async fn chunk_ids(s3: &S3) -> Vec<String> {
-    let root = s3.key("chunks/");
-    let mut ids: Vec<String> = s3
-        .list(&root)
+/// Every chunk key in the bucket, sorted.
+async fn chunk_keys(s3: &S3) -> Vec<String> {
+    let mut keys: Vec<String> = s3
+        .list(&s3.key("chunks/"))
         .await
         .unwrap()
         .into_iter()
-        .map(|o| o.key.strip_prefix(&root).unwrap().to_owned())
+        .map(|o| o.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+async fn chunk_ids(s3: &S3) -> Vec<String> {
+    let mut ids: Vec<String> = chunk_keys(s3)
+        .await
+        .iter()
+        .map(|k| k.rsplit('/').next().unwrap().to_owned())
         .collect();
     ids.sort();
     ids
@@ -238,8 +248,8 @@ async fn a_chunk_altered_before_publication_is_detected() {
     tampering.before_publish = Some(Arc::new(move |_set: String| {
         let s3 = target.clone();
         Box::pin(async move {
-            let id = chunk_ids(&s3).await.remove(0);
-            flip_byte(&s3, &s3.key(&format!("chunks/{id}"))).await;
+            let chunk = chunk_keys(&s3).await.remove(0);
+            flip_byte(&s3, &chunk).await;
         })
     }));
     let summary = worker(&app, dir.path(), tampering)
@@ -768,7 +778,7 @@ async fn a_damaged_chunk_is_repaired_from_the_local_set_or_reported() {
     let summary = w.run_once().await.unwrap();
     assert!(matches!(summary.remote, Some(Ok(_))));
     let ids = chunk_ids(&s3).await;
-    let chunk = s3.key(&format!("chunks/{}", ids[0]));
+    let chunk = chunk_keys(&s3).await.remove(0);
     flip_byte(&s3, &chunk).await;
     let stats = w.replicate_now().await.unwrap().unwrap();
     assert_eq!((stats.damaged, stats.repaired), (1, 1), "{stats:?}");
@@ -782,6 +792,45 @@ async fn a_damaged_chunk_is_repaired_from_the_local_set_or_reported() {
         lost.contains("cannot be restored") && lost.contains(&summary.set_id),
         "{lost}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
+async fn another_key_on_the_same_prefix_never_touches_these_chunks() {
+    let _emulator = EMULATOR.read().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let summary = worker(&app, dir.path(), replicator(&app, &s3))
+        .run_once()
+        .await
+        .unwrap();
+    assert!(matches!(summary.remote, Some(Ok(_))));
+    let before = chunk_keys(&s3).await;
+    let other =
+        SecretKey::parse(&base64::engine::general_purpose::STANDARD.encode([7u8; 32])).unwrap();
+    let mut r = replicator(&app, &s3);
+    r.sample = 1000;
+    r.grace = chrono::Duration::zero();
+    let stats = r
+        .replicate_pending(&dir.path().join("backups"), &other)
+        .await
+        .unwrap();
+    assert_eq!(
+        (stats.checked, stats.damaged, stats.swept),
+        (0, 0, 0),
+        "{stats:?}"
+    );
+    assert_eq!(chunk_keys(&s3).await, before);
+    else_api::backup::replicate::download_set(
+        &s3,
+        &summary.set_id,
+        &dir.path().join("download"),
+        &key(),
+        1 << 30,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -818,7 +867,7 @@ async fn a_set_built_from_earlier_runs_chunks_restores_into_a_fresh_database() {
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
     let w = worker(&app, dir.path(), replicator(&app, &s3));
-    grow(&app, 400).await;
+    grow(&app, 2000).await;
     let first = w.run_once().await.unwrap();
     grow(&app, 20).await;
     let second = w.run_once().await.unwrap();

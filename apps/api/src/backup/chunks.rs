@@ -8,7 +8,9 @@
 //! every byte after an edit, so no chunk would match the previous run.
 //!
 //! Cut points come from FastCDC, so an insertion changes only the chunks
-//! around it. A chunk is stored once at `chunks/<id>` as age(zstd(bytes)).
+//! around it. A chunk is stored once at `chunks/<key id>/<id>` as
+//! age(zstd(bytes)), so each master key only ever reads, checks, or sweeps
+//! its own chunks.
 //! Its id is an HMAC-SHA-256 of its bytes keyed from `SECRET_KEY`: a plain
 //! hash would let anyone who can list the bucket test whether it holds a
 //! known file. Chunks use their own key, derived like a set's identity with
@@ -114,7 +116,9 @@ impl Index {
                     let plain = s.encoding != Encoding::Plain
                         || (s.bytes, &s.sha256) == (a.plaintext_bytes, &a.plaintext_sha256);
                     plain
-                        && s.chunks.iter().all(|c| valid_id(&c.id) && c.bytes > 0)
+                        && s.chunks.iter().all(|c| {
+                            valid_id(&c.id) && c.bytes > 0 && c.bytes as usize <= MAX_CHUNK
+                        })
                         && s.chunks.iter().map(|c| c.bytes as u64).sum::<u64>() == s.bytes
                 });
         if !matches {
@@ -140,6 +144,7 @@ pub fn valid_id(id: &str) -> bool {
 pub struct ChunkKeys {
     identity: age::x25519::Identity,
     mac: Zeroizing<[u8; 32]>,
+    key_id: String,
 }
 
 impl ChunkKeys {
@@ -149,7 +154,16 @@ impl ChunkKeys {
         hkdf::Hkdf::<sha2_010::Sha256>::new(None, key.bytes())
             .expand(CHUNK_ID_PURPOSE, mac.as_mut())
             .map_err(|_| BackupError::Crypto("HKDF output length rejected".into()))?;
-        Ok(Self { identity, mac })
+        Ok(Self {
+            identity,
+            mac,
+            key_id: super::key_id(key),
+        })
+    }
+
+    /// Where this key's chunks live, relative to the bucket prefix.
+    pub fn root(&self) -> String {
+        format!("{CHUNKS}{}/", self.key_id)
     }
 
     pub fn id(&self, plain: &[u8]) -> String {
