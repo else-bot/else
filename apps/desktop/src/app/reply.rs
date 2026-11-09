@@ -148,9 +148,8 @@ impl ReactionKind {
     pub(super) fn message(self, reference: &MessageReference) -> String {
         let request = match self {
             ReactionKind::ThumbsUp => {
-                "I reacted 👍 to this message. Work out what made it work, and remember that \
-                 behavior so you keep doing it in similar situations. Do not send an \
-                 acknowledgement or explain what you remembered. Only reply if there is \
+                "I reacted 👍 to this message. This is approval, not an instruction, so do not \
+                 save a rule from it. Do not send an acknowledgement. Only reply if there is \
                  something actionable to tell me or a question that needs my answer."
             }
             ReactionKind::ThumbsDown => {
@@ -273,13 +272,13 @@ mod tests {
     }
 
     #[test]
-    fn a_thumbs_up_quotes_the_message_and_asks_the_bot_to_remember_what_worked() {
+    fn a_thumbs_up_quotes_the_message_without_asking_for_a_rule() {
         let message = ReactionKind::ThumbsUp.message(&reference(Author::Bot, "Step 1\nStep 2"));
         assert!(
             message.starts_with("👍 Feedback on your earlier message:\n> Step 1\n> Step 2\n\n")
         );
-        assert!(message.contains("what made it work"));
-        assert!(message.contains("remember"));
+        assert!(message.contains("do not save a rule"));
+        assert!(!message.contains("remember"));
         assert!(message.contains("Do not send an acknowledgement"));
         assert!(message.contains("Only reply if"));
     }
