@@ -1,0 +1,34 @@
+//! Render a visual to PNG: `cargo run -p else-visual --example render -- in.html out.png [width] [light]`.
+
+use takumi::prelude::{Bitmap, OutputFormat};
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let [_, input, output, rest @ ..] = args.as_slice() else {
+        eprintln!("usage: render IN.html OUT.png [WIDTH] [light]");
+        std::process::exit(2);
+    };
+    let width = rest
+        .first()
+        .and_then(|w| w.parse().ok())
+        .unwrap_or(else_visual::REFERENCE_WIDTH);
+    let dark = !rest.iter().any(|a| a == "light");
+    let html = std::fs::read_to_string(input).expect("readable input");
+    let start = std::time::Instant::now();
+    let rendered = else_visual::render(&html, width, 2.0, &else_visual::Theme::standard(dark))
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!(
+        "{}x{} device px, content {} css px, clipped {}, blocked {:?}, {:?}",
+        rendered.width,
+        rendered.height,
+        rendered.content_height,
+        rendered.clipped,
+        rendered.blocked,
+        start.elapsed()
+    );
+    let bitmap =
+        Bitmap::from_raw(rendered.width, rendered.height, rendered.rgba).expect("rgba size");
+    let mut png = Vec::new();
+    takumi::write_image(&bitmap, &mut png, OutputFormat::Png).expect("png");
+    std::fs::write(output, png).expect("writable output");
+}

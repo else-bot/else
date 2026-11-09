@@ -1,0 +1,8 @@
+[package]
+name = "else-visual"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+takumi = { version = "=2.20.0", default-features = false, features = ["raster-backend", "from-html", "svg-source", "png", "jpeg", "webp", "woff2", "unstable"] }
+thiserror = "2.0.21"
