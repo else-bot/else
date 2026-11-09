@@ -221,6 +221,9 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
+            if self.upgrading(bot).await {
+                continue;
+            }
             let _op = self.op(bot).await;
             self.observe(bot).await?;
         }
@@ -237,6 +240,9 @@ impl ComputerManager {
         for bot in must_stop {
             if cancel.is_cancelled() {
                 return Ok(());
+            }
+            if self.upgrading(bot).await {
+                continue;
             }
             let _op = self.op(bot).await;
             self.stop_held(bot, Reason::MustStop).await?;
@@ -259,6 +265,9 @@ impl ComputerManager {
         for bot in idle {
             if cancel.is_cancelled() {
                 return Ok(());
+            }
+            if self.upgrading(bot).await {
+                continue;
             }
             let _op = self.op(bot).await;
             self.stop_held(bot, Reason::Idle(self.config.idle_action))
@@ -337,8 +346,8 @@ impl ComputerManager {
             .execute(&self.pool)
             .await?;
         }
-        if let Err(err) = self.stop_interrupted_replacements().await {
-            tracing::warn!(error = %err, "an interrupted upgrade's replacement was not stopped");
+        if let Err(err) = self.clear_all_interrupted_upgrades().await {
+            tracing::warn!(error = %err, "an interrupted upgrade's replacement was not removed");
             return Ok(());
         }
         sqlx::query(

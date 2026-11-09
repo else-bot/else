@@ -10,8 +10,8 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use crate::api::{
-    Client, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent,
-    DesktopMode,
+    Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
+    DesktopEvent, DesktopMode,
 };
 
 #[cfg(target_os = "macos")]
@@ -50,6 +50,7 @@ pub(super) struct ComputerView {
     avatar: crate::avatar::Avatar,
     screen: Screen,
     computer: Option<ComputerState>,
+    upgrade_refused: Option<String>,
     image: Option<Arc<RenderImage>>,
     painted_image: Option<Arc<RenderImage>>,
     resolution: (u16, u16),
@@ -104,6 +105,7 @@ impl ComputerView {
             avatar: bot.avatar,
             screen: Screen::Loading,
             computer: None,
+            upgrade_refused: None,
             image: None,
             painted_image: None,
             resolution: (0, 0),
@@ -276,16 +278,16 @@ impl ComputerView {
         self.release(cx);
         let client = self.client.clone();
         let bot = self.bot;
+        self.upgrade_refused = None;
         self.watch_upgrade(cx);
         self._session = Some(cx.spawn(async move |this, cx| {
             let started = client.clone().upgrade_computer(bot).await;
             let _ = this.update(cx, |view, cx| match started {
                 Ok(()) => view.watch_upgrade(cx),
                 Err(error) => {
+                    view.upgrade_refused = Some(error.to_string());
                     if let Some(computer) = &mut view.computer {
-                        computer.upgrade = Some(ComputerUpgrade::Failed {
-                            error: error.to_string(),
-                        });
+                        computer.upgrade = None;
                     }
                     view.monitor(false, cx);
                 }
@@ -293,8 +295,6 @@ impl ComputerView {
         }));
     }
 
-    /// Shows the upgrade until the server reports it finished or failed,
-    /// then reconnects to the (possibly new) computer.
     fn watch_upgrade(&mut self, cx: &mut Context<Self>) {
         self.clear_input();
         self.notice = None;
@@ -312,8 +312,18 @@ impl ComputerView {
         self._session = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
-                let Ok(state) = client.clone().computer(bot).await else {
-                    continue;
+                let state = match client.clone().computer(bot).await {
+                    Ok(state) => state,
+                    Err(
+                        error @ (ClientError::Unauthorized
+                        | ClientError::Api {
+                            status: 400..=499, ..
+                        }),
+                    ) => {
+                        let _ = this.update(cx, |view, cx| view.fail(error.to_string(), cx));
+                        return;
+                    }
+                    Err(_) => continue,
                 };
                 if state.upgrade == Some(ComputerUpgrade::Running) {
                     continue;
@@ -331,8 +341,8 @@ impl ComputerView {
     fn upgrade_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let computer = self.computer.as_ref()?;
         let theme = cx.theme();
-        let (message, failed) = match &computer.upgrade {
-            Some(ComputerUpgrade::Running) => {
+        let (message, failed) = match (&computer.upgrade, &self.upgrade_refused) {
+            (Some(ComputerUpgrade::Running), _) => {
                 return Some(
                     div()
                         .text_xs()
@@ -345,8 +355,11 @@ impl ComputerView {
                 );
             }
             _ if !computer.outdated() => return None,
-            Some(ComputerUpgrade::Failed { error }) => (format!("Upgrade failed: {error}"), true),
-            None => (
+            (_, Some(refused)) => (refused.clone(), true),
+            (Some(ComputerUpgrade::Failed { error }), None) => {
+                (format!("Upgrade failed: {error}"), true)
+            }
+            (None, None) => (
                 "A newer computer is available. Files, projects and browser sign-ins \
                  carry over; the bot can't use its computer while it upgrades."
                     .to_owned(),

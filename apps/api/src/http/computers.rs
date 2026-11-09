@@ -96,7 +96,7 @@ async fn show(
         Some(computers) => (
             Some(computers.config().image.clone()),
             match computers.upgrade_status(bot_id).await {
-                None => Value::Null,
+                None => last_failed_upgrade(&state, bot_id).await?,
                 Some(UpgradeStatus::Running) => json!({ "state": "running" }),
                 Some(UpgradeStatus::Failed(error)) => json!({ "state": "failed", "error": error }),
             },
@@ -140,12 +140,38 @@ async fn show(
     })))
 }
 
+/// The newest recorded upgrade, when it failed (one a restart interrupted,
+/// or one run offline).
+async fn last_failed_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
+    let last: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT state, error FROM computer_upgrades WHERE bot_id = ?1
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(match last {
+        Some((upgrade, error)) if upgrade == "failed" => json!({
+            "state": "failed",
+            "error": error.unwrap_or_else(|| "interrupted".into()),
+        }),
+        _ => Value::Null,
+    })
+}
+
 async fn upgrade(
     State(state): State<Arc<AppState>>,
     ApiPath(bot_id): ApiPath<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     require_bot(&state, bot_id, true).await?;
-    match manager(&state)?.start_upgrade(bot_id).await {
+    let computers = manager(&state)?;
+    let Some(admission) = state.scheduler.gate().enter() else {
+        return Err(ApiError::unavailable(
+            "maintenance",
+            "A backup or an update is in progress; try again shortly.",
+        ));
+    };
+    match computers.start_upgrade(bot_id, admission).await {
         Ok(()) => Ok(StatusCode::ACCEPTED),
         Err(ComputerError::Refused(reason)) => Err(ApiError::new(
             StatusCode::CONFLICT,

@@ -731,7 +731,9 @@ impl ComputerManager {
     ) -> Result<bool, sqlx::Error> {
         let (cpus, memory): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT coalesce(sum({RESERVED_CPUS}), 0), coalesce(sum({RESERVED_MEMORY} + ?2), 0)
-             FROM bot_computers WHERE bot_id <> ?1 AND observed_state IN {RESERVING}"
+             FROM bot_computers c WHERE bot_id <> ?1 AND (observed_state IN {RESERVING}
+                 OR EXISTS (SELECT 1 FROM computer_upgrades u
+                            WHERE u.bot_id = c.bot_id AND u.state = 'started'))"
         )))
         .bind(bot_id)
         .bind(self.config.overhead_mib as i64)

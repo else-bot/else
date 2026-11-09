@@ -21,8 +21,11 @@
 //!
 //! The owner starts one from the desktop ([`ComputerManager::start_upgrade`])
 //! or offline with `else-api upgrade-computer`. One started from the
-//! desktop ends the owner's desktop sessions first, and while it runs new
-//! leases are queued instead of waiting on the bot's operation lock.
+//! desktop holds a maintenance admission until it ends, so a backup or an
+//! update waits for it; it ends the owner's desktop sessions first, and
+//! while it runs, new leases and viewers are refused. A started upgrade's
+//! computers count against the budget though the bot's row says stopped.
+//! Startup removes the replacement of an upgrade a restart interrupted.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -155,7 +158,16 @@ impl ComputerManager {
     /// Start moving a bot's computer to the configured image in the
     /// background; [`Self::upgrade_status`] reports its progress. Refused
     /// when the computer already uses that image or an upgrade is running.
-    pub async fn start_upgrade(self: &Arc<Self>, bot_id: Uuid) -> Result<(), ComputerError> {
+    pub async fn start_upgrade(
+        self: &Arc<Self>,
+        bot_id: Uuid,
+        admission: crate::maintenance::Admission,
+    ) -> Result<(), ComputerError> {
+        if !self.inspected.load(super::Ordering::SeqCst) {
+            return Err(ComputerError::Busy(
+                "the computer runtime has not been inspected yet".into(),
+            ));
+        }
         let current: Option<String> =
             sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
                 .bind(bot_id)
@@ -184,6 +196,7 @@ impl ComputerManager {
         }
         let this = self.clone();
         tokio::spawn(async move {
+            let _admission = admission;
             let upgraded = match this.end_desktop_sessions(bot_id).await {
                 Ok(()) => this.upgrade_image(bot_id, &image, None).await,
                 Err(err) => Err(err),
@@ -212,9 +225,9 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// End the owner's desktop sessions on this bot's computer so the
-    /// upgrade it asked for can stop it. Runs once the upgrade is marked
-    /// running, when new sessions are already refused.
+    /// End the owner's desktop sessions so the upgrade can stop the
+    /// computer. A viewer that passed the upgrade check just before still
+    /// holds its lease and makes the upgrade fail as in use.
     async fn end_desktop_sessions(&self, bot_id: Uuid) -> Result<(), ComputerError> {
         sqlx::query(
             "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'upgrade'
@@ -262,20 +275,15 @@ impl ComputerManager {
         Ok(())
     }
 
-    pub(super) async fn stop_interrupted_replacements(&self) -> Result<(), ComputerError> {
-        let started: Vec<String> = sqlx::query_scalar(
-            "SELECT to_runtime_name FROM computer_upgrades WHERE state = 'started'",
+    pub(super) async fn clear_all_interrupted_upgrades(&self) -> Result<(), ComputerError> {
+        let bots: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT bot_id FROM computer_upgrades WHERE state = 'started'",
         )
         .fetch_all(&self.pool)
         .await?;
-        for name in started {
-            match self.runtime.state(&name).await? {
-                None | Some(RuntimeState::Stopped) => {}
-                Some(_) => {
-                    tracing::warn!(computer = %name, "stopping an interrupted upgrade's replacement");
-                    self.runtime.stop(&name).await?;
-                }
-            }
+        for bot_id in bots {
+            tracing::warn!(bot = %bot_id, "removing an interrupted upgrade's replacement");
+            self.clear_interrupted_upgrades(bot_id).await?;
         }
         Ok(())
     }

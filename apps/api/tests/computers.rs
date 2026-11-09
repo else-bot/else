@@ -907,10 +907,18 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     .unwrap();
     drop(manager);
     let _restarted = self::manager(&app, &fake, config(1)).await;
-    assert_eq!(
-        fake.computers.lock().unwrap()[&leftover].state,
-        RuntimeState::Stopped
+    assert!(
+        !fake.computers.lock().unwrap().contains_key(&leftover),
+        "startup removes an interrupted upgrade's replacement"
     );
+    let started: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started'",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(started, 0);
 }
 
 async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: Uuid) {
@@ -1301,7 +1309,7 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
         fake.clone(),
         ComputerConfig {
             image: "img:new".into(),
-            ..config(2)
+            ..config(1)
         },
     ));
     manager.reconcile_startup().await.unwrap();
@@ -1365,6 +1373,22 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
             Acquire::Queued { .. }
         ),
         "a turn queues instead of waiting for the upgrade"
+    );
+    assert!(
+        app.scheduler
+            .gate()
+            .close(Duration::from_millis(50))
+            .await
+            .is_err(),
+        "a backup or an update waits for the upgrade"
+    );
+    let other: Uuid = app.create_bot("Neighbour").await.parse().unwrap();
+    assert!(
+        matches!(
+            manager.acquire(other, "turn:neighbour").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "the upgrade's computers hold the budget"
     );
 
     let done = settled(&app, &path).await;
