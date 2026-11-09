@@ -664,6 +664,47 @@ async fn bots_channel_carries_categories_to_every_client() {
         )
         .await;
     each(&mut clients, |d| d["categories"][0]["name"] == "Renamed").await;
+    let other = server
+        .app
+        .owner(
+            "POST",
+            "/v1/categories",
+            Some(json!({ "request_id": Uuid::new_v4(), "name": "Zulu" })),
+        )
+        .await
+        .body["category"]["id"]
+        .clone();
+    each(&mut clients, |d| d["categories"][1]["name"] == "Zulu").await;
+    let placed = server
+        .app
+        .owner(
+            "PUT",
+            "/v1/categories/order",
+            Some(json!({ "category_ids": [other, id] })),
+        )
+        .await;
+    assert_eq!(
+        placed.status,
+        axum::http::StatusCode::OK,
+        "{:?}",
+        placed.body
+    );
+    each(&mut clients, |d| {
+        d["categories"][0]["name"] == "Zulu" && d["categories"][1]["name"] == "Renamed"
+    })
+    .await;
+    server
+        .app
+        .owner(
+            "DELETE",
+            &format!("/v1/categories/{}", other.as_str().unwrap()),
+            None,
+        )
+        .await;
+    each(&mut clients, |d| {
+        d["categories"].as_array().unwrap().len() == 1
+    })
+    .await;
     let main = server.app.main_bot().await;
     server
         .app
