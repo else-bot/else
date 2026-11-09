@@ -114,6 +114,20 @@ def _get_json(path, timeout=2):
         return json.load(r)
 
 
+def _replacement(endpoint, deadline, error):
+    """The endpoint of a browser that replaced endpoint, or error once the
+    monotonic deadline passes with the same browser still answering."""
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        try:
+            found = ready(max(0.001, deadline - time.monotonic()))["webSocketDebuggerUrl"]
+        except BrowserNotReady:
+            continue
+        if found != endpoint:
+            return found
+    raise error
+
+
 def ready(timeout=30):
     """Wait until DevTools answers (the browser may be starting or restarting)."""
     deadline = time.monotonic() + timeout
@@ -159,7 +173,12 @@ class _Socket:
             head += chunk
         head, self.buf = head.split(b"\r\n\r\n", 1)
         accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
-        if b" 101 " not in head.split(b"\r\n", 1)[0] or accept.encode() not in head:
+        status = head.split(b"\r\n", 1)[0].split(b" ")
+        if len(status) < 2 or status[1] != b"101":
+            error = CdpError(f"DevTools refused the connection: {b' '.join(status[1:]).decode(errors='replace')}")
+            error.status = int(status[1]) if len(status) > 1 and status[1].isdigit() else None
+            raise error
+        if accept.encode() not in head:
             raise CdpError("bad WebSocket handshake")
         self.closed = False
         self.parts = []
@@ -476,22 +495,32 @@ class Browser:
         return [t for t in _get_json("/json/list") if t.get("type") == "page"]
 
     def _create_blank_tab(self):
-        """A browser that is shutting down still answers /json/version for a
-        moment, then drops the connection; a blank tab it made dies with it, so
-        creating one again on the next browser repeats no page work."""
+        """Open a blank tab and return its target ID. A browser that is shutting
+        down still answers /json/version for a moment, then drops connections,
+        so a failed handshake (nothing sent) is retried, and a request it
+        dropped is sent again only to the browser that replaced it, whose tabs
+        are new."""
         deadline = time.monotonic() + self.timeout
+        left = lambda: max(0.001, deadline - time.monotonic())
+        endpoint = ready(left())["webSocketDebuggerUrl"]
         while True:
-            version = ready(max(1, deadline - time.monotonic()))
             try:
-                conn = _Connection(version["webSocketDebuggerUrl"], self.timeout, lambda msg: None)
-                try:
-                    return conn.call("Target.createTarget", {"url": "about:blank"}, mutating=False)["targetId"]
-                finally:
-                    conn.close()
-            except (TargetClosed, ConnectionError):
-                if time.monotonic() > deadline:
+                conn = _Connection(endpoint, left(), lambda msg: None)
+            except (ConnectionError, CdpError) as e:
+                unsent = isinstance(e, (TargetClosed, ConnectionError)) or getattr(e, "status", None) == 404
+                if not unsent or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.25)
+                endpoint = ready(left())["webSocketDebuggerUrl"]
+                continue
+            try:
+                return conn.call("Target.createTarget", {"url": "about:blank"}, left())["targetId"]
+            except (Uncertain, TargetClosed) as e:
+                if not conn.closed:
+                    raise
+                endpoint = _replacement(endpoint, min(deadline, time.monotonic() + 10), e)
+            finally:
+                conn.close()
 
     def page(self, id=None, url_prefix=None, title=None, create=None):
         """Attach to a page by id, url_prefix, or title; or create a new tab at
