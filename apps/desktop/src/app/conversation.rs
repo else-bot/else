@@ -145,15 +145,23 @@ fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                         .filter(|(ix, d)| {
                             turn.delegations[..*ix]
                                 .iter()
-                                .all(|earlier| earlier.attempt != d.attempt)
+                                .all(|earlier| !earlier.shares_handoff(d))
                         })
                         .filter_map(move |(_, d)| {
                             let anchor = c.question_anchor(turn.id, Some(d.created_at));
-                            let live = turn
+                            let group: Vec<_> = turn
                                 .delegations
                                 .iter()
-                                .any(|other| other.attempt == d.attempt && !other.status.settled());
-                            (live || anchor.is_some()).then_some((RowKey::Handoff(d.id), anchor))
+                                .filter(|other| other.shares_handoff(d))
+                                .collect();
+                            let live = group.iter().any(|other| !other.status.settled());
+                            // A single live task shows in the waiting tray above the composer.
+                            let shown = if live {
+                                group.len() > 1
+                            } else {
+                                anchor.is_some()
+                            };
+                            shown.then_some((RowKey::Handoff(d.id), anchor))
                         }),
                 )
                 .chain(turn.social_setups.iter().map(move |setup| {
@@ -232,6 +240,8 @@ pub(super) struct ConversationView {
     pub(super) expanded_tasks: HashSet<Uuid>,
     /// Live councils whose queued lane shows every member.
     pub(super) expanded_councils: HashSet<Uuid>,
+    /// The waiting tray shows only its header.
+    pub(super) tray_collapsed: bool,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
@@ -284,6 +294,7 @@ impl ConversationView {
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
             expanded_councils: HashSet::new(),
+            tray_collapsed: false,
             reply_transitions: HashMap::new(),
             _reply_clock: None,
             latest_seen: false,
@@ -796,7 +807,11 @@ impl ElseApp {
             }
         }
         view.rows = rows;
-        let ticking = tasks.values().any(|reply| reply.state.ticking());
+        let ticking = tasks.values().any(|reply| reply.state.ticking())
+            || view
+                .conversation
+                .as_ref()
+                .is_some_and(|c| !c.waiting_on().is_empty());
         if !ticking {
             view._reply_clock = None;
         } else if view._reply_clock.is_none() {
@@ -811,7 +826,10 @@ impl ElseApp {
                             .is_some_and(|view| {
                                 view.rows.iter().any(|row| {
                                     row.task.as_ref().is_some_and(|task| task.state.ticking())
-                                })
+                                }) || view
+                                    .conversation
+                                    .as_ref()
+                                    .is_some_and(|c| !c.waiting_on().is_empty())
                             });
                         if ticking {
                             cx.notify();
@@ -845,7 +863,7 @@ mod tests {
     use chrono::{DateTime, FixedOffset, Utc};
 
     use crate::model::{Conversation, Snapshot};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     fn routine_conversation() -> Conversation {
@@ -928,7 +946,7 @@ mod tests {
         let task = |id: u128, attempt: i64, at: &str| {
             json!({ "id": Uuid::from_u128(id), "attempt": attempt,
                     "target_bot_id": Uuid::from_u128(id + 50), "target_name": "Scout",
-                    "task": "Research", "status": "running", "created_at": at })
+                    "task": "Research", "status": "completed", "created_at": at })
         };
         let snapshot: Snapshot = serde_json::from_value(json!({
             "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
@@ -998,9 +1016,71 @@ mod tests {
             "no stale summary at the tail"
         );
         let live = Conversation::from_snapshot(page("running")).unwrap();
+        assert!(
+            request_rows(&live).is_empty(),
+            "a single live task shows in the waiting tray, not the transcript"
+        );
+    }
+
+    #[test]
+    fn the_tray_waits_on_unfinished_and_unread_single_tasks_of_unfinished_turns() {
+        let task = |id: u128, attempt: i64, status: &str, seen: bool| {
+            json!({ "id": Uuid::from_u128(id), "attempt": attempt,
+                    "target_bot_id": Uuid::from_u128(id + 50), "target_name": "Scout",
+                    "task": "Research", "status": status, "seen": seen,
+                    "created_at": format!("2026-11-07T10:{:02}:00Z", id - 20) })
+        };
+        let turn = |id: u128, no: i64, status: &str, delegations: Value| {
+            json!({ "id": Uuid::from_u128(id), "request_id": Uuid::from_u128(id + 1),
+                    "turn_no": no, "provider_id": "codex", "status": status, "error": null,
+                    "effect_uncertain": false, "delegations": delegations })
+        };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [],
+            "turns": [
+                turn(10, 1, "failed", json!([task(20, 1, "completed", false)])),
+                turn(12, 2, "running", json!([
+                    task(21, 0, "running", false), task(22, 1, "completed", false),
+                    task(23, 0, "completed", true), task(24, 2, "running", false),
+                    task(25, 2, "queued", false)
+                ])),
+            ],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        }))
+        .unwrap();
+        let c = Conversation::from_snapshot(snapshot).unwrap();
+        let waiting: Vec<_> = c.waiting_on().iter().map(|d| d.id).collect();
+        assert_eq!(waiting, [Uuid::from_u128(21), Uuid::from_u128(22)]);
+    }
+
+    #[test]
+    fn tasks_carried_from_earlier_messages_stand_alone_and_a_live_council_stays_in_the_transcript()
+    {
+        let task = |id: u128, attempt: i64, status: &str| {
+            json!({ "id": Uuid::from_u128(id), "attempt": attempt,
+                    "target_bot_id": Uuid::from_u128(id + 50), "target_name": "Scout",
+                    "task": "Research", "status": status, "created_at": "2026-11-07T10:01:00Z" })
+        };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "conversation_id": Uuid::from_u128(70), "bot_id": Uuid::from_u128(80),
+            "event_cursor": "11111111-1111-1111-1111-111111111111:00000000-0000-0000-0000-000000000050:1",
+            "items": [],
+            "turns": [{
+                "id": Uuid::from_u128(10), "request_id": Uuid::from_u128(11), "turn_no": 2,
+                "provider_id": "codex", "status": "waiting", "error": null, "effect_uncertain": false,
+                "delegations": [task(20, 0, "running"), task(21, 0, "running"),
+                                task(22, 1, "running"), task(23, 1, "queued")]
+            }],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 }
+        }))
+        .unwrap();
+        let c = Conversation::from_snapshot(snapshot).unwrap();
+        assert_eq!(c.handoff(Uuid::from_u128(21)).unwrap().1.len(), 1);
         assert_eq!(
-            request_rows(&live),
-            [(RowKey::Handoff(Uuid::from_u128(20)), None)]
+            request_rows(&c),
+            [(RowKey::Handoff(Uuid::from_u128(22)), None)]
         );
     }
 

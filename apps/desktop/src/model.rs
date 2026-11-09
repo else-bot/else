@@ -407,6 +407,23 @@ pub struct Delegation {
     pub status: DelegationStatus,
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// The delegating turn has read the outcome. Absent from older servers.
+    #[serde(default)]
+    pub seen: bool,
+    /// Messages the task has written so far.
+    #[serde(default)]
+    pub updates: i64,
+    /// While the task runs, the start of its latest finished message.
+    #[serde(default)]
+    pub progress: Option<String>,
+}
+
+impl Delegation {
+    /// Tasks one provider attempt sent share a handoff. A task carried over
+    /// from an earlier owner message has attempt 0 and stands alone.
+    pub fn shares_handoff(&self, other: &Delegation) -> bool {
+        self.attempt == other.attempt && (self.attempt > 0 || self.id == other.id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -775,13 +792,42 @@ impl Conversation {
             .turns
             .values()
             .find(|t| t.delegations.iter().any(|d| d.id == id))?;
-        let attempt = turn.delegations.iter().find(|d| d.id == id)?.attempt;
+        let first = turn.delegations.iter().find(|d| d.id == id)?;
         let group = turn
             .delegations
             .iter()
-            .filter(|d| d.attempt == attempt)
+            .filter(|d| d.shares_handoff(first))
             .collect();
         Some((turn, group))
+    }
+
+    /// The tasks this conversation waits on, oldest first: each single task
+    /// of an unfinished turn with no outcome yet, or whose outcome no
+    /// attempt has read. A council keeps its card in the transcript.
+    pub fn waiting_on(&self) -> Vec<&Delegation> {
+        let mut tasks: Vec<&Delegation> = self
+            .turns
+            .values()
+            .filter(|turn| {
+                matches!(
+                    turn.status.as_str(),
+                    "queued" | "waiting" | "preparing" | "sending" | "running"
+                )
+            })
+            .flat_map(|turn| {
+                turn.delegations.iter().filter(|d| {
+                    (!d.status.settled() || !d.seen)
+                        && turn
+                            .delegations
+                            .iter()
+                            .filter(|other| other.shares_handoff(d))
+                            .count()
+                            == 1
+                })
+            })
+            .collect();
+        tasks.sort_by_key(|d| (d.created_at, d.id));
+        tasks
     }
 
     pub fn social_setup(&self, id: Uuid) -> Option<&crate::api::socials::SocialSetup> {

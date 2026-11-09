@@ -28,6 +28,7 @@ mod social_card;
 mod task_reply;
 mod view;
 mod visuals;
+mod waiting_tray;
 
 use categories::CategoryFormHolder;
 use conversation::{ConversationView, RowKey};
