@@ -449,7 +449,11 @@ impl Element for BotAvatar {
         cx: &mut App,
     ) {
         let (Some(id), Some(hitbox), false) = (id, hitbox.as_ref(), cx.reduce_motion()) else {
-            paint_avatar(bounds, self.avatar, Pose::default(), window);
+            let pose = Pose {
+                work: if self.working { 1. } else { 0. },
+                ..Pose::default()
+            };
+            paint_avatar(bounds, self.avatar, pose, 0., window);
             return;
         };
         let center = bounds.center();
@@ -463,23 +467,19 @@ impl Element for BotAvatar {
                 (0., 0.)
             },
             hovered: attending && hitbox.is_hovered(window),
+            working: self.working,
         };
         let view = window.current_view();
         let now = Instant::now();
-        let (pose, awake) = window.with_element_state(id, |live: Option<Live>, window| {
+        let (pose, elapsed, awake) = window.with_element_state(id, |live: Option<Live>, window| {
             let mut live = live.unwrap_or_else(|| Live {
                 motion: Motion::default(),
                 started: now,
                 awake: Rc::default(),
                 wake: None,
             });
-            let (mut pose, next) = live.motion.advance(now, input);
-            if self.working {
-                let phase = now.duration_since(live.started).as_secs_f32() * 4.;
-                pose.gaze = (phase.sin() * 0.6, phase.cos() * 0.35);
-                pose.hover = (phase.sin() + 1.) * 0.5;
-                window.request_animation_frame();
-            }
+            let (pose, next) = live.motion.advance(now, input);
+            let elapsed = now.duration_since(live.started).as_secs_f32();
             live.awake.set(next != Next::Rest || input.gaze != (0., 0.));
             match next {
                 Next::Frame => {
@@ -497,9 +497,9 @@ impl Element for BotAvatar {
                 }
                 Next::Rest => live.wake = None,
             }
-            ((pose, live.awake.clone()), live)
+            ((pose, elapsed, live.awake.clone()), live)
         });
-        paint_avatar(bounds, self.avatar, pose, window);
+        paint_avatar(bounds, self.avatar, pose, elapsed, window);
 
         let moved = awake.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
@@ -531,24 +531,51 @@ fn gaze_toward(
     (dx / distance * pull, dy / distance * pull)
 }
 
-fn paint_avatar(bounds: Bounds<Pixels>, avatar: Avatar, pose: Pose, window: &mut Window) {
+/// `elapsed` is seconds since the avatar first painted; it phases the working loop.
+fn paint_avatar(
+    bounds: Bounds<Pixels>,
+    avatar: Avatar,
+    pose: Pose,
+    elapsed: f32,
+    window: &mut Window,
+) {
     let art = avatar.shape.art();
     let unit = f32::from(bounds.size.width.min(bounds.size.height));
-    let (gx, gy) = pose.gaze;
-    let scale = unit * (1. + 0.06 * pose.hover);
+    let work = pose.work;
+    let orbit = TAU * elapsed / 3.6;
+    let gx = pose.gaze.0 + (0.42 * orbit.cos() - pose.gaze.0) * work;
+    let gy = pose.gaze.1 + (0.3 * orbit.sin() - pose.gaze.1) * work;
+    let pulse = (TAU * elapsed / 1.8).sin();
+    let blink = pose.blink.max(focus_blink(elapsed) * work);
+    let scale = unit * (1. + 0.06 * pose.hover) * (1. + 0.015 * pulse * work);
     let lean = (gx * 0.025 * unit, gy * 0.02 * unit);
-    let tilt = gx * 0.05;
+    let tilt = gx * 0.05 + 0.03 * orbit.cos() * work;
     let (sin, cos) = tilt.sin_cos();
     let center = bounds.center();
-    let place = |(x, y): (f32, f32)| {
-        let (x, y) = (x * cos - y * sin, x * sin + y * cos);
-        point(
-            center.x + px(x * scale + lean.0),
-            center.y + px(y * scale + lean.1),
-        )
+    let place_at = |scale: f32| {
+        move |(x, y): (f32, f32)| {
+            let (x, y) = (x * cos - y * sin, x * sin + y * cos);
+            point(
+                center.x + px(x * scale + lean.0),
+                center.y + px(y * scale + lean.1),
+            )
+        }
     };
+    let place = place_at(scale);
 
-    let points = outline(&art).map(place);
+    let shape = outline(&art);
+    if work > 0.01 {
+        paint_halo(
+            shape.map(place_at(scale * 1.26)),
+            center,
+            unit,
+            avatar.color.fill(),
+            work,
+            elapsed,
+            window,
+        );
+    }
+    let points = shape.map(place);
     let mut body = PathBuilder::fill();
     body.move_to(points[0]);
     for i in 0..SAMPLES {
@@ -575,8 +602,8 @@ fn paint_avatar(bounds: Bounds<Pixels>, avatar: Avatar, pose: Pose, window: &mut
     }
 
     let width = (0.075 * unit).max(1.6);
-    let height = (0.165 * unit * (1. + 0.06 * pose.hover)).max(3.6);
-    let height = (height * (1. - 0.95 * pose.blink)).max(0.75);
+    let height = (0.165 * unit * (1. + 0.06 * pose.hover)).max(3.6) * (1. - 0.35 * work);
+    let height = (height * (1. - 0.95 * blink)).max(0.75);
     let spread = (0.08 * unit).max(width * 1.15);
     let look = (gx * 0.075, gy * 0.06);
     let eyes = (art.eyes.0 + look.0, art.eyes.1 + look.1);
@@ -586,6 +613,74 @@ fn paint_avatar(bounds: Bounds<Pixels>, avatar: Avatar, pose: Pose, window: &mut
         let eye = point(middle.x + px(side * spread), middle.y);
         let rect = Bounds::centered_at(eye, size(px(width), px(height)));
         window.paint_quad(fill(rect, ink).corner_radii(px(width / 2.)));
+    }
+}
+
+/// A periodic blink while working, so a focused bot still looks alive.
+fn focus_blink(elapsed: f32) -> f32 {
+    const PERIOD: f32 = 3.8;
+    const LENGTH: f32 = 0.17;
+    let t = elapsed.rem_euclid(PERIOD);
+    if t < LENGTH {
+        (t / LENGTH * PI).sin()
+    } else {
+        0.
+    }
+}
+
+/// A soft glow behind the avatar and a light tracing its outline, one lap per 1.7 s.
+fn paint_halo(
+    points: [Point<Pixels>; SAMPLES],
+    center: Point<Pixels>,
+    unit: f32,
+    color: Hsla,
+    work: f32,
+    elapsed: f32,
+    window: &mut Window,
+) {
+    let glow = 0.3 * unit;
+    let breathe = 0.35 + 0.15 * (TAU * elapsed / 1.8).sin();
+    window.paint_drop_shadows(
+        Bounds::centered_at(center, size(px(glow * 2.), px(glow * 2.))),
+        Corners::all(px(glow)),
+        &[BoxShadow {
+            color: color.opacity(breathe * work),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.4 * unit),
+            spread_radius: px(0.),
+            inset: false,
+        }],
+    );
+
+    let mut track = PathBuilder::stroke(px((0.035 * unit).max(1.)));
+    track.move_to(points[0]);
+    for p in &points[1..] {
+        track.line_to(*p);
+    }
+    track.close();
+    if let Ok(path) = track.build() {
+        window.paint_path(path, color.opacity(0.16 * work));
+    }
+
+    const LIT: usize = SAMPLES * 38 / 100;
+    let at = |i: isize| points[i.rem_euclid(SAMPLES as isize) as usize];
+    let head = (elapsed / 1.7).fract() * SAMPLES as f32;
+    for i in 0..LIT {
+        let k = 1. - i as f32 / LIT as f32;
+        let position = head - i as f32;
+        let index = position.floor() as isize;
+        let (from, to, next) = (at(index - 1), at(index), at(index + 1));
+        let mut segment = PathBuilder::stroke(px((unit * (0.03 + 0.045 * k)).max(1.1)));
+        segment.move_to(from);
+        segment.line_to(to);
+        segment.line_to(to + (next - to) * position.fract());
+        if let Ok(path) = segment.build() {
+            let light = Hsla {
+                l: color.l + (1. - color.l) * 0.35 * k,
+                ..color
+            };
+            window.paint_path(path, light.opacity(k * k * work));
+        }
     }
 }
 

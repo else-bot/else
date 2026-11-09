@@ -16,7 +16,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, Textarea};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -289,10 +288,17 @@ impl ElseApp {
             .child(self.sidebar_handle(SidebarEdge::Left, cx))
     }
 
-    fn render_bot_identity_avatar(&self, id: impl Into<ElementId>, bot: &Bot) -> impl IntoElement {
+    fn render_bot_identity_avatar(
+        &self,
+        id: impl Into<ElementId>,
+        bot: &Bot,
+        working: bool,
+    ) -> impl IntoElement {
         let mut avatar = bot_avatar(id, bot.avatar, px(30.));
         if !bot.is_active() {
             avatar = avatar.still();
+        } else if working {
+            avatar = avatar.working();
         }
         div()
             .relative()
@@ -329,6 +335,7 @@ impl ElseApp {
         let muted = bot.muted && !pending;
         let connected = self.connected();
         let subtitle = Subtitle::new(bot, connected, self.stopping.contains(&id));
+        let working = subtitle.kind == Kind::Working && connected;
         let color = if !connected {
             theme.muted_foreground
         } else {
@@ -341,7 +348,7 @@ impl ElseApp {
         };
         let icon = match subtitle.kind {
             Kind::Message => None,
-            Kind::Working => Some(IconName::LoaderCircle),
+            Kind::Working => None,
             Kind::Queued => Some(IconName::Clock),
             Kind::Answer => Some(IconName::CircleQuestionMark),
             Kind::Approval => Some(IconName::BadgeCheck),
@@ -364,21 +371,15 @@ impl ElseApp {
                     style.text_color(theme.foreground)
                 })
             })
+            .when(working, |line| {
+                line.child(working_dots(id, color, cx.reduce_motion()))
+            })
             .when_some(icon, |line, icon| {
-                line.child(div().flex_none().child(
-                    if subtitle.kind == Kind::Working && connected {
-                        Spinner::new()
-                            .icon(Icon::new(icon))
-                            .xsmall()
-                            .color(color)
-                            .into_any_element()
-                    } else {
-                        Icon::new(icon)
-                            .xsmall()
-                            .text_color(color)
-                            .into_any_element()
-                    },
-                ))
+                line.child(
+                    div()
+                        .flex_none()
+                        .child(Icon::new(icon).xsmall().text_color(color)),
+                )
             })
             .child(div().flex_1().min_w_0().truncate().child(subtitle.text));
         let mut row = h_flex()
@@ -390,7 +391,7 @@ impl ElseApp {
             .px_2()
             .py_1()
             .rounded(theme.radius)
-            .child(self.render_bot_identity_avatar("avatar", bot))
+            .child(self.render_bot_identity_avatar("avatar", bot, working))
             .child(
                 v_flex()
                     .flex_1()
@@ -522,6 +523,9 @@ impl ElseApp {
             .child(self.render_bot_identity_avatar(
                 ElementId::Name(format!("header-avatar-{}", bot.id).into()),
                 bot,
+                self.connected()
+                    && Subtitle::new(bot, true, self.stopping.contains(&bot.id)).kind
+                        == Kind::Working,
             ))
             .child(
                 v_flex()
@@ -877,6 +881,31 @@ impl ElseApp {
         }
         body.into_any_element()
     }
+}
+
+/// Three dots that ripple left to right in place of a spinner icon.
+fn working_dots(bot: Uuid, color: Hsla, still: bool) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .size(px(14.))
+        .gap(px(2.))
+        .items_center()
+        .justify_center()
+        .children((0..3).map(move |i| {
+            let dot = div().relative().size(px(3.)).rounded_full().bg(color);
+            if still {
+                return dot.into_any_element();
+            }
+            dot.with_animation(
+                SharedString::from(format!("working-dot-{bot}-{i}")),
+                Animation::new(std::time::Duration::from_millis(1050)).repeat(),
+                move |dot, t| {
+                    let lift = (std::f32::consts::TAU * t - i as f32 * 0.75).sin().max(0.);
+                    dot.top(px(-2.6 * lift * lift)).opacity(0.45 + 0.55 * lift)
+                },
+            )
+            .into_any_element()
+        }))
 }
 
 fn subtitle(bot: &Bot, main: bool) -> String {
