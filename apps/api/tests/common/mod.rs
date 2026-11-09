@@ -26,6 +26,9 @@ impl TestDb {
         else_api::db::migrate(&db.pool).await.unwrap();
         db
     }
+    pub fn dir(&self) -> &std::path::Path {
+        self._dir.path()
+    }
 }
 
 pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
