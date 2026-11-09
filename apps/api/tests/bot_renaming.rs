@@ -233,6 +233,18 @@ async fn routine_runs_cannot_rename_even_with_a_forged_capability() {
         .await;
     let denied = tool(&h.app, &forged, "rename_bot", args).await;
     assert_eq!(denied.code(), "NOT_ALLOWED");
+    let model = json!({ "target_bot_id": main, "model": "anything" });
+    let denied = tool(&h.app, &token, "set_bot_model", model.clone()).await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = tool(&h.app, &forged, "set_bot_model", model).await;
+    assert!(denied.error, "{}", denied.body);
+    assert_eq!(
+        h.app
+            .owner("GET", &format!("/v1/bots/{main}/profile"), None)
+            .await
+            .body["profile"]["own"],
+        false
+    );
     assert_eq!(snapshot(&h.app, &main).await["name"], "Assistant");
     h.release(routine).await;
 }
