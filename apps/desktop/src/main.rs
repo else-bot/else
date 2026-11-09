@@ -156,9 +156,7 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some(else_visual::isolate::WORKER_ARG) {
         else_visual::isolate::run_worker();
     }
-    if let Ok(executable) = std::env::current_exe() {
-        else_visual::isolate::use_worker(executable);
-    }
+    else_visual::isolate::use_this_executable();
     if matches!(
         std::env::args().nth(1).as_deref(),
         Some("version" | "--version" | "-V")

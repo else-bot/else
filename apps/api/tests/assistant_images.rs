@@ -701,17 +701,21 @@ async fn one_html_file_can_be_both_a_download_and_a_visual_in_either_order() {
     .unwrap();
     send(&app, &bot, "completed").await;
     let messages = replies(&app, &bot).await;
-    for (message, visual_at) in messages.iter().zip([2, 0]) {
-        let parts = message["parts"].as_array().unwrap();
-        let types: Vec<&str> = parts
+    for (message, order) in messages.iter().zip([
+        ["text/html", else_visual::MEDIA_TYPE],
+        [else_visual::MEDIA_TYPE, "text/html"],
+    ]) {
+        let files: Vec<&Value> = message["parts"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter_map(|part| part["file"]["media_type"].as_str())
+            .filter(|part| part["type"] == "file")
             .collect();
-        assert_eq!(types.len(), 2, "{message}");
-        assert_eq!(
-            parts[visual_at]["file"]["media_type"],
-            else_visual::MEDIA_TYPE,
-            "{message}"
-        );
+        let types: Vec<&str> = files
+            .iter()
+            .map(|part| part["file"]["media_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, order, "{message}");
+        assert_ne!(files[0]["file"]["id"], files[1]["file"]["id"], "{message}");
     }
 }

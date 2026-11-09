@@ -50,8 +50,6 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
         .open(project)
         .ok()?;
     let mut files = Vec::new();
-    // Keyed by path and whether the file is shown, so one HTML file can be
-    // both a download and a visual. A link reuses either.
     let mut saved = HashMap::<(PathBuf, bool), Attachment>::new();
     let mut parts = Vec::new();
     let mut offset = 0;
@@ -71,9 +69,11 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
             .collect();
         let reused = match reference {
             Reference::Image => saved.get(&(key.clone(), true)),
-            Reference::Link => saved
-                .get(&(key.clone(), false))
-                .or_else(|| saved.get(&(key.clone(), true))),
+            Reference::Link => saved.get(&(key.clone(), false)).or_else(|| {
+                saved
+                    .get(&(key.clone(), true))
+                    .filter(|file| file.media_type != else_visual::MEDIA_TYPE)
+            }),
         };
         let file = if let Some(file) = reused {
             file.clone()

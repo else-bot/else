@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+futures-channel = "0.3.34"
+futures-executor = "0.3.34"
 libc = "0.2.191"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 takumi = { version = "=2.20.0", default-features = false, features = ["raster-backend", "from-html", "svg-source", "png", "jpeg", "webp", "woff2", "unstable"] }
 thiserror = "2.0.21"
+
+[dev-dependencies]
+futures-executor = "0.3.34"

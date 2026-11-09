@@ -86,8 +86,6 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
     (tool_image(meta, &png), None)
 }
 
-/// The theme variables come from the renderer, so the list cannot drift
-/// from what the chat fills in.
 fn rules() -> String {
     let colors: Vec<String> = else_visual::Color::ALL
         .iter()

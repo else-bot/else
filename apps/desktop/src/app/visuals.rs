@@ -28,8 +28,6 @@ enum Source {
     Failed(String),
 }
 
-/// The last finished render and the key it used, so a failure retries
-/// once the width or theme changes.
 struct Shown {
     key: Key,
     result: Result<Picture, String>,
@@ -134,11 +132,18 @@ impl MessageVisuals {
             }
             let (html, render_key, id) = (html.clone(), key.clone(), visual.file.id);
             let task = cx.spawn(async move |this, cx| {
-                let job_key = render_key.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { render(&html, &job_key) })
-                    .await;
+                let scale = render_key.scale as f32 / 100.0;
+                let rendered =
+                    else_visual::isolate::submit(&html, render_key.width, scale, &render_key.theme)
+                        .await;
+                let result = match rendered {
+                    Ok(rendered) => {
+                        cx.background_executor()
+                            .spawn(async move { picture(rendered) })
+                            .await
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
                 let _ = this.update(cx, |this, cx| {
                     let Some(visual) = this.files.iter_mut().find(|v| v.file.id == id) else {
                         return;
@@ -162,10 +167,7 @@ impl MessageVisuals {
     }
 }
 
-fn render(html: &str, key: &Key) -> Result<(Arc<RenderImage>, u32), String> {
-    let scale = key.scale as f32 / 100.0;
-    let rendered = else_visual::isolate::render(html, key.width, scale, &key.theme)
-        .map_err(|e| e.to_string())?;
+fn picture(rendered: else_visual::Rendered) -> Result<(Arc<RenderImage>, u32), String> {
     let height = rendered.content_height.min(else_visual::MAX_HEIGHT);
     let mut bgra = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
         .ok_or("The render has the wrong size.")?;

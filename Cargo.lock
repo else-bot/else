@@ -2238,6 +2238,8 @@ dependencies = [
 name = "else-visual"
 version = "0.0.30"
 dependencies = [
+ "futures-channel",
+ "futures-executor",
  "libc",
  "serde",
  "serde_json",
