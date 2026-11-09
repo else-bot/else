@@ -1,0 +1,260 @@
+Description: Accept UTF-8 clipboard text from ExtendedClipboard viewers
+ libvncserver negotiates the ExtendedClipboard extension only when the
+ server sets setXCutTextUTF8, so x11vnc took clipboard text as Latin-1
+ and offered it to X clients as STRING alone. It now registers that hook,
+ keeps the text as UTF-8, and offers UTF8_STRING next to STRING in
+ TARGETS (as XA_ATOM, per the ICCCM), converting between Latin-1 and
+ UTF-8 for whichever target a requestor asks for. CUT_BUFFER0 stays
+ Latin-1. Text from classic viewers is unchanged.
+Author: else.bot
+Forwarded: not-needed
+Last-Update: 2026-11-09
+---
+--- a/src/selection.h
++++ b/src/selection.h
+@@ -37,6 +37,7 @@
+ 
+ extern char *xcut_str_primary;
+ extern char *xcut_str_clipboard;
++extern int xcut_utf8;
+ extern int own_primary;
+ extern int set_primary;
+ extern int own_clipboard;
+@@ -51,5 +52,6 @@
+ extern void cutbuffer_send(void);
+ extern void selection_send(XEvent *ev);
+ extern void resend_selection(char *type);
++extern char *utf8_to_latin1(const char *str, unsigned int len, unsigned int *out_len);
+ 
+ #endif /* _X11VNC_SELECTION_H */
+--- a/src/selection.c
++++ b/src/selection.c
+@@ -58,6 +58,8 @@
+  */
+ char *xcut_str_primary = NULL;
+ char *xcut_str_clipboard = NULL;
++/* The two strings above are UTF-8 (from an ExtendedClipboard client), not Latin-1. */
++int xcut_utf8 = 0;
+ 
+ 
+ void selection_request(XEvent *ev, char *type);
+@@ -82,6 +84,72 @@
+ static int clipboard_len = 0;
+ 
+ /*
++ * Latin-1 for UTF-8 text; characters outside Latin-1 and malformed bytes
++ * become '?'. The result is NUL-terminated and must be freed.
++ */
++char *utf8_to_latin1(const char *str, unsigned int len, unsigned int *out_len) {
++	const unsigned char *s = (const unsigned char *) str;
++	char *out = (char *) malloc((size_t) len + 1);
++	unsigned int i = 0, n = 0;
++	while (i < len) {
++		unsigned char c = s[i];
++		unsigned int need, cp, k;
++		if (c < 0x80) {
++			out[n++] = (char) c;
++			i++;
++			continue;
++		}
++		if ((c & 0xE0) == 0xC0) {
++			need = 1;
++			cp = c & 0x1F;
++		} else if ((c & 0xF0) == 0xE0) {
++			need = 2;
++			cp = c & 0x0F;
++		} else if ((c & 0xF8) == 0xF0) {
++			need = 3;
++			cp = c & 0x07;
++		} else {
++			out[n++] = '?';
++			i++;
++			continue;
++		}
++		for (k = 1; k <= need; k++) {
++			if (i + k >= len || (s[i + k] & 0xC0) != 0x80) {
++				break;
++			}
++			cp = (cp << 6) | (s[i + k] & 0x3F);
++		}
++		if (k <= need) {
++			out[n++] = '?';
++			i += k;
++			continue;
++		}
++		out[n++] = cp <= 0xFF ? (char) cp : '?';
++		i += need + 1;
++	}
++	out[n] = '\0';
++	*out_len = n;
++	return out;
++}
++
++static char *latin1_to_utf8(const char *str, unsigned int len, unsigned int *out_len) {
++	const unsigned char *s = (const unsigned char *) str;
++	char *out = (char *) malloc((size_t) len * 2 + 1);
++	unsigned int i, n = 0;
++	for (i = 0; i < len; i++) {
++		if (s[i] < 0x80) {
++			out[n++] = (char) s[i];
++		} else {
++			out[n++] = (char) (0xC0 | (s[i] >> 6));
++			out[n++] = (char) (0x80 | (s[i] & 0x3F));
++		}
++	}
++	out[n] = '\0';
++	*out_len = n;
++	return out;
++}
++
++/*
+  * An X11 (not VNC) client on the local display has requested the selection
+  * from us (because we are the current owner).
+  *
+@@ -99,7 +167,9 @@
+ 	char *str;
+ 	unsigned int length;
+ 	unsigned char *data;
++	char *converted = NULL;
+ 	static Atom xa_targets = None;
++	static Atom xa_utf8_string = None;
+ 	static int sync_it = -1;
+ # ifndef XA_LENGTH
+ 	unsigned long XA_LENGTH;
+@@ -153,6 +223,9 @@
+ 	if (xa_targets == None) {
+ 		xa_targets = XInternAtom(dpy, "TARGETS", False);
+ 	}
++	if (xa_utf8_string == None) {
++		xa_utf8_string = XInternAtom(dpy, "UTF8_STRING", False);
++	}
+ 
+ 	/* the window may have gone away, so trap errors */
+ 	trapped_xerror = 0;
+@@ -175,15 +248,16 @@
+ 	} else if (xa_targets != None && ev->xselectionrequest.target == xa_targets) {
+ 		/* targets request */
+ 		int ret;
+-		Atom targets[2];
++		Atom targets[3];
+ 		targets[0] = (Atom) xa_targets;
+-		targets[1] = (Atom) XA_STRING;
++		targets[1] = (Atom) xa_utf8_string;
++		targets[2] = (Atom) XA_STRING;
+ 
+ 		ret = XChangeProperty(ev->xselectionrequest.display,
+ 		    ev->xselectionrequest.requestor,
+ 		    ev->xselectionrequest.property,
+-		    ev->xselectionrequest.target, 32, PropModeReplace,
+-		    (unsigned char *) targets, 2);
++		    XA_ATOM, 32, PropModeReplace,
++		    (unsigned char *) targets, 3);
+ 		if (debug_sel) {
+ 			rfbLog("TARGETS: XChangeProperty() -> %d -- sz1: %d  sz2: %d\n",
+ 			    ret, sizeof(targets[0]), sizeof(targets)/sizeof(targets[0]));
+@@ -193,7 +267,14 @@
+ 		/* data request */
+ 		int ret;
+ 
+-		data = (unsigned char *)str;
++		int want_utf8 = ev->xselectionrequest.target == xa_utf8_string;
++
++		if (str && want_utf8 && ! xcut_utf8) {
++			converted = latin1_to_utf8(str, length, &length);
++		} else if (str && ! want_utf8 && xcut_utf8) {
++			converted = utf8_to_latin1(str, length, &length);
++		}
++		data = (unsigned char *) (converted ? converted : str);
+ 
+ 		ret = XChangeProperty(ev->xselectionrequest.display,
+ 		    ev->xselectionrequest.requestor,
+@@ -203,6 +284,7 @@
+ 		if (debug_sel) {
+ 			rfbLog("DATA: XChangeProperty() -> %d\n", ret);
+ 		}
++		free(converted);
+ 	}
+ 
+ 	if (! trapped_xerror) {
+--- a/src/xevents.h
++++ b/src/xevents.h
+@@ -53,6 +53,7 @@
+ extern void set_prop_atom(Atom atom);
+ extern void check_xevents(int reset);
+ extern void xcut_receive(char *text, int len, rfbClientPtr cl);
++extern void xcut_receive_utf8(char *text, int len, rfbClientPtr cl);
+ 
+ extern void kbd_release_all_keys(rfbClientPtr cl);
+ extern void set_single_window(rfbClientPtr cl, int x, int y);
+--- a/src/xevents.c
++++ b/src/xevents.c
+@@ -1678,7 +1678,7 @@
+ /*
+  * hook called when a VNC client sends us some "XCut" text (rfbClientCutText).
+  */
+-void xcut_receive(char *text, int len, rfbClientPtr cl) {
++static void xcut_store(char *text, int len, rfbClientPtr cl, int utf8) {
+ 	allowed_input_t input;
+ 
+ 	if (threads_drop_input) {
+@@ -1808,6 +1808,7 @@
+ 	}
+ 
+ 	/* duplicate the text string for our own use. */
++	xcut_utf8 = utf8;
+ 	if (set_primary) {
+ 		if (xcut_str_primary != NULL) {
+ 			free(xcut_str_primary);
+@@ -1834,8 +1835,16 @@
+ 	}
+ 
+ 	/* copy this text to CUT_BUFFER0 as well: */
+-	XChangeProperty(dpy, rootwin, XA_CUT_BUFFER0, XA_STRING, 8,
+-	    PropModeReplace, (unsigned char *) text, len);
++	if (utf8) {
++		unsigned int latin1_len;
++		char *latin1 = utf8_to_latin1(text, (unsigned int) len, &latin1_len);
++		XChangeProperty(dpy, rootwin, XA_CUT_BUFFER0, XA_STRING, 8,
++		    PropModeReplace, (unsigned char *) latin1, (int) latin1_len);
++		free(latin1);
++	} else {
++		XChangeProperty(dpy, rootwin, XA_CUT_BUFFER0, XA_STRING, 8,
++		    PropModeReplace, (unsigned char *) text, len);
++	}
+ 	XFlush_wr(dpy);
+ 
+ 	X_UNLOCK;
+@@ -1845,6 +1854,21 @@
+ #endif	/* NO_X11 */
+ }
+ 
++void xcut_receive(char *text, int len, rfbClientPtr cl) {
++	xcut_store(text, len, cl, 0);
++}
++
++/*
++ * hook called with the UTF-8 text of an ExtendedClipboard client; it ends
++ * in a NUL, which is not part of the text.
++ */
++void xcut_receive_utf8(char *text, int len, rfbClientPtr cl) {
++	while (len > 0 && text[len - 1] == '\0') {
++		len--;
++	}
++	xcut_store(text, len, cl, 1);
++}
++
+ void kbd_release_all_keys(rfbClientPtr cl) {
+ 	if (unixpw_in_progress) {
+ 		rfbLog("kbd_release_all_keys: unixpw_in_progress, skipping.\n");
+--- a/src/screen.c
++++ b/src/screen.c
+@@ -3795,6 +3795,9 @@
+ 	screen->kbdAddEvent = keyboard;
+ 	screen->ptrAddEvent = pointer_event;
+ 	screen->setXCutText = xcut_receive;
++#ifdef LIBVNCSERVER_HAVE_LIBZ
++	screen->setXCutTextUTF8 = xcut_receive_utf8;
++#endif
+ 	screen->setTranslateFunction = set_xlate_wrapper;
+ 
+ 	screen->kbdReleaseAllKeys = kbd_release_all_keys; 
