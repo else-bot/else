@@ -22,7 +22,8 @@ RUN mkdir -p /etc/elsebot && dpkg-query -W -f='${Package}\t${Version}\n' \
       cargo chromium fonts-noto-cjk fonts-noto-core g++ gcc git jq make nodejs npm pkg-config python3 python3-pip \
       python3-venv rustc x11vnc \
     | jq -R -s --arg tag "$IMAGE_TAG" \
-      '{image: $tag, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add)}' \
+      --argjson manual "$(apt-mark showmanual | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      '{image: $tag, packages: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add), manual: $manual}' \
       > /etc/elsebot/image.json
 
 ENV DISPLAY=:99

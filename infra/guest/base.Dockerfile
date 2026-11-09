@@ -7,7 +7,7 @@ RUN apt-get update \
       ca-certificates chromium curl fonts-dejavu-core fonts-noto-cjk fonts-noto-core novnc openbox procps \
       python3 python3-websocket supervisor websockify x11vnc xterm xvfb \
       bzip2 cargo g++ gcc git jq libc6-dev make nodejs npm pkg-config \
-      python3-pip python3-venv rustc time unzip xz-utils zip \
+      python3-pip python3-venv rustc sudo time unzip xz-utils zip \
  && rm -rf /var/lib/apt/lists/*
 
 FROM runtime AS x11vnc
@@ -30,7 +30,10 @@ FROM runtime
 COPY --from=x11vnc /build/x11vnc.deb /tmp/x11vnc.deb
 RUN dpkg -i /tmp/x11vnc.deb && rm /tmp/x11vnc.deb
 
-# Desktop work runs as an unprivileged user; Chromium keeps its sandbox.
+# Desktop work runs as an unprivileged user, so Chromium keeps its sandbox.
+# The user has passwordless sudo: the VM is the security boundary.
 RUN useradd --create-home --shell /bin/bash elsebot \
  && mkdir -p /var/lib/elsebot/jobs /var/lib/elsebot/vnc-released /home/elsebot/work \
- && chown -R elsebot:elsebot /var/lib/elsebot /home/elsebot
+ && chown -R elsebot:elsebot /var/lib/elsebot /home/elsebot \
+ && echo 'elsebot ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/elsebot \
+ && chmod 0440 /etc/sudoers.d/elsebot
