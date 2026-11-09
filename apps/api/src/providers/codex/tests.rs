@@ -394,6 +394,7 @@ fn fake_codex_with(
     let ignore_catalog = dir.join("ignore-catalog");
     let one_model = dir.join("one-model");
     let long_history = dir.join("long-history");
+    let account_failures = dir.join("account-failures");
     let catalog = json!({
         "models": MODELS.iter().chain(&["hidden-model"]).map(|slug| json!({
             "slug": slug,
@@ -436,6 +437,12 @@ for line in sys.stdin:
     m = json.loads(line)
     if "id" not in m: continue
     method, p = m["method"], m.get("params") or {{}}
+    if method == "account/read" and os.path.exists({account_failures:?}):
+        left = int(open({account_failures:?}).read())
+        open({account_failures:?}, "w").write(str(left - 1))
+        if left > 0:
+            out({{"id": m["id"], "error": {{"code": -32603, "message": "workspace routing discovery timed out"}}}})
+            continue
     if method == "mcpServerStatus/list": r = {{"data": json.loads({servers})}}
     elif method == "skills/list": r = {{"data": [{{"skills": []}}]}}
     elif method == "account/read": r = {{"account": {{"type": "chatgpt", "email": "o@example.test"}}}}
@@ -651,6 +658,39 @@ async fn summaries_and_checkpoints_run_on_the_no_native_catalog() {
         "{result:?}"
     );
     assert!(!dir.path().join("threads.jsonl").exists());
+}
+
+#[tokio::test]
+async fn a_failed_account_read_is_asked_once_more_before_the_turn_fails() {
+    for (failures, delivered) in [(1, true), (2, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, received) = fake_codex_with(dir.path(), &elsebot_server(), None);
+        let codex = codex.with_tools(TOOL_URL.into());
+        std::fs::write(dir.path().join("account-failures"), failures.to_string()).unwrap();
+        let sink = super::super::recording::Recorded::default();
+        let outcome = codex
+            .run(
+                turn_from(crate::app::providers::Origin::OwnerRequest),
+                &sink,
+                Stop::default(),
+            )
+            .await;
+        let asked = std::fs::read_to_string(dir.path().join("account-failures")).unwrap();
+        assert_eq!(asked, (failures - 2).to_string(), "asked twice: {failures}");
+        assert_eq!(received.exists(), delivered, "{failures}: {outcome:?}");
+        if delivered {
+            assert_eq!(outcome, TurnOutcome::Completed);
+        } else {
+            assert_eq!(
+                outcome,
+                TurnOutcome::Failed {
+                    code: "provider_unavailable".into(),
+                    message: "account/read failed: workspace routing discovery timed out (-32603)"
+                        .into(),
+                }
+            );
+        }
+    }
 }
 
 #[tokio::test]
