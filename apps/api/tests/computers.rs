@@ -29,6 +29,8 @@ struct Fake {
     fail_close: std::sync::atomic::AtomicBool,
     fail_configure: std::sync::atomic::AtomicBool,
     specs: Mutex<Vec<Spec>>,
+    packages: Mutex<Vec<String>>,
+    reinstalled: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -206,7 +208,12 @@ impl ComputerRuntime for Fake {
             {
                 files.insert("/var/tmp/else-upgrade.tar".into(), "DATA".into());
                 use sha2::Digest;
-                format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")))
+                let mut report =
+                    format!("4\n{}\n1000\n", hex::encode(sha2::Sha256::digest(b"DATA")));
+                for package in self.packages.lock().unwrap().iter() {
+                    report += &format!("{package}\n");
+                }
+                report
             }
             "/bin/sh" if close && self.fail_close.load(std::sync::atomic::Ordering::SeqCst) => {
                 return Ok(ExecOutput {
@@ -225,7 +232,14 @@ impl ComputerRuntime for Fake {
                         truncated: false,
                     });
                 }
-                "{\"image\":\"new\"}".into()
+                let packages = &args[6..];
+                *self.reinstalled.lock().unwrap() =
+                    packages.iter().map(|p| (*p).to_owned()).collect();
+                let mut out = String::new();
+                for package in packages.iter().filter(|p| p.starts_with("gone-")) {
+                    out += &format!("unrestored {package}\n");
+                }
+                out + "{\"image\":\"new\"}"
             }
             _ => String::new(),
         };
@@ -1407,6 +1421,79 @@ async fn owners_upgrade_from_the_api_while_turns_queue() {
     assert!(desktop_released, "the owner's desktop session ended");
     let latest = app.owner("POST", &upgrade, None).await;
     assert_eq!(latest.status, StatusCode::CONFLICT, "{:?}", latest.body);
+}
+
+/// Bots have root in their computer, so the old computer reports the APT
+/// packages the bot installed and the new one installs them again by name.
+/// A package it cannot install is reported, without failing the upgrade.
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrades_reinstall_the_bots_packages_and_report_the_ones_that_fail() {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        ComputerConfig {
+            image: "img:new".into(),
+            ..config(1)
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Root").await.parse().unwrap();
+    let path = format!("/v1/bots/{bot}/computer");
+    let (turn, _) = ready(&manager, bot, "turn:gone").await;
+    manager.release(turn).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    *fake.packages.lock().unwrap() = vec!["ffmpeg".into(), "gone-tool:amd64".into()];
+    let report = manager.upgrade_image(bot, "img:new", None).await.unwrap();
+    assert_eq!(
+        *fake.reinstalled.lock().unwrap(),
+        vec!["ffmpeg".to_owned(), "gone-tool:amd64".to_owned()],
+        "the new computer installs the bot's packages again"
+    );
+    assert_eq!(report.unrestored_packages, vec!["gone-tool:amd64"]);
+    assert_eq!(report.image_description, "{\"image\":\"new\"}");
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["upgrade"],
+        serde_json::json!({ "state": "completed", "unrestored_packages": ["gone-tool:amd64"] }),
+        "the owner sees what was not installed again"
+    );
+
+    manager.rollback_upgrade(bot).await.unwrap();
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["upgrade"],
+        serde_json::Value::Null,
+        "the report belongs to the computer that upgrade made"
+    );
+
+    *fake.packages.lock().unwrap() = vec!["--allow-unauthenticated".into()];
+    let refused = manager.upgrade_image(bot, "img:new", None).await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("unreadable")),
+        "a name apt-get would read as an option is refused: {refused:?}"
+    );
+
+    *fake.packages.lock().unwrap() = vec!["ffmpeg".into()];
+    let report = manager.upgrade_image(bot, "img:new", None).await.unwrap();
+    assert!(report.unrestored_packages.is_empty());
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["upgrade"],
+        serde_json::Value::Null,
+        "nothing to report when every package came back"
+    );
 }
 
 async fn settled(app: &TestApp, path: &str) -> serde_json::Value {

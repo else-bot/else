@@ -96,7 +96,7 @@ async fn show(
         Some(computers) => (
             Some(computers.config().image.clone()),
             match computers.upgrade_status(bot_id).await {
-                None => last_failed_upgrade(&state, bot_id).await?,
+                None => last_upgrade(&state, bot_id).await?,
                 Some(UpgradeStatus::Running) => json!({ "state": "running" }),
                 Some(UpgradeStatus::Failed(error)) => json!({ "state": "failed", "error": error }),
             },
@@ -141,19 +141,26 @@ async fn show(
 }
 
 /// The newest recorded upgrade, when it failed (one a restart interrupted,
-/// or one run offline).
-async fn last_failed_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
-    let last: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT state, error FROM computer_upgrades WHERE bot_id = ?1
-         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+/// or one run offline), or when it made the current computer and left some
+/// of the bot's APT packages uninstalled.
+async fn last_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
+    let last: Option<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
+        "SELECT u.state, u.error, u.unrestored_packages, u.to_runtime_name = c.runtime_name
+         FROM computer_upgrades u JOIN bot_computers c ON c.bot_id = u.bot_id
+         WHERE u.bot_id = ?1
+         ORDER BY u.created_at DESC, u.rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(&state.db)
     .await?;
     Ok(match last {
-        Some((upgrade, error)) if upgrade == "failed" => json!({
+        Some((upgrade, error, _, _)) if upgrade == "failed" => json!({
             "state": "failed",
             "error": error.unwrap_or_else(|| "interrupted".into()),
+        }),
+        Some((upgrade, _, Some(packages), true)) if upgrade == "completed" => json!({
+            "state": "completed",
+            "unrestored_packages": serde_json::from_str::<Vec<String>>(&packages).unwrap_or_default(),
         }),
         _ => Value::Null,
     })

@@ -19,6 +19,9 @@ mod text_input;
 
 actions!(computer_viewer, [GuestTab, GuestBackTab]);
 
+const CARRIED: &str = "Files, projects, browser sign-ins, installed packages, and anything in \
+                       /usr/local or /opt carry over. Changes to /etc don't.";
+
 pub(super) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", GuestTab, Some("ComputerControl")),
@@ -347,10 +350,27 @@ impl ComputerView {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(
-                            "Upgrading to the latest computer. This takes a few minutes. \
-                             Files, projects and browser sign-ins carry over.",
-                        )
+                        .child(format!(
+                            "Upgrading to the latest computer. This takes a few minutes. {CARRIED}"
+                        ))
+                        .into_any_element(),
+                );
+            }
+            (
+                Some(ComputerUpgrade::Completed {
+                    unrestored_packages,
+                }),
+                _,
+            ) if !computer.outdated() => {
+                return Some(
+                    div()
+                        .text_xs()
+                        .text_color(theme.warning)
+                        .child(format!(
+                            "Upgraded, but these packages couldn't be installed again: {}. \
+                             The bot can install them again itself.",
+                            unrestored_packages.join(", ")
+                        ))
                         .into_any_element(),
                 );
             }
@@ -359,10 +379,11 @@ impl ComputerView {
             (Some(ComputerUpgrade::Failed { error }), None) => {
                 (format!("Upgrade failed: {error}"), true)
             }
-            (None, None) => (
-                "A newer computer is available. Files, projects and browser sign-ins \
-                 carry over; the bot can't use its computer while it upgrades."
-                    .to_owned(),
+            (None | Some(ComputerUpgrade::Completed { .. }), None) => (
+                format!(
+                    "A newer computer is available. {CARRIED} \
+                     The bot can't use its computer while it upgrades."
+                ),
                 false,
             ),
         };

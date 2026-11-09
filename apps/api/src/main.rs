@@ -259,6 +259,12 @@ fn run_upgrade_computer(
                 report.data_bytes, report.data_sha256
             );
             println!("image: {}", report.image_description);
+            if !report.unrestored_packages.is_empty() {
+                println!(
+                    "not installed again: {}",
+                    report.unrestored_packages.join(" ")
+                );
+            }
         }
         Ok(())
     })

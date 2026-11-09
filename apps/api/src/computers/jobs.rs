@@ -9,7 +9,8 @@
 //! `/var/lib/elsebot/jobs/<id>` (`pid`, `exit`, `out`). Maintenance polls
 //! running jobs, records their outcome, enforces deadlines, and releases
 //! their leases; cancellation is recorded only once the job's process group
-//! is gone. Commands run as the guest's unprivileged user.
+//! is gone. Commands run as the guest's unprivileged user, which has
+//! passwordless sudo.
 
 mod commands;
 mod files;

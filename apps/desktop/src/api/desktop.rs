@@ -49,6 +49,7 @@ impl ComputerState {
 pub enum ComputerUpgrade {
     Running,
     Failed { error: String },
+    Completed { unrestored_packages: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,6 +602,16 @@ mod tests {
             failed.upgrade,
             Some(ComputerUpgrade::Failed {
                 error: "busy".into()
+            })
+        );
+        let partial = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "upgrade": { "state": "completed", "unrestored_packages": ["ffmpeg"] },
+        }));
+        assert_eq!(
+            partial.upgrade,
+            Some(ComputerUpgrade::Completed {
+                unrestored_packages: vec!["ffmpeg".into()]
             })
         );
     }
