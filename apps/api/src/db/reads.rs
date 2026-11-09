@@ -4,7 +4,9 @@
 //! (its seq and the UTF-8 bytes of its text) is compared with the saved read
 //! position, so text appended to a reply after the owner read it is unread
 //! again. Reading only moves forward; marking unread sets a flag and keeps
-//! the position, so a delayed read can never undo it.
+//! the position, so a delayed read can never undo it. Attaching a reply's
+//! linked files can rewrite its text shorter, so a position past the end of a
+//! reply reads it through its current end.
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -146,7 +148,7 @@ pub async fn apply(
         ReadCommand::MarkRead { position } => (position, Some(false)),
         ReadCommand::MarkUnread => (None, Some(true)),
     };
-    if let Some(position) = position {
+    if let Some(mut position) = position {
         let bytes: Option<i64> = sqlx::query_scalar(
             "SELECT length(CAST(text AS BLOB)) FROM items
              WHERE conversation_id = ?1 AND seq = ?2 AND kind = 'assistant'",
@@ -155,8 +157,11 @@ pub async fn apply(
         .bind(position.item_seq)
         .fetch_optional(&mut *tx)
         .await?;
-        if !bytes.is_some_and(|bytes| (0..=bytes).contains(&position.text_bytes)) {
-            return Err(ReadError::InvalidPosition);
+        match bytes {
+            Some(bytes) if position.text_bytes >= 0 => {
+                position.text_bytes = position.text_bytes.min(bytes);
+            }
+            _ => return Err(ReadError::InvalidPosition),
         }
         sqlx::query(
             "UPDATE conversations SET read_item_seq = ?2, read_text_bytes = ?3
