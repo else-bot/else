@@ -644,13 +644,12 @@ pub async fn answer(
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
-        let connected: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM connector_accounts WHERE state <> 'removed'
+        let connected: Vec<(Uuid, bool)> = sqlx::query_as(
+            "SELECT id, lower(json_extract(config, '$.address')) = ?1 FROM connector_accounts
+             WHERE state <> 'removed'
                 AND (lower(json_extract(config, '$.address')) = ?1
                      OR (json_extract(config, '$.provider') = ?3
-                         AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))
-             ORDER BY lower(json_extract(config, '$.address')) = ?1 DESC, created_at DESC
-             LIMIT 1",
+                         AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
         )
         .bind(email_connection.address.to_lowercase())
         .bind(question.id)
@@ -661,16 +660,26 @@ pub async fn answer(
                 .unwrap_or_default()
                 .to_owned(),
         )
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
-        let Some(account_id) = connected else {
+        if connected.is_empty() {
             return Err(SettleError::InboxNotConnected);
+        }
+        // Wake only on an inbox this card surely connected: the requested
+        // address, or the one account of its provider connected since.
+        let account = match connected.iter().find(|(_, exact)| *exact) {
+            Some((id, _)) => Some(*id),
+            None if connected.len() == 1 => Some(connected[0].0),
+            None => None,
         };
-        match crate::connectors::store::wake_in(&mut tx, account_id, bot_id, true).await {
-            Ok(_) => {}
-            Err(crate::connectors::store::StoreError::Db(error)) => return Err(error.into()),
-            Err(error) => {
-                tracing::warn!(%account_id, %bot_id, %error, "inbox connected without wake-ups");
+        if let Some(account_id) = account {
+            use crate::connectors::store::{StoreError, wake_if_readable_in};
+            match wake_if_readable_in(&mut tx, account_id, bot_id).await {
+                Ok(_) => {}
+                Err(StoreError::Db(error)) => return Err(error.into()),
+                Err(error) => {
+                    tracing::warn!(%account_id, %bot_id, %error, "inbox connected without wake-ups");
+                }
             }
         }
     }

@@ -1134,3 +1134,100 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     assert_eq!(chosen.result["account_id"], other_mailbox.id.to_string());
     h.release(turn).await;
 }
+
+fn gmail(address: &str) -> (MailConfig, Credential) {
+    (
+        Provider::Gmail.config(address.into()).unwrap(),
+        Credential::OAuth2 {
+            client_id: "desktop".into(),
+            client_secret: None,
+            refresh_token: "private-refresh".into(),
+            access_token: None,
+            expires_at: None,
+        },
+    )
+}
+
+/// Parks a turn on an inbox card for owner@gmail.com and returns the bot and
+/// the card's answer path once the turn waits.
+async fn inbox_card(h: &recorder::Harness) -> (String, String) {
+    let bot = h.app.main_bot().await;
+    let (turn, token) = h
+        .running(&bot, &format!("{GATE} Watch owner@gmail.com"))
+        .await;
+    let parked = tool(
+        &h.app,
+        &token,
+        "mail_connect",
+        json!({"provider":"gmail","address":"owner@gmail.com"}),
+    )
+    .await;
+    let question = parked.result["question_id"].as_str().unwrap().to_owned();
+    h.release(turn).await;
+    h.app
+        .wait_turn_for(
+            &turn.to_string(),
+            &["waiting"],
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+    let path = format!("/v1/bots/{bot}/questions/{question}/answer");
+    (bot, path)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inbox_card_wakes_no_bot_when_its_inbox_is_ambiguous() {
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let (bot, path) = inbox_card(&h).await;
+    let mut ids = vec![];
+    for address in ["first@gmail.com", "second@gmail.com"] {
+        let (config, credential) = gmail(address);
+        let key = h.app.state.secret_key.as_ref().unwrap();
+        ids.push(
+            store::create(&h.app.db.pool, key, &config, &credential)
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let answered = h
+        .app
+        .owner("POST", &path, Some(json!({"choice":"approve"})))
+        .await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    for id in ids {
+        let p = store::permissions(&h.app.db.pool, id, bot.parse().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            !p.unwrap().wake,
+            "neither inbox is surely the one signed in"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inbox_card_never_restores_read_the_owner_withdrew() {
+    let h = recorder::harness_with(4, Some(Arc::new(QuietInbox::default()))).await;
+    let (bot, path) = inbox_card(&h).await;
+    let (config, credential) = gmail("owner@gmail.com");
+    let key = h.app.state.secret_key.as_ref().unwrap();
+    let id = store::create(&h.app.db.pool, key, &config, &credential)
+        .await
+        .unwrap()
+        .id;
+    let bot_id: Uuid = bot.parse().unwrap();
+    store::set_permissions(&h.app.db.pool, id, bot_id, &Permissions::default())
+        .await
+        .unwrap();
+    let answered = h
+        .app
+        .owner("POST", &path, Some(json!({"choice":"approve"})))
+        .await;
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    let p = store::permissions(&h.app.db.pool, id, bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!p.read && !p.wake, "{p:?}");
+}

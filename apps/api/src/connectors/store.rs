@@ -577,8 +577,7 @@ pub async fn set_wake(
     Ok(changed)
 }
 
-/// [`set_wake`] inside the caller's immediate transaction.
-pub async fn wake_in(
+async fn wake_in(
     conn: &mut SqliteConnection,
     account_id: Uuid,
     bot_id: Uuid,
@@ -593,6 +592,25 @@ pub async fn wake_in(
         ..current
     };
     write_grant(conn, account_id, bot_id, &p).await
+}
+
+/// Wake a bot on an inbox it can already read. Never restores read the
+/// owner withdrew. Returns whether anything changed.
+pub async fn wake_if_readable_in(
+    conn: &mut SqliteConnection,
+    account_id: Uuid,
+    bot_id: Uuid,
+) -> Result<bool, StoreError> {
+    match grant_in(conn, account_id, bot_id).await? {
+        Some(current) if current.read => {
+            let p = Permissions {
+                wake: true,
+                ..current
+            };
+            write_grant(conn, account_id, bot_id, &p).await
+        }
+        _ => Ok(false),
+    }
 }
 
 async fn write_grant(

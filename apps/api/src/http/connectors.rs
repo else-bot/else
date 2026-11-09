@@ -525,9 +525,9 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         ),
         Ok(Gate::Run { .. }) => (
             tool_result(json!({"status":"connected",
-                "next":"The owner signed in. New mail in this inbox now wakes you. Call \
-                    mail_accounts to find the inbox; Google may have connected a different \
-                    address than requested."})),
+                "next":"The owner signed in. Call mail_accounts to find the inbox; Google may \
+                    have connected a different address than requested. Its permissions say \
+                    whether new mail wakes you."})),
             None,
         ),
         Err(error) => super::owner_tools::question_refused(error),
