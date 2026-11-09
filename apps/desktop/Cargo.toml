@@ -44,4 +44,5 @@ wl-clipboard-rs = "0.9.5"
 axum = { version = "0.8.9", default-features = false, features = ["json"] }
 futures-util = "0.3.34"
 proc-macro2 = "1.0.107"
+sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["io-util", "net"] }
