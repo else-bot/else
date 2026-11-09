@@ -380,10 +380,7 @@ impl ComputerManager {
                 tracing::warn!(error = %err, "computer maintenance failed");
             }
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    self.stop_upgrades().await;
-                    return;
-                }
+                _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }

@@ -1470,13 +1470,16 @@ async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_r
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let cancel = never();
-    let maintenance = tokio::spawn(manager.clone().run(cancel.clone()));
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(5), maintenance)
+    tokio::time::timeout(Duration::from_secs(5), manager.stop_upgrades())
         .await
-        .expect("stopping waits for the upgrade to be interrupted, not to finish")
-        .unwrap();
+        .expect("stopping waits for the upgrade to be interrupted, not to finish");
+    assert!(
+        matches!(
+            manager.acquire(bot, "turn:after").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "the old computer stays down while the replacement may still run"
+    );
     let image: String = sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
         .bind(bot)
         .fetch_one(&app.db.pool)

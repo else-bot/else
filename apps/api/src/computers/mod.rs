@@ -429,6 +429,17 @@ impl ComputerManager {
             });
         }
         let _op = self.op(bot_id).await;
+        let stranded: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started')",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if stranded {
+            return Ok(Acquire::Queued {
+                reason: "a failed upgrade's computer is still being removed".into(),
+            });
+        }
         let stopped = {
             let mut conn = self.pool.acquire().await?;
             Self::row(&mut conn, bot_id)

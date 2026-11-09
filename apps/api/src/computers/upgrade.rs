@@ -233,11 +233,11 @@ impl ComputerManager {
         Ok(())
     }
 
-    /// Interrupt running upgrades and wait until they have ended, so the
-    /// API's singleton lock outlives them. An interrupted upgrade has not
-    /// switched the bot (the switch is one transaction), and startup removes
-    /// its replacement.
-    pub(super) async fn stop_upgrades(&self) {
+    /// Interrupt running upgrades and wait until they have ended; shutdown
+    /// calls it before releasing the API's singleton lock. An interrupted
+    /// upgrade has not switched the bot (the switch is one transaction), and
+    /// maintenance removes its replacement.
+    pub async fn stop_upgrades(&self) {
         self.upgrade_stop.cancel();
         self.upgrade_tasks.close();
         self.upgrade_tasks.wait().await;
