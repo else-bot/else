@@ -423,9 +423,8 @@ impl RowText {
                     }
                     if let Some(file) = linked_file(url).and_then(|id| link_files.get(&id)) {
                         let file = file.clone();
-                        let _ = link_owner.update(cx, |app, cx| {
-                            app.preview_attachment(bot, file, window, cx)
-                        });
+                        let _ = link_owner
+                            .update(cx, |app, cx| app.preview_attachment(bot, file, window, cx));
                     } else if let Some(target) = LinkTarget::parse(url) {
                         target.open(cx);
                     }
@@ -550,7 +549,12 @@ fn file_links(
             let name: String = file
                 .name
                 .chars()
-                .flat_map(|c| c.is_ascii_punctuation().then_some('\\').into_iter().chain([c]))
+                .flat_map(|c| {
+                    c.is_ascii_punctuation()
+                        .then_some('\\')
+                        .into_iter()
+                        .chain([c])
+                })
                 .collect();
             Some((span.range(), format!("[{name}]({FILE_LINK}{})", file.id)))
         })
