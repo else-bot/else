@@ -49,6 +49,10 @@ const LANES: [(DelegationStatus, &str); 5] = [
 /// Queued members beyond this fold into "+N more" so a large council keeps its height.
 const QUEUED_SHOWN: usize = 4;
 
+/// Matches an xsmall button so lane labels line up with the first row of pills.
+const LANE_ROW_H: f32 = 20.;
+const PILL_MAX_W: f32 = 180.;
+
 fn task_summary(task: &str) -> String {
     task.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -200,6 +204,7 @@ impl ElseApp {
                         .ghost()
                         .xsmall()
                         .rounded_full()
+                        .max_w(px(PILL_MAX_W))
                         .focus_ring(false)
                         .cursor_pointer()
                         .accessibility_label(format!("Open chat with {}", name(d)))
@@ -208,12 +213,13 @@ impl ElseApp {
                         )
                         .child(
                             h_flex()
+                                .min_w_0()
                                 .gap_1p5()
                                 .items_center()
                                 .text_xs()
                                 .when(status == DelegationStatus::Queued, |row| row.opacity(0.6))
                                 .children(avatar(d, 16.))
-                                .child(name(d)),
+                                .child(div().min_w_0().truncate().child(name(d))),
                         )
                 });
                 Some(
@@ -225,7 +231,7 @@ impl ElseApp {
                         .child(
                             h_flex()
                                 .w(px(84.))
-                                .h(px(24.))
+                                .h(px(LANE_ROW_H))
                                 .flex_none()
                                 .items_center()
                                 .gap_1p5()
@@ -250,7 +256,7 @@ impl ElseApp {
                                 .when(hidden > 0, |row| {
                                     row.child(
                                         div()
-                                            .h(px(24.))
+                                            .h(px(LANE_ROW_H))
                                             .flex()
                                             .items_center()
                                             .px_2()
