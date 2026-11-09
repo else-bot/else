@@ -202,6 +202,18 @@ with elsecdp.connect() as browser:
 print(json.dumps(out))
 "#;
 
+const DRAFT_NODE: &str = r#"
+import { connect } from "/usr/local/lib/elsebot/cdp/cdp.mjs";
+const browser = await connect();
+try {
+  const draft = await browser.page({ create: "http://127.0.0.1:8411/draft" });
+  await draft.evaluate("document.getElementById('draft').focus()");
+  await draft.call("Input.insertText", { text: "unsent" });
+} finally {
+  await browser.close();
+}
+"#;
+
 const RESTART_PY: &str = r#"
 import json, sys, urllib.request
 sys.path.insert(0, "/usr/local/lib/elsebot/cdp")
@@ -398,11 +410,34 @@ async fn scripts_drive_the_visible_browser_safely() {
     assert_eq!(python["kept"], "unsent");
     assert_eq!(python["answered"], "Draft");
     assert_eq!(python["left"], "Fixture search");
+
     assert!(
         windows(&manager, bot)
             .await
             .contains("Results for python-picnic")
     );
+
+    write(&manager, bot, "cdp/draft.mjs", DRAFT_NODE).await;
+    ok(&manager, bot, "node cdp/draft.mjs", 60).await;
+    let Acquire::Ready { lease_id, .. } = manager.acquire(bot, "test:tool").await.unwrap() else {
+        panic!("not ready")
+    };
+    let blocked = manager
+        .browser(lease_id, &["open", "http://127.0.0.1:8411/"])
+        .await
+        .unwrap();
+    assert!(blocked.stderr.contains("NAVIGATION_BLOCKED"), "{blocked:?}");
+    let left = manager
+        .browser(
+            lease_id,
+            &["--accept-dialogs", "open", "http://127.0.0.1:8411/"],
+        )
+        .await
+        .unwrap();
+    let left: Value = serde_json::from_str(left.stdout.trim()).unwrap();
+    assert_eq!(left["title"], "Fixture search");
+    assert_eq!(left["dialogs"][0]["type"], "beforeunload");
+    manager.release(lease_id).await.unwrap();
 
     let example = ok(
         &manager,
