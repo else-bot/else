@@ -389,20 +389,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         continue_waiting(&mut tx, task).await?;
         crate::db::events::turn_changed(&mut tx, req.bot_id, task).await?;
     }
-    // A task the owner took over keeps running in the target's chat however
-    // this conversation ends, so its outcome goes to this message instead.
-    sqlx::query(
-        "UPDATE delegations SET root_turn_id = ?3, parent_attempt = 0
-         WHERE takeover_turn_id IS NOT NULL AND status IN ('queued', 'running')
-           AND root_turn_id IN (
-               SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
-                 AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))",
-    )
-    .bind(conversation_id)
-    .bind(turn_no)
-    .bind(turn_id)
-    .execute(&mut *tx)
-    .await?;
+    crate::db::delegations::carry_forward(&mut tx, conversation_id, turn_no, turn_id).await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',
