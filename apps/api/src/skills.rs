@@ -14,6 +14,7 @@ pub const MAX_FILES: usize = 64;
 pub const MAX_FILE_BYTES: usize = 256 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 1024 * 1024;
 pub const MAX_ID: usize = 34;
+pub const MAX_PATH: usize = 255;
 const MAX_DESCRIPTION: usize = 1024;
 const SKILL_FILE: &str = "SKILL.md";
 
@@ -348,6 +349,13 @@ pub async fn fetch(sources: &Sources, url: &str) -> Result<Package, FetchError> 
     let tree: Tree =
         serde_json::from_slice(&bounded(tree, 16 * 1024 * 1024, "the repository tree").await?)
             .map_err(|_| FetchError::Unavailable("GitHub returned an unreadable tree".into()))?;
+    if tree.truncated {
+        return Err(FetchError::Invalid(
+            "GitHub truncated the repository listing, so the skill's files cannot be listed \
+             completely; link a smaller repository"
+                .into(),
+        ));
+    }
     let prefix = if at.path.is_empty() {
         String::new()
     } else {
@@ -370,6 +378,12 @@ pub async fn fetch(sources: &Sources, url: &str) -> Result<Package, FetchError> 
         if relative.split('/').any(|s| s.starts_with('.')) {
             continue;
         }
+        if relative.len() > MAX_PATH {
+            return Err(FetchError::Invalid(format!(
+                "a file path is longer than {MAX_PATH} bytes: {}…",
+                &relative[..relative.floor_char_boundary(60)]
+            )));
+        }
         if entry.size.unwrap_or(0) > MAX_FILE_BYTES {
             return Err(FetchError::Invalid(format!(
                 "{relative} is larger than {MAX_FILE_BYTES} bytes"
@@ -378,11 +392,6 @@ pub async fn fetch(sources: &Sources, url: &str) -> Result<Package, FetchError> 
         wanted.push(relative.to_owned());
     }
     if !wanted.iter().any(|p| p == SKILL_FILE) {
-        if tree.truncated {
-            return Err(FetchError::Invalid(
-                "the repository is too large to list; link a smaller repository".into(),
-            ));
-        }
         return Err(FetchError::NotFound(format!(
             "SKILL.md in {repo}{}",
             if at.path.is_empty() {

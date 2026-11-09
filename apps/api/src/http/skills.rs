@@ -55,6 +55,7 @@ pub(super) fn schemas() -> Vec<Value> {
                 "properties": {
                     "id": { "type": "string", "description": "Skill id from the installed skills list." },
                     "path": { "type": "string", "description": "File path inside the skill, e.g. scripts/run.py." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to continue a long file from next_offset." },
                 },
                 "required": ["id"],
                 "additionalProperties": false,
@@ -205,16 +206,19 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
             None,
         );
     };
-    let (truncated, content) = if content.len() > MAX_READ {
-        (true, super::mcp::slice(content, 0, MAX_READ).1)
-    } else {
-        (false, content.as_str())
-    };
+    let offset = args["offset"]
+        .as_u64()
+        .and_then(|o| usize::try_from(o).ok())
+        .unwrap_or(0);
+    let (from, part) = super::mcp::slice(content, offset, MAX_READ);
+    let end = from + part.len();
     let mut result = json!({
         "id": skill.id,
         "path": path,
-        "content": content,
-        "truncated": truncated,
+        "content": part,
+        "offset": from,
+        "bytes": content.len(),
+        "next_offset": (end < content.len()).then_some(end),
     });
     if skill.files.iter().any(|f| f.script) {
         let secrets = if skill.env.is_empty() {

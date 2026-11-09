@@ -29,8 +29,33 @@ fn repo_files() -> Vec<(&'static str, &'static str)> {
             "---\nname: other\ndescription: d\n---\n",
         ),
         ("README.md", "# treg\n"),
+        (
+            "skills/big/SKILL.md",
+            "---\nname: big\ndescription: A long reference.\n---\nRead big.md.\n",
+        ),
+        ("skills/big/big.md", BIG),
+        (
+            "skills/long/SKILL.md",
+            "---\nname: long\ndescription: d\n---\n",
+        ),
+        (LONG_PATH, "x"),
     ]
 }
+
+/// About 85 KiB, longer than one skill_read page.
+const BIG: &str = concat!(
+    include_str!("../src/skills.rs"),
+    include_str!("../src/skills.rs"),
+    include_str!("../src/skills.rs"),
+    include_str!("../src/skills.rs"),
+    include_str!("../src/skills.rs"),
+);
+const LONG_PATH: &str = concat!(
+    "skills/long/",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.md",
+);
 
 /// A local stand-in for GitHub's REST API and raw file host.
 async fn fake_github() -> else_api::skills::Sources {
@@ -38,7 +63,7 @@ async fn fake_github() -> else_api::skills::Sources {
         .route(
             "/repos/{owner}/{repo}/commits/{reference}",
             get(|Path((owner, repo, reference)): Path<(String, String, String)>| async move {
-                if (owner.as_str(), repo.as_str(), reference.as_str()) == ("acme", "treg", "main") {
+                if owner == "acme" && matches!(repo.as_str(), "treg" | "huge") && reference == "main" {
                     (StatusCode::OK, COMMIT.to_owned())
                 } else {
                     (StatusCode::NOT_FOUND, String::new())
@@ -47,14 +72,15 @@ async fn fake_github() -> else_api::skills::Sources {
         )
         .route(
             "/repos/{owner}/{repo}/git/trees/{sha}",
-            get(|Path((_, _, sha)): Path<(String, String, String)>| async move {
+            get(|Path((_, repo, sha)): Path<(String, String, String)>| async move {
                 assert_eq!(sha, COMMIT, "the tree is read at the pinned commit");
+                let truncated = repo == "huge";
                 let tree: Vec<Value> = repo_files()
                     .into_iter()
                     .map(|(path, body)| json!({ "path": path, "mode": "100644", "type": "blob", "size": body.len() }))
                     .chain([json!({ "path": "skills/rea-growth/scripts", "mode": "040000", "type": "tree" })])
                     .collect();
-                axum::Json(json!({ "sha": sha, "tree": tree, "truncated": false }))
+                axum::Json(json!({ "sha": sha, "tree": tree, "truncated": truncated }))
             }),
         )
         .route(
@@ -424,6 +450,14 @@ async fn links_that_do_not_hold_a_skill_are_refused_before_any_card() {
             "https://github.com/acme/treg/tree/main/skills/missing",
             "NOT_FOUND",
         ),
+        (
+            "https://github.com/acme/treg/tree/main/skills/long",
+            "INVALID_SKILL",
+        ),
+        (
+            "https://github.com/acme/huge/tree/main/skills/rea-growth",
+            "INVALID_SKILL",
+        ),
     ] {
         let refused = tool(
             &app,
@@ -465,4 +499,48 @@ async fn links_that_do_not_hold_a_skill_are_refused_before_any_card() {
         "running",
         "a refused install parks nothing"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_file_reads_in_full_across_pages() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (turn, token) = running(&app, &main).await;
+    let pending = tool(
+        &app,
+        &token,
+        "skill_install",
+        json!({ "url": "https://github.com/acme/treg/tree/main/skills/big", "reason": "r" }),
+    )
+    .await;
+    let card_id = pending["request_id"].as_str().unwrap().to_owned();
+    wait(&app, turn, "waiting").await;
+    let done = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/skill-installs/{card_id}/approve"),
+            Some(json!({ "scope": "all" })),
+        )
+        .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    wait(&app, turn, "completed").await;
+    let (_, token) = running(&app, &main).await;
+    let mut text = String::new();
+    let mut offset = Some(0);
+    let mut pages = 0;
+    while let Some(at) = offset {
+        let page = tool(
+            &app,
+            &token,
+            "skill_read",
+            json!({ "id": "big", "path": "big.md", "offset": at }),
+        )
+        .await;
+        assert_eq!(page["bytes"], BIG.len(), "{page}");
+        text.push_str(page["content"].as_str().unwrap());
+        offset = page["next_offset"].as_u64();
+        pages += 1;
+    }
+    assert!(pages > 1, "a long file spans pages");
+    assert_eq!(text, BIG);
 }

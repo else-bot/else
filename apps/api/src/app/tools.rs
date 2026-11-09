@@ -11,6 +11,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "mcp_request",
     "mcp_wait",
     "mcp_connect",
+    "skill_install",
     "skill_read",
     "memory_bots",
     "memory_search",
@@ -53,7 +54,6 @@ pub const TOOL_NAMES: &[&str] = &[
 /// of the tool they called, which for these is `use_tool`.
 pub const DEFERRED_TOOLS: &[&str] = &[
     "mcp_connection_status",
-    "skill_install",
     "memory_zoom",
     "memory_date",
     "else_status",
@@ -84,6 +84,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "mcp_wait",
     "mcp_install",
     "mcp_connect",
+    "skill_install",
     "social_connect",
     "social_action",
     "mail_connect",
