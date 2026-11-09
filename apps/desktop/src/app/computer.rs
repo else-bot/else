@@ -514,6 +514,7 @@ impl ComputerView {
         let radius = rems(if self.expanded { 0.5 } else { 0.75 });
         let mut area = div()
             .id("computer-screen")
+            .group("computer-screen")
             .relative()
             .w_full()
             .h_full()
@@ -587,6 +588,8 @@ impl ComputerView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .opacity(0.)
+                        .group_hover("computer-screen", |style| style.opacity(1.))
                         .child(
                             h_flex()
                                 .px_3()
