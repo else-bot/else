@@ -1,4 +1,5 @@
 use super::ElseApp;
+use super::conversation::RowKey;
 use super::task_reply::state::format_elapsed;
 use crate::avatar::bot_avatar;
 use crate::model::{Delegation, DelegationStatus};
@@ -51,13 +52,20 @@ const QUEUED_SHOWN: usize = 4;
 
 /// Matches an xsmall button so lane labels line up with the first row of pills.
 const LANE_ROW_H: f32 = 20.;
-const PILL_MAX_W: f32 = 180.;
+const PILL_MAX_W: f32 = 240.;
 
 fn task_summary(task: &str) -> String {
     task.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl ElseApp {
+    fn expand_council(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_mut() {
+            view.expanded_councils.insert(id);
+        }
+        self.remeasure_row(RowKey::Handoff(id), cx);
+    }
+
     pub(super) fn render_handoff(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
         self.handoff_card(id, cx)
             .unwrap_or_else(|| div().into_any_element())
@@ -177,6 +185,7 @@ impl ElseApp {
         }
 
         if council {
+            let expanded = view.expanded_councils.contains(&id);
             let lanes = LANES.iter().filter_map(|&(status, label)| {
                 let members: Vec<_> = group.iter().filter(|d| d.status == status).collect();
                 if members.is_empty() {
@@ -192,7 +201,7 @@ impl ElseApp {
                     DelegationStatus::Failed => dot.bg(theme.danger),
                     DelegationStatus::Cancelled => dot.bg(theme.muted_foreground),
                 };
-                let shown = if status == DelegationStatus::Queued {
+                let shown = if status == DelegationStatus::Queued && !expanded {
                     QUEUED_SHOWN
                 } else {
                     members.len()
@@ -255,14 +264,23 @@ impl ElseApp {
                                 .children(pills)
                                 .when(hidden > 0, |row| {
                                     row.child(
-                                        div()
-                                            .h(px(LANE_ROW_H))
-                                            .flex()
-                                            .items_center()
-                                            .px_2()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("+{hidden} more")),
+                                        Button::new(SharedString::from(format!(
+                                            "handoff-{id}-more"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .rounded_full()
+                                        .focus_ring(false)
+                                        .cursor_pointer()
+                                        .label(format!("+{hidden} more"))
+                                        .accessibility_label(format!(
+                                            "Show {hidden} more queued bots"
+                                        ))
+                                        .on_click(
+                                            cx.listener(move |app, _, _, cx| {
+                                                app.expand_council(id, cx)
+                                            }),
+                                        ),
                                     )
                                 }),
                         ),

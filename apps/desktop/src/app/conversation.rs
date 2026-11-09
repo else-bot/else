@@ -230,6 +230,8 @@ pub(super) struct ConversationView {
     pub(super) expanded_drafts: HashSet<Uuid>,
     pub(super) expanded_questions: HashSet<Uuid>,
     pub(super) expanded_tasks: HashSet<Uuid>,
+    /// Live councils whose queued lane shows every member.
+    pub(super) expanded_councils: HashSet<Uuid>,
     pub(super) reply_transitions: HashMap<Uuid, std::time::Instant>,
     pub(super) _reply_clock: Option<Task<()>>,
     pub(super) latest_seen: bool,
@@ -281,6 +283,7 @@ impl ConversationView {
             expanded_drafts: HashSet::new(),
             expanded_questions: HashSet::new(),
             expanded_tasks: HashSet::new(),
+            expanded_councils: HashSet::new(),
             reply_transitions: HashMap::new(),
             _reply_clock: None,
             latest_seen: false,
