@@ -16,6 +16,19 @@ pub(in crate::app) enum ReplyState {
 }
 
 impl ReplyState {
+    pub(in crate::app) fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Working => "Working",
+            Self::Waiting => "Waiting",
+            Self::Stopping => "Stopping",
+            Self::Complete => "Complete",
+            Self::Stopped => "Stopped",
+            Self::Failed => "Failed",
+            Self::Uncertain => "Unknown result",
+        }
+    }
+
     pub(in crate::app) fn ticking(self) -> bool {
         matches!(self, Self::Working | Self::Waiting | Self::Stopping)
     }
