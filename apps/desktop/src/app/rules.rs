@@ -347,8 +347,10 @@ impl ElseApp {
             None => "Change your rules: ".to_owned(),
         };
         window.close_dialog(cx);
+        let end = text.len();
         self.composer.update(cx, |state, cx| {
             state.set_value(text, window, cx);
+            state.set_selected_range(end..end, cx);
             state.focus(window, cx);
         });
         cx.notify();
