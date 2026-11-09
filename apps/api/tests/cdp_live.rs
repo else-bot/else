@@ -115,7 +115,7 @@ async fn windows(manager: &ComputerManager, bot: Uuid) -> String {
 }
 
 const NODE: &str = r#"
-import { connect, NavigationTimeout, TargetClosed } from "/usr/local/lib/elsebot/cdp/cdp.mjs";
+import { connect, DialogOpen, NavigationBlocked, NavigationTimeout, TargetClosed } from "/usr/local/lib/elsebot/cdp/cdp.mjs";
 const site = "http://127.0.0.1:8411";
 const out = {};
 const browser = await connect();
@@ -137,6 +137,23 @@ try {
   await new Promise((r) => setTimeout(r, 500));
   try { await slow.read("document.title"); out.closed = "still open?"; }
   catch (e) { out.closed = e instanceof TargetClosed ? "TargetClosed" : String(e); }
+  // A page that asks to confirm leaving keeps its unsent input.
+  const draft = await browser.page({ create: site + "/draft" });
+  await draft.evaluate("document.getElementById('draft').focus()");
+  await draft.call("Input.insertText", { text: "unsent" });
+  try { await draft.navigate(site + "/", { timeoutMs: 10000 }); out.blocked = "left?"; }
+  catch (e) { out.blocked = e instanceof NavigationBlocked ? "NavigationBlocked" : String(e); }
+  out.kept = await draft.read("document.getElementById('draft').value");
+  await draft.evaluate("setTimeout(() => { confirm('Discard?'); confirm('Really?'); }, 0)");
+  await new Promise((r) => setTimeout(r, 500));
+  try { await draft.read("1"); out.dialog = "no dialog?"; }
+  catch (e) { out.dialog = e instanceof DialogOpen ? e.dialog.type : String(e); }
+  await draft.handleDialog({ accept: false });
+  await new Promise((r) => setTimeout(r, 500));
+  out.next_dialog = draft.dialog?.message ?? null;
+  await draft.handleDialog({ accept: false });
+  await draft.navigate(site + "/", { timeoutMs: 10000, leave: true });
+  out.left = await draft.read("document.title");
   const blank = await browser.page({ create: "about:blank" });
   out.blank = await blank.read("location.href");
   await page.show();
@@ -147,7 +164,7 @@ console.log(JSON.stringify(out));
 "#;
 
 const PYTHON: &str = r#"
-import json, sys
+import json, sys, time
 sys.path.insert(0, "/usr/local/lib/elsebot/cdp")
 import elsecdp
 site = "http://127.0.0.1:8411"
@@ -166,6 +183,21 @@ with elsecdp.connect() as browser:
     except elsecdp.NavigationTimeout:
         out["slow"] = "NavigationTimeout"
     slow.close()
+    draft = browser.page(create=site + "/draft")
+    draft.evaluate("document.getElementById('draft').focus()")
+    draft.call("Input.insertText", {"text": "unsent"})
+    try:
+        draft.navigate(site + "/", timeout=10)
+        out["blocked"] = "left?"
+    except elsecdp.NavigationBlocked:
+        out["blocked"] = "NavigationBlocked"
+    out["kept"] = draft.read("document.getElementById('draft').value")
+    draft.evaluate("setTimeout(() => confirm('Discard?'), 200)")
+    time.sleep(0.6)
+    draft.handle_dialog(False)
+    out["answered"] = draft.read("document.title")
+    draft.navigate(site + "/", timeout=10, leave=True)
+    out["left"] = draft.read("document.title")
     page.show()
 print(json.dumps(out))
 "#;
@@ -333,6 +365,11 @@ async fn scripts_drive_the_visible_browser_safely() {
     );
     assert_eq!(node["slow"], "NavigationTimeout");
     assert_eq!(node["closed"], "TargetClosed");
+    assert_eq!(node["blocked"], "NavigationBlocked");
+    assert_eq!(node["kept"], "unsent");
+    assert_eq!(node["dialog"], "confirm");
+    assert_eq!(node["next_dialog"], "Really?");
+    assert_eq!(node["left"], "Fixture search");
     assert_eq!(node["blank"], "about:blank");
     let shown = windows(&manager, bot).await;
     eprintln!("windows: {shown}");
@@ -357,6 +394,10 @@ async fn scripts_drive_the_visible_browser_safely() {
     eprintln!("python: {python}");
     assert_eq!(python["title"], "Results for python-picnic");
     assert_eq!(python["slow"], "NavigationTimeout");
+    assert_eq!(python["blocked"], "NavigationBlocked");
+    assert_eq!(python["kept"], "unsent");
+    assert_eq!(python["answered"], "Draft");
+    assert_eq!(python["left"], "Fixture search");
     assert!(
         windows(&manager, bot)
             .await
