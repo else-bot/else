@@ -1687,3 +1687,62 @@ async fn chat_approval_of_a_delegated_draft(parked: bool) {
         "the delegating request continues"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_that_moves_on_closes_the_draft_it_was_sent_with() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let id = draft(&app, &token, family_message()).await;
+    wait(&app, first, "waiting").await;
+
+    let (reply, _) = running(
+        &app,
+        &main,
+        "[synthetic:slow] Offer me a choice of channels instead.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    let card = shown(&app, &main, first).await[0].clone();
+    assert_eq!(card["status"], "pending", "the reply may still confirm it");
+    assert_eq!(card["in_reply"], true, "{card}");
+
+    let stop = app
+        .owner(
+            "POST",
+            &format!("/v1/bots/{main}/cancel"),
+            Some(json!({ "request_id": Uuid::new_v4() })),
+        )
+        .await;
+    assert!(stop.status.is_success(), "{}", stop.body);
+    wait(&app, reply, "interrupted").await;
+    let card = journaled(&app, &main, id).await;
+    assert_eq!(card["status"], "discarded", "{card}");
+    assert_eq!(card["in_reply"], false, "{card}");
+
+    let (first, token) = running(&app, &main, SLOW, None).await;
+    let id = draft(&app, &token, family_message()).await;
+    wait(&app, first, "waiting").await;
+    let done = send(
+        &app,
+        &main,
+        "Make it a poll instead.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::ACCEPTED, "{}", done.body);
+    let done: Uuid = done.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, done, "completed").await;
+    let card = shown(&app, &main, first).await[0].clone();
+    assert_eq!(card["status"], "discarded", "{card}");
+    assert_eq!(card["can_approve"], false);
+    assert_eq!(journaled(&app, &main, id).await["status"], "discarded");
+    let late = send(
+        &app,
+        &main,
+        "Send it.",
+        Some(json!({ "id": id, "version": 1 })),
+    )
+    .await;
+    assert_eq!(late.body["error"]["code"], "draft_settled", "{}", late.body);
+}
