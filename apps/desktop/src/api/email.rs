@@ -61,6 +61,13 @@ pub struct EmailPreset {
     pub preset: Option<EmailConfig>,
 }
 
+/// The inbox a bot asked the owner to sign in to from a chat card.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EmailConsent {
+    pub provider: EmailProvider,
+    pub address: String,
+}
+
 #[derive(Deserialize)]
 pub struct EmailAuthorization {
     pub request_id: Uuid,

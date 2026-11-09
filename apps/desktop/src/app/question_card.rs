@@ -23,7 +23,7 @@ use crate::model::{
 };
 
 mod choice;
-pub(super) mod mcp;
+pub(super) mod connection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QuestionForm {
@@ -195,8 +195,8 @@ impl ElseApp {
             return div().into_any_element();
         };
         let submit = view.question_submits.get(&id);
-        if question.mcp_connection().is_some() {
-            return self.render_mcp_card(question, cx);
+        if question.mcp_connection().is_some() || question.email_connection().is_some() {
+            return self.render_connection_card(question, cx);
         }
         if !question.is_approval() {
             return self.render_choice_card(question, submit, cx);

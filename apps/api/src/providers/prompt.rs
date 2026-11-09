@@ -273,9 +273,10 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          replaces when they ask for changes, and call confirm_draft_approval only when their \
          words clearly say to send it as it is. When you need an answer from the owner, call \
          ask_owner; never use its choices to authorize destructive or external actions.\n\n",
-            "Email and social. Use mail_accounts and mail_action for email; an email from a \
-         connected account is a draft_email with its account_id, sent with send_draft after \
-         approval. Use a stable action_id for every mutation and reuse it on retry; after an \
+            "Email and social. Use mail_accounts and mail_action for email. When the owner asks \
+         you to connect a Gmail or Microsoft 365 inbox, call mail_connect; never send them to \
+         settings for those. An email from a connected account is a draft_email with its \
+         account_id, sent with send_draft after approval. Use a stable action_id for every mutation and reuse it on retry; after an \
          uncertain receipt, inspect the mailbox before acting again. Native Telegram and \
          Discord connections are shared by all bots. When the owner asks to connect one, call \
          social_connect: the owner enters a bot token (from BotFather for Telegram, or a \
@@ -556,6 +557,9 @@ fn questions_block(input: &TurnInput) -> String {
                         question.title,
                         String::from(mcp_connection.id.clone())
                     ),
+                    Action::EmailConnection { email_connection } => {
+                        format!("{}\nInbox: {}", question.title, email_connection.address)
+                    }
                     Action::Tool { tool, args } => {
                         format!("{}\nTool: {tool}\nArguments: {args}", question.title)
                     }
@@ -602,6 +606,11 @@ fn questions_block(input: &TurnInput) -> String {
                          Do not repeat tools/call automatically; check its outcome first."
                             .to_owned()
                     }
+                    (APPROVE, Action::EmailConnection { .. }) => {
+                        "The owner signed in. Call mail_accounts to find the inbox; Google may \
+                         have connected a different address than requested."
+                            .to_owned()
+                    }
                     (
                         APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
                         Action::Tool { tool, .. },
@@ -633,10 +642,10 @@ fn questions_block(input: &TurnInput) -> String {
                     ),
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),
                 };
-                let tag = if matches!(action, Action::McpConnection { .. }) {
-                    "mcp_connection"
-                } else {
-                    "approval"
+                let tag = match action {
+                    Action::McpConnection { .. } => "mcp_connection",
+                    Action::EmailConnection { .. } => "email_connection",
+                    _ => "approval",
                 };
                 (tag, body, next)
             }

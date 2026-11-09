@@ -39,6 +39,13 @@ async fn server(status: Value, fail_answers: usize) -> Server {
             let status = status.clone(); let cancels = cancels.clone();
             async move { cancels.fetch_add(1, Ordering::SeqCst); respond(status) }
         }))
+        .route("/v1/connectors/email/accounts", get(|| async {
+            let endpoint = json!({"host":"imap.gmail.com","port":993,"start_tls":false});
+            Json(json!({"accounts":[{"id":Uuid::new_v4(),"state":"active","health":"connected",
+                "config":{"provider":"gmail","address":"owner@gmail.com","username":"owner@gmail.com",
+                    "imap":endpoint,"smtp":endpoint,"archive_folder":"Archive","trash_folder":"Trash",
+                    "drafts_folder":"Drafts","sent_folder":"Sent"}}]}))
+        }))
         .route("/v1/bots/{bot}/questions/{question}/answer", post(move |Json(body): Json<Value>| {
             let sent = sent.clone(); let tries = tries.clone();
             async move {
@@ -58,11 +65,11 @@ async fn server(status: Value, fail_answers: usize) -> Server {
             client,
             bot: Uuid::new_v4(),
             question: Uuid::new_v4(),
-            consent: McpConsent {
+            consent: Consent::Mcp(McpConsent {
                 id: "fixture".into(),
                 provider: Some("https://issuer.test".into()),
                 scopes: vec!["read".into()],
-            },
+            }),
         },
         answers,
         cancellations,
@@ -162,4 +169,33 @@ async fn a_removed_package_leaves_the_card_cancellable() {
     );
     assert_eq!(server.flow.cancel().await.unwrap(), Resolution::Recorded);
     assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
+}
+
+fn inbox(address: &str) -> Consent {
+    Consent::Email(crate::api::EmailConsent {
+        provider: crate::api::EmailProvider::Gmail,
+        address: address.into(),
+    })
+}
+
+#[tokio::test]
+async fn an_inbox_card_confirms_once_the_address_is_connected() {
+    let mut server = server(Value::Null, 0).await;
+    server.flow.consent = inbox("Owner@Gmail.com");
+    assert_eq!(server.flow.recover().await.unwrap(), Resolution::Recorded);
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], APPROVE);
+}
+
+#[tokio::test]
+async fn a_missing_inbox_waits_for_sign_in_and_cancels_without_mcp_calls() {
+    let mut server = server(Value::Null, 0).await;
+    server.flow.consent = inbox("other@gmail.com");
+    assert_eq!(
+        server.flow.recover().await.unwrap(),
+        Resolution::Disconnected
+    );
+    assert!(server.answers.try_recv().is_err());
+    assert_eq!(server.flow.cancel().await.unwrap(), Resolution::Recorded);
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
+    assert_eq!(server.cancellations.load(Ordering::SeqCst), 0);
 }

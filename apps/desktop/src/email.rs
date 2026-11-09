@@ -1,5 +1,5 @@
 mod form;
-mod oauth;
+pub(crate) mod oauth;
 
 use std::sync::Arc;
 
@@ -145,7 +145,6 @@ impl EmailSettings {
             form.authorized(signin.authorization.authorization_url.clone());
         }
         self.busy = true;
-        let client = self.client.clone();
         self._request = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 let callback = signin.wait().await?;
@@ -156,14 +155,7 @@ impl EmailSettings {
                     cx.notify();
                 })
                 .map_err(|_| "Email settings closed.".to_owned())?;
-                client
-                    .complete_email(
-                        signin.authorization.request_id,
-                        callback.state,
-                        callback.code,
-                    )
-                    .await
-                    .map_err(|err| err.to_string())
+                signin.finish(callback).await.map_err(|err| err.to_string())
             }
             .await;
             let _ = this.update_in(cx, |view, window, cx| {
