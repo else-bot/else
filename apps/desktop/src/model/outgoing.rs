@@ -176,6 +176,9 @@ pub struct OutgoingDraft {
     pub version: i64,
     pub status: DraftStatus,
     pub can_approve: bool,
+    /// Handed to the live request of the owner reply it was sent with.
+    #[serde(default)]
+    pub in_reply: bool,
     pub result_detail: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub settled_at: Option<DateTime<Utc>>,
@@ -197,6 +200,19 @@ pub struct DraftAttachment {
 }
 
 impl OutgoingDraft {
+    /// Open on its card for the owner to edit, approve, or discard.
+    pub fn is_open(&self) -> bool {
+        self.status == DraftStatus::Pending && !self.in_reply
+    }
+
+    pub fn label(&self) -> &'static str {
+        if self.status == DraftStatus::Pending && self.in_reply {
+            "Continued in your reply"
+        } else {
+            self.status.label(&self.content)
+        }
+    }
+
     pub fn edit(&self) -> DraftEdit {
         DraftEdit {
             version: self.version,
@@ -266,6 +282,23 @@ mod tests {
             assert_eq!(payload["body"], "Edited message");
             assert!(!DraftStatus::Sent.label(&content).contains("email"));
         }
+    }
+
+    #[test]
+    fn a_draft_handed_to_a_reply_is_no_longer_open_on_its_card() {
+        let card = |status: &str, in_reply: bool| -> OutgoingDraft {
+            serde_json::from_value(json!({
+                "id": Uuid::nil(), "lineage_id": Uuid::nil(), "revision": 1,
+                "content": {"channel":"message", "platform":"telegram", "body":"Hi"},
+                "version":1, "status":status, "can_approve":false, "in_reply":in_reply,
+                "result_detail":null, "updated_at":"2026-11-09T09:36:00Z", "settled_at":null
+            }))
+            .unwrap()
+        };
+        assert!(card("pending", false).is_open());
+        assert!(!card("pending", true).is_open());
+        assert_eq!(card("pending", true).label(), "Continued in your reply");
+        assert_eq!(card("discarded", false).label(), "Draft discarded");
     }
 
     #[test]

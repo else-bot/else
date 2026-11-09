@@ -646,8 +646,8 @@ impl ElseApp {
                     RowKey::Question(id) => c.question(id).map(|q| q.status.clone()),
                     RowKey::Draft(id) => c.outgoing_draft(id).map(|d| {
                         format!(
-                            "{}:{}:{:?}:{}",
-                            d.version, d.updated_at, d.status, d.can_approve
+                            "{}:{}:{:?}:{}:{}",
+                            d.version, d.updated_at, d.status, d.can_approve, d.in_reply
                         )
                     }),
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
