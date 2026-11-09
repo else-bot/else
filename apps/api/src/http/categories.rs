@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,6 +20,7 @@ use crate::db::categories::{self, CategoryError, Created};
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/categories", get(list).post(create))
+        .route("/categories/order", put(reorder))
         .route("/categories/{category_id}", patch(rename).delete(remove))
         .route("/bots/{bot_id}/category", patch(assign))
 }
@@ -83,6 +84,27 @@ async fn create(
         }
         Err(err) => Err(ApiError::from(err).with_request_id(body.request_id)),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrderBody {
+    category_ids: Vec<Uuid>,
+}
+
+async fn reorder(
+    State(state): State<Arc<AppState>>,
+    ApiJson(body): ApiJson<OrderBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    if !body.category_ids.iter().all(|id| seen.insert(*id)) {
+        return Err(ApiError::bad_request(
+            "invalid_input",
+            "List each category at most once.",
+        ));
+    }
+    let categories = categories::reorder(&state.db, &body.category_ids).await?;
+    Ok(Json(json!({ "categories": categories })))
 }
 
 #[derive(Deserialize)]

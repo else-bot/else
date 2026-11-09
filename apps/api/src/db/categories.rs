@@ -8,7 +8,9 @@
 //!
 //! Names are unique by a Unicode case-folded key (`fold`), and lists are
 //! ordered by that key's bytes (code point order), so the order does not
-//! depend on the database collation. Lock order: a category row before a
+//! depend on the database collation. The owner can place categories in a
+//! shared order (`reorder`); placed categories come first, by position.
+//! Lock order: a category row before a
 //! bot row, and never more than one bot row: deletion marks the category
 //! `deleting` (hidden, no new assignments), unassigns its bots one per
 //! transaction, then removes the row; an interrupted deletion is finished by
@@ -87,9 +89,10 @@ async fn wake(conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
     events::notify(conn, Uuid::nil()).await
 }
 
-/// The visible categories (not those being deleted), in the portable order.
+/// The visible categories (not those being deleted): placed ones by
+/// position, then the rest in the portable name order.
 pub const LIST: &str = "SELECT id, name, created_at, updated_at FROM bot_categories
-     WHERE NOT deleting ORDER BY name_key COLLATE BINARY, id";
+     WHERE NOT deleting ORDER BY position IS NULL, position, name_key COLLATE BINARY, id";
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Category>, sqlx::Error> {
     sqlx::query_as(LIST).fetch_all(pool).await
@@ -175,6 +178,27 @@ pub async fn rename(pool: &SqlitePool, id: Uuid, name: &str) -> Result<Category,
     wake(&mut tx).await?;
     tx.commit().await?;
     Ok(category)
+}
+
+/// Place categories in the given order. Listed IDs that no longer exist
+/// are skipped; categories left out lose their place and follow by name.
+/// Repeating the same order changes nothing.
+pub async fn reorder(pool: &SqlitePool, ids: &[Uuid]) -> Result<Vec<Category>, CategoryError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("UPDATE bot_categories SET position = NULL WHERE position IS NOT NULL")
+        .execute(&mut *tx)
+        .await?;
+    for (position, id) in (0_i64..).zip(ids) {
+        sqlx::query("UPDATE bot_categories SET position = ?2 WHERE id = ?1 AND NOT deleting")
+            .bind(id)
+            .bind(position)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let categories = sqlx::query_as(LIST).fetch_all(&mut *tx).await?;
+    wake(&mut tx).await?;
+    tx.commit().await?;
+    Ok(categories)
 }
 
 /// Delete a category: its bots become unassigned (each journals
