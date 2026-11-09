@@ -106,6 +106,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             if turn.routine.is_some()
                 || !turn.questions.is_empty()
                 || !turn.secret_requests.is_empty()
+                || !turn.skill_installs.is_empty()
                 || !turn.outgoing_drafts.is_empty()
                 || !turn.social_setups.is_empty()
             {

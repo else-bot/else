@@ -33,7 +33,10 @@ const STORY_MIN_WIDTH: f32 = 760.;
 
 pub(crate) const SHELL_CONTEXT: &str = "AppShell";
 
-actions!(else_desktop, [OpenAppSettings, OpenEmailSettings]);
+actions!(
+    else_desktop,
+    [OpenAppSettings, OpenEmailSettings, OpenSkillsSettings]
+);
 
 struct Verified {
     profile: Profile,

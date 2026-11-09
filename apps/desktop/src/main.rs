@@ -16,6 +16,7 @@ mod oauth_callback;
 mod preferences;
 mod profile_picker;
 mod sidebar;
+mod skill_ui;
 mod socials;
 mod updates;
 mod window_frame;
@@ -60,6 +61,7 @@ gpui_kit::assets::icon_assets!(
         Search,
         ChevronUp,
         FileText,
+        SquareTerminal,
         Pause,
         LoaderCircle,
         CircleQuestionMark,
