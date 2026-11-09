@@ -13,8 +13,10 @@ fn main() {
     let dark = !rest.iter().any(|a| a == "light");
     let html = std::fs::read_to_string(input).expect("readable input");
     let start = std::time::Instant::now();
-    let rendered = else_visual::render(&html, width, 2.0, &else_visual::Theme::standard(dark))
-        .unwrap_or_else(|e| panic!("{e}"));
+    let theme = else_visual::Theme::standard(dark);
+    let rendered = else_visual::render(&html, width, 2.0, &theme)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .over(theme.color(else_visual::Color::Background));
     eprintln!(
         "{}x{} device px, content {} css px, clipped {}, blocked {:?}, {:?}",
         rendered.width,

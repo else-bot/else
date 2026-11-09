@@ -53,7 +53,9 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
     };
     let rendered = tokio::task::spawn_blocking(move || {
         let html = crate::providers::output_files::read_visual(&project, &path)?;
-        else_visual::render(&html, width, 1.0, &else_visual::Theme::standard(dark))
+        let theme = else_visual::Theme::standard(dark);
+        else_visual::render(&html, width, 1.0, &theme)
+            .map(|rendered| rendered.over(theme.color(else_visual::Color::Background)))
             .and_then(|rendered| Ok((rendered.png()?, rendered)))
             .map_err(|err| err.to_string())
     })

@@ -215,6 +215,20 @@ pub struct Rendered {
 }
 
 impl Rendered {
+    /// This render laid over an opaque `backdrop`, as it looks in the chat.
+    pub fn over(mut self, backdrop: Rgba) -> Self {
+        for pixel in self.rgba.as_chunks_mut::<4>().0 {
+            let alpha = u32::from(pixel[3]);
+            for channel in 0..3 {
+                let blended = u32::from(pixel[channel]) * alpha
+                    + u32::from(backdrop[channel]) * (255 - alpha);
+                pixel[channel] = (blended / 255) as u8;
+            }
+            pixel[3] = 255;
+        }
+        self
+    }
+
     pub fn png(&self) -> Result<Vec<u8>, Error> {
         let bitmap = takumi::prelude::Bitmap::from_raw(self.width, self.height, self.rgba.clone())
             .ok_or_else(|| Error::Render("pixel buffer size mismatch".into()))?;

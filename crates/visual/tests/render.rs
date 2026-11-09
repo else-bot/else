@@ -83,3 +83,13 @@ fn a_fragment_inherits_the_theme_text_color() {
     let lit = (0..rendered.width).any(|x| pixel(&rendered, x, 20) == [250, 250, 250, 255]);
     assert!(lit, "text uses --foreground");
 }
+
+#[test]
+fn a_render_laid_over_the_bubble_is_opaque() {
+    let html = r#"<div style="height: 10px; width: 50%; background: rgba(255, 0, 0, 0.5)"></div>"#;
+    let rendered = render(html, 300, 1.0, &Theme::standard(true))
+        .unwrap()
+        .over([0, 0, 255, 255]);
+    assert_eq!(pixel(&rendered, 5, 5), [128, 0, 127, 255]);
+    assert_eq!(pixel(&rendered, 250, 5), [0, 0, 255, 255]);
+}
