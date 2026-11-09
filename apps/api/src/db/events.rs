@@ -171,6 +171,14 @@ async fn reply_drafts_changed(
     Ok(())
 }
 
+/// A delegated task finished a message: its handoff shows the new progress.
+pub async fn task_progressed(
+    conn: &mut SqliteConnection,
+    task_turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    root_changed(conn, task_turn).await
+}
+
 /// Republish the delegating turns of `task_turn`, a child turn or the owner
 /// chat turn that took tasks over, so each handoff card follows its task
 /// from queued to running to its outcome.

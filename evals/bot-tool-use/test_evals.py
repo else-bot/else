@@ -88,6 +88,8 @@ def run(runner):
                     "name": "routine_run", "arguments": {"routine_id": routine_id}})], "Queued."),
                 "delegate-parks": ([self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000004",
                                                           "task": "Research Reunion history"}, {"status": "pending", "parked": True})], "Handed it over."),
+                "follow-up-keeps-task-in-progress": ([self.call("delegate", {"target_bot_id": "00000000-0000-0000-0000-000000000005",
+                                                                            "task": "Check whether issue #12 is fixed"}, {"status": "pending", "parked": True})], "Asked GitHub; Research is still working."),
                 "email-uses-draft": ([self.call("draft_email", {"to": ["alex@example.com"],
                                                               "body": "The review is ready for Friday."})], "Draft ready."),
                 "mental-arithmetic": ([], "84"),

@@ -98,6 +98,33 @@ pub(super) fn mcps_block(input: &TurnInput) -> String {
     text
 }
 
+/// The delegated tasks this request still waits on. A bot that can delegate
+/// always gets the block, empty included, so a session that held a task
+/// learns its result has been given or that it ended.
+pub(super) fn in_progress_block(input: &TurnInput) -> String {
+    let delegation = &input.delegation;
+    if !delegation.can_delegate() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "[else.bot tasks in progress] Tasks you delegated that have no result yet, including \
+         ones started for an earlier owner message. They keep running; each result arrives as \
+         a continuation of the current request. Do not delegate them again. This list \
+         replaces earlier ones.\n",
+    );
+    if delegation.in_progress.is_empty() {
+        text.push_str("None.\n");
+    }
+    for task in &delegation.in_progress {
+        text.push_str(&format!(
+            "<task id=\"{}\" bot=\"{}\" bot_id=\"{}\">{}</task>\n",
+            task.id, task.target_name, task.target_bot_id, task.task
+        ));
+    }
+    text.push('\n');
+    text
+}
+
 /// Delegations left for this request, once the request has used some.
 fn delegation_budget(input: &TurnInput) -> String {
     let delegation = &input.delegation;

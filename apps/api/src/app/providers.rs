@@ -299,6 +299,19 @@ pub struct DelegationContext {
     pub remaining: i64,
     /// Child outcomes not yet given to an attempt of this turn.
     pub outcomes: Vec<DelegationOutcome>,
+    /// Tasks this turn still waits on, including those an earlier owner
+    /// message started and this one carried forward.
+    pub in_progress: Vec<DelegationInProgress>,
+}
+
+/// A delegated task with no outcome yet; its result arrives later as a
+/// continuation of the turn that waits on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationInProgress {
+    pub id: Uuid,
+    pub target_bot_id: Uuid,
+    pub target_name: String,
+    pub task: String,
 }
 
 impl DelegationContext {

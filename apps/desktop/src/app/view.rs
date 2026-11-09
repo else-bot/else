@@ -765,6 +765,7 @@ impl ElseApp {
             .pt_1()
             .pb_3()
             .child(notices)
+            .children(self.render_waiting_tray(cx))
             .child(
                 div()
                     .relative()

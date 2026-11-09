@@ -38,7 +38,13 @@ struct SinkState {
     delivered_drafts: Vec<Uuid>,
     delivered_socials: Vec<Uuid>,
     delivered_waits: Vec<Uuid>,
+    /// A delegated task: its text updates the delegating turn's progress.
+    delegated: bool,
+    progress_at: Option<std::time::Instant>,
 }
+
+/// How often a delegated task's streamed text republishes its handoff.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct SqliteSink {
     state: Actor<SinkState>,
@@ -70,6 +76,8 @@ impl SqliteSink {
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
                 delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
+                delegated: input.delegation.delegated_task,
+                progress_at: None,
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
                 delivered_drafts: input
                     .outgoing_drafts
@@ -316,7 +324,17 @@ impl SinkState {
             let item = self
                 .write_text(&mut tx, self.assistant_item, &transcript, &chunk)
                 .await?;
+            let progressed = self.delegated
+                && self
+                    .progress_at
+                    .is_none_or(|at| at.elapsed() >= PROGRESS_EVERY);
+            if progressed {
+                crate::db::events::task_progressed(&mut tx, self.turn_id).await?;
+            }
             tx.commit().await?;
+            if progressed {
+                self.progress_at = Some(std::time::Instant::now());
+            }
             Ok(Some(item))
         }
         .await;
@@ -391,8 +409,20 @@ impl SinkState {
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
         .await?;
+        let (tasks_pending, ready): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT (SELECT count(*) FROM delegations
+                     WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
+                    (SELECT count(*) FROM delegations d
+                     WHERE d.root_turn_id = ?1 AND {})",
+            crate::db::delegations::READY
+        )))
+        .bind(self.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
         let parks = current != "cancelling" && matches!(status, "completed" | "interrupted");
-        let status = if parks && pending > 0 {
+        let status = if parks && pending == tasks_pending && ready > 0 {
+            "queued"
+        } else if parks && pending > 0 {
             "waiting"
         } else if parks && unseen > 0 {
             "queued"
@@ -531,6 +561,10 @@ impl SinkState {
                             &self.delivered_waits,
                         )
                         .await?;
+                        if !self.delivered.is_empty() {
+                            crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id)
+                                .await?;
+                        }
                         tx.commit().await
                     }
                     .await;
@@ -733,12 +767,18 @@ impl SinkState {
         self.flush().await?;
         if self.pending.is_empty() {
             let result: Result<(), sqlx::Error> = async {
-                if let (Some(item), Some(reply)) =
-                    (self.assistant_item, self.prepare_files().await?)
-                {
+                let ended = self.assistant_item.is_some();
+                let files = match self.assistant_item {
+                    Some(item) => self.prepare_files().await?.map(|reply| (item, reply)),
+                    None => None,
+                };
+                if ended {
                     let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                    self.write_files(&mut tx, item, &reply, "('sending', 'running')")
-                        .await?;
+                    if let Some((item, reply)) = &files {
+                        self.write_files(&mut tx, *item, reply, "('sending', 'running')")
+                            .await?;
+                    }
+                    crate::db::events::task_progressed(&mut tx, self.turn_id).await?;
                     tx.commit().await?;
                 }
                 Ok(())

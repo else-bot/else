@@ -1,6 +1,6 @@
 //! Context a native session keeps until it changes: the bot's rules file,
-//! the bot registry, the saved-permission snapshot, and the installed shared
-//! MCPs. Each block rides in the turn packet only
+//! the bot registry, the saved-permission snapshot, the installed shared
+//! MCPs, and the delegated tasks still in progress. Each block rides in the turn packet only
 //! when its content hash differs from the one the session acknowledged, so
 //! the system prompt stays byte-identical across turns and the provider's
 //! cached prefix survives a new bot, a delegation, or a permission change.
@@ -21,7 +21,7 @@ pub struct Update {
 /// The blocks for this turn, by receipt key. An empty block does not apply
 /// to this turn (a webhook wake has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
-fn blocks(input: &TurnInput) -> [(&'static str, String); 4] {
+fn blocks(input: &TurnInput) -> [(&'static str, String); 5] {
     [
         // The bot's rules file, verbatim; a cleared file renders its own block,
         // so a session that held rules learns they are gone.
@@ -36,6 +36,7 @@ fn blocks(input: &TurnInput) -> [(&'static str, String); 4] {
         ("registry", prompt::registry_block(input)),
         ("permissions", prompt::permissions_block(input)),
         ("mcps", prompt::mcps_block(input)),
+        ("in_progress", prompt::in_progress_block(input)),
     ]
 }
 
@@ -124,6 +125,31 @@ mod tests {
         turn.delegation.remaining = 0;
         assert_eq!(prompt::instructions(&turn, "/p"), before);
         assert!(!before.contains("Researcher"));
+    }
+
+    #[test]
+    fn a_session_learns_which_delegated_tasks_are_still_in_progress() {
+        let mut turn = input();
+        let idle = for_session(&turn, None);
+        assert!(idle.text.unwrap().contains("[else.bot tasks in progress]"));
+        turn.delegation.in_progress = vec![crate::app::providers::DelegationInProgress {
+            id: Uuid::from_u128(7),
+            target_bot_id: Uuid::from_u128(8),
+            target_name: "Growth".into(),
+            task: "Check the X Ads funding status".into(),
+        }];
+        let waiting = for_session(&turn, Some(&session(idle.applied.clone())));
+        let text = waiting.text.unwrap();
+        assert!(text.contains("bot=\"Growth\""), "{text}");
+        assert!(text.contains("Check the X Ads funding status"), "{text}");
+        assert!(!text.contains("[else.bot bot registry]"), "{text}");
+
+        turn.delegation.in_progress.clear();
+        let done = for_session(&turn, Some(&session(waiting.applied)));
+        assert!(done.text.unwrap().contains("None."));
+
+        turn.delegation.delegated_task = true;
+        assert!(prompt::in_progress_block(&turn).is_empty());
     }
 
     #[test]
