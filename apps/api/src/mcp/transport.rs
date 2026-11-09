@@ -12,7 +12,10 @@ use rmcp::transport::streamable_http_client::{
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 
+use zeroize::Zeroizing;
+
 use super::{Error, Transport};
+use crate::db::task_secrets::{self, Redact};
 use crate::providers::host::{Host, MARKER_VAR, Supervised};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -32,6 +35,27 @@ pub(crate) const METHODS: &[&str] = &[
 pub(super) struct Connection {
     service: RunningService<RoleClient, ClientConfig>,
     process: Option<Supervised>,
+    /// Credentials this connection sends, kept out of logged server errors.
+    redact: Vec<Redact>,
+}
+
+/// The header and environment values `config` sends, which may be
+/// credentials a server echoes back in an error.
+fn credentials(config: &Transport) -> Vec<Redact> {
+    let values = match config {
+        Transport::Http { headers, .. } => headers,
+        Transport::Stdio { env, .. } => env,
+    };
+    let mut set: Vec<Redact> = values
+        .iter()
+        .filter(|(_, value)| value.len() >= task_secrets::MIN_REDACTED)
+        .map(|(name, value)| Redact {
+            name: name.clone(),
+            value: Zeroizing::new(value.clone()),
+        })
+        .collect();
+    set.sort_by_key(|r| std::cmp::Reverse(r.value.len()));
+    set
 }
 
 pub(super) async fn connect(
@@ -42,10 +66,11 @@ pub(super) async fn connect(
     // rmcp offers its newest revision by default, which dropped the
     // initialize handshake. Servers that accept it, such as GitHub's, then
     // hand back a session id they never honor.
+    let redact = credentials(config);
     let info =
         ClientConfig::default().with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     let (service, process) = match config {
-        Transport::Http { url, headers } => {
+        Transport::Http { url, headers, .. } => {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
@@ -70,7 +95,8 @@ pub(super) async fn connect(
                 .await
                 .map_err(|_| Error::Timeout)?
                 .map_err(|error| {
-                    tracing::warn!(%error, "MCP initialization failed");
+                    let logged = task_secrets::redact(&error.to_string(), &redact);
+                    tracing::warn!(error = %logged, "MCP initialization failed");
                     initialize_error(error)
                 })?;
             (service, None)
@@ -106,13 +132,18 @@ pub(super) async fn connect(
                 .await
                 .map_err(|_| Error::Timeout)?
                 .map_err(|error| {
+                    let error = task_secrets::redact(&error.to_string(), &redact);
                     tracing::warn!(%error, "MCP initialization failed");
                     Error::Connection
                 })?;
             (service, Some(process))
         }
     };
-    Ok(Connection { service, process })
+    Ok(Connection {
+        service,
+        process,
+        redact,
+    })
 }
 
 impl Connection {
@@ -137,10 +168,12 @@ impl Connection {
             {
                 Ok(Ok(response)) => response,
                 Ok(Err(rmcp::ServiceError::TransportSend(error))) => {
-                    tracing::warn!(%error, %method, "MCP request failed");
+                    let logged = task_secrets::redact(&error.to_string(), &self.redact);
+                    tracing::warn!(error = %logged, %method, "MCP request failed");
                     return Err(transport_error(error.error.as_ref()));
                 }
                 Ok(Err(error)) => {
+                    let error = task_secrets::redact(&error.to_string(), &self.redact);
                     tracing::warn!(%error, %method, "MCP request failed");
                     return Err(Error::Connection);
                 }
@@ -502,6 +535,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::from([("Authorization".into(), "Bearer mcp-test-token".into())]),
         };
@@ -555,6 +589,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let redirect_server =
             tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::from([("Authorization".into(), "Bearer mcp-test-token".into())]),
         };
@@ -587,6 +622,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
             let config = Transport::Http {
+                secrets: Vec::new(),
                 url: format!("http://{address}/mcp"),
                 headers: BTreeMap::new(),
             };
@@ -634,6 +670,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::new(),
         };
@@ -695,6 +732,7 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let config = Transport::Http {
+            secrets: Vec::new(),
             url: format!("http://{address}/mcp"),
             headers: BTreeMap::new(),
         };
@@ -708,5 +746,79 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         );
         connection.shutdown().await;
         server.abort();
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn logged_server_errors_leave_out_the_credentials_sent() {
+        async fn echo(headers: HeaderMap, Json(message): Json<Value>) -> Response {
+            let Some(id) = message.get("id") else {
+                return StatusCode::ACCEPTED.into_response();
+            };
+            let token = headers["authorization"].to_str().unwrap();
+            let reply = match message["method"].as_str().unwrap() {
+                "initialize" => json!({"jsonrpc":"2.0","id":id,"result":{
+                    "protocolVersion":message["params"]["protocolVersion"],
+                    "capabilities":{"tools":{}},"serverInfo":{"name":"echo","version":"1"}}}),
+                _ => {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("bad credential {token}")}})
+                }
+            };
+            Json(reply).into_response()
+        }
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("trace"))
+            .with(tracing_subscriber::filter::filter_fn(|meta| {
+                !crate::connectors::sensitive_log_target(meta.target())
+            }))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone()),
+            );
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/mcp", post(echo)))
+                .await
+                .unwrap()
+        });
+        let config = Transport::Http {
+            url: format!("http://{address}/mcp"),
+            headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
+            secrets: Vec::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = connect(&config, dir.path(), dir.path()).await.unwrap();
+        assert!(
+            connection
+                .request("tools/list".into(), json!({}))
+                .await
+                .is_err()
+        );
+        connection.shutdown().await;
+        server.abort();
+        let logged = String::from_utf8_lossy(&capture.0.lock().unwrap()).into_owned();
+        assert!(
+            logged.contains("bad credential [secret Authorization]"),
+            "{logged}"
+        );
+        assert!(!logged.contains("private-token"), "{logged}");
     }
 }

@@ -26,6 +26,9 @@ impl TestDb {
         else_api::db::migrate(&db.pool).await.unwrap();
         db
     }
+    pub fn dir(&self) -> &std::path::Path {
+        self._dir.path()
+    }
 }
 
 pub const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -206,6 +209,10 @@ impl TestApp {
         state.mcps.get_or_init(|| {
             else_api::mcp::Library::new(db._dir.path().join("mcp"), state.scheduler.gate().clone())
                 .with_oauth_key(state.secret_key.clone())
+                .with_task_secrets(else_api::mcp::TaskSecrets::new(
+                    db.pool.clone(),
+                    state.secret_key.clone(),
+                ))
         });
         let state = Arc::new(state);
         tokio::spawn(else_api::http::mcp_wait::run(state.clone(), stop.clone()));

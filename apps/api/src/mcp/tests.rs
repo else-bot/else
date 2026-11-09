@@ -9,6 +9,7 @@ fn input(id: &str) -> Installation {
         skill: "Use T3 for code tasks.".into(),
         documentation: "Read the schemas before calling a tool.".into(),
         config: Transport::Http {
+            secrets: Vec::new(),
             url: "http://127.0.0.1:1/mcp".into(),
             headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
         },
@@ -320,6 +321,7 @@ async fn approved_replacement_keeps_sign_ins_only_for_the_same_connection() {
 
     let mut moved = documented.clone();
     moved.config = Transport::Http {
+        secrets: Vec::new(),
         url: "https://example.com/mcp?token=private-query".into(),
         headers: BTreeMap::from([("Authorization".into(), "Bearer private-token".into())]),
     };
@@ -366,6 +368,7 @@ async fn owner_listings_name_the_http_origin_without_credentials() {
     let library = Library::new(temp.path().join("mcp"), Arc::default());
     let mut http = input("sentry");
     http.config = Transport::Http {
+        secrets: Vec::new(),
         url: "https://mcp.sentry.dev:8443/secret/mcp?token=private".into(),
         headers: BTreeMap::new(),
     };
@@ -393,4 +396,34 @@ async fn owner_listings_name_the_http_origin_without_credentials() {
     assert_eq!(public[1]["name"], "T3 Code");
     assert!(!public.to_string().contains("secret"));
     assert!(!public.to_string().contains("private"));
+}
+
+#[test]
+fn header_placeholders_name_task_secret_variables() {
+    let http = |value: &str, secrets: &[&str]| Transport::Http {
+        url: "https://mcp.example.com/mcp".into(),
+        headers: BTreeMap::from([("Authorization".into(), value.into())]),
+        secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    assert!(http("Bearer ${API_TOKEN}", &["vendor"]).validate().is_ok());
+    assert!(http("plain $value", &[]).validate().is_ok());
+    for (value, secrets) in [
+        ("Bearer ${API_TOKEN}", &[][..]),
+        ("Bearer ${API_TOKEN", &["vendor"]),
+        ("Bearer ${api_token}", &["vendor"]),
+        ("Bearer ${PATH}", &["vendor"]),
+        ("Bearer ${API_TOKEN}", &["Vendor"]),
+        ("Bearer ${API_TOKEN}", &["vendor", "vendor"]),
+        ("Bearer ${API_TOKEN}", &["a", "b", "c", "d", "e"]),
+    ] {
+        assert!(
+            matches!(http(value, secrets).validate(), Err(Error::Invalid(_))),
+            "{value} {secrets:?}"
+        );
+    }
+    assert!(
+        http("x", &["vendor"])
+            .describe()
+            .ends_with("from task secrets vendor")
+    );
 }

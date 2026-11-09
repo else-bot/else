@@ -47,6 +47,7 @@ async fn github_signin_identifies_the_missing_server_registration() {
     let error = session
         .authorize(
             &Transport::Http {
+                secrets: Vec::new(),
                 url: "https://api.githubcopilot.com/mcp/".into(),
                 headers: Default::default(),
             },

@@ -69,6 +69,7 @@ async fn compiled_registration_starts_signin_without_runtime_credentials() {
     let started = session
         .authorize(
             &Transport::Http {
+                secrets: Vec::new(),
                 url: github().resource,
                 headers: Default::default(),
             },
@@ -132,6 +133,7 @@ async fn registered_signin_exchanges_and_refreshes_with_a_secret_without_registr
     let started = session
         .authorize(
             &Transport::Http {
+                secrets: Vec::new(),
                 url: discovery.resource.clone(),
                 headers: Default::default(),
             },

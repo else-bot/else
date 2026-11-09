@@ -14,8 +14,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::actor::Actor;
+use crate::db::task_secrets;
 
 const MAX_TEXT: usize = 64 * 1024;
 
@@ -45,6 +47,8 @@ pub enum Error {
     Timeout,
     #[error("The MCP library is paused for a backup or update. Try again afterward.")]
     Paused,
+    #[error("{0}")]
+    Secret(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,8 +85,12 @@ impl From<PackageId> for String {
 pub enum Transport {
     Http {
         url: String,
+        /// Values may hold `${VAR}` placeholders, filled from `secrets`
+        /// each time a connection opens, so no value is saved here.
         #[serde(default)]
         headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets: Vec<String>,
     },
     Stdio {
         command: String,
@@ -125,7 +133,11 @@ impl Transport {
                 .join(", ")
         };
         match self {
-            Self::Http { url, headers } => {
+            Self::Http {
+                url,
+                headers,
+                secrets,
+            } => {
                 let mut text = match reqwest::Url::parse(url) {
                     Ok(mut parsed) => {
                         let query = parsed.query().is_some();
@@ -138,6 +150,12 @@ impl Transport {
                     text.push_str(&format!(
                         " with headers {}",
                         names(headers.keys().collect())
+                    ));
+                }
+                if !secrets.is_empty() {
+                    text.push_str(&format!(
+                        " from task secrets {}",
+                        names(secrets.iter().collect())
                     ));
                 }
                 text
@@ -157,7 +175,11 @@ impl Transport {
 
     fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::Http { url, headers } => {
+            Self::Http {
+                url,
+                headers,
+                secrets,
+            } => {
                 let url = reqwest::Url::parse(url)
                     .map_err(|_| Error::Invalid("Use a complete HTTP MCP URL."))?;
                 if !matches!(url.scheme(), "http" | "https")
@@ -173,7 +195,25 @@ impl Transport {
                 if headers.len() > 32 {
                     return Err(Error::Invalid("Use at most 32 HTTP headers."));
                 }
+                if secrets.len() > MAX_SECRETS
+                    || secrets.iter().any(|name| !task_secrets::valid_name(name))
+                    || (1..secrets.len()).any(|i| secrets[..i].contains(&secrets[i]))
+                {
+                    return Err(Error::Invalid(
+                        "Name at most 4 different task secrets, each in lowercase as stored.",
+                    ));
+                }
                 for (name, value) in headers {
+                    fill(value, |var| {
+                        task_secrets::valid_var(var).then_some("").ok_or(Error::Invalid(
+                            "Write each header placeholder as ${VAR}, naming an uppercase task secret variable.",
+                        ))
+                    })?;
+                    if value.contains("${") && secrets.is_empty() {
+                        return Err(Error::Invalid(
+                            "Name the task secrets that set the header placeholders in secrets.",
+                        ));
+                    }
                     let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                         .map_err(|_| Error::Invalid("Invalid MCP HTTP header name."))?;
                     reqwest::header::HeaderValue::from_str(value)
@@ -240,6 +280,123 @@ impl Transport {
             return Err(Error::Invalid("Keep the MCP config to 64 KB."));
         }
         Ok(())
+    }
+}
+
+const MAX_SECRETS: usize = task_secrets::MAX_PER_COMMAND;
+
+fn fill<'a>(
+    template: &str,
+    mut value: impl FnMut(&str) -> Result<&'a str, Error>,
+) -> Result<Zeroizing<String>, Error> {
+    let mut out = Zeroizing::new(String::with_capacity(template.len()));
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or(Error::Invalid(
+            "Close each ${VAR} placeholder in the MCP headers.",
+        ))?;
+        out.push_str(value(&after[..end])?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+#[derive(Clone)]
+pub struct TaskSecrets {
+    pool: sqlx::SqlitePool,
+    key: Option<Arc<crate::credentials::SecretKey>>,
+}
+
+impl TaskSecrets {
+    pub fn new(pool: sqlx::SqlitePool, key: Option<Arc<crate::credentials::SecretKey>>) -> Self {
+        Self { pool, key }
+    }
+
+    /// The config to connect with: header placeholders filled from the
+    /// named task secrets, read now so a secret the owner replaced applies
+    /// to the next connection. Also the values to redact from what the
+    /// server returns, as for guest commands.
+    pub async fn fill(
+        this: Option<&Self>,
+        config: &Transport,
+    ) -> Result<(Transport, Vec<task_secrets::Redact>), Error> {
+        let Transport::Http {
+            url,
+            headers,
+            secrets,
+        } = config
+        else {
+            return Ok((config.clone(), Vec::new()));
+        };
+        if secrets.is_empty() {
+            return Ok((config.clone(), Vec::new()));
+        }
+        let this = this.ok_or_else(|| {
+            Error::Secret("Task secrets are not available on this server.".into())
+        })?;
+        let env = task_secrets::resolve(&this.pool, this.key.as_deref(), secrets)
+            .await
+            .map_err(|error| match error {
+                task_secrets::SecretError::Unknown(name) => Error::Secret(format!(
+                    "No task secret named {name}. Ask the owner to store it, then try again."
+                )),
+                task_secrets::SecretError::NoKey => {
+                    Error::Secret("Task secrets need the installation's SECRET_KEY.".into())
+                }
+                task_secrets::SecretError::Invalid(message) => Error::Secret(message),
+                error => {
+                    tracing::warn!(%error, "MCP task secrets could not be read");
+                    Error::Secret("The MCP's task secrets could not be read.".into())
+                }
+            })?;
+        let mut filled = BTreeMap::new();
+        for (name, template) in headers {
+            let value = fill(template, |var| {
+                env.vars
+                    .iter()
+                    .find(|(name, _)| name == var)
+                    .map(|(_, value)| value.as_str())
+                    .ok_or_else(|| {
+                        Error::Secret(format!(
+                            "The task secrets {} do not set {var}. Ask the owner to add it.",
+                            secrets.join(", ")
+                        ))
+                    })
+            })?;
+            filled.insert(name.clone(), value.to_string());
+        }
+        let filled = Transport::Http {
+            url: url.clone(),
+            headers: filled,
+            secrets: Vec::new(),
+        };
+        Ok((filled, env.redaction()))
+    }
+}
+
+fn redact(value: Value, set: &[task_secrets::Redact]) -> Value {
+    match value {
+        Value::String(text) => Value::String(task_secrets::redact(&text, set)),
+        Value::Number(number) => {
+            let text = number.to_string();
+            let redacted = task_secrets::redact(&text, set);
+            if redacted == text {
+                Value::Number(number)
+            } else {
+                Value::String(redacted)
+            }
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(|v| redact(v, set)).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (task_secrets::redact(&k, set), redact(v, set)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -368,6 +525,9 @@ struct Slot {
     session: Option<oauth::Session>,
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     oauth_client: Option<Arc<oauth::RegisteredClient>>,
+    task_secrets: Option<TaskSecrets>,
+    /// The filled config the live connection, if any, was opened with.
+    connected_with: Option<Transport>,
     retired: bool,
     gate: Arc<crate::maintenance::Gate>,
 }
@@ -381,6 +541,22 @@ impl Slot {
         tokio::task::spawn_blocking(move || read_package(&path))
             .await
             .map_err(|_| Error::Connection)?
+    }
+
+    /// The package's connection config with its task secrets filled in.
+    /// A live connection made with other values, such as a secret the
+    /// owner since replaced, is closed so the next one sends these.
+    async fn config(&mut self) -> Result<(Transport, Vec<task_secrets::Redact>), Error> {
+        let package = self.package().await?;
+        let (config, redact) =
+            TaskSecrets::fill(self.task_secrets.as_ref(), &package.config).await?;
+        if self.connected_with.as_ref() != Some(&config) {
+            if let Some(session) = self.session.as_mut() {
+                session.close().await;
+            }
+            self.connected_with = Some(config.clone());
+        }
+        Ok((config, redact))
     }
 
     async fn session(&mut self) -> Result<&mut oauth::Session, Error> {
@@ -411,6 +587,7 @@ pub struct Library {
     slots: Actor<HashMap<String, Entry>>,
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     oauth_client: Option<Arc<oauth::RegisteredClient>>,
+    task_secrets: Option<TaskSecrets>,
 }
 
 impl Library {
@@ -421,7 +598,19 @@ impl Library {
             slots: Actor::default(),
             oauth_key: None,
             oauth_client: None,
+            task_secrets: None,
         }
+    }
+
+    pub fn with_task_secrets(mut self, secrets: TaskSecrets) -> Self {
+        self.task_secrets = Some(secrets);
+        self
+    }
+
+    pub async fn check_secrets(&self, config: &Transport) -> Result<(), Error> {
+        TaskSecrets::fill(self.task_secrets.as_ref(), config)
+            .await
+            .map(drop)
     }
 
     pub fn with_oauth_key(mut self, key: Option<Arc<crate::credentials::SecretKey>>) -> Self {
@@ -440,6 +629,7 @@ impl Library {
         let gate = self.gate.clone();
         let oauth_key = self.oauth_key.clone();
         let oauth_client = self.oauth_client.clone();
+        let task_secrets = self.task_secrets.clone();
         self.slots
             .call(move |slots| {
                 if !slots.contains_key(&id) && slots.len() >= 1024 {
@@ -456,6 +646,8 @@ impl Library {
                             session: None,
                             oauth_key,
                             oauth_client,
+                            task_secrets,
+                            connected_with: None,
                             retired: false,
                             gate,
                         }),
@@ -629,11 +821,17 @@ impl Library {
             .call_async(move |slot| {
                 Box::pin(async move {
                     let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    let package = slot.package().await?;
-                    slot.session()
+                    let (config, secrets) = slot.config().await?;
+                    let result = slot
+                        .session()
                         .await?
-                        .request(&package.config, method, params)
-                        .await
+                        .request(&config, method, params)
+                        .await?;
+                    Ok(if secrets.is_empty() {
+                        result
+                    } else {
+                        redact(result, &secrets)
+                    })
                 })
             })
             .await
@@ -647,8 +845,8 @@ impl Library {
             .call_async(move |slot| {
                 Box::pin(async move {
                     let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    let package = slot.package().await?;
-                    slot.session().await?.git_token(&package.config).await
+                    let (config, _) = slot.config().await?;
+                    slot.session().await?.git_token(&config).await
                 })
             })
             .await
@@ -689,11 +887,8 @@ impl Library {
             .call_async(move |slot| {
                 Box::pin(async move {
                     let _admission = slot.gate.enter().ok_or(Error::Paused)?;
-                    let package = slot.package().await?;
-                    slot.session()
-                        .await?
-                        .authorize(&package.config, redirect_uri)
-                        .await
+                    let (config, _) = slot.config().await?;
+                    slot.session().await?.authorize(&config, redirect_uri).await
                 })
             })
             .await

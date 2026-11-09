@@ -98,6 +98,10 @@ def run(runner):
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
                 "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
                                                 "The X draft asked to confirm leaving, so I kept it open."),
+                "header-mcp-uses-task-secrets": ([self.call("mcp_install", {"id": "bento", "config": {
+                    "type": "http", "url": "https://mcp.bentonow.com/mcp", "secrets": ["bento"], "headers": {
+                        "X-Bento-Publishable-Key": "${BENTO_PUBLISHABLE_KEY}", "X-Bento-Secret-Key": "${BENTO_SECRET_KEY}",
+                        "X-Bento-Site-UUID": "${BENTO_SITE_UUID}"}}})], "Bento is connected."),
                 "thumbs-up-saves-no-rule": ([], ""),
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
