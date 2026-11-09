@@ -701,6 +701,9 @@ impl ElseApp {
             {
                 view.reply_transitions
                     .insert(task.turn, std::time::Instant::now());
+                if task.state == ReplyState::Complete {
+                    view.expanded_tasks.remove(&task.turn);
+                }
             }
         }
         let same = |a: &TranscriptRow, b: &TranscriptRow| a.key == b.key;
