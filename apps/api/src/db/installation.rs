@@ -224,6 +224,33 @@ pub async fn owner_timezone(pool: &SqlitePool) -> Result<Option<String>, sqlx::E
         .map(Option::flatten)
 }
 
+/// The owner's name for this server, or `None` when never named.
+pub async fn server_name(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT server_name FROM installation")
+        .fetch_optional(pool)
+        .await
+        .map(Option::flatten)
+}
+
+/// Name this server for every desktop, or only when nobody named it yet
+/// with `only_if_unnamed`. Returns the name the server keeps.
+pub async fn set_server_name(
+    pool: &SqlitePool,
+    name: &str,
+    only_if_unnamed: bool,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "UPDATE installation SET server_name = CASE
+             WHEN ?2 AND server_name IS NOT NULL THEN server_name ELSE ?1 END
+         RETURNING server_name",
+    )
+    .bind(name)
+    .bind(only_if_unnamed)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+}
+
 /// Record the owner's time zone; writes only when it changed.
 pub async fn set_owner_timezone(pool: &SqlitePool, timezone: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE installation SET owner_timezone = ?1 WHERE owner_timezone IS NOT ?1")

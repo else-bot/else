@@ -132,6 +132,21 @@ pub struct Capabilities {
     pub onboarding_required: bool,
     #[serde(default)]
     pub bot_avatar_on_create: bool,
+    /// Absent from servers that do not keep a name.
+    #[serde(default)]
+    pub server: Option<ServerInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ServerInfo {
+    /// The owner's name for the server, shared by every desktop; `None`
+    /// until someone names it.
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ServerEnvelope {
+    server: ServerInfo,
 }
 
 #[derive(Deserialize)]
@@ -489,6 +504,19 @@ impl Client {
             this.send_json(request).await.map(|(_, caps)| caps)
         })
         .await
+    }
+
+    /// Name the server for every desktop, or only if nobody named it yet;
+    /// returns the name the server keeps.
+    pub async fn name_server(
+        self: Arc<Self>,
+        name: String,
+        only_if_unnamed: bool,
+    ) -> Result<Option<String>, ClientError> {
+        let body = json!({ "name": name, "only_if_unnamed": only_if_unnamed });
+        self.call::<ServerEnvelope>(Method::PUT, "/v1/settings/server".into(), Some(body))
+            .await
+            .map(|(_, v)| v.server.name)
     }
 
     async fn call<T: DeserializeOwned + Send + 'static>(

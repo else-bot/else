@@ -165,6 +165,9 @@ pub struct Shell {
     notification_target: Option<(Uuid, Uuid, Uuid)>,
     _switch: Option<Task<()>>,
     connection_error: Option<String>,
+    names: servers::NameWrites,
+    /// The name the server editor opened with.
+    editor_name: String,
     server_updates: updates::View,
     remote_updates: HashMap<Uuid, updates::View>,
     server_update_target: Option<Uuid>,
@@ -234,6 +237,8 @@ impl Shell {
             connection_error: loaded.err(),
             server_updates,
             remote_updates: HashMap::new(),
+            names: Default::default(),
+            editor_name: String::new(),
             server_update_target: None,
             setup: None,
             settings_focus: cx.focus_handle(),
@@ -638,7 +643,8 @@ impl Shell {
             .setup
             .as_ref()
             .map(|setup| setup.name.read(cx).value().trim().to_owned())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .filter(|s| self.server_editor.is_none() || *s != self.editor_name);
         if matches!(self.server_editor, Some(servers::Editor::Add))
             && self
                 .registry
@@ -652,6 +658,10 @@ impl Shell {
             );
             return;
         }
+        let typed = name.is_some();
+        let before = editing
+            .and_then(|id| self.registry.find(id))
+            .map(|saved| saved.name.clone());
         let mut registry = self.registry.clone();
         let id = match registry.upsert(profile.clone(), name, editing) {
             Ok(id) => id,
@@ -696,7 +706,21 @@ impl Shell {
                 .app
                 .update(cx, |app, cx| app.dismiss_notifications(cx));
         }
+        let renamed = registry
+            .find(id)
+            .map(|saved| saved.name.clone())
+            .filter(|name| typed && before.as_ref() != Some(name));
         self.registry = registry;
+        if let Some(name) = renamed {
+            self.name_server(
+                id,
+                servers::NameWrite {
+                    name,
+                    carried: false,
+                },
+                cx,
+            );
+        }
         self.refresh_servers(window, cx);
         self.server_editor = None;
         if activate {

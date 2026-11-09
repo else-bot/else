@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings/providers/{provider_id}", get(show).patch(update))
         .route("/settings/defaults", get(show_defaults).put(set_defaults))
+        .route("/settings/server", put(name_server))
 }
 
 /// A provider and a complete profile for it, as the owner's pickers send.
@@ -243,4 +244,30 @@ async fn update(
         ProfileError::Db(err) => err.into(),
     })?;
     Ok(Json(json!({ "profile": profile_json(&record) })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerBody {
+    name: String,
+    /// Keep a name another desktop already gave the server.
+    #[serde(default)]
+    only_if_unnamed: bool,
+}
+
+/// Name this server; every desktop shows the name from its capabilities.
+async fn name_server(
+    State(state): State<Arc<AppState>>,
+    ApiJson(body): ApiJson<ServerBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "invalid_input",
+            "Give the server a name of 1 to 80 characters, without control characters.",
+        ));
+    }
+    let kept =
+        crate::db::installation::set_server_name(&state.db, name, body.only_if_unnamed).await?;
+    Ok(Json(json!({ "server": { "name": kept } })))
 }

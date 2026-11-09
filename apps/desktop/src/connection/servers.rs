@@ -4,7 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{FocusableExt as _, h_flex};
 use reqwest::Method;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Copy)]
@@ -68,6 +68,11 @@ pub(super) struct Observation {
     pub seen: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub working: Option<u64>,
+    /// `None` when the server does not keep a name or has not answered;
+    /// a name of `None` when it keeps one but nobody set it.
+    pub server: Option<crate::api::ServerInfo>,
+    /// When the last answered check started.
+    pub asked: Option<Instant>,
 }
 
 impl Default for Observation {
@@ -78,7 +83,77 @@ impl Default for Observation {
             seen: None,
             error: None,
             working: None,
+            server: None,
+            asked: None,
         }
+    }
+}
+
+/// What a desktop does with the name a saved server reports.
+#[derive(Debug, PartialEq, Eq)]
+enum NameAction {
+    Adopt(String),
+    /// Offer this desktop's name to a server nobody named yet.
+    Carry(String),
+    Keep,
+}
+
+impl NameAction {
+    fn of(saved: &crate::config::SavedServer, server: crate::api::ServerInfo) -> Self {
+        match server.name {
+            Some(name) if name != saved.name => Self::Adopt(name),
+            None if !saved.has_default_name() => Self::Carry(saved.name.clone()),
+            _ => Self::Keep,
+        }
+    }
+}
+
+pub(super) struct NameWrite {
+    pub name: String,
+    /// Offered to a server nobody named yet; a failure waits for the next
+    /// check instead of being shown.
+    pub carried: bool,
+}
+
+/// Name writes per server: the one in flight with the latest name waiting
+/// behind it, and when the last write landed.
+#[derive(Default)]
+pub(super) struct NameWrites {
+    pending: HashMap<Uuid, Option<NameWrite>>,
+    landed: HashMap<Uuid, Instant>,
+}
+
+impl NameWrites {
+    /// The write to send now, or `None` when it waits behind one in flight.
+    fn begin(&mut self, id: Uuid, write: NameWrite) -> Option<NameWrite> {
+        match self.pending.get_mut(&id) {
+            Some(next) => {
+                *next = Some(write);
+                None
+            }
+            None => {
+                self.pending.insert(id, None);
+                Some(write)
+            }
+        }
+    }
+
+    /// End the write in flight; returns the one waiting behind it.
+    fn finish(&mut self, id: Uuid, landed: bool) -> Option<NameWrite> {
+        if landed {
+            self.landed.insert(id, Instant::now());
+        }
+        self.pending.remove(&id).flatten()
+    }
+
+    /// Whether a check that started at `asked` can change the name: no
+    /// write is in flight and it started after the last one landed.
+    fn settled(&self, id: Uuid, asked: Option<Instant>) -> bool {
+        !self.pending.contains_key(&id)
+            && self
+                .landed
+                .get(&id)
+                .is_none_or(|landed| asked.is_some_and(|asked| asked > *landed))
     }
 }
 
@@ -100,7 +175,13 @@ struct Report {
     running_commands: u64,
 }
 
-async fn observe(client: Arc<Client>) -> Result<(Option<String>, Option<u64>), (Health, String)> {
+struct Observed {
+    version: Option<String>,
+    working: Option<u64>,
+    server: Option<crate::api::ServerInfo>,
+}
+
+async fn observe(client: Arc<Client>) -> Result<Observed, (Health, String)> {
     let this = client.clone();
     client
         .run(async move {
@@ -136,12 +217,17 @@ async fn observe(client: Arc<Client>) -> Result<(Option<String>, Option<u64>), (
                     format!("Server readiness check failed. {err}"),
                 ));
             }
-            Ok(match report {
+            let (version, working) = match report {
                 Ok((_, report)) => (
                     Some(report.version),
                     Some(report.active_turns.saturating_add(report.running_commands)),
                 ),
                 Err(_) => (None, None),
+            };
+            Ok(Observed {
+                version,
+                working,
+                server: caps.server,
             })
         })
         .await
@@ -163,15 +249,18 @@ fn monitor(
                 request = requests.recv() => if request.is_none() { break },
                 _ = timer.tick() => {},
             }
+            let asked = Instant::now();
             let result = match &client {
                 Ok(client) => tokio::select! { _ = states.closed() => break, result = observe(client.clone()) => result },
                 Err(error) => Err((Health::Offline, error.clone())),
             };
             states.send_modify(|state| match result {
-                Ok((version, working)) => {
+                Ok(observed) => {
                     state.health = Health::Online;
-                    state.version = version;
-                    state.working = working;
+                    state.version = observed.version;
+                    state.working = observed.working;
+                    state.server = observed.server;
+                    state.asked = Some(asked);
                     state.seen = Some(Utc::now());
                     state.error = None;
                 }
@@ -183,6 +272,13 @@ fn monitor(
 }
 
 impl Connections {
+    /// Check a saved server again now instead of at its next interval.
+    fn recheck(&self, id: Uuid) {
+        if let Some(monitor) = self.monitors.get(&id) {
+            let _ = monitor.commands.try_send(());
+        }
+    }
+
     pub(super) fn new(
         registry: &ServerRegistry,
         runtime: &tokio::runtime::Handle,
@@ -232,6 +328,7 @@ impl Connections {
                             return false;
                         }
                         shell.servers.entries.insert(id, snapshot);
+                        shell.adopt_server_name(id, cx);
                         cx.notify();
                         true
                     });
@@ -321,6 +418,103 @@ impl Shell {
         cx.notify();
     }
 
+    /// Use the name the server keeps for every desktop. A server nobody
+    /// named yet gets this desktop's name, unless it is the made-up one.
+    pub(super) fn adopt_server_name(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let (Some(saved), Some(observed)) = (self.registry.find(id), self.servers.entries.get(&id))
+        else {
+            return;
+        };
+        if !self.names.settled(id, observed.asked) {
+            return;
+        }
+        let Some(server) = observed.server.clone() else {
+            return;
+        };
+        match NameAction::of(saved, server) {
+            NameAction::Adopt(name) => self.rename_saved(id, &name),
+            NameAction::Carry(name) => self.name_server(
+                id,
+                NameWrite {
+                    name,
+                    carried: true,
+                },
+                cx,
+            ),
+            NameAction::Keep => {}
+        }
+    }
+
+    fn rename_saved(&mut self, id: Uuid, name: &str) {
+        let mut registry = self.registry.clone();
+        let saved = registry.rename(id, name).and_then(|()| {
+            self.launch
+                .store
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|store| store.save(&registry))
+        });
+        match saved {
+            Ok(()) => self.registry = registry,
+            Err(err) => self.connection_error = Some(err),
+        }
+    }
+
+    /// Save the name on the server, which every desktop picks up on its
+    /// next check. Writes to one server go one at a time, and only the
+    /// latest waiting name is sent next.
+    pub(super) fn name_server(&mut self, id: Uuid, write: NameWrite, cx: &mut Context<Self>) {
+        let Some(saved) = self.registry.find(id) else {
+            return;
+        };
+        let profile = saved.profile.clone();
+        let client = match Client::new(profile.origin.clone(), &profile.token, self.runtime.clone())
+        {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                if !write.carried {
+                    self.connection_error = Some(err);
+                }
+                return;
+            }
+        };
+        let Some(write) = self.names.begin(id, write) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = client.name_server(write.name.clone(), write.carried).await;
+            let _ = this.update(cx, |shell, cx| {
+                let next = shell.names.finish(id, result.is_ok());
+                match result {
+                    Ok(kept) => {
+                        let current = shell.registry.find(id).filter(|s| s.profile == profile);
+                        if let Some(kept) = kept
+                            && next.is_none()
+                            && current.is_some_and(|s| s.name != kept)
+                        {
+                            shell.rename_saved(id, &kept);
+                        }
+                        shell.servers.recheck(id);
+                    }
+                    // A server from before shared names keeps the name on this desktop only.
+                    Err(ClientError::Api { status: 404, .. }) => {}
+                    Err(err) if !write.carried => {
+                        shell.connection_error = Some(format!(
+                            "Could not save the name {} on the server. {err}",
+                            write.name
+                        ));
+                    }
+                    Err(_) => {}
+                }
+                if let Some(next) = next {
+                    shell.name_server(id, next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn server_update_view(&self, id: Uuid) -> Option<&updates::View> {
         self.registry.find(id).and_then(|saved| {
             if self.managed_server(&saved.profile) {
@@ -395,6 +589,7 @@ impl Shell {
                 .unwrap_or_default(),
             Editor::Add => String::new(),
         };
+        self.editor_name = name.clone();
         self.setup
             .as_ref()
             .unwrap()
@@ -738,7 +933,10 @@ mod tests {
                 async move {
                     let allowed = headers.get("authorization").and_then(|value| value.to_str().ok()) == Some(expected.as_str());
                     let status = if allowed { StatusCode::OK } else { StatusCode::UNAUTHORIZED };
-                    let body = json!({"api_version":api_version,"providers":[],"limits":{"max_text_bytes":32768}});
+                    let mut body = json!({"api_version":api_version,"providers":[],"limits":{"max_text_bytes":32768}});
+                    if report {
+                        body["server"] = json!({"name": "Studio"});
+                    }
                     (status, Json(body))
                 }
             }))
@@ -758,7 +956,9 @@ mod tests {
         (Profile::parse(&origin, TOKEN).unwrap(), server)
     }
 
-    async fn probe(profile: Profile) -> Result<(Option<String>, Option<u64>), (Health, String)> {
+    type Probed = (Option<String>, Option<u64>, Option<Option<String>>);
+
+    async fn probe(profile: Profile) -> Result<Probed, (Health, String)> {
         let client = Arc::new(
             Client::new(
                 profile.origin,
@@ -767,7 +967,66 @@ mod tests {
             )
             .unwrap(),
         );
-        observe(client).await
+        observe(client)
+            .await
+            .map(|o| (o.version, o.working, o.server.map(|s| s.name)))
+    }
+
+    #[::core::prelude::v1::test]
+    fn desktops_show_the_servers_name_and_carry_their_own_once() {
+        let saved = |origin: &str, name: &str| crate::config::SavedServer {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            profile: Profile::parse(origin, TOKEN).unwrap(),
+        };
+        let named = |name: Option<&str>| crate::api::ServerInfo {
+            name: name.map(Into::into),
+        };
+        let studio = saved("https://studio.example.com", "Studio");
+        assert_eq!(
+            NameAction::of(&studio, named(Some("Office"))),
+            NameAction::Adopt("Office".into())
+        );
+        assert_eq!(
+            NameAction::of(&studio, named(Some("Studio"))),
+            NameAction::Keep
+        );
+        assert_eq!(
+            NameAction::of(&studio, named(None)),
+            NameAction::Carry("Studio".into())
+        );
+        let made_up = saved("https://studio.example.com", "studio.example.com");
+        assert_eq!(NameAction::of(&made_up, named(None)), NameAction::Keep);
+        let local = saved("http://127.0.0.1:7878", "This computer");
+        assert_eq!(NameAction::of(&local, named(None)), NameAction::Keep);
+    }
+
+    #[::core::prelude::v1::test]
+    fn name_writes_go_one_at_a_time_and_outdate_earlier_checks() {
+        let id = Uuid::new_v4();
+        let write = |name: &str| NameWrite {
+            name: name.into(),
+            carried: false,
+        };
+        let mut writes = NameWrites::default();
+        let before = Instant::now();
+        assert!(writes.settled(id, Some(before)), "nothing written yet");
+        assert_eq!(writes.begin(id, write("A")).unwrap().name, "A");
+        assert!(writes.begin(id, write("B")).is_none(), "B waits behind A");
+        assert!(writes.begin(id, write("C")).is_none(), "C replaces B");
+        assert!(!writes.settled(id, Some(Instant::now())), "A is in flight");
+        assert_eq!(writes.finish(id, true).unwrap().name, "C");
+        assert!(
+            !writes.settled(id, Some(before)),
+            "a check from before A landed is outdated"
+        );
+        assert!(writes.settled(id, Some(Instant::now())));
+        assert_eq!(writes.begin(id, write("D")).unwrap().name, "D");
+        assert!(writes.finish(id, false).is_none());
+        assert!(
+            !writes.settled(id, None),
+            "an unanswered check never renames"
+        );
     }
 
     #[::core::prelude::v1::test]
@@ -811,8 +1070,12 @@ mod tests {
         )
         .unwrap();
         let (first, second) = tokio::join!(probe(a), probe(b));
-        assert_eq!(first.unwrap(), (Some("0.0.20".into()), Some(3)));
-        assert_eq!(second.unwrap(), (Some("0.0.24".into()), Some(3)));
+        let studio = Some(Some("Studio".into()));
+        assert_eq!(
+            first.unwrap(),
+            (Some("0.0.20".into()), Some(3), studio.clone())
+        );
+        assert_eq!(second.unwrap(), (Some("0.0.24".into()), Some(3), studio));
         a_server.abort();
         b_server.abort();
     }
@@ -839,7 +1102,7 @@ mod tests {
     #[tokio::test]
     async fn older_server_without_version_reporting_remains_online() {
         let (profile, server) = fixture("0.0.24", "v1", StatusCode::OK, false, TOKEN).await;
-        assert_eq!(probe(profile).await.unwrap(), (None, None));
+        assert_eq!(probe(profile).await.unwrap(), (None, None, None));
         server.abort();
     }
 }
