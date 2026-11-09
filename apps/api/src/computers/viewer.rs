@@ -6,9 +6,13 @@
 //! server (see infra/guest/vnc): `else-watch` reaches the view-only server
 //! that the bot's input guard ignores; anything else reaches the controlling
 //! one. A watch connection asks for 32-bit pixels in Raw and CopyRect plus
-//! DesktopSize; a control connection only sends input. While the owner
-//! controls, the viewer can also ask for cursor shapes (RichCursor), which
-//! stops the server painting the cursor into the pixels.
+//! DesktopSize; a control connection sends input and clipboard text, and
+//! asks for ExtendedClipboard so the text can be UTF-8 where the guest's
+//! x11vnc supports it. While the owner controls, the viewer can also ask for
+//! cursor shapes (RichCursor), which stops the server painting the cursor
+//! into the pixels.
+
+use std::io::Write as _;
 
 use des::cipher::{BlockEncrypt, KeyInit};
 use futures_util::{SinkExt, StreamExt};
@@ -31,6 +35,13 @@ fn valid_size(width: u16, height: u16) -> bool {
         && u32::from(width) * u32::from(height) <= MAX_PIXELS
 }
 const MAX_CUT_TEXT: u32 = 1 << 20;
+/// The ExtendedClipboard pseudo-encoding and the flags this viewer uses.
+const EXTENDED_CLIPBOARD: i32 = 0xC0A1_E5CE_u32 as i32;
+const CLIPBOARD_TEXT: u32 = 1;
+const CLIPBOARD_CAPS: u32 = 1 << 24;
+const CLIPBOARD_PROVIDE: u32 = 1 << 28;
+/// The most clipboard text the owner can paste at once, in UTF-8 bytes.
+pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 const BRIDGE_BUFFER: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +102,7 @@ pub async fn connect(port: u16, password: &str, target: Target) -> Result<Connec
         0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0,
     ];
     let mut negotiation = SET_PIXEL_FORMAT_RGBA.to_vec();
-    negotiation.extend_from_slice(&set_encodings(false));
+    negotiation.extend_from_slice(&set_encodings(false, target == Target::Control));
     writer.write_all(&negotiation).await?;
     Ok(Connection {
         reader,
@@ -212,13 +223,16 @@ pub fn vnc_auth_response(password: &str, challenge: [u8; 16]) -> [u8; 16] {
     out
 }
 
-/// SetEncodings: Raw, CopyRect, DesktopSize, and with `cursor` RichCursor.
-pub fn set_encodings(cursor: bool) -> Vec<u8> {
-    let encodings: &[i32] = if cursor {
-        &[0, 1, -223, -239]
-    } else {
-        &[0, 1, -223]
-    };
+/// SetEncodings: Raw, CopyRect, DesktopSize, with `cursor` RichCursor, and
+/// with `clipboard` ExtendedClipboard.
+pub fn set_encodings(cursor: bool, clipboard: bool) -> Vec<u8> {
+    let mut encodings = vec![0, 1, -223];
+    if cursor {
+        encodings.push(-239);
+    }
+    if clipboard {
+        encodings.push(EXTENDED_CLIPBOARD);
+    }
     let mut message = vec![2, 0];
     message.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
     for encoding in encodings {
@@ -263,6 +277,8 @@ pub enum Event {
     },
     /// The end of one framebuffer update.
     UpdateEnd,
+    /// The server takes UTF-8 clipboard text through ExtendedClipboard.
+    ClipboardUtf8,
 }
 
 /// Parse server messages until the connection ends. Events go to `events`
@@ -389,11 +405,22 @@ pub async fn read_events<R: AsyncRead + Unpin>(
             3 => {
                 let mut pad = [0u8; 3];
                 reader.read_exact(&mut pad).await?;
-                let len = reader.read_u32().await?;
-                if len > MAX_CUT_TEXT {
+                let len = reader.read_i32().await?;
+                // A negative length marks an ExtendedClipboard message.
+                let size = len.unsigned_abs();
+                if size > MAX_CUT_TEXT || (len < 0 && size < 4) {
                     return Err(ViewerError::Protocol("clipboard text too long".into()));
                 }
-                skip(&mut reader, u64::from(len)).await?;
+                if len >= 0 {
+                    skip(&mut reader, u64::from(size)).await?;
+                    continue;
+                }
+                let flags = reader.read_u32().await?;
+                skip(&mut reader, u64::from(size - 4)).await?;
+                let text = CLIPBOARD_CAPS | CLIPBOARD_TEXT;
+                if flags & text == text && !send(Event::ClipboardUtf8).await {
+                    return Ok(());
+                }
             }
             other => return Err(ViewerError::Protocol(format!("message type {other}"))),
         }
@@ -423,6 +450,36 @@ pub fn pointer_event(buttons: u8, x: u16, y: u16) -> [u8; 6] {
     let [x0, x1] = x.to_be_bytes();
     let [y0, y1] = y.to_be_bytes();
     [5, buttons, x0, x1, y0, y1]
+}
+
+/// ExtendedClipboard Provide: `text` as NUL-terminated UTF-8, compressed.
+/// Callers bound it by [`MAX_CLIPBOARD_BYTES`].
+pub fn clipboard_utf8(text: &str) -> Vec<u8> {
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let size = text.len() as u32 + 1;
+    zlib.write_all(&size.to_be_bytes())
+        .and_then(|()| zlib.write_all(text.as_bytes()))
+        .and_then(|()| zlib.write_all(&[0]))
+        .expect("writing to memory");
+    let packed = zlib.finish().expect("writing to memory");
+    let mut message = vec![6, 0, 0, 0];
+    message.extend_from_slice(&(-(4 + packed.len() as i32)).to_be_bytes());
+    message.extend_from_slice(&(CLIPBOARD_PROVIDE | CLIPBOARD_TEXT).to_be_bytes());
+    message.extend_from_slice(&packed);
+    message
+}
+
+/// ClientCutText for a server without ExtendedClipboard, or `None` when
+/// `text` has a character outside Latin-1, which that server cannot take.
+pub fn clipboard_latin1(text: &str) -> Option<Vec<u8>> {
+    let latin1: Vec<u8> = text
+        .chars()
+        .map(|ch| u8::try_from(u32::from(ch)).ok())
+        .collect::<Option<_>>()?;
+    let mut message = vec![6, 0, 0, 0];
+    message.extend_from_slice(&(latin1.len() as u32).to_be_bytes());
+    message.extend_from_slice(&latin1);
+    Some(message)
 }
 
 /// The screen as the viewer last saw it, 4 bytes per pixel.
@@ -480,7 +537,7 @@ impl Framebuffer {
                 }
             }
             Event::Resize { width, height } => *self = Self::new(width, height),
-            Event::Cursor { .. } | Event::UpdateEnd => {}
+            Event::Cursor { .. } | Event::UpdateEnd | Event::ClipboardUtf8 => {}
         }
     }
 
@@ -526,6 +583,34 @@ mod tests {
     }
 
     const REFERENCE: &str = "5f15f4f0e1684cdc260ea962ab82fa3b";
+
+    #[test]
+    fn clipboard_text_is_utf8_when_offered_and_latin1_only_when_it_fits() {
+        assert_eq!(
+            clipboard_latin1("café").unwrap(),
+            [&[6, 0, 0, 0, 0, 0, 0, 4][..], b"caf\xe9"].concat()
+        );
+        assert_eq!(clipboard_latin1("‘café’"), None);
+
+        let message = clipboard_utf8("‘café’");
+        let len = i32::from_be_bytes(message[4..8].try_into().unwrap());
+        assert_eq!(message[..4], [6, 0, 0, 0]);
+        assert_eq!(
+            len,
+            -(message.len() as i32 - 8),
+            "a negative length marks it extended"
+        );
+        assert_eq!(message[8..12], ((1u32 << 28) | 1).to_be_bytes());
+        let mut plain = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::ZlibDecoder::new(&message[12..]),
+            &mut plain,
+        )
+        .unwrap();
+        let text = "‘café’".as_bytes();
+        assert_eq!(plain[..4], (text.len() as u32 + 1).to_be_bytes());
+        assert_eq!(&plain[4..], [text, &[0]].concat());
+    }
 
     #[test]
     fn copies_overlapping_rows_without_smearing() {

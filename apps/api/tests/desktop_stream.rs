@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -139,7 +140,7 @@ async fn fake_guest(port: u16, password: String, old_image: bool, log: Arc<Log>)
                 let watch = !old_image && host.lock().unwrap().as_str() == "else-watch";
                 let server = if watch { "watch" } else { "control" };
                 log.push(format!("{server} open"));
-                let _ = rfb_server(ws, &password, watch, server, &log).await;
+                let _ = rfb_server(ws, &password, watch, !old_image, server, &log).await;
                 log.push(format!("{server} closed"));
             });
         }
@@ -172,11 +173,33 @@ impl Io {
 
 const W: u16 = 64;
 const H: u16 = 48;
+const EXTENDED_CLIPBOARD: i32 = 0xC0A1_E5CE_u32 as i32;
+
+/// The clipboard text in a ClientCutText, classic or ExtendedClipboard.
+async fn cut_text(io: &mut Io) -> Option<String> {
+    let head = io.take(7).await?;
+    let len = i32::from_be_bytes([head[3], head[4], head[5], head[6]]);
+    let body = io.take(len.unsigned_abs() as usize).await?;
+    if len >= 0 {
+        return Some(body.iter().map(|&b| char::from(b)).collect());
+    }
+    let flags = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    assert_eq!(flags, (1 << 28) | 1, "a Provide with text alone");
+    let mut plain = Vec::new();
+    flate2::read::ZlibDecoder::new(&body[4..])
+        .read_to_end(&mut plain)
+        .unwrap();
+    let size = u32::from_be_bytes([plain[0], plain[1], plain[2], plain[3]]) as usize;
+    assert_eq!(plain.len(), 4 + size);
+    assert_eq!(plain.last(), Some(&0), "the text ends in a NUL");
+    Some(String::from_utf8(plain[4..plain.len() - 1].to_vec()).unwrap())
+}
 
 async fn rfb_server(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     password: &str,
     watch: bool,
+    utf8_clipboard: bool,
     server: &str,
     log: &Log,
 ) -> Option<()> {
@@ -232,11 +255,22 @@ async fn rfb_server(
                 let head = io.take(3).await?;
                 let n = u16::from_be_bytes([head[1], head[2]]) as usize;
                 let encodings = io.take(n * 4).await?;
-                let shapes = encodings
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .any(|e| i32::from_be_bytes(*e) == -239);
+                let has = |wanted: i32| {
+                    encodings
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|e| i32::from_be_bytes(*e) == wanted)
+                };
+                let shapes = has(-239);
+                if utf8_clipboard && has(EXTENDED_CLIPBOARD) {
+                    // libvncserver's capabilities: text, up to 1 MiB.
+                    let mut caps = vec![3, 0, 0, 0];
+                    caps.extend_from_slice(&(-8i32).to_be_bytes());
+                    caps.extend_from_slice(&0x1700_0001u32.to_be_bytes());
+                    caps.extend_from_slice(&(1u32 << 20).to_be_bytes());
+                    io.send(&caps).await?;
+                }
                 if shapes != cursor_shapes {
                     cursor_shapes = shapes;
                     cursor_due = shapes;
@@ -264,6 +298,10 @@ async fn rfb_server(
                 let x = u16::from_be_bytes([m[1], m[2]]);
                 let y = u16::from_be_bytes([m[3], m[4]]);
                 log.push(format!("{server} pointer {} {x} {y}", m[0]));
+            }
+            6 => {
+                let text = cut_text(&mut io).await?;
+                log.push(format!("{server} clipboard {text:?}"));
             }
             other => panic!("unexpected client message {other}"),
         }
@@ -634,6 +672,79 @@ async fn control_sends_input_releases_it_and_excludes_other_controllers() {
     assert!(
         !s.log.lines().iter().any(|l| l.contains("key 98")),
         "input after leaving control is dropped"
+    );
+}
+
+fn clipboard_and_keys(s: &Setup) -> Vec<String> {
+    s.log
+        .lines()
+        .into_iter()
+        .filter(|l| l.starts_with("control clipboard") || l.starts_with("control key"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pasted_text_reaches_the_guest_as_utf8_before_later_keys() {
+    let s = setup(false, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=watch").await;
+    next_json(&mut socket).await;
+    next_json(&mut socket).await;
+    send(&mut socket, json!({"type":"clipboard","text":"watching"})).await;
+    send(&mut socket, json!({"type":"mode","mode":"control"})).await;
+    assert_eq!(
+        next_json(&mut socket).await,
+        json!({"type":"mode","mode":"control"})
+    );
+    s.wait_log("control open").await;
+
+    send(
+        &mut socket,
+        json!({"type":"clipboard","text":"héllo ‘quoted’ 漢字 🙂\r\nnext"}),
+    )
+    .await;
+    send(&mut socket, json!({"type":"key","key":0x76,"down":true})).await;
+    s.wait_log("control key 118 1").await;
+    assert_eq!(
+        clipboard_and_keys(&s),
+        [
+            r#"control clipboard "héllo ‘quoted’ 漢字 🙂\nnext""#,
+            "control key 118 1"
+        ],
+        "the text arrives whole, with Unix line ends, before the paste key"
+    );
+
+    send(
+        &mut socket,
+        json!({"type":"clipboard","text":"x".repeat(viewer::MAX_CLIPBOARD_BYTES + 1)}),
+    )
+    .await;
+    assert_eq!(next_json(&mut socket).await["code"], "clipboard_too_large");
+    send(&mut socket, json!({"type":"key","key":0x76,"down":false})).await;
+    s.wait_log("control key 118 0").await;
+    assert_eq!(
+        clipboard_and_keys(&s).len(),
+        3,
+        "text from watch mode and text over the limit never reach the guest"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_image_takes_only_latin1_clipboard_text() {
+    let s = setup(true, Duration::from_secs(300)).await;
+    let mut socket = s.open("mode=control").await;
+    assert_eq!(next_json(&mut socket).await["type"], "size");
+    assert_eq!(next_json(&mut socket).await["type"], "mode");
+    send(&mut socket, json!({"type":"clipboard","text":"café"})).await;
+    send(&mut socket, json!({"type":"clipboard","text":"‘quoted’"})).await;
+    assert_eq!(
+        next_json(&mut socket).await["code"],
+        "clipboard_unsupported"
+    );
+    send(&mut socket, json!({"type":"key","key":0x76,"down":true})).await;
+    s.wait_log("control key 118 1").await;
+    assert_eq!(
+        clipboard_and_keys(&s),
+        [r#"control clipboard "café""#, "control key 118 1"]
     );
 }
 

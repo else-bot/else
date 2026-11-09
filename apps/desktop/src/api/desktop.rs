@@ -23,6 +23,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// with a notice instead of being truncated.
 #[cfg(any(target_os = "macos", test))]
 pub const MAX_TEXT_CHARS: usize = 4096;
+/// The most clipboard text the desktop takes at once, in UTF-8 bytes.
+pub const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComputerState {
@@ -66,6 +68,7 @@ pub enum DesktopCommand {
     Pointer { x: u16, y: u16, buttons: u8 },
     Key { key: u32, down: bool },
     Release,
+    Clipboard { text: String },
 }
 
 #[derive(Debug)]
@@ -453,7 +456,9 @@ impl Client {
                         },
                     };
                     match &command {
-                        DesktopCommand::Pointer { .. } | DesktopCommand::Key { .. }
+                        DesktopCommand::Pointer { .. }
+                        | DesktopCommand::Key { .. }
+                        | DesktopCommand::Clipboard { .. }
                             if mode != DesktopMode::Control => continue,
                         _ => {},
                     }
@@ -505,7 +510,7 @@ impl Client {
                                         deliver!(DesktopEvent::Asleep);
                                         return Ok(());
                                     }
-                                    if matches!(code.as_str(), "control_in_use" | "control_failed" | "invalid_message") {
+                                    if matches!(code.as_str(), "control_in_use" | "control_failed" | "invalid_message" | "clipboard_too_large" | "clipboard_unsupported") {
                                         deliver!(DesktopEvent::Notice(message));
                                     } else {
                                         return Err(message);
@@ -711,6 +716,51 @@ mod tests {
             rx.recv().await,
             Some((_, Input::Command(DesktopCommand::Key { down: false, .. })))
         ));
+    }
+
+    #[tokio::test]
+    async fn clipboard_text_goes_out_only_while_controlling() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut received = Vec::new();
+            loop {
+                let text = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                if text.contains(r#""type":"mode""#) {
+                    ws.send(Message::Text(text.clone())).await.unwrap();
+                }
+                received.push(text.to_string());
+                if text.contains(r#""type":"release""#) {
+                    return received;
+                }
+            }
+        });
+        let mut stream = client(origin).desktop(Uuid::new_v4(), false);
+        let clipboard = |text: &str| DesktopCommand::Clipboard { text: text.into() };
+        assert!(stream.commands.send_or_disconnect(clipboard("watching")));
+        assert!(stream.commands.send_or_disconnect(DesktopCommand::Mode {
+            mode: DesktopMode::Control,
+        }));
+        assert!(matches!(
+            stream.events.recv().await,
+            Some(DesktopEvent::Mode(DesktopMode::Control))
+        ));
+        assert!(
+            stream
+                .commands
+                .send_or_disconnect(clipboard("‘quoted’\n漢"))
+        );
+        assert!(stream.commands.send_or_disconnect(DesktopCommand::Release));
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                r#"{"type":"mode","mode":"control"}"#,
+                r#"{"type":"clipboard","text":"‘quoted’\n漢"}"#,
+                r#"{"type":"release"}"#,
+            ]
+        );
     }
 
     #[tokio::test]
