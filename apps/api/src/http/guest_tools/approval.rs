@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{AppState, Grant, Outcome, slice, summarize_input, tool_error};
-use crate::app::questions::Kind;
+use crate::app::questions::{Kind, TaskScope};
 
 pub(super) const MAX_PURPOSE: usize = 300;
 const MAX_PREVIEW: usize = 2000;
@@ -99,6 +99,7 @@ fn declared_effect(name: &str, args: &Value) -> Result<Option<Effect>, String> {
             if text.len() <= crate::app::questions::MAX_CONTEXT && !text.contains('\0') => {}
         Some(_) => return Err("context is at most 4000 bytes of text.".into()),
     }
+    TaskScope::from_args(args).map_err(|message| format!("{message}. Nothing was done."))?;
     Ok(Some(effect))
 }
 
@@ -206,7 +207,10 @@ pub(crate) async fn approve_card(
 ) -> Result<Option<&'static str>, Outcome> {
     use crate::app::questions::{Spec, Standing};
     use crate::db::owner_questions::{self, Gate};
-    let spec = Spec::tool_approval(kind, name, args, title, context);
+    let task_scope = declares_effect(name)
+        .then(|| TaskScope::from_args(args).ok().flatten())
+        .flatten();
+    let spec = Spec::tool_approval(kind, name, args, task_scope, title, context);
     match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
         Ok(Gate::Run {
             standing: Some(Standing::Bot),

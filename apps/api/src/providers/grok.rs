@@ -31,7 +31,7 @@ use crate::app::providers::{
 use protocol::Tracker;
 
 pub const ID: &str = "grok";
-const PROMPT_VERSION: &str = "else-grok-v2";
+const PROMPT_VERSION: &str = "else-grok-v3";
 
 pub static DEFINITION: Definition = Definition {
     id: ID,

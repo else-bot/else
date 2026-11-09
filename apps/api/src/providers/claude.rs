@@ -61,7 +61,7 @@ use crate::app::providers::{
 use protocol::Tracker;
 
 pub const ID: &str = "claude";
-const PROMPT_VERSION: &str = "else-claude-v16";
+const PROMPT_VERSION: &str = "else-claude-v17";
 
 pub static DEFINITION: Definition = Definition {
     id: ID,

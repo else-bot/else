@@ -177,6 +177,8 @@ pub enum Action {
     Tool {
         tool: String,
         args: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_scope: Option<TaskScope>,
     },
     Host {
         host: String,
@@ -188,7 +190,8 @@ pub enum Action {
     },
 }
 
-/// The recurring work a host action belongs to, as the bot declared it:
+/// The recurring work a host action or computer tool call belongs to, as
+/// the bot declared it:
 /// what kind of task, on which target. A standing grant matches it exactly,
 /// after normalization; it never parses the action itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +224,22 @@ impl TaskScope {
                 target.to_owned()
             },
         })
+    }
+
+    /// The optional `task_scope` argument of a gated call, normalized.
+    pub fn from_args(args: &Value) -> Result<Option<Self>, &'static str> {
+        const SCOPE_ERROR: &str =
+            "task_scope is {task, target}: each 1 to 200 bytes of text without control characters";
+        match args.get("task_scope") {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => {
+                let scope =
+                    serde_json::from_value::<Self>(value.clone()).map_err(|_| SCOPE_ERROR)?;
+                Self::new(&scope.task, &scope.target)
+                    .map(Some)
+                    .ok_or(SCOPE_ERROR)
+            }
+        }
     }
 
     fn canonical(&self) -> bool {
@@ -347,9 +366,13 @@ impl PermissionTarget {
     }
 
     /// The standing grant that would cover this approved action: an MCP tool
-    /// call, or a host action declared with a task scope.
+    /// call, or a host action or computer tool call declared with a task scope.
     pub fn for_action(kind: Kind, action: &Action) -> Option<Self> {
         if let Action::Host {
+            task_scope: Some(scope),
+            ..
+        }
+        | Action::Tool {
             task_scope: Some(scope),
             ..
         } = action
@@ -361,7 +384,7 @@ impl PermissionTarget {
             };
             return target.valid().then_some(target);
         }
-        let Action::Tool { tool, args } = action else {
+        let Action::Tool { tool, args, .. } = action else {
             return None;
         };
         if tool != "mcp_request" || args["method"] != "tools/call" {
@@ -587,16 +610,7 @@ impl Spec {
             .ok_or("action is 1 to 4000 bytes: exactly what will be done")?;
         let reason = text_arg(args, "reason", MAX_TITLE)
             .map_err(|_| "reason is at most 500 bytes of text")?;
-        const SCOPE_ERROR: &str =
-            "task_scope is {task, target}: each 1 to 200 bytes of text without control characters";
-        let task_scope = match args.get("task_scope") {
-            None | Some(Value::Null) => None,
-            Some(value) => {
-                let scope =
-                    serde_json::from_value::<TaskScope>(value.clone()).map_err(|_| SCOPE_ERROR)?;
-                Some(TaskScope::new(&scope.task, &scope.target).ok_or(SCOPE_ERROR)?)
-            }
-        };
+        let task_scope = TaskScope::from_args(args)?;
         let action_hash = match &task_scope {
             None => hash(&[b"host", kind.as_str().as_bytes(), action.as_bytes()]),
             Some(scope) => hash(&[
@@ -633,14 +647,22 @@ impl Spec {
     }
 
     /// An approval bound to one computer tool call: the tool and its exact
-    /// arguments. `title` and `context` are what the card shows.
+    /// arguments. `title` and `context` are what the card shows. A call
+    /// declared with a task scope offers that task's standing grant instead
+    /// of the bot-wide destructive one.
     pub fn tool_approval(
         kind: Kind,
         tool: &str,
         args: &Value,
+        task_scope: Option<TaskScope>,
         title: String,
         context: String,
     ) -> Self {
+        let offer = if task_scope.is_some() {
+            Standing::Task
+        } else {
+            Standing::Bot
+        };
         let mut canonical = args.clone();
         canonical.sort_all_objects();
         let canonical = canonical.to_string();
@@ -648,12 +670,13 @@ impl Spec {
             kind,
             title,
             context: Some(context),
-            choices: approval_choices(kind, Some(Standing::Bot)),
+            choices: approval_choices(kind, Some(offer)),
             multiple: false,
             approval: Some(Approval {
                 action: Action::Tool {
                     tool: tool.to_owned(),
                     args: crate::app::tools::loggable_args(tool, args),
+                    task_scope,
                 },
                 hash: hash(&[b"tool", tool.as_bytes(), canonical.as_bytes()]),
             }),
@@ -910,6 +933,7 @@ mod tests {
             Kind::External,
             "computer_run",
             &json!({ "command": "./send.sh", "effect": "external" }),
+            None,
             "t".into(),
             "c".into(),
         );
@@ -917,6 +941,7 @@ mod tests {
             Kind::External,
             "computer_run",
             &json!({ "effect": "external", "command": "./send.sh" }),
+            None,
             "t".into(),
             "c".into(),
         );
@@ -924,6 +949,7 @@ mod tests {
             Kind::External,
             "computer_run",
             &json!({ "command": "./send.sh --all", "effect": "external" }),
+            None,
             "t".into(),
             "c".into(),
         );
@@ -941,6 +967,7 @@ mod tests {
                 Kind::External,
                 "computer_job_start",
                 &json!({ "command": "./send.sh", "effect": "external" }),
+                None,
                 "t".into(),
                 "c".into()
             )

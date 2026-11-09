@@ -17,7 +17,7 @@
 //! longer offer it. "Always allow for this routine" covers runs of that one
 //! routine admitted with its current prompt revision; editing the prompt
 //! ends it. A tool grant covers one MCP tool and effect, and a task grant
-//! one declared task, target, and effect of host actions. A tool grant
+//! one declared task, target, and effect of host actions and computer tool calls. A tool grant
 //! applies only in the bot's owner requests; a task grant also in tasks
 //! delegated to the bot for an owner request, whose cards approve once. Which scope a card offers and which grant applies
 //! come from the turn's source in the database; a task grant matches the

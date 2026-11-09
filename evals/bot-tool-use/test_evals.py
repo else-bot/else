@@ -102,6 +102,10 @@ def run(runner):
                     "type": "http", "url": "https://mcp.bentonow.com/mcp", "secrets": ["bento"], "headers": {
                         "X-Bento-Publishable-Key": "${BENTO_PUBLISHABLE_KEY}", "X-Bento-Secret-Key": "${BENTO_SECRET_KEY}",
                         "X-Bento-Site-UUID": "${BENTO_SITE_UUID}"}}})], "Bento is connected."),
+                "recurring-external-batch-declares-task-scope": ([self.call("computer_run", {
+                    "command": "node unfollow.js @UST_mean @rahulxero", "effect": "external",
+                    "task_scope": {"task": "Unfollow X accounts that never replied", "target": "X account @proliquid_xyz"}},
+                    {"status": "pending", "parked": True})], "Approve the card to unfollow them."),
                 "thumbs-up-saves-no-rule": ([], ""),
                 "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
                                            "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
@@ -109,6 +113,10 @@ def run(runner):
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
             }
+            unscoped = [self.call("computer_run", {"command": "node unfollow.js @UST_mean", "effect": "external"},
+                                  {"status": "pending", "parked": True})]
+            scoped_case = next(c for c in runner.load_cases() if c["id"] == "recurring-external-batch-declares-task-scope")
+            self.assertFalse(self.passed(scoped_case["expect"], unscoped, "Approve the card."))
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
                     calls, final, *bad_final = examples[case["id"]]

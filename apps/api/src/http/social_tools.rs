@@ -232,6 +232,7 @@ async fn action(s: &AppState, g: &Grant, args: &Value) -> Result<Value, Error> {
             kind,
             "social_action",
             args,
+            None,
             format!("{} social action", connection.provider.label()),
             serde_json::to_string(&input.command).map_err(|_| Error::Conflict)?,
         );
