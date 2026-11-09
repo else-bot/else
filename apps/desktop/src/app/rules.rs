@@ -1,19 +1,17 @@
-//! A bot's rules file: the card shown when the bot edits a rule, the Rules
-//! section in Bot details, and the dialog with the file, its history, and
-//! its markdown.
+//! A bot's rules file: the one-line note shown when the bot edits a rule,
+//! the Rules section in Bot details, and the dialog with the file and its
+//! history.
 
 use std::collections::HashMap;
 
 use super::ElseApp;
 use crate::avatar::bot_avatar;
-use crate::model::{
-    DiffLine, DiffOp, RuleChange, RuleSection, RulesFile, RulesUpdate, RulesVersion,
-};
+use crate::model::{DiffLine, DiffOp, RuleChange, RulesFile, RulesUpdate, RulesVersion};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, Size, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, WindowExt as _,
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -33,7 +31,6 @@ pub(super) enum RulesTab {
     #[default]
     Rules,
     History,
-    Markdown,
 }
 
 pub(super) struct RulesDialog {
@@ -60,20 +57,10 @@ fn on<E: ?Sized>(
 
 fn change_label(change: RuleChange) -> &'static str {
     match change {
-        RuleChange::Added => "added a rule",
-        RuleChange::Changed => "updated its rules",
-        RuleChange::Removed => "removed a rule",
-        RuleChange::Restored => "restored its rules",
-    }
-}
-
-fn counts(diff: &[DiffLine]) -> String {
-    let removed = diff.iter().filter(|l| l.op == DiffOp::Remove).count();
-    let added = diff.iter().filter(|l| l.op == DiffOp::Add).count();
-    match (removed, added) {
-        (0, a) => format!("{a} added"),
-        (r, 0) => format!("{r} removed"),
-        (r, a) => format!("{r} removed · {a} added"),
+        RuleChange::Added => "added the rule",
+        RuleChange::Changed => "changed the rule",
+        RuleChange::Removed => "removed the rule",
+        RuleChange::Restored => "restored the rule",
     }
 }
 
@@ -86,35 +73,6 @@ fn when(at: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-fn summary(section: &RuleSection) -> String {
-    section
-        .body
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn chip(text: impl Into<SharedString>, cx: &App) -> Div {
-    let theme = cx.theme();
-    div()
-        .flex_none()
-        .px_1p5()
-        .rounded_full()
-        .bg(theme.secondary)
-        .text_xs()
-        .text_color(theme.muted_foreground)
-        .child(text.into())
-}
-
-fn accent_chip(text: impl Into<SharedString>, cx: &App) -> Div {
-    let theme = cx.theme();
-    chip(text, cx)
-        .bg(theme.primary.opacity(0.14))
-        .text_color(theme.primary)
-}
-
 fn dot(cx: &App) -> Div {
     div()
         .flex_none()
@@ -123,53 +81,50 @@ fn dot(cx: &App) -> Div {
         .bg(cx.theme().primary)
 }
 
-/// One line of a rule: a leading `Label:` reads as a small caps label and
+/// One line of a rule as wrapping text: a leading `Label:` reads bold and
 /// backtick spans as code.
-fn rule_line(line: &str, cx: &App) -> Div {
+fn rule_line(line: &str, cx: &App) -> StyledText {
     let theme = cx.theme();
-    let mut row = h_flex().w_full().flex_wrap().items_baseline().gap_x_1();
+    let mut text = String::with_capacity(line.len());
+    let mut highlights = Vec::new();
     let mut rest = line;
     if let Some((label, after)) = line.split_once(": ")
         && !label.is_empty()
         && label.len() <= 16
         && label.chars().all(|c| c.is_alphabetic() || c == ' ')
     {
-        row = row.child(
-            div()
-                .flex_none()
-                .mr_1()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .child(label.to_uppercase()),
-        );
+        text.push_str(label);
+        text.push_str(": ");
+        highlights.push((
+            0..label.len() + 1,
+            HighlightStyle {
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            },
+        ));
         rest = after;
     }
     for (ix, span) in rest.split('`').enumerate() {
-        if span.is_empty() {
-            continue;
-        }
-        if ix % 2 == 1 {
-            row = row.child(
-                div()
-                    .px_1()
-                    .rounded(px(4.))
-                    .bg(theme.secondary)
-                    .font_family(theme.mono_font_family.clone())
-                    .text_xs()
-                    .child(span.to_owned()),
-            );
-        } else {
-            row = row.child(div().child(span.to_owned()));
+        let start = text.len();
+        text.push_str(span);
+        if ix % 2 == 1 && !span.is_empty() {
+            highlights.push((
+                start..text.len(),
+                HighlightStyle {
+                    background_color: Some(theme.secondary),
+                    ..Default::default()
+                },
+            ));
         }
     }
-    row
+    StyledText::new(text).with_highlights(highlights)
 }
 
 fn diff_block(diff: &[DiffLine], cx: &App) -> Div {
     let theme = cx.theme();
     v_flex()
         .w_full()
+        .flex_none()
         .py_1()
         .rounded(theme.radius)
         .border_1()
@@ -273,6 +228,7 @@ impl ElseApp {
         bot: Uuid,
         focus: Option<String>,
         tab: RulesTab,
+        version: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -281,12 +237,11 @@ impl ElseApp {
             bot,
             tab,
             focus,
-            version: None,
+            version,
             scroll,
         });
-        if let Some(version) = self.rules_file(bot).map(|file| file.version) {
-            self.preferences.rules_seen.insert(bot, version);
-            self.save_preferences(cx);
+        if tab == RulesTab::Rules {
+            self.mark_rules_seen(bot, cx);
         }
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -323,18 +278,24 @@ impl ElseApp {
         }
     }
 
-    fn set_rules_tab(&mut self, tab: RulesTab, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.rules_dialog {
-            dialog.tab = tab;
+    /// Only the Rules tab shows the current file; viewing an older change in
+    /// History leaves newer ones unread.
+    fn mark_rules_seen(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+        if let Some(version) = self.rules_file(bot).map(|file| file.version) {
+            self.preferences.rules_seen.insert(bot, version);
+            self.save_preferences(cx);
         }
-        cx.notify();
     }
 
-    fn focus_rule(&mut self, title: String, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.rules_dialog {
-            dialog.focus = Some(title);
+    fn set_rules_tab(&mut self, tab: RulesTab, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.rules_dialog else {
+            return;
+        };
+        dialog.tab = tab;
+        let bot = dialog.bot;
+        if tab == RulesTab::Rules {
+            self.mark_rules_seen(bot, cx);
         }
-        self.scroll_to_focus();
         cx.notify();
     }
 
@@ -407,13 +368,53 @@ impl ElseApp {
         let current = self.rules_version_of(bot) == Some(update.version);
         let restoring = self.rules.get(&bot).is_some_and(|cache| cache.restoring);
         let section = update.section.clone();
-        let header = h_flex()
+        let shown = update.version;
+        let view = Button::new(SharedString::from(format!("rules-view-{item}")))
+            .ghost()
+            .xsmall()
+            .focus_ring(false)
+            .cursor_pointer()
+            .label("View")
+            .accessibility_label(format!("View the change to {}", update.section))
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.open_rules(
+                    bot,
+                    Some(section.clone()),
+                    RulesTab::History,
+                    Some(shown),
+                    window,
+                    cx,
+                )
+            }));
+        let previous = update.version - 1;
+        let undo = current.then(|| {
+            Button::new(SharedString::from(format!("rules-undo-{item}")))
+                .ghost()
+                .xsmall()
+                .focus_ring(false)
+                .cursor_pointer()
+                .label("Undo")
+                .loading(restoring)
+                .disabled(restoring)
+                .accessibility_label(format!("Undo the change to {}", update.section))
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.restore_rules(bot, previous, shown, window, cx)
+                }))
+        });
+        let line = h_flex()
+            .id(SharedString::from(format!("message-{item}")))
             .w_full()
             .min_w_0()
             .items_center()
             .gap_1p5()
-            .text_xs()
-            .text_color(theme.muted_foreground)
+            .pl_2p5()
+            .pr_1()
+            .py_1()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(theme.sidebar.opacity(0.6))
+            .text_sm()
             .children(author.map(|b| {
                 bot_avatar(
                     SharedString::from(format!("rules-{item}")),
@@ -425,95 +426,27 @@ impl ElseApp {
             .child(
                 div()
                     .min_w_0()
+                    .max_w(px(160.))
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
                     .child(name),
             )
-            .child(div().flex_none().child(change_label(update.change)))
-            .child(div().flex_1())
-            .child(chip(
-                if update.version > 1 {
-                    format!("v{} → v{}", update.version - 1, update.version)
-                } else {
-                    format!("v{}", update.version)
-                },
-                cx,
-            ));
-        let title = h_flex()
-            .gap_2()
-            .items_center()
             .child(
                 div()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(change_label(update.change)),
+            )
+            .child(
+                div()
+                    .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .child(update.section.clone()),
             )
-            .child(accent_chip(
-                match update.change {
-                    RuleChange::Added => "new",
-                    RuleChange::Changed => "changed",
-                    RuleChange::Removed => "removed",
-                    RuleChange::Restored => "restored",
-                },
-                cx,
-            ));
-        let view = Button::new(SharedString::from(format!("rules-view-{item}")))
-            .ghost()
-            .small()
-            .focus_ring(false)
-            .cursor_pointer()
-            .icon(IconName::FileText)
-            .label("View rules")
-            .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_rules(bot, Some(section.clone()), RulesTab::Rules, window, cx)
-            }));
-        let previous = update.version - 1;
-        let shown = update.version;
-        let undo = current.then(|| {
-            Button::new(SharedString::from(format!("rules-undo-{item}")))
-                .ghost()
-                .small()
-                .focus_ring(false)
-                .cursor_pointer()
-                .label("Undo change")
-                .loading(restoring)
-                .disabled(restoring)
-                .accessibility_label(format!("Undo the change to {}", update.section))
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    app.restore_rules(bot, previous, shown, window, cx)
-                }))
-        });
-        let card = v_flex()
-            .id(SharedString::from(format!("message-{item}")))
-            .w_full()
-            .gap_2p5()
-            .p_3p5()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(theme.sidebar.opacity(0.6))
-            .child(header)
-            .child(title)
-            .child(quote(&update.owner_words, cx))
-            .child(diff_block(&update.diff, cx))
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_1()
-                    .child(view)
-                    .children(undo)
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(counts(&update.diff)),
-                    ),
-            );
+            .child(view)
+            .children(undo);
         v_flex()
             .w_full()
             .gap_1()
@@ -521,7 +454,7 @@ impl ElseApp {
                 div()
                     .w_full()
                     .pr(super::message_row::BOT_GUTTER)
-                    .child(card),
+                    .child(line),
             )
             .children(stamp.map(|at| div().text_xs().text_color(theme.muted_foreground).child(at)))
             .into_any_element()
@@ -531,7 +464,8 @@ impl ElseApp {
         let theme = cx.theme().clone();
         let cache = self.rules.get(&bot);
         let file = cache.and_then(|cache| cache.file.as_ref());
-        let has_rules = file.is_some_and(|file| !file.history.is_empty());
+        let only_history =
+            file.is_some_and(|file| file.sections.is_empty() && !file.history.is_empty());
         let open = Button::new("rules-open")
             .ghost()
             .xsmall()
@@ -541,7 +475,7 @@ impl ElseApp {
             .accessibility_label("Open rules")
             .disabled(file.is_none())
             .on_click(cx.listener(move |app, _, window, cx| {
-                app.open_rules(bot, None, RulesTab::Rules, window, cx)
+                app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
             }));
         let heading = h_flex()
             .w_full()
@@ -554,7 +488,7 @@ impl ElseApp {
                     .text_color(theme.muted_foreground)
                     .child("RULES"),
             )
-            .when(has_rules, |row| row.child(open));
+            .when(only_history, |row| row.child(open));
         let body = v_flex().gap_3().child(heading);
         let muted = |text: String| {
             div()
@@ -594,74 +528,82 @@ impl ElseApp {
             .copied()
             .unwrap_or(file.version);
         let changed = file.changed_since(seen);
-        let rows = file.sections.iter().enumerate().map(|(ix, section)| {
-            let title = section.title.clone();
-            let fresh = changed.contains(&section.title.to_lowercase());
+        let fresh = file
+            .sections
+            .iter()
+            .filter(|section| changed.contains(&section.title.to_lowercase()))
+            .count();
+        let count = file.sections.len();
+        let title = if count == 1 {
+            "1 rule".to_owned()
+        } else {
+            format!("{count} rules")
+        };
+        let detail = match (fresh, file.history.first()) {
+            (0, Some(latest)) => format!("Updated {}", when(latest.created_at)),
+            (0, None) => "Followed word for word".to_owned(),
+            (1, _) => "1 changed since you looked".to_owned(),
+            (n, _) => format!("{n} changed since you looked"),
+        };
+        let card = Button::new("rules-summary")
+            .ghost()
+            .focus_ring(false)
+            .cursor_pointer()
+            .with_size(Size::Size(px(16.)))
+            .w_full()
+            .px_2p5()
+            .py_2()
+            .accessibility_label("Open rules")
+            .on_click(cx.listener(move |app, _, window, cx| {
+                app.open_rules(bot, None, RulesTab::Rules, None, window, cx)
+            }))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2p5()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::FileText)
+                            .size_4()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_start()
+                            .text_left()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .when(fresh > 0, |row| row.child(dot(cx)))
+                                    .child(div().truncate().child(detail)),
+                            ),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .size_4()
+                            .text_color(theme.muted_foreground),
+                    ),
+            );
+        body.child(
             div()
                 .w_full()
                 .rounded(theme.radius)
                 .bg(theme.secondary)
-                .child(
-                    Button::new(("rule", ix))
-                        .ghost()
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .with_size(Size::Size(px(16.)))
-                        .w_full()
-                        .px_2p5()
-                        .py_2()
-                        .accessibility_label(format!("Open rule {}", section.title))
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.open_rules(bot, Some(title.clone()), RulesTab::Rules, window, cx)
-                        }))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_0p5()
-                                .items_start()
-                                .text_left()
-                                .child(
-                                    h_flex()
-                                        .gap_1p5()
-                                        .items_center()
-                                        .when(fresh, |row| row.child(dot(cx)))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(section.title.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(summary(section)),
-                                ),
-                        ),
-                )
-        });
-        let latest = file.history.first().map(|v| {
-            let by = if v.author == "owner" {
-                "restored by you".to_owned()
-            } else {
-                let name = self
-                    .bots
-                    .iter()
-                    .find(|b| b.id == bot)
-                    .map_or("the bot", |b| b.name.as_str());
-                format!("edited by {name}")
-            };
-            format!("v{} · {by} {}", v.version, when(v.created_at))
-        });
-        body.child(v_flex().gap_1p5().children(rows))
-            .children(latest.map(muted))
-            .into_any_element()
+                .child(card),
+        )
+        .into_any_element()
     }
 
     fn render_rules_dialog(
@@ -684,27 +626,22 @@ impl ElseApp {
                 .into_any_element();
         };
         let tabs = h_flex().gap_1().children(
-            [
-                (RulesTab::Rules, "Rules"),
-                (RulesTab::History, "History"),
-                (RulesTab::Markdown, "Markdown"),
-            ]
-            .into_iter()
-            .map(|(value, label)| {
-                Button::new(SharedString::from(format!("rules-tab-{label}")))
-                    .ghost()
-                    .small()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label(label)
-                    .selected(value == tab)
-                    .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
-            }),
+            [(RulesTab::Rules, "Rules"), (RulesTab::History, "History")]
+                .into_iter()
+                .map(|(value, label)| {
+                    Button::new(SharedString::from(format!("rules-tab-{label}")))
+                        .ghost()
+                        .small()
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .label(label)
+                        .selected(value == tab)
+                        .on_click(on(owner, move |app, _, cx| app.set_rules_tab(value, cx)))
+                }),
         );
         let body = match tab {
-            RulesTab::Rules => self.render_rules_tab(bot, file, owner, cx),
+            RulesTab::Rules => self.render_rules_tab(bot, file, cx),
             RulesTab::History => self.render_history_tab(bot, file, owner, cx),
-            RulesTab::Markdown => self.render_markdown_tab(file, cx),
         };
         let problem = self.rules.get(&bot).and_then(|cache| cache.problem.clone());
         let markdown = file.markdown.clone();
@@ -757,26 +694,13 @@ impl ElseApp {
         v_flex()
             .w_full()
             .gap_3()
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(chip(format!("v{}", file.version), cx))
-                    .child(div().flex_1())
-                    .child(tabs),
-            )
-            .child(div().h(px(380.)).w_full().child(body))
+            .child(tabs)
+            .child(div().h(px(440.)).w_full().child(body))
             .child(footer)
             .into_any_element()
     }
 
-    fn render_rules_tab(
-        &self,
-        bot: Uuid,
-        file: &RulesFile,
-        owner: &WeakEntity<ElseApp>,
-        cx: &App,
-    ) -> AnyElement {
+    fn render_rules_tab(&self, bot: Uuid, file: &RulesFile, cx: &App) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(dialog) = &self.rules_dialog else {
             return div().into_any_element();
@@ -797,54 +721,16 @@ impl ElseApp {
             .map(|v| v.section.to_lowercase())
             .collect();
         let focus = dialog.focus.as_ref().map(|f| f.to_lowercase());
-        let outline = v_flex()
-            .w(px(160.))
-            .flex_none()
-            .h_full()
-            .gap_0p5()
-            .pr_2()
-            .border_r_1()
-            .border_color(theme.border)
-            .children(file.sections.iter().enumerate().map(|(ix, section)| {
-                let title = section.title.clone();
-                let selected = focus.as_deref() == Some(section.title.to_lowercase().as_str());
-                let fresh = changed.contains(&section.title.to_lowercase());
-                Button::new(("rules-outline", ix))
-                    .ghost()
-                    .small()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .w_full()
-                    .selected(selected)
-                    .accessibility_label(format!("Show rule {}", section.title))
-                    .on_click(on(owner, move |app, _, cx| {
-                        app.focus_rule(title.clone(), cx)
-                    }))
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1p5()
-                            .items_center()
-                            .text_xs()
-                            .when(fresh, |row| row.child(dot(cx)))
-                            .child(div().min_w_0().truncate().child(section.title.clone())),
-                    )
-            }));
         let sections = file.sections.iter().map(|section| {
-            let focused = focus.as_deref() == Some(section.title.to_lowercase().as_str());
-            let fresh = changed.contains(&section.title.to_lowercase());
-            let version = file
-                .history
-                .iter()
-                .find(|v| v.section.eq_ignore_ascii_case(&section.title))
-                .map(|v| v.version);
+            let key = section.title.to_lowercase();
+            let focused = focus.as_deref() == Some(key.as_str());
             v_flex()
                 .w_full()
                 .gap_1()
-                .px_2p5()
-                .py_2()
+                .px_3()
+                .py_2p5()
                 .rounded(theme.radius)
+                .bg(theme.secondary.opacity(0.5))
                 .when(focused, |block| {
                     block
                         .bg(theme.primary.opacity(0.08))
@@ -853,41 +739,30 @@ impl ElseApp {
                 })
                 .child(
                     h_flex()
-                        .gap_2()
+                        .gap_1p5()
                         .items_center()
+                        .when(changed.contains(&key), |row| row.child(dot(cx)))
                         .child(
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(section.title.clone()),
-                        )
-                        .when_some(version.filter(|_| fresh), |row, version| {
-                            row.child(accent_chip(format!("changed in v{version}"), cx))
-                        }),
+                        ),
                 )
                 .children(
                     section
                         .body
                         .lines()
-                        .map(|line| rule_line(line, cx).text_sm()),
+                        .map(|line| div().w_full().text_sm().child(rule_line(line, cx))),
                 )
         });
-        h_flex()
+        v_flex()
+            .id("rules-sections")
             .size_full()
-            .items_start()
-            .gap_3()
-            .child(outline)
-            .child(
-                v_flex()
-                    .id("rules-sections")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&dialog.scroll)
-                    .gap_2()
-                    .children(sections),
-            )
+            .overflow_y_scroll()
+            .track_scroll(&dialog.scroll)
+            .gap_2()
+            .children(sections)
             .into_any_element()
     }
 
@@ -1052,30 +927,6 @@ impl ElseApp {
             .gap_3()
             .child(list)
             .child(detail)
-            .into_any_element()
-    }
-
-    fn render_markdown_tab(&self, file: &RulesFile, cx: &App) -> AnyElement {
-        let theme = cx.theme();
-        v_flex()
-            .id("rules-markdown")
-            .size_full()
-            .overflow_y_scroll()
-            .p_3()
-            .rounded(theme.radius)
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border.opacity(0.6))
-            .font_family(theme.mono_font_family.clone())
-            .text_xs()
-            .children(file.markdown.lines().map(|line| {
-                let heading = line.starts_with("## ");
-                div()
-                    .min_h(px(16.))
-                    .whitespace_normal()
-                    .when(heading, |line| line.text_color(theme.primary))
-                    .child(line.to_owned())
-            }))
             .into_any_element()
     }
 }
