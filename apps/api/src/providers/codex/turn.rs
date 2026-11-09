@@ -76,10 +76,16 @@ impl Codex {
         if let Err(reason) = self.check_servers(&status["data"], true) {
             return Err(failed("policy_violation", reason));
         }
-        let account = server
-            .request("account/read", json!({}), RPC_TIMEOUT)
-            .await
-            .map_err(|err| failed("provider_unavailable", err.to_string()))?;
+        // Codex looks up workspace routing on chatgpt.com here, under its own
+        // 15-second timeout, and caches only a successful lookup.
+        let account = match server.request("account/read", json!({}), RPC_TIMEOUT).await {
+            Err(RpcError::Remote { message, .. }) => {
+                tracing::info!(%message, "account/read failed; asking once more");
+                server.request("account/read", json!({}), RPC_TIMEOUT).await
+            }
+            first => first,
+        }
+        .map_err(|err| failed("provider_unavailable", err.to_string()))?;
         let account = &account["account"];
         if account.is_null() {
             return Err(failed(
