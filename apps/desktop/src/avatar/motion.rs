@@ -46,6 +46,7 @@ pub struct Input {
     /// Gaze direction, each axis in -1..=1; zero looks straight ahead.
     pub gaze: (f32, f32),
     pub hovered: bool,
+    pub working: bool,
 }
 
 /// What to draw this frame.
@@ -56,6 +57,8 @@ pub struct Pose {
     pub hover: f32,
     /// 0 with eyes open, 1 fully closed.
     pub blink: f32,
+    /// 0 when idle, about 1 while working; eases in and out.
+    pub work: f32,
 }
 
 /// When the avatar needs to be painted again.
@@ -73,6 +76,7 @@ pub enum Next {
 pub struct Motion {
     gaze: (Spring, Spring),
     hover: Spring,
+    work: Spring,
     blink_started: Option<Instant>,
     blink_due: Option<Instant>,
     blinks: u32,
@@ -84,6 +88,7 @@ impl Default for Motion {
         Self {
             gaze: (Spring::REST, Spring::REST),
             hover: Spring::REST,
+            work: Spring::REST,
             blink_started: None,
             blink_due: None,
             blinks: 0,
@@ -109,6 +114,8 @@ impl Motion {
         self.gaze.1.step(gy, 170., 21., dt);
         let hover_target = if input.hovered { 1. } else { 0. };
         self.hover.step(hover_target, 320., 16., dt);
+        let work_target = if input.working { 1. } else { 0. };
+        self.work.step(work_target, 170., 24., dt);
 
         if !input.hovered {
             self.blink_due = None;
@@ -138,10 +145,13 @@ impl Motion {
             gaze: (self.gaze.0.value, self.gaze.1.value),
             hover: self.hover.value,
             blink,
+            work: self.work.value,
         };
         let moving = !self.gaze.0.resting_at(gx)
             || !self.gaze.1.resting_at(gy)
             || !self.hover.resting_at(hover_target)
+            || input.working
+            || !self.work.resting_at(work_target)
             || self.blink_started.is_some();
         let next = match (moving, self.blink_due) {
             (true, _) => Next::Frame,
@@ -185,6 +195,7 @@ mod tests {
         let look = Input {
             gaze: (3., 0.),
             hovered: false,
+            working: false,
         };
         let (pose, next, frames) = run(&mut motion, start, 120, look);
         assert_eq!(pose.gaze, (1., 0.), "clamped to the unit circle");
@@ -205,6 +216,7 @@ mod tests {
         let look = Input {
             gaze: (1., 0.),
             hovered: false,
+            working: false,
         };
         let (pose, next) = motion.advance(start + Duration::from_secs(5), look);
         assert!(pose.gaze.0 > 0. && pose.gaze.0 < 0.2, "{:?}", pose.gaze);
@@ -219,6 +231,7 @@ mod tests {
         let hover = Input {
             gaze: (0., 0.),
             hovered: true,
+            working: false,
         };
         let mut closed = 0f32;
         let mut next = Next::Frame;
@@ -265,5 +278,30 @@ mod tests {
             matches!(next, Next::At(_)),
             "returning schedules another blink"
         );
+    }
+
+    #[test]
+    fn working_eases_in_animates_until_it_stops_then_eases_out() {
+        let mut motion = Motion::default();
+        let start = Instant::now();
+        motion.advance(start, Input::default());
+        let working = Input {
+            working: true,
+            ..Input::default()
+        };
+        let (pose, next, frames) = run(&mut motion, start, 240, working);
+        assert_eq!(frames, 240, "keeps asking for frames while working");
+        assert_eq!(next, Next::Frame);
+        assert_eq!(pose.work, 1., "fully in after a few seconds");
+
+        let early = motion.advance(
+            start + Duration::from_micros(16_667 * 241),
+            Input::default(),
+        );
+        assert!(early.0.work > 0.9, "eases out instead of snapping");
+        let later = start + Duration::from_secs(10);
+        let (pose, next, _) = run(&mut motion, later, 120, Input::default());
+        assert_eq!(pose.work, 0.);
+        assert_eq!(next, Next::Rest, "stops asking for frames once idle");
     }
 }
