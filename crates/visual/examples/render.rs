@@ -1,7 +1,5 @@
 //! Render a visual to PNG: `cargo run -p else-visual --example render -- in.html out.png [width] [light]`.
 
-use takumi::prelude::{Bitmap, OutputFormat};
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let [_, input, output, rest @ ..] = args.as_slice() else {
@@ -26,9 +24,5 @@ fn main() {
         rendered.blocked,
         start.elapsed()
     );
-    let bitmap =
-        Bitmap::from_raw(rendered.width, rendered.height, rendered.rgba).expect("rgba size");
-    let mut png = Vec::new();
-    takumi::write_image(&bitmap, &mut png, OutputFormat::Png).expect("png");
-    std::fs::write(output, png).expect("writable output");
+    std::fs::write(output, rendered.png().expect("png")).expect("writable output");
 }

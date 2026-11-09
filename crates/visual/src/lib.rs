@@ -214,6 +214,17 @@ pub struct Rendered {
     pub blocked: Vec<String>,
 }
 
+impl Rendered {
+    pub fn png(&self) -> Result<Vec<u8>, Error> {
+        let bitmap = takumi::prelude::Bitmap::from_raw(self.width, self.height, self.rgba.clone())
+            .ok_or_else(|| Error::Render("pixel buffer size mismatch".into()))?;
+        let mut png = Vec::new();
+        takumi::write_image(&bitmap, &mut png, takumi::prelude::OutputFormat::Png)
+            .map_err(|e| Error::Render(e.to_string()))?;
+        Ok(png)
+    }
+}
+
 /// Render `html` at `width` CSS pixels (clamped to the supported range)
 /// and `scale` device pixels per CSS pixel, with the height its content
 /// needs.

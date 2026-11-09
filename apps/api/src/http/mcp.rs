@@ -108,6 +108,8 @@ pub async fn endpoint(
                 Some("create_bot") => Tool::CreateBot,
                 Some("rename_bot" | "set_bot_model") => Tool::EditBot,
                 Some("rules_update") => Tool::Rules,
+                // Previews read the project, which only turns with the computer may do.
+                Some(super::visual_tools::NAME) => Tool::Computer,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_permission") => Tool::AskPermission,
                 Some("ask_owner" | "confirm_permission" | "social_connect" | "mail_connect") => {
@@ -354,6 +356,7 @@ fn tool_list() -> Value {
                              "idempotentHint": true, "openWorldHint": false },
         },
         super::rules::schema(),
+        super::visual_tools::schema(),
         super::owner_tools::secret_schema(),
         super::owner_tools::choice_schema(),
         super::owner_tools::permission_schema(),
@@ -562,6 +565,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "routine_delete" => super::routines::delete(state, grant, args).await,
         "routine_run" => super::routines::run(state, grant, args).await,
         "rules_update" => super::rules::update(state, grant, args).await,
+        super::visual_tools::NAME => super::visual_tools::call(state, grant, args).await,
         "webhook_create" => super::webhooks::create(state, grant, args).await,
         "webhook_list" => super::webhooks::list(state, grant).await,
         "webhook_update" => super::webhooks::update(state, grant, args).await,

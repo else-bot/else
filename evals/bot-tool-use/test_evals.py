@@ -116,6 +116,10 @@ def run(runner):
                     "target_bot_id": "00000000-0000-0000-0000-000000000005", "model": "gpt-6.1-sol", "reasoning_effort": "high", "service_tier": "default"}})],
                                         "Research now runs gpt-6.1-terra and GitHub gpt-6.1-sol.",
                                         "I can't apply them directly. No settings have changed."),
+                "chart-as-visual": ([self.call("visual_preview", {}),
+                                     self.call("computer_write_file", {"path": "viz/signups.html", "content": "<div></div>"}),
+                                     self.call("visual_preview", {"path": "viz/signups.html"})],
+                                    "Signups peaked Friday. ![Signups this week](viz/signups.html)"),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
             }
