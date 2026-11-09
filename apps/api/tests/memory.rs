@@ -632,6 +632,7 @@ async fn mcp_tools_read_own_memory_and_shared_memory_only() {
                     | "social_trigger_list"
                     | "else_status"
                     | "find_tool"
+                    | "visual_preview"
             );
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
     }
