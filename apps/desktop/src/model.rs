@@ -381,6 +381,17 @@ pub struct Turn {
     /// Tasks this turn handed to other bots. Absent from older servers.
     #[serde(default)]
     pub delegations: Vec<Delegation>,
+    /// MCP jobs this turn waits on. Absent from older servers.
+    #[serde(default)]
+    pub mcp_waits: Vec<McpWait>,
+}
+
+/// A job in an installed MCP that a waiting turn rechecks until it ends.
+/// A pending wait is the only hold of its attempt.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct McpWait {
+    pub id: Uuid,
+    pub mcp_id: String,
 }
 
 /// A task a turn handed to another bot. Its settled reply is the item
