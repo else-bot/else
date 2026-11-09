@@ -110,7 +110,9 @@ pub async fn endpoint(
                 Some("rules_update") => Tool::Rules,
                 Some("request_secret") => Tool::RequestSecret,
                 Some("ask_permission") => Tool::AskPermission,
-                Some("ask_owner" | "confirm_permission" | "social_connect") => Tool::AskOwner,
+                Some("ask_owner" | "confirm_permission" | "social_connect" | "mail_connect") => {
+                    Tool::AskOwner
+                }
                 Some(name) if super::outgoing_tools::TOOL_NAMES.contains(&name) => Tool::AskOwner,
                 Some(name)
                     if name.starts_with("routine_")
@@ -534,7 +536,7 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
         "webhook_list" => super::webhooks::list(state, grant).await,
         "webhook_update" => super::webhooks::update(state, grant, args).await,
         "webhook_delete" => super::webhooks::delete(state, grant, args).await,
-        "mail_accounts" | "mail_action" | "mail_action_status" => {
+        "mail_accounts" | "mail_connect" | "mail_action" | "mail_action_status" => {
             super::connectors::call(state, grant, name, args).await
         }
         name if name.starts_with("computer_") => {

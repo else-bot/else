@@ -556,6 +556,9 @@ fn questions_block(input: &TurnInput) -> String {
                         question.title,
                         String::from(mcp_connection.id.clone())
                     ),
+                    Action::EmailConnection { email_connection } => {
+                        format!("{}\nInbox: {}", question.title, email_connection.address)
+                    }
                     Action::Tool { tool, args } => {
                         format!("{}\nTool: {tool}\nArguments: {args}", question.title)
                     }
@@ -602,6 +605,11 @@ fn questions_block(input: &TurnInput) -> String {
                          Do not repeat tools/call automatically; check its outcome first."
                             .to_owned()
                     }
+                    (APPROVE, Action::EmailConnection { .. }) => {
+                        "The owner signed in. Call mail_accounts to find the inbox; Google may \
+                         have connected a different address than requested."
+                            .to_owned()
+                    }
                     (
                         APPROVE | APPROVE_FOREVER | APPROVE_ROUTINE | APPROVE_TOOL | APPROVE_TASK,
                         Action::Tool { tool, .. },
@@ -633,10 +641,10 @@ fn questions_block(input: &TurnInput) -> String {
                     ),
                     _ => format!("Not approved: this {kind} action was not allowed; do not do it."),
                 };
-                let tag = if matches!(action, Action::McpConnection { .. }) {
-                    "mcp_connection"
-                } else {
-                    "approval"
+                let tag = match action {
+                    Action::McpConnection { .. } => "mcp_connection",
+                    Action::EmailConnection { .. } => "email_connection",
+                    _ => "approval",
                 };
                 (tag, body, next)
             }

@@ -333,7 +333,6 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    #[cfg(test)]
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api { code, .. } => Some(code),

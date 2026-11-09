@@ -23,6 +23,21 @@ impl Drop for Server {
 }
 
 async fn server(status: Value, fail_answers: usize) -> Server {
+    refusing(
+        status,
+        fail_answers,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable",
+    )
+    .await
+}
+
+async fn refusing(
+    status: Value,
+    fail_answers: usize,
+    refusal: StatusCode,
+    code: &'static str,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = Origin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
     let (sent, answers) = mpsc::channel(8);
@@ -31,23 +46,45 @@ async fn server(status: Value, fail_answers: usize) -> Server {
     let cancels = cancellations.clone();
     let read_status = status.clone();
     let router = Router::new()
-        .route("/v1/bots/{bot}/mcp/fixture/connection", get(move || {
-            let status = read_status.clone();
-            async move { respond(status) }
-        }))
-        .route("/v1/bots/{bot}/mcp/fixture/oauth", delete(move || {
-            let status = status.clone(); let cancels = cancels.clone();
-            async move { cancels.fetch_add(1, Ordering::SeqCst); respond(status) }
-        }))
-        .route("/v1/bots/{bot}/questions/{question}/answer", post(move |Json(body): Json<Value>| {
-            let sent = sent.clone(); let tries = tries.clone();
-            async move {
-                sent.send(body).await.unwrap();
-                if tries.fetch_add(1, Ordering::SeqCst) < fail_answers {
-                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"code":"unavailable","message":"Confirmation unavailable"}}))).into_response()
-                } else { Json(json!({"requeued":true})).into_response() }
-            }
-        }));
+        .route(
+            "/v1/bots/{bot}/mcp/fixture/connection",
+            get(move || {
+                let status = read_status.clone();
+                async move { respond(status) }
+            }),
+        )
+        .route(
+            "/v1/bots/{bot}/mcp/fixture/oauth",
+            delete(move || {
+                let status = status.clone();
+                let cancels = cancels.clone();
+                async move {
+                    cancels.fetch_add(1, Ordering::SeqCst);
+                    respond(status)
+                }
+            }),
+        )
+        .route(
+            "/v1/bots/{bot}/questions/{question}/answer",
+            post(move |Json(body): Json<Value>| {
+                let sent = sent.clone();
+                let tries = tries.clone();
+                async move {
+                    sent.send(body).await.unwrap();
+                    if tries.fetch_add(1, Ordering::SeqCst) < fail_answers {
+                        (
+                            refusal,
+                            Json(
+                                json!({"error":{"code":code,"message":"Confirmation unavailable"}}),
+                            ),
+                        )
+                            .into_response()
+                    } else {
+                        Json(json!({"requeued":true})).into_response()
+                    }
+                }
+            }),
+        );
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -58,11 +95,11 @@ async fn server(status: Value, fail_answers: usize) -> Server {
             client,
             bot: Uuid::new_v4(),
             question: Uuid::new_v4(),
-            consent: McpConsent {
+            consent: Consent::Mcp(McpConsent {
                 id: "fixture".into(),
                 provider: Some("https://issuer.test".into()),
                 scopes: vec!["read".into()],
-            },
+            }),
         },
         answers,
         cancellations,
@@ -162,4 +199,33 @@ async fn a_removed_package_leaves_the_card_cancellable() {
     );
     assert_eq!(server.flow.cancel().await.unwrap(), Resolution::Recorded);
     assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
+}
+
+fn inbox(address: &str) -> Consent {
+    Consent::Email(crate::api::EmailConsent {
+        provider: crate::api::EmailProvider::Gmail,
+        address: address.into(),
+    })
+}
+
+#[tokio::test]
+async fn an_inbox_card_confirms_once_the_api_sees_an_account() {
+    let mut server = server(Value::Null, 0).await;
+    server.flow.consent = inbox("owner@gmail.com");
+    assert_eq!(server.flow.recover().await.unwrap(), Resolution::Recorded);
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], APPROVE);
+}
+
+#[tokio::test]
+async fn a_missing_inbox_waits_for_sign_in_and_cancels_without_mcp_calls() {
+    let mut server = refusing(Value::Null, 1, StatusCode::CONFLICT, "inbox_not_connected").await;
+    server.flow.consent = inbox("owner@gmail.com");
+    assert_eq!(
+        server.flow.recover().await.unwrap(),
+        Resolution::Disconnected
+    );
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], APPROVE);
+    assert_eq!(server.flow.cancel().await.unwrap(), Resolution::Recorded);
+    assert_eq!(server.answers.recv().await.unwrap()["choice"], DENY);
+    assert_eq!(server.cancellations.load(Ordering::SeqCst), 0);
 }

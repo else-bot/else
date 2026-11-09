@@ -171,6 +171,9 @@ pub enum Action {
     McpConnection {
         mcp_connection: McpConnection,
     },
+    EmailConnection {
+        email_connection: EmailConnection,
+    },
     Tool {
         tool: String,
         args: Value,
@@ -240,6 +243,15 @@ pub struct McpConnection {
     pub id: crate::mcp::PackageId,
     pub provider: Option<String>,
     pub scopes: Vec<String>,
+}
+
+/// An email account the owner signs in to from a chat card. Gmail reports
+/// the mailbox it authorized, so `address` is only a sign-in hint there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailConnection {
+    pub provider: crate::connectors::types::Provider,
+    pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,6 +449,23 @@ impl Spec {
                 hash: hash(&[b"mcp_connection", &encoded]),
                 action: Action::McpConnection {
                     mcp_connection: connection,
+                },
+            }),
+        }
+    }
+
+    pub fn email_connection(connection: EmailConnection, title: String, context: String) -> Self {
+        let encoded = serde_json::to_vec(&connection).expect("email consent serialization");
+        Self {
+            kind: Kind::External,
+            title,
+            context: Some(context),
+            choices: approval_choices(Kind::External, None),
+            multiple: false,
+            approval: Some(Approval {
+                hash: hash(&[b"email_connection", &encoded]),
+                action: Action::EmailConnection {
+                    email_connection: connection,
                 },
             }),
         }

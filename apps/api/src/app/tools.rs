@@ -36,6 +36,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "computer_screenshot",
     "computer_input",
     "mail_accounts",
+    "mail_connect",
     "mail_action",
     "mail_action_status",
     "social_connections",
@@ -81,6 +82,7 @@ pub const PARKING_TOOLS: &[&str] = &[
     "mcp_connect",
     "social_connect",
     "social_action",
+    "mail_connect",
     "delegate",
     "council",
     "request_secret",
@@ -145,6 +147,7 @@ pub fn loggable_args(name: &str, args: &serde_json::Value) -> serde_json::Value 
         "mcp_wait" => json!({"id":args["id"],"tool":args["tool"]}),
         "mail_accounts" | "social_connections" => json!({}),
         "social_connect" => json!({"provider":args["provider"],"reason":args["reason"]}),
+        "mail_connect" => json!({"provider":args["provider"]}),
         "social_action" | "social_action_status" => {
             json!({"connection_id":args["connection_id"],"action_id":args["action_id"],"operation":args["command"]["operation"]})
         }

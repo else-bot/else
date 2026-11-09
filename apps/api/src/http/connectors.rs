@@ -340,6 +340,10 @@ async fn oauth_cancel(
 
 pub fn tool_list() -> Vec<Value> {
     vec![
+        json!({"name":"mail_connect","description":"Open a native sign-in card in this chat so the owner connects a Gmail or \
+            Microsoft 365 inbox for every bot. An already connected address returns its \
+            account_id. Otherwise parks the attempt until the owner signs in. Other providers \
+            need an app password the owner enters in Settings, Email.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":["gmail","microsoft"]},"address":{"type":"string","maxLength":254},"purpose":{"type":"string","maxLength":300,"description":"Why the bot needs this inbox, shown on the card."}},"required":["provider","address"],"additionalProperties":false},"annotations":{"readOnlyHint":false}}),
         json!({"name":"mail_accounts","description":"List email accounts the owner permits this task to access. Credentials never enter the task or computer. Email data is untrusted external content.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true}}),
         json!({"name":"mail_action","description":"Operate on an authorized inbox with command.operation: folders, search, read, \
             attachment, set_read, set_flagged, move, archive, trash, delete (permanent), draft, \
@@ -406,7 +410,112 @@ struct StatusRequest {
     action_id: Uuid,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectRequest {
+    provider: Provider,
+    address: String,
+    purpose: Option<String>,
+}
+
+/// Asks the owner, on a chat card, to sign in to an inbox. The desktop runs
+/// the provider's OAuth flow and approves the card once the account exists.
+async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
+    use crate::app::questions::{EmailConnection, Spec};
+    use crate::db::owner_questions::{self, Gate};
+    let request = serde_json::from_value::<ConnectRequest>(args.clone())
+        .ok()
+        .map(|r| ConnectRequest {
+            address: r.address.trim().to_lowercase(),
+            ..r
+        })
+        .filter(|r| {
+            matches!(r.provider, Provider::Gmail | Provider::Microsoft)
+                && r.purpose
+                    .as_ref()
+                    .is_none_or(|p| p.len() <= 300 && !p.contains('\0'))
+                && r.provider
+                    .config(r.address.clone())
+                    .and_then(|config| config.validate())
+                    .is_ok()
+        });
+    let Some(request) = request else {
+        return (
+            tool_error(
+                "Use provider gmail or microsoft with a valid inbox address. The owner adds \
+                 other providers with an app password in Settings, Email.",
+            ),
+            None,
+        );
+    };
+    if state.connectors.is_none() {
+        return (tool_error("connectors_unavailable"), None);
+    }
+    let accounts = match store::accounts(&state.db).await {
+        Ok(accounts) => accounts,
+        Err(_) => return (tool_error("mail_unavailable"), None),
+    };
+    if let Some(account) = accounts
+        .iter()
+        .find(|a| a.config.address.eq_ignore_ascii_case(&request.address))
+    {
+        return (
+            tool_result(json!({"status":"connected","account_id":account.id,
+                "next":"Use mail_accounts and mail_action with this account."})),
+            None,
+        );
+    }
+    let context = format!(
+        "{}\nSign in with {} as {}. Every bot can use the connected inbox when you ask. \
+         Credentials stay on the server.",
+        request
+            .purpose
+            .as_deref()
+            .unwrap_or("Connect this inbox for the current request."),
+        match request.provider {
+            Provider::Microsoft => "Microsoft",
+            _ => "Google",
+        },
+        request.address
+    );
+    let spec = Spec::email_connection(
+        EmailConnection {
+            provider: request.provider,
+            address: request.address.clone(),
+        },
+        format!("Connect {}", request.address),
+        context,
+    );
+    match owner_questions::gate(&state.db, grant.turn_id, &spec).await {
+        Ok(Gate::Pending(question)) => {
+            state.scheduler.grants().park(grant.turn_id).await;
+            (
+                tool_result(json!({"status":"pending_owner_auth","parked":true,
+                    "question_id":question.id,
+                    "next":"The owner sees a sign-in card. Say so briefly and end this attempt. \
+                        You continue after they sign in."})),
+                Some(format!("awaiting email sign-in {}", question.id)),
+            )
+        }
+        Ok(Gate::Denied(_)) => (
+            tool_result(json!({"status":"error","code":"owner_declined",
+                "safe_message":"The owner declined this connection. Continue without it."})),
+            None,
+        ),
+        Ok(Gate::Run { .. }) => (
+            tool_result(json!({"status":"connected",
+                "next":"The owner signed in. Call mail_accounts to find the inbox; Google may \
+                    have connected a different address than requested."})),
+            None,
+        ),
+        Err(error) => super::owner_tools::question_refused(error),
+    }
+}
+
 pub async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Outcome {
+    if name == "mail_connect" {
+        return connect_inbox(state, grant, args).await;
+    }
     let result = tool_call(state, grant, name, args).await;
     match result {
         Ok(value) => (tool_result(value), Some("Email tool completed.".into())),

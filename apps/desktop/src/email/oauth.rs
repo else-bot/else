@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use url::Url;
 
-use crate::api::{Client, ClientError, EmailAuthorization, EmailProvider};
+use crate::api::{Client, ClientError, EmailAccount, EmailAuthorization, EmailProvider};
 use crate::oauth_callback::{self, Outcome, WaitError};
 
 const GOOGLE_REGISTRATION: Option<(&str, &str)> =
@@ -11,7 +11,7 @@ const GOOGLE_REGISTRATION: Option<(&str, &str)> =
 const MICROSOFT_CLIENT_ID: Option<&str> = include!(concat!(env!("OUT_DIR"), "/microsoft_oauth.rs"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Provider {
+pub(crate) enum Provider {
     Google,
     Microsoft,
 }
@@ -65,7 +65,7 @@ impl Provider {
     }
 }
 
-pub(super) struct SignIn {
+pub(crate) struct SignIn {
     pub authorization: EmailAuthorization,
     callback: oauth_callback::Pending,
     client: Arc<Client>,
@@ -79,7 +79,7 @@ impl Drop for SignIn {
     }
 }
 
-pub(super) struct Callback {
+pub(crate) struct Callback {
     pub state: String,
     pub code: String,
 }
@@ -151,6 +151,13 @@ impl SignIn {
             Duration::from_secs(600),
         );
         Ok(signin)
+    }
+
+    pub async fn finish(&self, callback: Callback) -> Result<EmailAccount, ClientError> {
+        self.client
+            .clone()
+            .complete_email(self.authorization.request_id, callback.state, callback.code)
+            .await
     }
 
     pub async fn wait(&mut self) -> Result<Callback, String> {

@@ -94,6 +94,8 @@ def run(runner):
                 "missing-api-key": ([self.call("request_secret", {"name": "openweather", "reason": "Weather data", "env": ["OPENWEATHER_API_KEY"]})], "Private form opened."),
                 "installed-mcp-has-id": (mcp_calls, "#17 Fix digest retry"),
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
+                "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
+                                                       {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
             }
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):

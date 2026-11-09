@@ -282,6 +282,8 @@ pub struct QuestionAction {
     #[serde(default)]
     pub mcp_connection: Option<crate::api::McpConsent>,
     #[serde(default)]
+    pub email_connection: Option<crate::api::EmailConsent>,
+    #[serde(default)]
     pub task_scope: Option<TaskScope>,
     #[serde(default)]
     pub permission: Option<QuestionPermission>,
@@ -328,6 +330,10 @@ impl Question {
 
     pub fn mcp_connection(&self) -> Option<&crate::api::McpConsent> {
         self.action.as_ref()?.mcp_connection.as_ref()
+    }
+
+    pub fn email_connection(&self) -> Option<&crate::api::EmailConsent> {
+        self.action.as_ref()?.email_connection.as_ref()
     }
 
     pub fn is_pending(&self) -> bool {
