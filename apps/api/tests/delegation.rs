@@ -1860,3 +1860,150 @@ async fn a_cancelled_child_keeps_its_partial_reply_and_an_empty_one_shows_empty(
     assert_eq!(shown, [("completed".to_owned(), String::new(), root)]);
     assert_eq!(upserts, 1);
 }
+
+async fn follow_up(db: &TestDb, bot: Uuid) -> Uuid {
+    sqlx::query(
+        "UPDATE conversations SET last_turn_no = (SELECT max(turn_no) FROM turns t
+             WHERE t.conversation_id = conversations.id) WHERE bot_id = ?1 AND kind = 'owner'",
+    )
+    .bind(bot)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let accepted = else_api::db::turns::accept(
+        &db.pool,
+        else_api::db::turns::SendRequest {
+            bot_id: bot,
+            request_id: Uuid::new_v4(),
+            text: "Sorry, I meant the other one.",
+            hidden: false,
+            parts: &[],
+            reaction: None,
+            requested_provider: Some("synthetic"),
+            provider_id: "synthetic",
+            uses_profile: false,
+            open_draft: None,
+        },
+    )
+    .await
+    .unwrap();
+    accepted.turn.id
+}
+
+async fn set_status(db: &TestDb, turn: Uuid, status: &str) {
+    sqlx::query("UPDATE turns SET status = ?2 WHERE id = ?1")
+        .bind(turn)
+        .bind(status)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_receives_an_outcome_its_earlier_turn_had_not_seen() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    set_status(&db, root, "waiting").await;
+    set_status(&db, child, "completed").await;
+    let follow = follow_up(&db, main).await;
+    let (carrier, status, delivered, root_status): (Uuid, String, Option<i64>, String) =
+        sqlx::query_as(
+            "SELECT d.root_turn_id, d.status, d.delivered_attempt, r.status
+             FROM delegations d, turns r WHERE d.id = ?1 AND r.id = ?2",
+        )
+        .bind(delegation)
+        .bind(root)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(root_status, "interrupted");
+    assert_eq!(
+        (carrier, status.as_str(), delivered),
+        (follow, "completed", None),
+        "the follow-up will receive the outcome"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, outbound) = seed(&db).await;
+    let target: Uuid = sqlx::query_scalar("SELECT bot_id FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let target_chat: Uuid =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id = ?1 AND kind = 'owner'")
+            .bind(target)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let approval = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO turns (id, bot_id, conversation_id, request_id, request_hash, turn_no,
+             owner_item_id, provider_id, status, attempt)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'synthetic', 'running', 1)",
+    )
+    .bind(approval)
+    .bind(target)
+    .bind(target_chat)
+    .bind(Uuid::new_v4())
+    .bind(vec![0u8; 32])
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE delegations SET takeover_turn_id = ?2, status = 'running' WHERE id = ?1")
+        .bind(outbound)
+        .bind(approval)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    set_status(&db, child, "interrupted").await;
+    set_status(&db, root, "waiting").await;
+    let inbound = else_api::db::delegations::create(&db.pool, approval, main, "check with main")
+        .await
+        .unwrap()
+        .delegation_id;
+    let asking: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+        .bind(inbound)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    set_status(&db, asking, "waiting").await;
+    sqlx::query(
+        "INSERT INTO owner_questions (id, bot_id, turn_id, attempt, kind, title, choices)
+         VALUES (?1, ?2, ?3, 1, 'choice', 'Which channel?', '[]')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(main)
+    .bind(asking)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let follow = follow_up(&db, main).await;
+    let takeover: Option<Uuid> =
+        sqlx::query_scalar("SELECT takeover_turn_id FROM delegations WHERE id = ?1")
+            .bind(inbound)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        takeover,
+        Some(follow),
+        "the follow-up answers the inbound task"
+    );
+    let (carrier, status): (Uuid, String) =
+        sqlx::query_as("SELECT root_turn_id, status FROM delegations WHERE id = ?1")
+            .bind(outbound)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (carrier, status.as_str()),
+        (root, "cancelled"),
+        "carrying the outbound task would leave both turns waiting on each other"
+    );
+}

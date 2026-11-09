@@ -389,6 +389,7 @@ pub async fn accept(pool: &SqlitePool, req: SendRequest<'_>) -> Result<Accepted,
         continue_waiting(&mut tx, task).await?;
         crate::db::events::turn_changed(&mut tx, req.bot_id, task).await?;
     }
+    crate::db::delegations::carry_forward(&mut tx, conversation_id, turn_no, turn_id).await?;
     let superseded: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE turns SET status = 'interrupted', error_code = 'superseded',
              error_message = 'A newer owner message continued this conversation before this one finished.',

@@ -457,6 +457,67 @@ pub async fn take_over(
     Ok(())
 }
 
+/// The owner's new message `turn_id` ends the earlier active turns of
+/// `conversation_id`; it receives the outcomes they have not seen yet. It
+/// also waits for the tasks the owner took over, which keep running in the
+/// target's chat however this conversation ends, unless that task already
+/// waits on this message. The caller stops the remaining children.
+pub async fn carry_forward(
+    conn: &mut SqliteConnection,
+    conversation_id: Uuid,
+    turn_no: i64,
+    turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    const EARLIER: &str = "SELECT id FROM turns WHERE conversation_id = ?1 AND turn_no < ?2
+         AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running')";
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE delegations SET root_turn_id = ?3, parent_attempt = 0
+         WHERE root_turn_id IN ({EARLIER}) AND delivered_attempt IS NULL
+           AND status IN ('completed', 'failed', 'cancelled')"
+    )))
+    .bind(conversation_id)
+    .bind(turn_no)
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    let taken_over: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id, takeover_turn_id FROM delegations
+         WHERE root_turn_id IN ({EARLIER}) AND takeover_turn_id IS NOT NULL
+           AND status IN ('queued', 'running')"
+    )))
+    .bind(conversation_id)
+    .bind(turn_no)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, owner_turn) in taken_over {
+        let waits_on_this: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "WITH RECURSIVE waits(turn) AS (
+                 SELECT ?4
+                 UNION SELECT coalesce(d.takeover_turn_id, d.child_turn_id)
+                 FROM delegations d JOIN waits w ON d.root_turn_id = w.turn
+                 WHERE d.status IN ('queued', 'running'))
+             SELECT EXISTS (SELECT 1 FROM waits
+                            WHERE turn = ?3 OR turn IN ({EARLIER}))"
+        )))
+        .bind(conversation_id)
+        .bind(turn_no)
+        .bind(turn_id)
+        .bind(owner_turn)
+        .fetch_one(&mut *conn)
+        .await?;
+        if !waits_on_this {
+            sqlx::query(
+                "UPDATE delegations SET root_turn_id = ?2, parent_attempt = 0 WHERE id = ?1",
+            )
+            .bind(id)
+            .bind(turn_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn stop_children(
     conn: &mut SqliteConnection,
     children: Vec<(Uuid, Uuid, Option<Uuid>)>,
