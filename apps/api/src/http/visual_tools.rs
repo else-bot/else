@@ -54,7 +54,7 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
     let rendered = tokio::task::spawn_blocking(move || {
         let html = crate::providers::output_files::read_visual(&project, &path)?;
         let theme = else_visual::Theme::standard(dark);
-        else_visual::render(&html, width, 1.0, &theme)
+        else_visual::isolate::render(&html, width, 1.0, &theme)
             .map(|rendered| rendered.over(theme.color(else_visual::Color::Background)))
             .and_then(|rendered| Ok((rendered.png()?, rendered)))
             .map_err(|err| err.to_string())
@@ -86,8 +86,8 @@ pub(super) async fn call(state: &AppState, grant: &Grant, args: &Value) -> Outco
     (tool_image(meta, &png), None)
 }
 
-/// How to write a visual. The theme variables come from the renderer, so
-/// the list cannot drift from what the chat fills in.
+/// The theme variables come from the renderer, so the list cannot drift
+/// from what the chat fills in.
 fn rules() -> String {
     let colors: Vec<String> = else_visual::Color::ALL
         .iter()

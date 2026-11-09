@@ -678,3 +678,40 @@ async fn an_html_file_shown_as_an_image_attaches_as_a_visual_and_a_linked_one_as
         .unwrap();
     assert_eq!(saved, visual.as_bytes());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_html_file_can_be_both_a_download_and_a_visual_in_either_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app(
+        directory.path(),
+        vec![
+            "[Source](chart.html) ![Chart](chart.html)".into(),
+            "![Chart](chart.html) [Source](chart.html)".into(),
+        ],
+        TurnOutcome::Completed,
+    )
+    .await;
+    let bot = app.main_bot().await;
+    let project = directory.path().join(&bot);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("chart.html"),
+        r#"<div style="height: 20px">Chart</div>"#,
+    )
+    .unwrap();
+    send(&app, &bot, "completed").await;
+    let messages = replies(&app, &bot).await;
+    for (message, visual_at) in messages.iter().zip([2, 0]) {
+        let parts = message["parts"].as_array().unwrap();
+        let types: Vec<&str> = parts
+            .iter()
+            .filter_map(|part| part["file"]["media_type"].as_str())
+            .collect();
+        assert_eq!(types.len(), 2, "{message}");
+        assert_eq!(
+            parts[visual_at]["file"]["media_type"],
+            else_visual::MEDIA_TYPE,
+            "{message}"
+        );
+    }
+}

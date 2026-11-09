@@ -2238,6 +2238,9 @@ dependencies = [
 name = "else-visual"
 version = "0.0.30"
 dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
  "takumi",
  "thiserror 2.0.21",
 ]

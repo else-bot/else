@@ -50,7 +50,9 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
         .open(project)
         .ok()?;
     let mut files = Vec::new();
-    let mut saved = HashMap::<PathBuf, Attachment>::new();
+    // Keyed by path and whether the file is shown, so one HTML file can be
+    // both a download and a visual. A link reuses either.
+    let mut saved = HashMap::<(PathBuf, bool), Attachment>::new();
     let mut parts = Vec::new();
     let mut offset = 0;
     for (range, url, reference) in candidates {
@@ -67,10 +69,13 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
             .components()
             .filter(|component| *component != Component::CurDir)
             .collect();
-        let file = if let Some(file) = saved.get(&key) {
-            if reference == Reference::Image && !is_shown(&file.media_type) {
-                continue;
-            }
+        let reused = match reference {
+            Reference::Image => saved.get(&(key.clone(), true)),
+            Reference::Link => saved
+                .get(&(key.clone(), false))
+                .or_else(|| saved.get(&(key.clone(), true))),
+        };
+        let file = if let Some(file) = reused {
             file.clone()
         } else {
             if files.len() == MAX_MESSAGE_FILES {
@@ -80,7 +85,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
                 continue;
             };
             let file = output.file.clone();
-            saved.insert(key, file.clone());
+            saved.insert((key, is_shown(&file.media_type)), file.clone());
             files.push(output);
             file
         };
@@ -271,7 +276,7 @@ fn is_html_name(path: &Path) -> bool {
 fn is_visual(name: &str, data: &[u8]) -> bool {
     is_html_name(Path::new(name))
         && std::str::from_utf8(data).is_ok_and(|html| {
-            else_visual::render(
+            else_visual::isolate::render(
                 html,
                 else_visual::REFERENCE_WIDTH,
                 1.0,

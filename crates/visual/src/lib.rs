@@ -3,6 +3,8 @@
 //! checks is what the owner sees. No scripts run and nothing is fetched:
 //! only bundled fonts and `data:` images load.
 
+pub mod isolate;
+
 use std::sync::{Arc, OnceLock};
 
 use takumi::prelude::{FontResource, Fonts, FromHtmlOptions, RenderOptions, StyleSheet, Viewport};
@@ -20,6 +22,8 @@ pub const MAX_WIDTH: u32 = 1600;
 /// Content below this many CSS pixels is cut off.
 pub const MAX_HEIGHT: u32 = 4000;
 const MAX_SCALE: f32 = 3.0;
+/// Element nesting a visual may use; dashboards need a dozen or so levels.
+const MAX_DEPTH: usize = 128;
 /// Device pixels one render may allocate (64 MiB of RGBA). A larger visual
 /// renders at a lower scale instead.
 const MAX_PIXELS: f32 = 16.0 * 1024.0 * 1024.0;
@@ -100,7 +104,7 @@ impl Color {
 /// Straight (not premultiplied) 8-bit RGBA.
 pub type Rgba = [u8; 4];
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Theme {
     pub dark: bool,
     pub radius: f32,
@@ -190,7 +194,7 @@ impl Theme {
     }
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Error {
     #[error("The visual is {0} bytes; the limit is {MAX_BYTES}.")]
     TooLarge(usize),
@@ -200,6 +204,8 @@ pub enum Error {
     Render(String),
     #[error("The visual rendered nothing visible.")]
     Empty,
+    #[error("The visual is too heavy to render: {0}.")]
+    Limit(String),
 }
 
 /// One render of a visual, in device pixels.
@@ -255,8 +261,11 @@ pub fn render(html: &str, width: u32, scale: f32, theme: &Theme) -> Result<Rende
     } else {
         1.0
     };
-    let parsed =
-        parse_html(html, FromHtmlOptions::default()).map_err(|e| Error::Html(e.to_string()))?;
+    let parsed = parse_html(
+        html,
+        FromHtmlOptions::builder().max_depth(MAX_DEPTH).build(),
+    )
+    .map_err(|e| Error::Html(e.to_string()))?;
     let mut sheets = vec![theme.base_css()];
     sheets.extend(parsed.css);
     let stylesheet = Arc::new(StyleSheet::parse_list_loosy(&sheets));

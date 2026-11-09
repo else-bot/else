@@ -15,7 +15,6 @@ pub(super) fn is_visual(file: &Attachment) -> bool {
     file.media_type == else_visual::MEDIA_TYPE
 }
 
-/// What a render depends on. A visual renders again when it changes.
 #[derive(Clone, PartialEq)]
 struct Key {
     width: u32,
@@ -29,8 +28,14 @@ enum Source {
     Failed(String),
 }
 
+/// The last finished render and the key it used, so a failure retries
+/// once the width or theme changes.
 struct Shown {
     key: Key,
+    result: Result<Picture, String>,
+}
+
+struct Picture {
     image: Arc<RenderImage>,
     height: u32,
 }
@@ -38,7 +43,7 @@ struct Shown {
 struct Visual {
     file: Attachment,
     source: Source,
-    shown: Option<Result<Shown, String>>,
+    shown: Option<Shown>,
     rendering: Option<(Key, Task<()>)>,
 }
 
@@ -118,18 +123,12 @@ impl MessageVisuals {
         }
     }
 
-    /// Start a render for each visual whose last one used another key and
-    /// that is not already rendering for this key.
     fn render_stale(&mut self, key: &Key, cx: &mut Context<Self>) {
         for visual in &mut self.files {
             let Source::Ready(html) = &visual.source else {
                 continue;
             };
-            let current = match &visual.shown {
-                Some(Ok(shown)) => shown.key == *key,
-                Some(Err(_)) => visual.rendering.is_none(),
-                None => false,
-            };
+            let current = visual.shown.as_ref().is_some_and(|shown| shown.key == *key);
             if current || visual.rendering.as_ref().is_some_and(|(k, _)| k == key) {
                 continue;
             }
@@ -151,11 +150,10 @@ impl MessageVisuals {
                     {
                         visual.rendering = None;
                     }
-                    visual.shown = Some(result.map(|(image, height)| Shown {
+                    visual.shown = Some(Shown {
                         key: render_key,
-                        image,
-                        height,
-                    }));
+                        result: result.map(|(image, height)| Picture { image, height }),
+                    });
                     cx.notify();
                 });
             });
@@ -166,8 +164,8 @@ impl MessageVisuals {
 
 fn render(html: &str, key: &Key) -> Result<(Arc<RenderImage>, u32), String> {
     let scale = key.scale as f32 / 100.0;
-    let rendered =
-        else_visual::render(html, key.width, scale, &key.theme).map_err(|e| e.to_string())?;
+    let rendered = else_visual::isolate::render(html, key.width, scale, &key.theme)
+        .map_err(|e| e.to_string())?;
     let height = rendered.content_height.min(else_visual::MAX_HEIGHT);
     let mut bgra = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
         .ok_or("The render has the wrong size.")?;
@@ -180,7 +178,6 @@ fn render(html: &str, key: &Key) -> Result<(Arc<RenderImage>, u32), String> {
     ))
 }
 
-/// The app theme as the colors a visual reads.
 fn visual_theme(theme: &Theme) -> else_visual::Theme {
     use else_visual::Color;
     let rgba = |color: Hsla| {
@@ -247,16 +244,20 @@ impl Render for MessageVisuals {
                     .id(SharedString::from(format!("visual-{}", visual.file.id)))
                     .w_full()
                     .overflow_hidden();
-                match (&visual.shown, &visual.source) {
-                    (Some(Ok(shown)), _) => frame
-                        .h(px(shown.height as f32))
+                let shown = visual
+                    .shown
+                    .as_ref()
+                    .map(|shown| (shown.key.width, &shown.result));
+                match (shown, &visual.source) {
+                    (Some((width, Ok(picture))), _) => frame
+                        .h(px(picture.height as f32))
                         .child(
-                            img(ImageSource::Render(shown.image.clone()))
-                                .w(px(shown.key.width as f32))
-                                .h(px(shown.height as f32)),
+                            img(ImageSource::Render(picture.image.clone()))
+                                .w(px(width as f32))
+                                .h(px(picture.height as f32)),
                         )
                         .into_any_element(),
-                    (Some(Err(error)), _) | (None, Source::Failed(error)) => frame
+                    (Some((_, Err(error))), _) | (None, Source::Failed(error)) => frame
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(format!("Could not show {}: {error}", visual.file.name))
