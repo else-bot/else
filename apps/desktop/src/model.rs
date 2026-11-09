@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::api::MailTrigger;
 use crate::api::socials::Trigger;
 use crate::api::{Activity, Bot};
 
@@ -480,6 +481,9 @@ pub struct Snapshot {
     pub routines: Vec<Routine>,
     #[serde(default)]
     pub social_triggers: Vec<Trigger>,
+    /// Absent from servers without email wake-ups.
+    #[serde(default)]
+    pub mail_triggers: Vec<MailTrigger>,
     /// Absent from servers without rules.
     #[serde(default)]
     pub rules_version: i64,
@@ -521,6 +525,7 @@ pub struct Conversation {
     pub activity: Option<Activity>,
     routines: Vec<Routine>,
     social_triggers: Vec<Trigger>,
+    mail_triggers: Vec<MailTrigger>,
     rules_version: i64,
 }
 
@@ -543,6 +548,7 @@ impl Conversation {
             activity: Some(snapshot.activity),
             routines: snapshot.routines,
             social_triggers: snapshot.social_triggers,
+            mail_triggers: snapshot.mail_triggers,
             rules_version: snapshot.rules_version,
         };
         for item in snapshot.items {
@@ -629,6 +635,12 @@ impl Conversation {
                 }
                 self.social_triggers = data
                     .get("social_triggers")
+                    .map(|triggers| serde_json::from_value(triggers.clone()))
+                    .transpose()
+                    .map_err(|_| Reset::Malformed)?
+                    .unwrap_or_default();
+                self.mail_triggers = data
+                    .get("mail_triggers")
                     .map(|triggers| serde_json::from_value(triggers.clone()))
                     .transpose()
                     .map_err(|_| Reset::Malformed)?
@@ -808,6 +820,10 @@ impl Conversation {
 
     pub fn social_triggers(&self) -> &[Trigger] {
         &self.social_triggers
+    }
+
+    pub fn mail_triggers(&self) -> &[MailTrigger] {
+        &self.mail_triggers
     }
 
     pub fn routines(&self) -> &[Routine] {
@@ -1411,6 +1427,43 @@ mod tests {
         assert_eq!(
             conversation.apply(&update(4, json!([{ "id": 1 }]))),
             Err(Reset::Malformed)
+        );
+    }
+
+    #[test]
+    fn mail_triggers_parse_from_snapshots_and_bot_updates() {
+        let inbox = |wake| {
+            json!({
+                "account_id": Uuid::from_u128(90), "address": "owner@example.com",
+                "state": "active", "health": "connected", "wake": wake
+            })
+        };
+        let first: Snapshot = serde_json::from_value(json!({
+            "event_cursor": format!("{PREFIX}:1"), "items": [], "turns": [],
+            "activity": { "phase": "idle", "active_turn_id": null, "queued_count": 0 },
+            "mail_triggers": [inbox(true)]
+        }))
+        .unwrap();
+        let mut conversation = Conversation::from_snapshot(first).unwrap();
+        let trigger = &conversation.mail_triggers()[0];
+        assert_eq!(trigger.account_id, Uuid::from_u128(90));
+        assert_eq!(trigger.address, "owner@example.com");
+        assert!(trigger.wake);
+        let update = |seq, triggers| {
+            frame(
+                seq,
+                "bot.updated",
+                json!({ "bot": { "id": bot(), "name": "Assistant" }, "mail_triggers": triggers }),
+            )
+        };
+        conversation
+            .apply(&update(2, json!([inbox(false)])))
+            .unwrap();
+        assert!(!conversation.mail_triggers()[0].wake);
+        conversation.apply(&update(3, json!([]))).unwrap();
+        assert!(
+            conversation.mail_triggers().is_empty(),
+            "removed inboxes leave the list"
         );
     }
 

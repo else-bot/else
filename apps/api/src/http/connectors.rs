@@ -39,6 +39,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             put(permissions).delete(revoke),
         )
         .route(
+            "/connectors/email/accounts/{account_id}/bots/{bot_id}/wake",
+            put(wake),
+        )
+        .route(
             "/connectors/email/accounts/{account_id}/introduction",
             post(introduction),
         )
@@ -285,6 +289,21 @@ async fn permissions(
         .map_err(unavailable)?;
     Ok(Json(json!({"permissions":request})))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wake {
+    wake: bool,
+}
+async fn wake(
+    State(state): State<Arc<AppState>>,
+    ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
+    ApiJson(request): ApiJson<Wake>,
+) -> Result<Json<Value>, ApiError> {
+    store::set_wake(&state.db, id, bot, request.wake)
+        .await
+        .map_err(unavailable)?;
+    Ok(Json(json!({"wake":request.wake})))
+}
 async fn revoke(
     State(state): State<Arc<AppState>>,
     ApiPath((id, bot)): ApiPath<(Uuid, Uuid)>,
@@ -461,7 +480,9 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
     {
         return (
             tool_result(json!({"status":"connected","account_id":account.id,
-                "next":"Use mail_accounts and mail_action with this account."})),
+                "next":"Use mail_accounts and mail_action with this account. Its permissions \
+                    say whether new mail wakes you; the owner turns that on under Triggers in \
+                    your details."})),
             None,
         );
     }
@@ -505,7 +526,8 @@ async fn connect_inbox(state: &AppState, grant: &Grant, args: &Value) -> Outcome
         Ok(Gate::Run { .. }) => (
             tool_result(json!({"status":"connected",
                 "next":"The owner signed in. Call mail_accounts to find the inbox; Google may \
-                    have connected a different address than requested."})),
+                    have connected a different address than requested. Its permissions say \
+                    whether new mail wakes you."})),
             None,
         ),
         Err(error) => super::owner_tools::question_refused(error),

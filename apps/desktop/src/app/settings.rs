@@ -5,7 +5,7 @@ use gpui_kit::component::FocusableExt as _;
 use std::collections::HashMap;
 
 use crate::api::socials::Trigger;
-use crate::api::{Bot, BotProfile, ProfileChoice};
+use crate::api::{Bot, BotProfile, MailTrigger, ProfileChoice};
 use crate::avatar::{Avatar, AvatarPicker, bot_avatar};
 use crate::model::{LastRun, Routine};
 use crate::profile_picker::{ProfilePicker, effort_label, model_label};
@@ -306,6 +306,8 @@ pub(super) struct BotSettings {
     model: ModelState,
     routines: HashMap<Uuid, RoutineSave>,
     triggers: HashMap<Uuid, TriggerSave>,
+    /// Wake switch changes by inbox account.
+    mail: HashMap<Uuid, TriggerSave>,
 }
 
 impl ElseApp {
@@ -377,6 +379,7 @@ impl ElseApp {
                 model: ModelState::Loading(Uuid::nil()),
                 routines: HashMap::new(),
                 triggers: HashMap::new(),
+                mail: HashMap::new(),
             },
         );
         self.load_profile(bot.id, window, cx);
@@ -674,19 +677,76 @@ impl ElseApp {
         .detach();
     }
 
-    pub(super) fn sync_social_trigger_changes(&mut self) {
+    pub(super) fn sync_trigger_changes(&mut self) {
         if let Some(view) = &self.view
             && let Some(conversation) = &view.conversation
             && let Some(entry) = self.settings.get_mut(&view.bot_id)
         {
             entry.triggers.retain(|id, save| {
-                let trigger = conversation
+                let enabled = conversation
                     .social_triggers()
                     .iter()
-                    .find(|trigger| trigger.id == *id);
-                still_pending(save, trigger)
+                    .find(|trigger| trigger.id == *id)
+                    .map(|trigger| trigger.enabled);
+                still_pending(save, enabled)
+            });
+            entry.mail.retain(|account, save| {
+                let wake = conversation
+                    .mail_triggers()
+                    .iter()
+                    .find(|trigger| trigger.account_id == *account)
+                    .map(|trigger| trigger.wake);
+                still_pending(save, wake)
             });
         }
+    }
+
+    fn change_mail_wake(
+        &mut self,
+        bot: Uuid,
+        account: Uuid,
+        wake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection != Connection::Connected {
+            return;
+        }
+        let Some(entry) = self.settings.get_mut(&bot) else {
+            return;
+        };
+        if entry.mail.get(&account).is_some_and(TriggerSave::busy) {
+            return;
+        }
+        let attempt = Uuid::new_v4();
+        entry.mail.insert(
+            account,
+            TriggerSave::Saving {
+                attempt,
+                enabled: wake,
+            },
+        );
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.set_email_wake(account, bot, wake).await;
+            let _ = this.update(cx, |app, cx| {
+                let Some(entry) = app.settings.get_mut(&bot) else {
+                    return;
+                };
+                if entry.mail.get(&account).and_then(TriggerSave::attempt) != Some(attempt) {
+                    return;
+                }
+                if let Err(error) = result {
+                    entry.mail.insert(
+                        account,
+                        TriggerSave::Failed(format!("Couldn't save. {error}")),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn changeable_trigger(&self, bot: Uuid, id: Uuid) -> Option<&Trigger> {
@@ -1082,7 +1142,7 @@ impl ElseApp {
                     .child(self.render_model(bot.id, &entry.model, cx))
                     .child(self.render_rules_section(bot.id, cx))
                     .child(self.render_routines(bot.id, &entry.routines, cx))
-                    .child(self.render_social_triggers(bot.id, &entry.triggers, cx));
+                    .child(self.render_triggers(bot.id, entry, cx));
             } else {
                 body = body.child(muted("Loading…", cx));
             }
@@ -1427,13 +1487,13 @@ impl ElseApp {
 }
 
 impl ElseApp {
-    fn render_social_triggers(
+    fn render_triggers(
         &self,
         bot: Uuid,
-        saves: &HashMap<Uuid, TriggerSave>,
+        entry: &BotSettings,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body = section("Social triggers", cx);
+        let body = section("Triggers", cx);
         let Some(conversation) = self
             .view
             .as_ref()
@@ -1442,17 +1502,97 @@ impl ElseApp {
         else {
             return body.child(muted("Loading…", cx)).into_any_element();
         };
-        if conversation.social_triggers().is_empty() {
+        if conversation.social_triggers().is_empty() && conversation.mail_triggers().is_empty() {
             return body.child(muted(
-                "No triggers yet. Ask the bot in chat to watch a Telegram or Discord chat, for example \"wake up when someone mentions you in the Proliquid channel\".", cx,
+                "No triggers yet. Ask the bot in chat to connect an inbox, or to watch a Telegram or Discord chat, for example \"wake up when someone mentions you in the Proliquid channel\".", cx,
             )).into_any_element();
         }
-        body.children(
-            conversation.social_triggers().iter().map(|trigger| {
-                self.render_social_trigger(bot, trigger, saves.get(&trigger.id), cx)
-            }),
-        )
+        body.children(conversation.mail_triggers().iter().map(|trigger| {
+            self.render_mail_trigger(bot, trigger, entry.mail.get(&trigger.account_id), cx)
+        }))
+        .children(conversation.social_triggers().iter().map(|trigger| {
+            self.render_social_trigger(bot, trigger, entry.triggers.get(&trigger.id), cx)
+        }))
         .into_any_element()
+    }
+
+    fn render_mail_trigger(
+        &self,
+        bot: Uuid,
+        trigger: &MailTrigger,
+        save: Option<&TriggerSave>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let account = trigger.account_id;
+        let checked = match save {
+            Some(TriggerSave::Saving { enabled, .. }) => *enabled,
+            _ => trigger.wake,
+        };
+        let switch = Switch::new(ElementId::Name(format!("mail-trigger-{account}").into()))
+            .focus_ring(false)
+            .cursor_pointer()
+            .checked(checked)
+            .small()
+            .accessibility_label(format!("Wake on new mail in {}", trigger.address))
+            .disabled(
+                save.is_some_and(TriggerSave::busy) || self.connection != Connection::Connected,
+            )
+            .on_click(cx.listener(move |app, wake: &bool, window, cx| {
+                app.change_mail_wake(bot, account, *wake, window, cx)
+            }));
+        let pill = |text: &'static str| {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .text_xs()
+                .bg(theme.sidebar_accent)
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let error = match save {
+            Some(TriggerSave::Failed(error)) => Some(error.clone()),
+            _ => None,
+        };
+        let description = if checked {
+            "Wakes the bot when new mail arrives."
+        } else {
+            "New mail doesn't wake the bot."
+        };
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_3()
+            .rounded(theme.radius_lg)
+            .bg(theme.sidebar_accent.opacity(0.4))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(trigger.address.clone()),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(pill("Email"))
+                    .child(pill("New mail"))
+                    .when(trigger.state == "paused", |row| {
+                        row.child(pill("inbox paused"))
+                    })
+                    .when(!checked, |row| row.child(pill("off"))),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().whitespace_normal().child(description))
+                    .child(switch),
+            )
+            .children(error.map(|error| note(error, true, cx)))
+            .into_any_element()
     }
 
     fn render_social_trigger(
@@ -2089,10 +2229,10 @@ fn note(text: impl Into<SharedString>, error: bool, cx: &App) -> Div {
 
 /// Whether a trigger's local change still waits for the server: a save until
 /// the trigger reports the saved state, a failure until the trigger is gone.
-fn still_pending(save: &TriggerSave, trigger: Option<&Trigger>) -> bool {
-    match (save, trigger) {
+fn still_pending(save: &TriggerSave, current: Option<bool>) -> bool {
+    match (save, current) {
         (_, None) => false,
-        (TriggerSave::Saving { enabled, .. }, Some(trigger)) => *enabled != trigger.enabled,
+        (TriggerSave::Saving { enabled, .. }, Some(current)) => *enabled != current,
         _ => true,
     }
 }
@@ -2388,13 +2528,13 @@ mod tests {
             enabled: false,
         };
         assert!(
-            still_pending(&saving, Some(&trigger(true))),
+            still_pending(&saving, Some(trigger(true).enabled)),
             "a stale event keeps it busy"
         );
-        assert!(!still_pending(&saving, Some(&trigger(false))));
+        assert!(!still_pending(&saving, Some(trigger(false).enabled)));
         let failed = TriggerSave::Failed("Couldn't save.".into());
         assert!(
-            still_pending(&failed, Some(&trigger(true))),
+            still_pending(&failed, Some(trigger(true).enabled)),
             "the error stays visible"
         );
         let deleting = TriggerSave::Deleting {
