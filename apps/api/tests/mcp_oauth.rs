@@ -582,3 +582,21 @@ async fn an_unauthorized_mutation_is_not_replayed_after_token_refresh() {
             .any(|event| event["kind"] == "token" && event["grant_type"] == "refresh_token")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_advertising_hundreds_of_scopes_still_shows_the_sign_in_card() {
+    let fixture = Fixture::start().await;
+    let scopes: Vec<String> = (0..250)
+        .map(|index| format!("resource_{index}:read"))
+        .collect();
+    fixture.control(json!({"scopes": scopes})).await;
+    let app = TestApp::installed().await;
+    let bot = app.create_bot("Large scope list").await;
+    let (_, token) = grant(&app, &bot, false).await;
+    result(&tool(&app, &token, "mcp_install", fixture.installation()).await);
+    let required = list_tools(&app, &token).await;
+    assert_eq!(required["status"], "auth_required", "{required}");
+    assert_eq!(required["parked"], true, "{required}");
+    let authorization = authorize(&app, &bot).await;
+    assert_eq!(authorization["scopes"], json!(scopes));
+}
