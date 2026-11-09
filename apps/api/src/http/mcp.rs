@@ -97,7 +97,8 @@ pub async fn endpoint(
             };
             let needs = match name {
                 Some("delegate" | "council" | "list_bots") => Tool::Delegate,
-                Some("mcp_install") => Tool::ManageMcp,
+                Some("mcp_install" | super::skills::INSTALL) => Tool::ManageMcp,
+                Some(super::skills::READ) => Tool::Mcp,
                 Some(
                     "mcp_list"
                     | "mcp_request"
@@ -420,6 +421,7 @@ pub(super) fn all_tools() -> Vec<Value> {
     tools.extend(super::social_tools::schemas());
     tools.extend(super::shared_mcp::schemas());
     tools.push(super::mcp_wait::schema());
+    tools.extend(super::skills::schemas());
     tools
 }
 
@@ -533,6 +535,9 @@ async fn call(state: &AppState, grant: &Grant, name: &str, args: &Value) -> Valu
             super::shared_mcp::call(state, grant, name, args).await
         }
         super::mcp_wait::NAME => super::mcp_wait::call(state, grant, args).await,
+        super::skills::INSTALL | super::skills::READ => {
+            super::skills::call(state, grant, name, args).await
+        }
         "memory_search" => search(state, grant, args).await,
         "memory_read" => read(state, grant, args).await,
         "memory_view" => view(state, grant, args).await,

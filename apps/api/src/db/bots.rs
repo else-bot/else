@@ -77,6 +77,9 @@ const SELECT_BOT: &str = "SELECT b.id, b.name, c.id AS conversation_id, b.status
         a.id AS active_turn_id, a.status AS active_turn_status,
         question.kind AS question_kind, question.title AS question_title,
         r.reason AS credential_reason,
+        (SELECT 'Install skill ' || p.name FROM skill_installs p JOIN turns t ON t.id = p.turn_id
+            WHERE p.bot_id = b.id AND p.status = 'pending' AND t.conversation_id = c.id
+            ORDER BY p.created_at, p.id LIMIT 1) AS skill_install_title,
         (SELECT t.status FROM turns t WHERE t.conversation_id = c.id
             ORDER BY t.turn_no DESC LIMIT 1) AS latest_turn_status,
         coalesce((SELECT (i.seq, length(CAST(i.text AS BLOB)))

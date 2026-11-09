@@ -49,9 +49,10 @@ pub enum Tool {
     /// Edit the bot's own rules file (a turn answering the owner in the
     /// bot's own conversation only).
     Rules,
-    /// Discover and use shared MCP packages in host-enabled tasks.
+    /// Discover and use shared MCP packages and installed skills in
+    /// host-enabled tasks.
     Mcp,
-    /// Install shared MCP packages for an owner request.
+    /// Install shared MCP packages and skills for an owner request.
     ManageMcp,
     Mail,
     Social,

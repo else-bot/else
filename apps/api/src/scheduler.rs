@@ -383,6 +383,14 @@ impl Scheduler {
                 }
             }
         }
+        if turn_tools(&input.delegation).contains(&Tool::Mcp) {
+            match crate::db::skills::visible(&self.pool, input.bot_id).await {
+                Ok(skills) => input.skills = Some(skills),
+                Err(err) => {
+                    tracing::warn!(turn = %turn_id, error = %err, "listing skills failed");
+                }
+            }
+        }
         if self.registry.get(&provider_id).is_some() {
             match crate::handoff::prepare(&self.pool, &self.registry, &input, &provider_id, &cancel)
                 .await

@@ -88,6 +88,7 @@ impl SecretForm {
 
 impl ElseApp {
     pub(super) fn sync_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_skill_cards(window, cx);
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -117,6 +118,7 @@ impl ElseApp {
     }
 
     pub(super) fn clear_secret_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_skill_cards(window, cx);
         if let Some(view) = self.view.as_mut() {
             for (_, mut form) in view.secret_forms.drain() {
                 form.clear(window, cx);

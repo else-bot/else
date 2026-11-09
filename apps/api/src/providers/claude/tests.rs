@@ -472,6 +472,8 @@ fn specialist_turn(session: Option<SessionState>) -> TurnInput {
         outgoing_drafts: Vec::new(),
         social_setups: Vec::new(),
         mcp_waits: Vec::new(),
+        skill_installs: Vec::new(),
+        skills: None,
         mcps: None,
         handoff: None,
         jobs: Vec::new(),
@@ -793,8 +795,8 @@ pub(crate) fn pinned_fingerprints() -> [(crate::app::providers::Origin, &'static
     };
     let ready = claude.ready.as_ref().unwrap();
     [
-        (Origin::OwnerRequest, "8cc8a6988dc2c0e4f9faa72d6f3356b1"),
-        (Origin::ConnectorEvent, "18476b6a433e4a65f6365d614706b30b"),
+        (Origin::OwnerRequest, "9c16343e0707004433548fb500b6ab7b"),
+        (Origin::ConnectorEvent, "edd4532920027e74c2991b3fa987650b"),
     ]
     .map(|(origin, expected)| {
         input.delegation.origin = origin;

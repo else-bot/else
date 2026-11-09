@@ -297,6 +297,7 @@ impl ElseApp {
             self._computer_layout = None;
             self.clear_social_forms(window, cx);
         } else {
+            self.sync_skill_cards(window, cx);
             self.sync_social_forms(window, cx);
         }
         if !hidden {

@@ -1,6 +1,7 @@
 //! Context a native session keeps until it changes: the bot's rules file,
 //! the bot registry, the saved-permission snapshot, the installed shared
-//! MCPs, and the delegated tasks still in progress. Each block rides in the turn packet only
+//! MCPs, the delegated tasks still in progress, and the installed skills the bot
+//! may use. Each block rides in the turn packet only
 //! when its content hash differs from the one the session acknowledged, so
 //! the system prompt stays byte-identical across turns and the provider's
 //! cached prefix survives a new bot, a delegation, or a permission change.
@@ -21,7 +22,7 @@ pub struct Update {
 /// The blocks for this turn, by receipt key. An empty block does not apply
 /// to this turn (a webhook wake has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
-fn blocks(input: &TurnInput) -> [(&'static str, String); 5] {
+fn blocks(input: &TurnInput) -> [(&'static str, String); 6] {
     [
         // The bot's rules file, verbatim; a cleared file renders its own block,
         // so a session that held rules learns they are gone.
@@ -37,6 +38,7 @@ fn blocks(input: &TurnInput) -> [(&'static str, String); 5] {
         ("permissions", prompt::permissions_block(input)),
         ("mcps", prompt::mcps_block(input)),
         ("in_progress", prompt::in_progress_block(input)),
+        ("skills", prompt::skills_block(input)),
     ]
 }
 

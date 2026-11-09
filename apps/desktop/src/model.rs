@@ -3,6 +3,9 @@
 //! mismatch, an unknown kind) asks the caller to reload a snapshot rather than
 //! guessing, so a bubble is never duplicated or corrupted.
 
+mod skills;
+pub use skills::*;
+
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
@@ -369,6 +372,8 @@ pub struct Turn {
     pub reaction: Option<Reaction>,
     #[serde(default)]
     pub secret_requests: Vec<SecretRequest>,
+    #[serde(default)]
+    pub skill_installs: Vec<SkillInstall>,
     /// Absent from servers without owner questions.
     #[serde(default)]
     pub questions: Vec<Question>,
@@ -770,6 +775,24 @@ impl Conversation {
             .into_iter()
             .flat_map(|t| t.secret_requests.iter().map(move |r| (t, r)))
             .collect()
+    }
+
+    pub fn skill_install(&self, id: Uuid) -> Option<&SkillInstall> {
+        self.turns
+            .values()
+            .flat_map(|t| &t.skill_installs)
+            .find(|r| r.id == id)
+    }
+
+    pub fn apply_skill_install(&mut self, install: SkillInstall) {
+        for turn in self.turns.values_mut() {
+            if let Some(current) = turn.skill_installs.iter_mut().find(|r| r.id == install.id) {
+                if current.status == SkillInstallStatus::Pending {
+                    *current = install;
+                }
+                return;
+            }
+        }
     }
 
     pub fn secret_request(&self, id: Uuid) -> Option<&SecretRequest> {

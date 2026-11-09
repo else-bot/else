@@ -620,7 +620,11 @@ impl Shell {
             cx.notify();
             return;
         }
-        let dirty = self.server_editor.is_some()
+        let dirty = self
+            .skills
+            .as_ref()
+            .is_some_and(|view| view.has_unsaved_work(cx))
+            || self.server_editor.is_some()
             || self
                 .mcp
                 .as_ref()

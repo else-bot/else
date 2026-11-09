@@ -40,6 +40,8 @@ pub fn export() -> Value {
         outgoing_drafts: vec![],
         social_setups: vec![],
         mcp_waits: vec![],
+        skill_installs: Vec::new(),
+        skills: None,
         mcps: Some(vec![InstalledMcp {
             id: "github".into(),
             name: "GitHub".into(),

@@ -17,6 +17,7 @@ pub mod reads;
 pub mod routines;
 pub mod rules;
 pub mod secret_requests;
+pub mod skills;
 pub mod stop;
 pub mod task_secrets;
 pub mod turn_sink;

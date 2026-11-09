@@ -122,6 +122,10 @@ def run(runner):
                                      self.call("computer_write_file", {"path": "viz/signups.html", "content": "<div></div>"}),
                                      self.call("visual_preview", {"path": "viz/signups.html"})],
                                     "Signups peaked Friday. ![Signups this week](viz/signups.html)"),
+                "install-skill-from-github-link": ([self.call("skill_install", {
+                    "url": "https://github.com/acme/treg/tree/main/skills/rea-growth", "reason": "Owner asked",
+                    "env": ["TREG_TOKEN"]}, {"status": "pending", "parked": True})], "Review the install card."),
+                "use-installed-skill": ([self.call("skill_read", {"id": "rea-growth"})], "When it grew: 2024."),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
             }

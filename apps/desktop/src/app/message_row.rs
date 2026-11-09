@@ -395,6 +395,9 @@ impl ElseApp {
                     .children(footer.map(|at| note(at, false)))
                     .into_any_element()
             }
+            RowKey::SkillInstall(id) => {
+                side(false, self.render_skill_card(id, cx)).into_any_element()
+            }
             RowKey::SecretRequest(id) => {
                 side(false, self.render_secret_card(id, cx)).into_any_element()
             }
@@ -571,6 +574,14 @@ pub(super) fn turn_label(turn: &crate::model::Turn) -> (String, bool) {
         "preparing" | "sending" | "running" => ("Working".into(), false),
         "waiting" if !turn.mcp_waits.is_empty() => ("Working".into(), false),
         "cancelling" => ("Stopping…".into(), false),
+        "waiting"
+            if turn
+                .skill_installs
+                .iter()
+                .any(|r| r.status == crate::model::SkillInstallStatus::Pending) =>
+        {
+            ("Waiting for your skill approval…".into(), false)
+        }
         "waiting" if turn.secret_requests.iter().any(|r| r.is_pending()) => (
             "Waiting for you to answer the secret request…".into(),
             false,

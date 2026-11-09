@@ -18,6 +18,7 @@ pub(super) enum RowKey {
     Task(Uuid),
     Pending(Uuid),
     SecretRequest(Uuid),
+    SkillInstall(Uuid),
     Question(Uuid),
     Draft(Uuid),
     SocialSetup(Uuid),
@@ -79,6 +80,9 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
             for question in &turn.questions {
                 turns.insert(RowKey::Question(question.id), turn.id);
             }
+            for install in &turn.skill_installs {
+                turns.insert(RowKey::SkillInstall(install.id), turn.id);
+            }
             for request in &turn.secret_requests {
                 turns.insert(RowKey::SecretRequest(request.id), turn.id);
             }
@@ -101,6 +105,7 @@ fn routine_rows(rows: &[RowKey], conversation: Option<&Conversation>) -> Vec<Opt
                 .filter(|turn| turn.routine.is_some())
                 .map(|turn| turn.id),
             RowKey::Question(_)
+            | RowKey::SkillInstall(_)
             | RowKey::SecretRequest(_)
             | RowKey::Draft(_)
             | RowKey::SocialSetup(_)
@@ -133,6 +138,12 @@ fn request_rows(c: &Conversation) -> Vec<(RowKey, Option<Uuid>)> {
                         c.question_anchor(turn.id, None),
                     )
                 })
+                .chain(turn.skill_installs.iter().map(move |install| {
+                    (
+                        RowKey::SkillInstall(install.id),
+                        c.question_anchor(turn.id, install.settled_at),
+                    )
+                }))
                 .chain(turn.questions.iter().filter_map(move |question| {
                     let anchor = c.question_anchor(turn.id, question.settled_at);
                     (question.is_pending() || anchor.is_some())
@@ -227,6 +238,7 @@ pub(super) struct ConversationView {
     pub(super) rows: Vec<TranscriptRow>,
     pub(super) list: ListState,
     pub(super) texts: HashMap<RowKey, RowText>,
+    pub(super) skill_cards: HashMap<Uuid, super::skill_card::SkillCard>,
     pub(super) secret_forms: HashMap<Uuid, super::secret_card::SecretForm>,
     pub(super) answered: HashSet<Uuid>,
     pub(super) connections: HashMap<Uuid, super::question_card::connection::Form>,
@@ -284,6 +296,7 @@ impl ConversationView {
             list,
             texts: HashMap::new(),
             secret_forms: HashMap::new(),
+            skill_cards: HashMap::new(),
             answered: HashSet::new(),
             question_submits: HashMap::new(),
             connections: HashMap::new(),
@@ -632,7 +645,8 @@ impl ElseApp {
                             (p.rejected.is_none() && p.reaction.is_none()).then_some(Author::Owner);
                         (author, Some(p.sent_at))
                     }),
-                RowKey::SecretRequest(_)
+                RowKey::SkillInstall(_)
+                | RowKey::SecretRequest(_)
                 | RowKey::Question(_)
                 | RowKey::Draft(_)
                 | RowKey::SocialSetup(_)
@@ -667,6 +681,9 @@ impl ElseApp {
                             d.version, d.updated_at, d.status, d.can_approve, d.in_reply
                         )
                     }),
+                    RowKey::SkillInstall(id) => {
+                        c.skill_install(id).map(|r| format!("{:?}", r.status))
+                    }
                     RowKey::SecretRequest(id) => c.secret_request(id).map(|r| r.status.clone()),
                     RowKey::SocialSetup(id) => c.social_setup(id).map(|s| s.status.clone()),
                     RowKey::Handoff(id) => c.handoff(id).map(|(_, group)| {

@@ -44,6 +44,9 @@ pub struct TurnRecord {
     pub secret_requests: Vec<crate::db::secret_requests::RequestInfo>,
     #[sqlx(skip)]
     pub social_setups: Vec<crate::socials::store::Setup>,
+    /// The bot's skill install cards during this turn (no file contents).
+    #[sqlx(skip)]
+    pub skill_installs: Vec<crate::db::skills::InstallInfo>,
     /// The bot's questions and approval requests to the owner during this turn.
     #[sqlx(skip)]
     pub questions: Vec<crate::db::owner_questions::QuestionInfo>,
@@ -466,7 +469,9 @@ pub async fn attach_owner_requests(
     let mut drafts = crate::db::outgoing_drafts::for_turns(conn, &ids).await?;
     let mut delegations = crate::db::delegations::for_turns(conn, &ids).await?;
     let mut mcp_waits = crate::db::mcp_waits::pending_for_turns(conn, &ids).await?;
+    let mut skills = crate::db::skills::for_turns(conn, &ids).await?;
     for turn in turns {
+        turn.skill_installs = skills.remove(&turn.id).unwrap_or_default();
         turn.social_setups = socials.remove(&turn.id).unwrap_or_default();
         turn.secret_requests = secrets.remove(&turn.id).unwrap_or_default();
         turn.questions = questions.remove(&turn.id).unwrap_or_default();
@@ -837,7 +842,9 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
         outgoing_drafts: crate::db::outgoing_drafts::notes(&mut conn, turn_id).await?,
         social_setups: crate::socials::store::setup_outcomes(&mut conn, turn_id).await?,
         mcp_waits: crate::db::mcp_waits::undelivered(&mut conn, turn_id).await?,
+        skill_installs: crate::db::skills::undelivered(&mut conn, turn_id).await?,
         mcps: None,
+        skills: None,
         handoff: None,
         jobs: crate::db::handoffs::job_receipts(&mut conn, turn.bot_id).await?,
         run: match crate::db::routines::run_of(&mut conn, turn_id).await? {
