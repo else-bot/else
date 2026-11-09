@@ -29,7 +29,9 @@ mod desktop;
 pub mod socials;
 #[cfg(target_os = "macos")]
 pub use desktop::MAX_TEXT_CHARS;
-pub use desktop::{DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode};
+pub use desktop::{
+    ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode,
+};
 use serde_json::json;
 
 use crate::avatar::Avatar;

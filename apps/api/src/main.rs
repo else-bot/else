@@ -540,6 +540,7 @@ fn run_serve() -> anyhow::Result<()> {
             .with_secret_key(secret_key.clone())
             .with_server_updates(&config);
         let mut computer_task = None;
+        let mut upgrades = None;
         match else_api::computers::runtime::Msb::detect(&config.data_dir, config.msb_bin.clone()) {
             Ok(msb) => {
                 let manager = Arc::new(
@@ -552,6 +553,7 @@ fn run_serve() -> anyhow::Result<()> {
                 );
                 manager.reconcile_startup().await?;
                 computer_task = Some(tokio::spawn(manager.clone().run(stop_scheduler.clone())));
+                upgrades = Some(manager.clone());
                 state = state.with_computers(manager);
             }
             Err(err) => {
@@ -602,6 +604,9 @@ fn run_serve() -> anyhow::Result<()> {
         let result = serve(&config, listener, state, shutdown).await;
         drop(published);
         stop_scheduler.cancel();
+        if let Some(computers) = upgrades {
+            computers.stop_upgrades().await;
+        }
         let _ = tokio::join!(
             scheduler_task,
             mcp_waits,

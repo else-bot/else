@@ -2,12 +2,17 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use crate::api::{Client, DesktopCommand, DesktopCommands, DesktopEvent, DesktopMode};
+use crate::api::{
+    Client, ClientError, ComputerState, ComputerUpgrade, DesktopCommand, DesktopCommands,
+    DesktopEvent, DesktopMode,
+};
 
 #[cfg(target_os = "macos")]
 mod text_input;
@@ -35,6 +40,7 @@ enum Screen {
     Live,
     Failed(String),
     Unavailable,
+    Upgrading,
 }
 
 pub(super) struct ComputerView {
@@ -43,6 +49,8 @@ pub(super) struct ComputerView {
     name: String,
     avatar: crate::avatar::Avatar,
     screen: Screen,
+    computer: Option<ComputerState>,
+    upgrade_refused: Option<String>,
     image: Option<Arc<RenderImage>>,
     painted_image: Option<Arc<RenderImage>>,
     resolution: (u16, u16),
@@ -96,6 +104,8 @@ impl ComputerView {
             name: bot.name.clone(),
             avatar: bot.avatar,
             screen: Screen::Loading,
+            computer: None,
+            upgrade_refused: None,
             image: None,
             painted_image: None,
             resolution: (0, 0),
@@ -146,14 +156,28 @@ impl ComputerView {
                 } else {
                     match client.clone().computer(bot).await {
                         Ok(state) => {
-                            if !state.desktop_available {
+                            let upgrading = state.upgrade == Some(ComputerUpgrade::Running);
+                            let available = state.desktop_available;
+                            let running =
+                                state.state == "running" && state.desired_state != "stopped";
+                            let _ = this.update(cx, |view, cx| {
+                                view.computer = Some(state);
+                                if upgrading {
+                                    view.watch_upgrade(cx);
+                                }
+                                cx.notify();
+                            });
+                            if upgrading {
+                                return;
+                            }
+                            if !available {
                                 let _ = this.update(cx, |view, cx| {
                                     view.screen = Screen::Unavailable;
                                     cx.notify();
                                 });
                                 return;
                             }
-                            state.state == "running" && state.desired_state != "stopped"
+                            running
                         }
                         Err(error) => {
                             let _ = this.update(cx, |view, cx| {
@@ -248,6 +272,128 @@ impl ComputerView {
             }
         }));
         cx.notify();
+    }
+
+    fn upgrade(&mut self, cx: &mut Context<Self>) {
+        self.release(cx);
+        let client = self.client.clone();
+        let bot = self.bot;
+        self.upgrade_refused = None;
+        self.watch_upgrade(cx);
+        self._session = Some(cx.spawn(async move |this, cx| {
+            let started = client.clone().upgrade_computer(bot).await;
+            let _ = this.update(cx, |view, cx| match started {
+                Ok(()) => view.watch_upgrade(cx),
+                Err(error) => {
+                    view.upgrade_refused = Some(error.to_string());
+                    if let Some(computer) = &mut view.computer {
+                        computer.upgrade = None;
+                    }
+                    view.monitor(false, cx);
+                }
+            });
+        }));
+    }
+
+    fn watch_upgrade(&mut self, cx: &mut Context<Self>) {
+        self.clear_input();
+        self.notice = None;
+        self.commands = None;
+        self.image = None;
+        self.mode = DesktopMode::Watch;
+        self.mode_pending = false;
+        self.guest_cursor = None;
+        self.screen = Screen::Upgrading;
+        if let Some(computer) = &mut self.computer {
+            computer.upgrade = Some(ComputerUpgrade::Running);
+        }
+        let client = self.client.clone();
+        let bot = self.bot;
+        self._session = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let state = match client.clone().computer(bot).await {
+                    Ok(state) => state,
+                    Err(
+                        error @ (ClientError::Unauthorized
+                        | ClientError::Api {
+                            status: 400..=499, ..
+                        }),
+                    ) => {
+                        let _ = this.update(cx, |view, cx| view.fail(error.to_string(), cx));
+                        return;
+                    }
+                    Err(_) => continue,
+                };
+                if state.upgrade == Some(ComputerUpgrade::Running) {
+                    continue;
+                }
+                let _ = this.update(cx, |view, cx| {
+                    view.computer = Some(state);
+                    view.monitor(false, cx);
+                });
+                return;
+            }
+        }));
+        cx.notify();
+    }
+
+    fn upgrade_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let computer = self.computer.as_ref()?;
+        let theme = cx.theme();
+        let (message, failed) = match (&computer.upgrade, &self.upgrade_refused) {
+            (Some(ComputerUpgrade::Running), _) => {
+                return Some(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            "Upgrading to the latest computer. This takes a few minutes. \
+                             Files, projects and browser sign-ins carry over.",
+                        )
+                        .into_any_element(),
+                );
+            }
+            _ if !computer.outdated() => return None,
+            (_, Some(refused)) => (refused.clone(), true),
+            (Some(ComputerUpgrade::Failed { error }), None) => {
+                (format!("Upgrade failed: {error}"), true)
+            }
+            (None, None) => (
+                "A newer computer is available. Files, projects and browser sign-ins \
+                 carry over; the bot can't use its computer while it upgrades."
+                    .to_owned(),
+                false,
+            ),
+        };
+        Some(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if failed {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(message),
+                )
+                .child(
+                    Button::new("upgrade-computer")
+                        .cursor_pointer()
+                        .focus_ring(false)
+                        .label(if failed {
+                            "Try upgrading again"
+                        } else {
+                            "Upgrade computer"
+                        })
+                        .small()
+                        .w_full()
+                        .on_click(cx.listener(|view, _, _, cx| view.upgrade(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
@@ -395,6 +541,7 @@ impl ComputerView {
                     "Desktop access is not enabled on this server",
                 ),
                 Screen::Live => ("Connecting…", ""),
+                Screen::Upgrading => ("Upgrading computer…", "This takes a few minutes"),
             };
             area = area.child(
                 v_flex()
@@ -574,6 +721,7 @@ impl Render for ComputerView {
                         .text_center()
                         .child(format!("{}'s screen", self.name)),
                 )
+                .children(self.upgrade_section(cx))
                 .children(match &self.screen {
                     Screen::Failed(error) => Some(
                         div()

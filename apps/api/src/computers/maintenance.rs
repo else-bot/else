@@ -221,7 +221,9 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let _op = self.op(bot).await;
+            let Some(_op) = self.try_op(bot).await else {
+                continue;
+            };
             self.observe(bot).await?;
         }
         if let Err(err) = self.poll_jobs(cancel).await {
@@ -238,7 +240,9 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let _op = self.op(bot).await;
+            let Some(_op) = self.try_op(bot).await else {
+                continue;
+            };
             self.stop_held(bot, Reason::MustStop).await?;
         }
         let idle_states: Vec<&str> = match self.config.idle_action {
@@ -260,10 +264,13 @@ impl ComputerManager {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let _op = self.op(bot).await;
+            let Some(_op) = self.try_op(bot).await else {
+                continue;
+            };
             self.stop_held(bot, Reason::Idle(self.config.idle_action))
                 .await?;
         }
+        self.clear_stranded_upgrades().await?;
         crate::db::stop::settle_all(&self.pool).await?;
         Ok(())
     }
@@ -337,10 +344,7 @@ impl ComputerManager {
             .execute(&self.pool)
             .await?;
         }
-        if let Err(err) = self.stop_interrupted_replacements().await {
-            tracing::warn!(error = %err, "an interrupted upgrade's replacement was not stopped");
-            return Ok(());
-        }
+        self.clear_stranded_upgrades().await?;
         sqlx::query(
             "UPDATE computer_leases AS l SET generation = c.generation
              FROM bot_computers c

@@ -422,6 +422,11 @@ impl ComputerManager {
                 "the computer runtime has not been inspected yet".into(),
             )));
         }
+        if self.upgrading(bot_id).await {
+            return Ok(Err(ViewerRefusal::Unavailable(
+                "the computer is being upgraded".into(),
+            )));
+        }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: Option<bool> =
             sqlx::query_scalar("SELECT status = 'active' FROM bots WHERE id = ?1")

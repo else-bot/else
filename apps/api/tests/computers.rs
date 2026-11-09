@@ -907,10 +907,18 @@ async fn image_upgrades_keep_network_respect_budget_and_settle_offline() {
     .unwrap();
     drop(manager);
     let _restarted = self::manager(&app, &fake, config(1)).await;
-    assert_eq!(
-        fake.computers.lock().unwrap()[&leftover].state,
-        RuntimeState::Stopped
+    assert!(
+        !fake.computers.lock().unwrap().contains_key(&leftover),
+        "startup removes an interrupted upgrade's replacement"
     );
+    let started: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started'",
+    )
+    .bind(bot)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(started, 0);
 }
 
 async fn first_stop(app: &TestApp, manager: &ComputerManager, fake: &Fake, bot: Uuid) {
@@ -1289,4 +1297,210 @@ async fn grown_computers_stay_counted_until_their_size_is_reset() {
     );
     fake.fail_configure.store(false, SeqCst);
     let (_, _) = ready(&manager, a, "test:a2").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owners_upgrade_from_the_api_while_turns_queue() {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        ComputerConfig {
+            image: "img:new".into(),
+            ..config(1)
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Upgrade").await.parse().unwrap();
+    let path = format!("/v1/bots/{bot}/computer");
+
+    let (turn, _) = ready(&manager, bot, "turn:gone").await;
+    manager.release(turn).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let shown = app.owner("GET", &path, None).await.body;
+    assert_eq!(
+        (&shown["image"], &shown["latest_image"], &shown["upgrade"]),
+        (
+            &serde_json::json!("img:old"),
+            &serde_json::json!("img:new"),
+            &serde_json::Value::Null
+        )
+    );
+
+    let (held, _) = ready(&manager, bot, "cli:held").await;
+    let (desktop, _) = ready(&manager, bot, &format!("desktop:{bot}")).await;
+    let upgrade = format!("{path}/upgrade");
+    assert_eq!(
+        app.owner("POST", &upgrade, None).await.status,
+        StatusCode::ACCEPTED
+    );
+    let failed = settled(&app, &path).await;
+    assert_eq!(failed["upgrade"]["state"], "failed", "{failed}");
+    assert!(
+        failed["upgrade"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("idle")),
+        "{failed}"
+    );
+    assert_eq!(failed["image"], "img:old");
+
+    manager.release(held).await.unwrap();
+    *fake.create_delay.lock().unwrap() = Duration::from_millis(500);
+    assert_eq!(
+        app.owner("POST", &upgrade, None).await.status,
+        StatusCode::ACCEPTED
+    );
+    let again = app.owner("POST", &upgrade, None).await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["upgrade"]["state"],
+        "running"
+    );
+    assert!(
+        matches!(
+            manager.acquire(bot, "turn:during").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "a turn queues instead of waiting for the upgrade"
+    );
+    assert!(
+        app.scheduler
+            .gate()
+            .close(Duration::from_millis(50))
+            .await
+            .is_err(),
+        "a backup or an update waits for the upgrade"
+    );
+    let other: Uuid = app.create_bot("Neighbour").await.parse().unwrap();
+    assert!(
+        matches!(
+            manager.acquire(other, "turn:neighbour").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "the upgrade's computers hold the budget"
+    );
+
+    let done = settled(&app, &path).await;
+    assert_eq!(
+        (&done["image"], &done["upgrade"]),
+        (&serde_json::json!("img:new"), &serde_json::Value::Null),
+        "{done}"
+    );
+    let desktop_released: bool = sqlx::query_scalar(
+        "SELECT released_at IS NOT NULL AND end_reason = 'upgrade' FROM computer_leases WHERE id = ?1",
+    )
+    .bind(desktop)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(desktop_released, "the owner's desktop session ended");
+    let latest = app.owner("POST", &upgrade, None).await;
+    assert_eq!(latest.status, StatusCode::CONFLICT, "{:?}", latest.body);
+}
+
+async fn settled(app: &TestApp, path: &str) -> serde_json::Value {
+    for _ in 0..200 {
+        let body = app.owner("GET", path, None).await.body;
+        if body["upgrade"]["state"] != "running" {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the upgrade did not finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_api_interrupts_an_upgrade_and_the_next_start_removes_its_replacement() {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let config = || ComputerConfig {
+        image: "img:new".into(),
+        ..config(1)
+    };
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        config(),
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Shutdown").await.parse().unwrap();
+    let (turn, old_name) = ready(&manager, bot, "turn:gone").await;
+    manager.release(turn).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    *fake.create_delay.lock().unwrap() = Duration::from_secs(30);
+    let path = format!("/v1/bots/{bot}/computer");
+    assert_eq!(
+        app.owner("POST", &format!("{path}/upgrade"), None)
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    let replacement = loop {
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT to_runtime_name FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started'",
+        )
+        .bind(bot)
+        .fetch_optional(&app.db.pool)
+        .await
+        .unwrap();
+        if let Some(name) = name {
+            break name;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    tokio::time::timeout(Duration::from_secs(5), manager.stop_upgrades())
+        .await
+        .expect("stopping waits for the upgrade to be interrupted, not to finish");
+    assert!(
+        matches!(
+            manager.acquire(bot, "turn:after").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "the old computer stays down while the replacement may still run"
+    );
+    let image: String = sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
+        .bind(bot)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(image, "img:old", "the bot stays on its old computer");
+
+    *fake.create_delay.lock().unwrap() = Duration::ZERO;
+    fake.computers.lock().unwrap().insert(
+        replacement.clone(),
+        Computer {
+            state: RuntimeState::Running,
+            files: HashMap::new(),
+        },
+    );
+    let _restarted = self::manager(&app, &fake, config()).await;
+    assert!(
+        !fake.computers.lock().unwrap().contains_key(&replacement),
+        "the next start removes the interrupted replacement"
+    );
+    assert!(fake.computers.lock().unwrap().contains_key(&old_name));
+    let failed = app.owner("GET", &path, None).await.body;
+    assert_eq!(failed["upgrade"]["state"], "failed", "{failed}");
 }

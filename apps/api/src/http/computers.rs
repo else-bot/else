@@ -1,5 +1,6 @@
 //! Owner routes for a bot's computer: its state, an explicit stop that
-//! prevents implicit wake, and resume (which starts nothing by itself).
+//! prevents implicit wake, resume (which starts nothing by itself), and an
+//! upgrade to the configured image that keeps the computer's data.
 
 use std::sync::Arc;
 
@@ -10,6 +11,9 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::computers::ComputerError;
+use crate::computers::upgrade::UpgradeStatus;
+
 use super::AppState;
 use super::error::{ApiError, ApiPath};
 use super::turns::bot_deleted;
@@ -19,6 +23,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/bots/{bot_id}/computer", get(show))
         .route("/bots/{bot_id}/computer/stop", post(stop))
         .route("/bots/{bot_id}/computer/resume", post(resume))
+        .route("/bots/{bot_id}/computer/upgrade", post(upgrade))
         .route("/bots/{bot_id}/desktop", get(desktop).delete(close_desktop))
         .route(
             "/bots/{bot_id}/desktop/stream",
@@ -87,6 +92,17 @@ async fn show(
         .computers
         .as_ref()
         .is_some_and(|computers| computers.config().desktop);
+    let (latest_image, upgrade) = match &state.computers {
+        Some(computers) => (
+            Some(computers.config().image.clone()),
+            match computers.upgrade_status(bot_id).await {
+                None => last_failed_upgrade(&state, bot_id).await?,
+                Some(UpgradeStatus::Running) => json!({ "state": "running" }),
+                Some(UpgradeStatus::Failed(error)) => json!({ "state": "failed", "error": error }),
+            },
+        ),
+        None => (None, Value::Null),
+    };
     let Some(ComputerRow {
         runtime_name: name,
         image,
@@ -119,7 +135,51 @@ async fn show(
         "last_used_at": last_used,
         "last_error": error,
         "desktop_available": desktop && has_desktop,
+        "latest_image": latest_image,
+        "upgrade": upgrade,
     })))
+}
+
+/// The newest recorded upgrade, when it failed (one a restart interrupted,
+/// or one run offline).
+async fn last_failed_upgrade(state: &AppState, bot_id: Uuid) -> Result<Value, ApiError> {
+    let last: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT state, error FROM computer_upgrades WHERE bot_id = ?1
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(match last {
+        Some((upgrade, error)) if upgrade == "failed" => json!({
+            "state": "failed",
+            "error": error.unwrap_or_else(|| "interrupted".into()),
+        }),
+        _ => Value::Null,
+    })
+}
+
+async fn upgrade(
+    State(state): State<Arc<AppState>>,
+    ApiPath(bot_id): ApiPath<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    require_bot(&state, bot_id, true).await?;
+    let computers = manager(&state)?;
+    let Some(admission) = state.scheduler.gate().enter() else {
+        return Err(ApiError::unavailable(
+            "maintenance",
+            "A backup or an update is in progress; try again shortly.",
+        ));
+    };
+    match computers.start_upgrade(bot_id, admission).await {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(ComputerError::Refused(reason)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "upgrade_refused",
+            reason,
+        )),
+        Err(err) => Err(computer_error(err)),
+    }
 }
 
 async fn stop(

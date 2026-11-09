@@ -300,6 +300,9 @@ pub struct ComputerManager {
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     input_batches: Actor<HashMap<Uuid, u32>>,
     controllers: Actor<HashMap<Uuid, Uuid>>,
+    upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
+    upgrade_tasks: tokio_util::task::TaskTracker,
+    upgrade_stop: tokio_util::sync::CancellationToken,
 }
 
 impl ComputerManager {
@@ -319,6 +322,9 @@ impl ComputerManager {
             secret_key: None,
             input_batches: Actor::default(),
             controllers: Actor::default(),
+            upgrades: Actor::default(),
+            upgrade_tasks: tokio_util::task::TaskTracker::new(),
+            upgrade_stop: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -371,8 +377,22 @@ impl ComputerManager {
     }
 
     async fn op(&self, bot_id: Uuid) -> OwnedSemaphorePermit {
-        let semaphore = self
-            .ops
+        self.op_semaphore(bot_id)
+            .await
+            .acquire_owned()
+            .await
+            .expect("computer operation semaphore stays open")
+    }
+
+    /// The bot's operation lock if no operation holds it, for maintenance
+    /// that should retry later rather than wait (an upgrade holds it for
+    /// minutes).
+    async fn try_op(&self, bot_id: Uuid) -> Option<OwnedSemaphorePermit> {
+        self.op_semaphore(bot_id).await.try_acquire_owned().ok()
+    }
+
+    async fn op_semaphore(&self, bot_id: Uuid) -> Arc<Semaphore> {
+        self.ops
             .call(move |ops| {
                 ops.retain(|_, weak| weak.strong_count() > 0);
                 if let Some(semaphore) = ops.get(&bot_id).and_then(std::sync::Weak::upgrade) {
@@ -382,11 +402,7 @@ impl ComputerManager {
                 ops.insert(bot_id, Arc::downgrade(&semaphore));
                 semaphore
             })
-            .await;
-        semaphore
-            .acquire_owned()
             .await
-            .expect("computer operation semaphore stays open")
     }
 
     async fn row(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<Option<Row>, sqlx::Error> {
@@ -407,7 +423,23 @@ impl ComputerManager {
                 reason: "the computer runtime has not been inspected yet".into(),
             });
         }
+        if self.upgrading(bot_id).await {
+            return Ok(Acquire::Queued {
+                reason: "the computer is being upgraded; try again in a few minutes".into(),
+            });
+        }
         let _op = self.op(bot_id).await;
+        let stranded: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM computer_upgrades WHERE bot_id = ?1 AND state = 'started')",
+        )
+        .bind(bot_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if stranded {
+            return Ok(Acquire::Queued {
+                reason: "a failed upgrade's computer is still being removed".into(),
+            });
+        }
         let stopped = {
             let mut conn = self.pool.acquire().await?;
             Self::row(&mut conn, bot_id)
@@ -724,7 +756,9 @@ impl ComputerManager {
     ) -> Result<bool, sqlx::Error> {
         let (cpus, memory): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT coalesce(sum({RESERVED_CPUS}), 0), coalesce(sum({RESERVED_MEMORY} + ?2), 0)
-             FROM bot_computers WHERE bot_id <> ?1 AND observed_state IN {RESERVING}"
+             FROM bot_computers c WHERE bot_id <> ?1 AND (observed_state IN {RESERVING}
+                 OR EXISTS (SELECT 1 FROM computer_upgrades u
+                            WHERE u.bot_id = c.bot_id AND u.state = 'started'))"
         )))
         .bind(bot_id)
         .bind(self.config.overhead_mib as i64)
