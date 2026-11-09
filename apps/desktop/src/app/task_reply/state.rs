@@ -466,6 +466,22 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_parked_on_an_mcp_job_is_working_not_waiting_for_a_bot() {
+        let mut parked = turn(11, "waiting");
+        parked["mcp_waits"] = json!([{ "id": id(30), "mcp_id": "t3-code" }]);
+        let c = conversation(
+            vec![item(1, 11, "assistant")],
+            vec![parked, turn(12, "waiting")],
+        );
+        let replies = task_replies(&c);
+        assert_eq!(replies[&id(11)].state, ReplyState::Working);
+        assert_eq!(replies[&id(12)].state, ReplyState::Waiting);
+        let label = |n| crate::app::message_row::turn_label(c.turn(id(n)).unwrap()).0;
+        assert_eq!(label(11), "Working");
+        assert_eq!(label(12), "Waiting for another bot…");
+    }
+
+    #[test]
     fn feedback_keeps_an_earlier_update_visible() {
         let mut feedback = item(4, 11, "user");
         feedback["reaction"] = json!({"item_id": id(2), "kind": "thumbs_up"});

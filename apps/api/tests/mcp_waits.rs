@@ -112,6 +112,20 @@ async fn attempts(app: &TestApp, turn: Uuid) -> i32 {
         .unwrap()
 }
 
+async fn shown_waits(app: &TestApp, bot: &str, turn: Uuid) -> Value {
+    let snapshot = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await
+        .body;
+    snapshot["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == turn.to_string())
+        .unwrap()["mcp_waits"]
+        .clone()
+}
+
 async fn settle(app: &TestApp, turn: Uuid, status: &str) {
     app.wait_turn_for(&turn.to_string(), &[status], Duration::from_secs(30))
         .await;
@@ -144,10 +158,14 @@ async fn a_request_waiting_on_a_running_mcp_job_continues_by_itself_when_it_fini
         app.wait_turn(&turn.to_string(), &["waiting"]).await,
         "waiting"
     );
+    let shown = shown_waits(&app, &main, turn).await;
+    assert_eq!(shown.as_array().map(Vec::len), Some(1), "{shown}");
+    assert_eq!(shown[0]["mcp_id"], "t3-code", "{shown}");
 
     std::fs::write(&state, "result_available").unwrap();
     check_now(&app).await;
     settle(&app, turn, "completed").await;
+    assert_eq!(shown_waits(&app, &main, turn).await, json!([]));
     assert_eq!(attempts(&app, turn).await, 2, "the same request continued");
     let (status, delivered, checks) = wait_row(&app, turn).await;
     assert_eq!((status.as_str(), delivered), ("finished", Some(2)));
