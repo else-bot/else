@@ -621,7 +621,8 @@ const TASK_OR_NO_WAITING_OWNER: &str = "(EXISTS (SELECT 1 FROM conversations k
                          WHERE w.conversation_id = t.conversation_id AND w.status = 'waiting'))";
 
 /// Claim the oldest queued turn of the next eligible bot, oldest first
-/// across bots. A bot is eligible when it is active, not stopping work, and
+/// across bots. A bot's owner message that took over its delegated work goes
+/// ahead of the bot's other queued turns, so the steer is not left behind. A bot is eligible when it is active, not stopping work, and
 /// has no turn in an active status. A waiting owner turn holds only owner
 /// work, and a waiting task holds nothing. The claimed turn moves to
 /// `preparing` and is returned; the caller must start it before claiming
@@ -633,7 +634,12 @@ pub async fn claim_next(pool: &SqlitePool, busy: &[Uuid]) -> Result<Option<Uuid>
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, bot_id FROM (
             SELECT t.id, t.bot_id, t.created_at,
-                   row_number() OVER (PARTITION BY t.bot_id ORDER BY t.turn_no) AS queue_rank
+                   row_number() OVER (
+                       PARTITION BY t.bot_id
+                       ORDER BY EXISTS (SELECT 1 FROM delegations d
+                                        WHERE d.takeover_turn_id = t.id
+                                          AND d.status IN ('queued', 'running')) DESC,
+                                t.turn_no) AS queue_rank
             FROM turns t JOIN bots b ON b.id = t.bot_id
             WHERE t.status = 'queued' AND b.status = 'active' AND NOT b.cancel_pending
               AND NOT EXISTS (SELECT 1 FROM turns a
