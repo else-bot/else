@@ -17,8 +17,12 @@ computer_browser also takes. Nothing that runs in a page is ever sent twice: a
 lost reply raises Uncertain (for actions) or TargetClosed, and the script
 decides. Page code runs with a browser-side time limit, and the tabs a script
 controls are recorded, so if the script is stopped the computer closes the tabs
-it opened and halts code in the ones it attached to. Errors: BrowserNotReady,
-BrowserBusy, TargetClosed, NavigationTimeout, Uncertain, CdpError.
+it opened and halts code in the ones it attached to. A native dialog (alert,
+confirm, prompt, "Leave site?") pauses its tab: calls fail fast with DialogOpen
+until page.handle_dialog() answers it, and navigate() stays on a page that asks
+to confirm leaving unless told leave=True, so unsent input survives. Errors:
+BrowserNotReady, BrowserBusy, TargetClosed, NavigationTimeout,
+NavigationBlocked, DialogOpen, Uncertain, CdpError.
 """
 
 import base64
@@ -26,6 +30,7 @@ import fcntl
 import hashlib
 import json
 import os
+import select
 import socket
 import struct
 import subprocess
@@ -88,6 +93,20 @@ class NavigationTimeout(CdpError):
 
 class Uncertain(CdpError):
     """The request was sent but no reply came: it may or may not have happened."""
+
+
+class NavigationBlocked(CdpError):
+    """The page asked to confirm leaving; navigate() stayed on it."""
+
+
+class DialogOpen(Exception):
+    """A native dialog pauses the tab; .dialog holds its type and message."""
+
+    def __init__(self, dialog):
+        message = f" ({json.dumps(dialog.get('message'))})" if dialog.get("message") else ""
+        super().__init__(f"a {dialog.get('type')} dialog is open on {dialog.get('url')}{message}; the tab is paused "
+                         "until page.handle_dialog(accept) answers it, and an action that opened it has already happened")
+        self.dialog = dialog
 
 
 def _get_json(path, timeout=2):
@@ -167,7 +186,9 @@ class _Socket:
                 continue
             left = deadline - time.monotonic()
             if left <= 0:
-                raise socket.timeout()
+                if not select.select([self.sock], [], [], 0)[0]:
+                    raise socket.timeout()
+                left = 1
             self.sock.settimeout(left)
             try:
                 chunk = self.sock.recv(65536)
@@ -231,11 +252,26 @@ class _Socket:
 
 
 class _Connection:
-    def __init__(self, url, timeout):
+    def __init__(self, url, timeout, on_event):
         self.socket = _Socket(url, timeout)
         self.next = 1
+        self.on_event = on_event
+
+    def poll(self):
+        """Handle the events that already arrived, without waiting."""
+        while True:
+            try:
+                msg = json.loads(self.socket.recv(time.monotonic()))
+            except socket.timeout:
+                return
+            if "method" in msg:
+                try:
+                    self.on_event(msg)
+                except DialogOpen:
+                    pass
 
     def call(self, method, params=None, timeout=30, mutating=True):
+        """on_event may raise to stop waiting; a late reply is ignored."""
         msg_id = self.next
         self.next += 1
         self.socket.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
@@ -251,7 +287,9 @@ class _Connection:
                 if mutating:
                     raise Uncertain(f"the connection closed before {method} answered; it may or may not have happened") from None
                 raise
-            if msg.get("id") == msg_id:
+            if "method" in msg:
+                self.on_event(msg)
+            elif msg.get("id") == msg_id:
                 if "error" in msg:
                     raise CdpError(f"{msg['error'].get('message')} ({msg['error'].get('code')})")
                 return msg.get("result", {})
@@ -269,7 +307,30 @@ class Page:
         self.browser = browser
         self.target = target
         self.timeout = timeout
-        self.conn = _Connection(target["webSocketDebuggerUrl"], timeout)
+        self._watch()
+
+    def _watch(self):
+        self.dialog = None
+        self.conn = _Connection(self.target["webSocketDebuggerUrl"], self.timeout, self._on_event)
+
+    def _on_event(self, msg):
+        if msg["method"] == "Page.javascriptDialogOpening":
+            self.dialog = msg["params"]
+            raise DialogOpen(self.dialog)
+        if msg["method"] == "Page.javascriptDialogClosed":
+            self.dialog = None
+
+    def _attach(self):
+        """Subscribe to this tab's dialogs. A tab that a dialog already paused
+        before this connection existed never answers."""
+        try:
+            self.call("Page.enable", timeout=5, mutating=False)
+        except TargetClosed:
+            raise
+        except CdpError:
+            raise CdpError(f"the tab {self.target.get('url') or self.target['id']} does not answer; a native dialog may "
+                           "be open on it. Look at the screen, answer the dialog there, then attach again") from None
+        self.show()
 
     @property
     def id(self):
@@ -281,7 +342,25 @@ class Page:
         resent. After a restart, call reconnect() or open the page again."""
         if self.conn.closed:
             raise TargetClosed("the page connection is closed; call reconnect() or open the page again, and check it before acting")
+        self.conn.poll()
+        if self.dialog and method != "Page.handleJavaScriptDialog":
+            raise DialogOpen(self.dialog)
         return self.conn.call(method, params, timeout, mutating)
+
+    def handle_dialog(self, accept=False, text=None):
+        """Answer the open dialog: accept (OK, or leave the page) or dismiss
+        (Cancel, or stay). text fills a prompt()."""
+        self.conn.poll()
+        dialog = self.dialog
+        if not dialog:
+            raise CdpError("no dialog is open on this tab")
+        params = {"accept": bool(accept)}
+        if text is not None:
+            params["promptText"] = text
+        self.call("Page.handleJavaScriptDialog", params)
+        # Answering can open the next dialog before this reply arrives.
+        if self.dialog is dialog:
+            self.dialog = None
 
     def evaluate(self, expression, mutating=True, timeout=30):
         limit = min(timeout, MAX_EVALUATE)
@@ -300,26 +379,41 @@ class Page:
     def text(self):
         return self.read("document.body ? document.body.innerText : ''")
 
-    def navigate(self, url, timeout=30):
-        """Navigate and wait for that navigation's document to load (bounded)."""
+    def navigate(self, url, timeout=30, leave=False):
+        """Navigate and wait for that navigation's document to load (bounded).
+        A page that asks to confirm leaving (it may hold unsent input) is kept:
+        NavigationBlocked, unless leave=True discards it."""
         token = os.urandom(8).hex()
         try:
             self.evaluate(f"window.__elseNav = {json.dumps(token)}", timeout=5)
         except CdpError:
             pass
+        self.conn.poll()
+        # From here a beforeunload dialog can only come from this navigation.
+        if self.dialog:
+            raise DialogOpen(self.dialog)
+        r = None
         try:
             r = self.call("Page.navigate", {"url": url}, timeout)
+        except DialogOpen as e:
+            if e.dialog.get("type") != "beforeunload":
+                raise
+            self.handle_dialog(leave)
+            if not leave:
+                raise NavigationBlocked(f"{self.target.get('url') or 'the page'} asked to confirm leaving, so it stayed open "
+                                        f"with its input; pass leave=True to discard it and load {url}") from None
         except Uncertain:
             # Chromium answers Page.navigate once the response starts; a
             # server that never answers is a navigation timeout.
             if self.conn.closed:
                 raise
             raise NavigationTimeout(f"loading {url} did not start within {timeout} s; the tab may still be loading") from None
-        if r.get("errorText"):
+        if r and r.get("errorText"):
             raise CdpError(f"navigation to {url} failed: {r['errorText']}")
         # A new document lacks the marker; a same-document navigation (no
-        # loaderId) keeps its document.
-        fresh = f"window.__elseNav !== {json.dumps(token)} && " if r.get("loaderId") else ""
+        # loaderId) keeps its document. Leaving after a confirmation (no reply
+        # kept) always loads a new one.
+        fresh = f"window.__elseNav !== {json.dumps(token)} && " if r is None or r.get("loaderId") else ""
         self.wait_for(f"{fresh}document.readyState === 'complete'", timeout, f"loading {url}", NavigationTimeout)
         self.target["url"] = self.read("location.href")
 
@@ -364,8 +458,9 @@ class Page:
         if not found:
             raise TargetClosed(f"the tab {self.target.get('url') or self.target['id']} is gone")
         self.target = found
-        self.conn = _Connection(found["webSocketDebuggerUrl"], timeout)
-        self.show()
+        self.timeout = timeout
+        self._watch()
+        self._attach()
 
     def close(self):
         self.conn.close()
@@ -386,7 +481,7 @@ class Browser:
         create, the first page tab."""
         if create:
             version = ready(self.timeout)
-            conn = _Connection(version["webSocketDebuggerUrl"], self.timeout)
+            conn = _Connection(version["webSocketDebuggerUrl"], self.timeout, lambda msg: None)
             try:
                 target_id = conn.call("Target.createTarget", {"url": "about:blank"})["targetId"]
             finally:
@@ -405,7 +500,7 @@ class Browser:
         _record(target["id"], bool(create))
         page = Page(self, target, self.timeout)
         self.pages.append(page)
-        page.show()
+        page._attach()
         if create:
             page.navigate(create, self.timeout)
         return page

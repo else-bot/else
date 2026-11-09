@@ -18,8 +18,12 @@
 // decides. Page code runs with a browser-side time limit, and the tabs a
 // script controls are recorded, so if the script is stopped the computer
 // closes the tabs it opened and halts code in the ones it attached to.
-// Errors: BrowserNotReady, TargetClosed, NavigationTimeout, Uncertain,
-// CdpError, BrowserBusy.
+// A native dialog (alert, confirm, prompt, "Leave site?") pauses its tab:
+// calls fail fast with DialogOpen until page.handleDialog() answers it, and
+// navigate() stays on a page that asks to confirm leaving unless told
+// { leave: true }, so unsent input survives.
+// Errors: BrowserNotReady, TargetClosed, NavigationTimeout, NavigationBlocked,
+// DialogOpen, Uncertain, CdpError, BrowserBusy.
 
 import http from "node:http";
 import crypto from "node:crypto";
@@ -72,6 +76,15 @@ export class BrowserNotReady extends Error {}
 export class BrowserBusy extends Error {}
 export class TargetClosed extends Error {}
 export class NavigationTimeout extends Error {}
+/** The page asked to confirm leaving; navigate() stayed on it. */
+export class NavigationBlocked extends Error {}
+/** A native dialog pauses the tab; `dialog` holds its type and message. */
+export class DialogOpen extends Error {
+  constructor(dialog) {
+    super(`a ${dialog.type} dialog is open on ${dialog.url}${dialog.message ? ` (${JSON.stringify(dialog.message)})` : ""}; the tab is paused until page.handleDialog({ accept }) answers it, and an action that opened it has already happened`);
+    this.dialog = dialog;
+  }
+}
 /** The request was sent but no reply came: it may or may not have happened. */
 export class Uncertain extends Error {}
 export class CdpError extends Error {}
@@ -290,6 +303,14 @@ class Connection {
     return this.socket.closed;
   }
 
+  interrupt(error) {
+    for (const [, { reject, timer }] of this.pending) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    this.pending.clear();
+  }
+
   close() {
     this.socket.close();
   }
@@ -315,7 +336,34 @@ export class Page {
   constructor(browser, target, conn) {
     this.browser = browser;
     this.target = target;
+    /** The native dialog open on this tab, or null. */
+    this.dialog = null;
+    this.watch(conn);
+  }
+
+  watch(conn) {
     this.conn = conn;
+    this.dialog = null;
+    conn.listeners.push((msg) => {
+      if (msg.method === "Page.javascriptDialogOpening") {
+        this.dialog = msg.params;
+        conn.interrupt(new DialogOpen(msg.params));
+      } else if (msg.method === "Page.javascriptDialogClosed") {
+        this.dialog = null;
+      }
+    });
+  }
+
+  /** Subscribe to this tab's dialogs. A tab that a dialog already paused
+   * before this connection existed never answers. */
+  async attach() {
+    try {
+      await this.call("Page.enable", {}, { mutating: false, timeoutMs: 5000 });
+    } catch (e) {
+      if (!(e instanceof CdpError)) throw e;
+      throw new CdpError(`the tab ${this.target.url || this.target.id} does not answer; a native dialog may be open on it. Look at the screen, answer the dialog there, then attach again`);
+    }
+    await this.show();
   }
 
   get id() {
@@ -329,7 +377,18 @@ export class Page {
     if (this.conn.closed) {
       throw new TargetClosed("the page connection is closed; call reconnect() or open the page again, and check it before acting");
     }
+    if (this.dialog && method !== "Page.handleJavaScriptDialog") throw new DialogOpen(this.dialog);
     return await this.conn.call(method, params, options);
+  }
+
+  /** Answer the open dialog: accept (OK, or leave the page) or dismiss
+   * (Cancel, or stay). `text` fills a prompt(). */
+  async handleDialog({ accept, text } = {}) {
+    const dialog = this.dialog;
+    if (!dialog) throw new CdpError("no dialog is open on this tab");
+    await this.call("Page.handleJavaScriptDialog", { accept: !!accept, ...(text === undefined ? {} : { promptText: text }) });
+    // Answering can open the next dialog before this reply arrives.
+    if (this.dialog === dialog) this.dialog = null;
   }
 
   async evaluate(expression, { mutating = true, timeoutMs = 30000 } = {}) {
@@ -349,25 +408,38 @@ export class Page {
     return this.read("document.body ? document.body.innerText : ''");
   }
 
-  /** Navigate and wait for that navigation's document to load (bounded). */
-  async navigate(url, { timeoutMs = 30000 } = {}) {
+  /** Navigate and wait for that navigation's document to load (bounded).
+   * A page that asks to confirm leaving (it may hold unsent input) is kept:
+   * NavigationBlocked, unless `leave: true` discards it. */
+  async navigate(url, { timeoutMs = 30000, leave = false } = {}) {
     const token = crypto.randomBytes(8).toString("hex");
-    await this.evaluate(`window.__elseNav = ${JSON.stringify(token)}`, { timeoutMs: 5000 }).catch(() => {});
+    await this.evaluate(`window.__elseNav = ${JSON.stringify(token)}`, { timeoutMs: 5000 }).catch((e) => {
+      if (e instanceof DialogOpen) throw e;
+    });
+    // From here a beforeunload dialog can only come from this navigation.
+    if (this.dialog) throw new DialogOpen(this.dialog);
     let r;
     try {
       r = await this.call("Page.navigate", { url }, { timeoutMs });
     } catch (e) {
-      // Chromium answers Page.navigate once the response starts; a server
-      // that never answers is a navigation timeout (the tab may be loading).
-      if (e instanceof Uncertain && !this.conn.closed) {
+      if (e instanceof DialogOpen && e.dialog.type === "beforeunload") {
+        await this.handleDialog({ accept: leave });
+        if (!leave) {
+          throw new NavigationBlocked(`${this.target.url || "the page"} asked to confirm leaving, so it stayed open with its input; pass { leave: true } to discard it and load ${url}`);
+        }
+      } else if (e instanceof Uncertain && !this.conn.closed) {
+        // Chromium answers Page.navigate once the response starts; a server
+        // that never answers is a navigation timeout (the tab may be loading).
         throw new NavigationTimeout(`loading ${url} did not start within ${timeoutMs} ms; the tab may still be loading`);
+      } else {
+        throw e;
       }
-      throw e;
     }
-    if (r.errorText) throw new CdpError(`navigation to ${url} failed: ${r.errorText}`);
+    if (r?.errorText) throw new CdpError(`navigation to ${url} failed: ${r.errorText}`);
     // A new document lacks the marker; a same-document navigation (no
-    // loaderId) keeps its document.
-    const fresh = r.loaderId ? `window.__elseNav !== ${JSON.stringify(token)} && ` : "";
+    // loaderId) keeps its document. Leaving after a confirmation (no reply
+    // kept) always loads a new one.
+    const fresh = !r || r.loaderId ? `window.__elseNav !== ${JSON.stringify(token)} && ` : "";
     await this.waitFor(`${fresh}document.readyState === 'complete'`, { timeoutMs, what: `loading ${url}`, error: NavigationTimeout });
     this.target.url = await this.read("location.href");
   }
@@ -408,8 +480,8 @@ export class Page {
     const found = (await getJson("/json/list")).find((t) => t.type === "page" && t.id === this.target.id);
     if (!found) throw new TargetClosed(`the tab ${this.target.url || this.target.id} is gone`);
     this.target = found;
-    this.conn = new Connection(await Socket.open(found.webSocketDebuggerUrl, timeoutMs));
-    await this.show();
+    this.watch(new Connection(await Socket.open(found.webSocketDebuggerUrl, timeoutMs)));
+    await this.attach();
   }
 
   close() {
@@ -454,7 +526,7 @@ export class Browser {
     record(target.id, !!create);
     const page = new Page(this, target, new Connection(await Socket.open(target.webSocketDebuggerUrl, this.timeoutMs)));
     this.pages.push(page);
-    await page.show();
+    await page.attach();
     if (create) await page.navigate(create, { timeoutMs: this.timeoutMs });
     return page;
   }
