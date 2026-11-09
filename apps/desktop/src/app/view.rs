@@ -884,7 +884,7 @@ impl ElseApp {
 }
 
 /// Three dots that ripple left to right in place of a spinner icon.
-fn working_dots(bot: Uuid, color: Hsla, still: bool) -> impl IntoElement {
+pub(super) fn working_dots(id: Uuid, color: Hsla, still: bool) -> impl IntoElement {
     h_flex()
         .flex_none()
         .size(px(14.))
@@ -897,7 +897,7 @@ fn working_dots(bot: Uuid, color: Hsla, still: bool) -> impl IntoElement {
                 return dot.into_any_element();
             }
             dot.with_animation(
-                SharedString::from(format!("working-dot-{bot}-{i}")),
+                SharedString::from(format!("working-dot-{id}-{i}")),
                 Animation::new(std::time::Duration::from_millis(1050)).repeat(),
                 move |dot, t| {
                     let lift = (std::f32::consts::TAU * t - i as f32 * 0.75).sin().max(0.);

@@ -58,7 +58,7 @@ impl ElseApp {
             history.push(id);
         }
         let expandable = !history.is_empty();
-        let header_padding = if complete { px(10.) } else { px(4.) };
+        let header_padding = if complete { px(10.) } else { px(14.) };
         let header = if complete {
             h_flex()
                 .w_full()
@@ -105,63 +105,112 @@ impl ElseApp {
                         )
                 }))
         } else {
+            let label = if error {
+                "Needs attention"
+            } else {
+                task.state.label()
+            };
+            let detail = (!error && summary != label).then(|| summary.clone());
+            let updates = expandable.then(|| {
+                let count = history.len();
+                format!("{count} {}", if count == 1 { "update" } else { "updates" })
+            });
             h_flex()
                 .w_full()
                 .min_w_0()
                 .items_center()
-                .gap_3()
+                .gap_4()
                 .children(bot.map(|bot| {
-                    bot_avatar(
-                        SharedString::from(format!("task-avatar-{}", task.turn)),
-                        bot.avatar,
-                        px(34.),
-                    )
-                    .when(working, |avatar| avatar.working())
+                    h_flex()
+                        .flex_none()
+                        .size(px(56.))
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            bot_avatar(
+                                SharedString::from(format!("task-avatar-{}", task.turn)),
+                                bot.avatar,
+                                px(38.),
+                            )
+                            .when(working, |avatar| avatar.working()),
+                        )
                 }))
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
+                        .gap(px(3.))
                         .text_left()
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .truncate()
-                                .child(title.clone()),
-                        )
-                        .child(
                             h_flex()
-                                .w_full()
                                 .min_w_0()
                                 .items_center()
-                                .gap_1()
-                                .text_xs()
-                                .text_color(color)
-                                .child(div().truncate().child(if error {
-                                    "Needs attention".to_owned()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(title.clone()),
+                                )
+                                .child(
+                                    h_flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_2()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(color.opacity(0.3))
+                                        .bg(color.opacity(0.08))
+                                        .text_xs()
+                                        .text_color(color)
+                                        .child(label)
+                                        .when(working, |pill| {
+                                            pill.child(super::view::working_dots(
+                                                task.turn,
+                                                color,
+                                                cx.reduce_motion(),
+                                            ))
+                                        }),
+                                ),
+                        )
+                        .children(detail.map(|detail| {
+                            div()
+                                .text_sm()
+                                .text_color(if working {
+                                    theme.foreground
                                 } else {
-                                    summary.clone()
-                                })),
-                        ),
+                                    theme.muted_foreground
+                                })
+                                .truncate()
+                                .child(detail)
+                        }))
+                        .when(working, |column| {
+                            column.child(work_sweep(task.turn, color, cx.reduce_motion()))
+                        }),
                 )
-                .children(elapsed.map(|elapsed| {
-                    div()
+                .child(
+                    v_flex()
                         .flex_none()
+                        .items_end()
+                        .gap_1p5()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(elapsed)
-                }))
-                .children(expandable.then(|| {
-                    Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .xsmall()
-                    .flex_none()
-                    .text_color(theme.muted_foreground)
-                }))
+                        .child(h_flex().items_center().gap_2().children(elapsed).children(
+                            expandable.then(|| {
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .flex_none()
+                            }),
+                        ))
+                        .children(updates),
+                )
         };
         let mut activity = v_flex()
             .w_full()
@@ -395,4 +444,38 @@ impl ElseApp {
             None => body.into_any_element(),
         })
     }
+}
+
+/// A light that sweeps under a working task's text, one lap per 1.7 s like the avatar's halo.
+fn work_sweep(turn: Uuid, color: Hsla, still: bool) -> impl IntoElement {
+    let light = div()
+        .absolute()
+        .top_0()
+        .h_full()
+        .w(relative(0.4))
+        .rounded_full()
+        .bg(color);
+    div()
+        .relative()
+        .w_full()
+        .h(px(2.))
+        .mt_1p5()
+        .rounded_full()
+        .overflow_hidden()
+        .bg(color.opacity(0.08))
+        .child(if still {
+            light.left(relative(0.3)).opacity(0.4).into_any_element()
+        } else {
+            light
+                .with_animation(
+                    SharedString::from(format!("task-sweep-{turn}")),
+                    Animation::new(Duration::from_millis(1700)).repeat(),
+                    |light, t| {
+                        light
+                            .left(relative(1.4 * t - 0.4))
+                            .opacity((std::f32::consts::PI * t).sin())
+                    },
+                )
+                .into_any_element()
+        })
 }
