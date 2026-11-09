@@ -37,12 +37,12 @@ Recheck provider capabilities before using a model in a new environment.
   },
   "fable-medium": {
     "providerInstanceId": "claudeAgent",
-    "model": "claude-fable-5-1",
+    "model": "claude-fable-5-2",
     "options": { "effort": "medium" }
   },
   "fable-high": {
     "providerInstanceId": "claudeAgent",
-    "model": "claude-fable-5-1",
+    "model": "claude-fable-5-2",
     "options": { "effort": "high" }
   }
 }
