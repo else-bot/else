@@ -251,6 +251,15 @@ pub enum ReadCommand {
 pub struct Category {
     pub id: Uuid,
     pub name: String,
+    /// The owner's sidebar place; absent from older servers, null when
+    /// never placed.
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CategoryList {
+    categories: Vec<Category>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -672,6 +681,17 @@ impl Client {
         self.call::<CategoryEnvelope>(Method::PATCH, format!("/v1/categories/{id}"), Some(body))
             .await
             .map(|(_, v)| v.category)
+    }
+
+    /// Place categories in this order for every client.
+    pub async fn reorder_categories(
+        self: Arc<Self>,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<Category>, ClientError> {
+        let body = json!({ "category_ids": ids });
+        self.call::<CategoryList>(Method::PUT, "/v1/categories/order".into(), Some(body))
+            .await
+            .map(|(_, v)| v.categories)
     }
 
     pub async fn delete_category(self: Arc<Self>, id: Uuid) -> Result<(), ClientError> {

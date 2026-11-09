@@ -44,7 +44,7 @@ impl Render for CategoryDrag {
 impl ElseApp {
     pub(super) fn sidebar_layout(&self) -> crate::sidebar::Layout<'_> {
         crate::sidebar::Layout::new(&self.categories, &self.bots, self.default_bot_id)
-            .with_preferences(&self.preferences)
+            .without_empty_unassigned()
     }
 
     pub(super) fn toggle_category(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
@@ -55,14 +55,59 @@ impl ElseApp {
     }
 
     pub(super) fn reorder_category(&mut self, dragged: Uuid, target: Uuid, cx: &mut Context<Self>) {
-        let ids = self
-            .sidebar_layout()
-            .groups
-            .iter()
-            .filter_map(|g| g.category.map(|c| c.id))
-            .collect();
-        self.preferences.reorder(ids, dragged, target);
-        self.save_preferences(cx);
+        let ids: Vec<Uuid> = self.categories.iter().map(|c| c.id).collect();
+        if let Some(ids) = crate::sidebar::moved(&ids, dragged, target) {
+            self.place_categories(ids, false, cx);
+        }
+    }
+
+    /// Send a desktop-local order from before the server kept one, once,
+    /// unless another desktop already placed the categories.
+    pub(super) fn carry_category_order(&mut self, cx: &mut Context<Self>) {
+        if self.carrying_order
+            || self.preferences.category_order.is_empty()
+            || self.categories.is_empty()
+        {
+            return;
+        }
+        if self.categories.iter().any(|c| c.position.is_some()) {
+            self.preferences.category_order.clear();
+            self.save_preferences(cx);
+            return;
+        }
+        self.carrying_order = true;
+        let ids = crate::sidebar::carried_order(&self.categories, &self.preferences.category_order);
+        self.place_categories(ids, true, cx);
+    }
+
+    /// Show the order at once and save it on the server, which tells every
+    /// desktop; a failure puts the previous order back.
+    fn place_categories(&mut self, ids: Vec<Uuid>, carried: bool, cx: &mut Context<Self>) {
+        let before = self.categories.clone();
+        self.categories
+            .sort_by_key(|c| ids.iter().position(|id| *id == c.id));
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = client.reorder_categories(ids.clone()).await;
+            let _ = this.update(cx, |app, cx| {
+                match result {
+                    Ok(_) if carried => {
+                        app.preferences.category_order.clear();
+                        app.save_preferences(cx);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        if app.categories.iter().map(|c| c.id).eq(ids.iter().copied()) {
+                            app.categories = before;
+                        }
+                        app.category_notice = Some(format!("Reordering categories failed: {err}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn sidebar_handle(

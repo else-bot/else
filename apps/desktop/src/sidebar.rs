@@ -2,8 +2,8 @@
 //! with their bots, then the unassigned bots. Pure, so the order is tested
 //! without a window.
 //!
-//! Categories are ordered as the server orders them: by the case-folded
-//! name's code points, then ID. Muted bots go last in their group. Bots are
+//! Categories keep the server's order: the owner's placed order, shared by
+//! every desktop, then unplaced ones by name. Muted bots go last in their group. Bots are
 //! otherwise ordered by recency: the newest message first, a never-messaged
 //! bot by its creation time, then the folded name and ID. A bot with no
 //! category, or with a category the client does not know (older records, a
@@ -20,6 +20,33 @@ pub mod status;
 /// The comparison key the server uses for category names.
 pub fn fold(name: &str) -> String {
     name.to_uppercase().to_lowercase()
+}
+
+/// The category order after dropping `dragged` onto `target`.
+pub fn moved(ids: &[Uuid], dragged: Uuid, target: Uuid) -> Option<Vec<Uuid>> {
+    let from = ids.iter().position(|id| *id == dragged)?;
+    let to = ids.iter().position(|id| *id == target)?;
+    let mut ids = ids.to_vec();
+    ids.remove(from);
+    ids.insert(to, dragged);
+    Some(ids)
+}
+
+/// A desktop-local order from before the server kept one: its known
+/// categories first, then the rest in the server's order.
+pub fn carried_order(categories: &[Category], local: &[Uuid]) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = local
+        .iter()
+        .copied()
+        .filter(|id| categories.iter().any(|c| c.id == *id))
+        .collect();
+    ids.extend(
+        categories
+            .iter()
+            .map(|c| c.id)
+            .filter(|id| !local.contains(id)),
+    );
+    ids
 }
 
 /// The bot's category if the client knows it; otherwise unassigned.
@@ -45,10 +72,8 @@ impl<'a> Layout<'a> {
     pub fn new(categories: &'a [Category], bots: &'a [Bot], main: Option<Uuid>) -> Self {
         let pinned = bots.iter().find(|b| Some(b.id) == main);
         let others = || bots.iter().filter(move |b| Some(b.id) != main);
-        let mut sorted: Vec<&Category> = categories.iter().collect();
-        sorted.sort_by_key(|c| (fold(&c.name), c.id));
-        let mut groups: Vec<Group> = sorted
-            .into_iter()
+        let mut groups: Vec<Group> = categories
+            .iter()
             .map(|category| Group {
                 category: Some(category),
                 bots: others()
@@ -75,17 +100,9 @@ impl<'a> Layout<'a> {
         Self { pinned, groups }
     }
 
-    pub fn with_preferences(mut self, preferences: &crate::preferences::Preferences) -> Self {
+    pub fn without_empty_unassigned(mut self) -> Self {
         self.groups
             .retain(|g| g.category.is_some() || !g.bots.is_empty());
-        self.groups.sort_by_key(|g| {
-            (
-                g.category.is_none(),
-                g.category
-                    .and_then(|c| preferences.category_order.iter().position(|id| *id == c.id))
-                    .unwrap_or(usize::MAX),
-            )
-        });
         self
     }
 
@@ -130,10 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn saved_order_collapse_and_empty_unassigned_match_navigation() {
+    fn server_order_collapse_and_empty_unassigned_match_navigation() {
         let categories = vec![
-            category(1, "Alpha"),
             category(2, "Beta"),
+            category(1, "Alpha"),
             category(3, "New"),
         ];
         let bots = vec![
@@ -142,10 +159,9 @@ mod tests {
             bot(12, "B", Some(2)),
         ];
         let mut prefs = crate::preferences::Preferences::default();
-        prefs.category_order = vec![Uuid::from_u128(2), Uuid::from_u128(999), Uuid::from_u128(1)];
         prefs.collapsed.insert(Some(Uuid::from_u128(2)));
         let layout =
-            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).with_preferences(&prefs);
+            Layout::new(&categories, &bots, Some(Uuid::from_u128(10))).without_empty_unassigned();
         assert_eq!(
             shape(&layout),
             vec![
@@ -182,6 +198,7 @@ mod tests {
         Category {
             id: Uuid::from_u128(id),
             name: name.into(),
+            position: None,
         }
     }
 
@@ -201,9 +218,9 @@ mod tests {
     #[test]
     fn categories_then_unassigned_in_a_deterministic_order() {
         let categories = vec![
-            category(2, "work"),
-            category(1, "Family"),
             category(3, "Empty"),
+            category(1, "Family"),
+            category(2, "work"),
         ];
         let bots = vec![
             bot(10, "zeta", Some(2)),
@@ -227,6 +244,24 @@ mod tests {
         assert_eq!(
             layout.visible_order(&Default::default()),
             [13, 11, 15, 10, 12, 14].map(Uuid::from_u128).to_vec()
+        );
+    }
+
+    #[test]
+    fn category_moves_reach_both_ends() {
+        let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
+        let last = moved(&ids, ids[0], ids[2]).unwrap();
+        assert_eq!(last, [ids[1], ids[2], ids[0]]);
+        assert_eq!(moved(&last, ids[0], ids[1]).unwrap(), ids);
+        assert_eq!(moved(&ids, ids[0], Uuid::from_u128(9)), None);
+    }
+
+    #[test]
+    fn a_local_order_carries_known_categories_then_the_rest() {
+        let categories = vec![category(1, "A"), category(2, "B"), category(3, "C")];
+        assert_eq!(
+            carried_order(&categories, &[3, 999, 1].map(Uuid::from_u128)),
+            [3, 1, 2].map(Uuid::from_u128)
         );
     }
 

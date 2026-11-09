@@ -334,6 +334,82 @@ async fn categories_change_during_a_turn_and_survive_a_restart_without_interrupt
     assert_eq!(after["categories"][0]["name"], "Team");
 }
 
+fn names(listing: &Value) -> Vec<&str> {
+    listing["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_orders_categories_for_every_client_and_restart() {
+    let app = TestApp::installed().await;
+    let mut ids = std::collections::HashMap::new();
+    for name in ["Alpha", "Beta", "Gamma"] {
+        ids.insert(
+            name,
+            create(&app, Uuid::new_v4(), name).await.body["category"]["id"].clone(),
+        );
+    }
+    let order = |names: &[&str]| json!({ "category_ids": names.iter().map(|n| ids[n].clone()).collect::<Vec<_>>() });
+    let placed = app
+        .owner(
+            "PUT",
+            "/v1/categories/order",
+            Some(order(&["Gamma", "Alpha", "Beta"])),
+        )
+        .await;
+    assert_eq!(placed.status, StatusCode::OK, "{:?}", placed.body);
+    assert_eq!(names(&placed.body), ["Gamma", "Alpha", "Beta"]);
+    let listed = listing(&app).await;
+    assert_eq!(names(&listed), ["Gamma", "Alpha", "Beta"]);
+    assert_eq!(listed["categories"][2]["position"], 2);
+
+    create(&app, Uuid::new_v4(), "Aardvark").await;
+    assert_eq!(
+        names(&listing(&app).await),
+        ["Gamma", "Alpha", "Beta", "Aardvark"],
+        "a new category follows the placed ones"
+    );
+    assert_eq!(
+        listing(&app).await["categories"][3]["position"],
+        Value::Null
+    );
+
+    let removed = ids["Alpha"].as_str().unwrap().to_owned();
+    app.owner("DELETE", &format!("/v1/categories/{removed}"), None)
+        .await;
+    let stale = app
+        .owner(
+            "PUT",
+            "/v1/categories/order",
+            Some(order(&["Beta", "Alpha"])),
+        )
+        .await;
+    assert_eq!(
+        names(&stale.body),
+        ["Beta", "Aardvark", "Gamma"],
+        "a deleted ID is skipped and unlisted categories follow by name"
+    );
+
+    let twice = app
+        .owner(
+            "PUT",
+            "/v1/categories/order",
+            Some(order(&["Beta", "Beta"])),
+        )
+        .await;
+    assert_eq!(twice.status, StatusCode::BAD_REQUEST);
+
+    let app = app.restart().await;
+    assert_eq!(
+        names(&app.owner("GET", "/v1/categories", None).await.body),
+        ["Beta", "Aardvark", "Gamma"]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn task_grants_cannot_change_categories() {
     let app = TestApp::installed().await;
@@ -374,6 +450,11 @@ async fn task_grants_cannot_change_categories() {
             Some(json!({ "category_id": null })),
         ),
         ("GET", "/v1/categories".to_owned(), None),
+        (
+            "PUT",
+            "/v1/categories/order".to_owned(),
+            Some(json!({ "category_ids": [] })),
+        ),
     ] {
         let reply = app.call(method, &path, body, Some(&token)).await;
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "{method} {path}");

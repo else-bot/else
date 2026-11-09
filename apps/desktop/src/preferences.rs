@@ -11,6 +11,8 @@ pub struct Preferences {
     path: Option<PathBuf>,
     pub sidebar_width: f32,
     pub details_width: f32,
+    /// The category order from before the server kept it; sent to the
+    /// server once, then cleared.
     pub category_order: Vec<Uuid>,
     pub collapsed: HashSet<Option<Uuid>>,
     /// The rules version the owner last opened, per bot.
@@ -73,18 +75,6 @@ impl Preferences {
             let _ = std::fs::remove_file(staged);
         }
         result
-    }
-
-    pub fn reorder(&mut self, ids: Vec<Uuid>, dragged: Uuid, target: Uuid) {
-        let (Some(from), Some(to)) = (
-            ids.iter().position(|id| *id == dragged),
-            ids.iter().position(|id| *id == target),
-        ) else {
-            return;
-        };
-        self.category_order = ids;
-        self.category_order.remove(from);
-        self.category_order.insert(to, dragged);
     }
 }
 
@@ -150,13 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn category_moves_reach_both_ends_and_preferences_round_trip() {
+    fn preferences_round_trip() {
         let ids: Vec<_> = (1..=3).map(Uuid::from_u128).collect();
-        let mut prefs = Preferences::default();
-        prefs.reorder(ids.clone(), ids[0], ids[2]);
-        assert_eq!(prefs.category_order, vec![ids[1], ids[2], ids[0]]);
-        prefs.reorder(prefs.category_order.clone(), ids[0], ids[1]);
-        assert_eq!(prefs.category_order, ids);
+        let mut prefs = Preferences {
+            category_order: ids.clone(),
+            ..Default::default()
+        };
         prefs.collapsed.extend([None, Some(ids[1])]);
         prefs.sidebar_width = 315.;
         prefs.details_width = 410.;

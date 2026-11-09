@@ -282,6 +282,7 @@ pub struct ElseApp {
     _category_enter: Option<Subscription>,
     moving: HashSet<Uuid>,
     category_notice: Option<String>,
+    carrying_order: bool,
     preferences: crate::preferences::Preferences,
     _save_preferences: Option<Task<()>>,
     settings_open: bool,
@@ -375,6 +376,7 @@ impl ElseApp {
             _category_enter: None,
             moving: HashSet::new(),
             category_notice: None,
+            carrying_order: false,
             preferences,
             _save_preferences: None,
             settings_open: false,
@@ -511,6 +513,7 @@ impl ElseApp {
             self.mention_bots = Arc::new(mention_bots);
         }
         self.categories = list.categories;
+        self.carry_category_order(cx);
         self.stopping.retain(|id| {
             self.bots
                 .iter()
