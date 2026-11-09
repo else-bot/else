@@ -421,13 +421,13 @@ pub async fn lock_targets_of_root(
     Ok(())
 }
 
-/// The owner's new message `turn_id` in `bot_id`'s chat answers the work
-/// delegated to that bot whose owner card (question, secret, draft, or
-/// connection) is pending there, or that an earlier chat message in
-/// `conversation_id` took over. A task that showed its card but has not
-/// parked yet is taken over too; the caller stops it. Its outcome becomes
-/// the delegation's; the caller then skips the cards and ends the parked
-/// child turns.
+/// The owner's new message `turn_id` in `bot_id`'s chat steers the work
+/// delegated to that bot: a task it is starting or running, a parked
+/// task whose owner card (question, secret, draft, or connection) is pending
+/// there, and a task an earlier chat message in `conversation_id` took over.
+/// A task parked on anything else holds no slot and keeps waiting. The
+/// message's outcome becomes the delegation's; the caller then skips the
+/// tasks' cards and stops their child turns.
 pub async fn take_over(
     conn: &mut SqliteConnection,
     bot_id: Uuid,
@@ -442,7 +442,8 @@ pub async fn take_over(
                     SELECT id FROM turns WHERE conversation_id = ?2 AND turn_no < ?3
                       AND status IN ('queued', 'waiting', 'preparing', 'sending', 'running'))
                 OR (takeover_turn_id IS NULL AND child_turn_id IN (
-                    SELECT id FROM turns WHERE status IN ('waiting', 'sending', 'running') AND id IN (
+                    SELECT id FROM turns WHERE status IN ('preparing', 'sending', 'running')
+                    UNION ALL SELECT id FROM turns WHERE status = 'waiting' AND id IN (
                         SELECT turn_id FROM owner_questions WHERE status = 'pending'
                         UNION ALL SELECT turn_id FROM secret_requests WHERE status = 'pending'
                         UNION ALL SELECT turn_id FROM outgoing_drafts WHERE status = 'pending'
