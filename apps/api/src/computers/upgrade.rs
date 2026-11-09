@@ -18,8 +18,14 @@
 //! [`ComputerManager::rollback_upgrade`] can switch back; it is never
 //! removed here. A failure before the switch removes only the replacement
 //! this upgrade created and leaves the bot on its old computer.
+//!
+//! The owner starts one from the desktop ([`ComputerManager::start_upgrade`])
+//! or offline with `else-api upgrade-computer`. One started from the
+//! desktop ends the owner's desktop sessions first, and while it runs new
+//! leases are queued instead of waiting on the bot's operation lock.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -83,6 +89,14 @@ rmdir "$(dirname "$2")" 2>/dev/null || true
 sync
 cat /etc/elsebot/image.json 2>/dev/null || echo '{}'"#;
 
+/// An upgrade the owner started from the desktop. Kept in memory: a restart
+/// forgets it, and an interrupted upgrade is cleaned up by the next one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeStatus {
+    Running,
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeReport {
     pub id: Uuid,
@@ -128,6 +142,90 @@ fn sha256_file(path: &Path) -> std::io::Result<(u64, String)> {
 }
 
 impl ComputerManager {
+    pub async fn upgrade_status(&self, bot_id: Uuid) -> Option<UpgradeStatus> {
+        self.upgrades
+            .call(move |upgrades| upgrades.get(&bot_id).cloned())
+            .await
+    }
+
+    pub(super) async fn upgrading(&self, bot_id: Uuid) -> bool {
+        self.upgrade_status(bot_id).await == Some(UpgradeStatus::Running)
+    }
+
+    /// Start moving a bot's computer to the configured image in the
+    /// background; [`Self::upgrade_status`] reports its progress. Refused
+    /// when the computer already uses that image or an upgrade is running.
+    pub async fn start_upgrade(self: &Arc<Self>, bot_id: Uuid) -> Result<(), ComputerError> {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT image FROM bot_computers WHERE bot_id = ?1")
+                .bind(bot_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let image = self.config.image.clone();
+        match current {
+            None => return Err(refused("the bot has no computer yet")),
+            Some(current) if current == image => {
+                return Err(refused("the computer already uses the latest image"));
+            }
+            Some(_) => {}
+        }
+        let claimed = self
+            .upgrades
+            .call(move |upgrades| {
+                if upgrades.get(&bot_id) == Some(&UpgradeStatus::Running) {
+                    return false;
+                }
+                upgrades.insert(bot_id, UpgradeStatus::Running);
+                true
+            })
+            .await;
+        if !claimed {
+            return Err(refused("an upgrade is already running"));
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let upgraded = match this.end_desktop_sessions(bot_id).await {
+                Ok(()) => this.upgrade_image(bot_id, &image, None).await,
+                Err(err) => Err(err),
+            };
+            let failed = match upgraded {
+                Ok(_) => None,
+                Err(ComputerError::Busy(reason)) if reason == "in use" => {
+                    Some("The bot is using its computer. Try again once it is idle.".to_owned())
+                }
+                Err(err) => {
+                    tracing::warn!(bot = %bot_id, error = %err, "computer upgrade failed");
+                    Some(err.to_string())
+                }
+            };
+            this.upgrades
+                .call(move |upgrades| match failed {
+                    None => {
+                        upgrades.remove(&bot_id);
+                    }
+                    Some(error) => {
+                        upgrades.insert(bot_id, UpgradeStatus::Failed(error));
+                    }
+                })
+                .await;
+        });
+        Ok(())
+    }
+
+    /// End the owner's desktop sessions on this bot's computer so the
+    /// upgrade it asked for can stop it. Runs once the upgrade is marked
+    /// running, when new sessions are already refused.
+    async fn end_desktop_sessions(&self, bot_id: Uuid) -> Result<(), ComputerError> {
+        sqlx::query(
+            "UPDATE computer_leases SET released_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'), end_reason = 'upgrade'
+             WHERE bot_id = ?1 AND released_at IS NULL AND holder LIKE 'desktop%'",
+        )
+        .bind(bot_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn active_jobs(&self, bot_id: Uuid) -> Result<i64, ComputerError> {
         Ok(sqlx::query_scalar(
             "SELECT count(*) FROM guest_jobs

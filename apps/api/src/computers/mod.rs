@@ -300,6 +300,7 @@ pub struct ComputerManager {
     secret_key: Option<Arc<crate::credentials::SecretKey>>,
     input_batches: Actor<HashMap<Uuid, u32>>,
     controllers: Actor<HashMap<Uuid, Uuid>>,
+    upgrades: Actor<HashMap<Uuid, upgrade::UpgradeStatus>>,
 }
 
 impl ComputerManager {
@@ -319,6 +320,7 @@ impl ComputerManager {
             secret_key: None,
             input_batches: Actor::default(),
             controllers: Actor::default(),
+            upgrades: Actor::default(),
         }
     }
 
@@ -405,6 +407,11 @@ impl ComputerManager {
         if !self.inspected.load(Ordering::SeqCst) {
             return Ok(Acquire::Queued {
                 reason: "the computer runtime has not been inspected yet".into(),
+            });
+        }
+        if self.upgrading(bot_id).await {
+            return Ok(Acquire::Queued {
+                reason: "the computer is being upgraded; try again in a few minutes".into(),
             });
         }
         let _op = self.op(bot_id).await;

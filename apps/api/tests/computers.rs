@@ -1290,3 +1290,108 @@ async fn grown_computers_stay_counted_until_their_size_is_reset() {
     fake.fail_configure.store(false, SeqCst);
     let (_, _) = ready(&manager, a, "test:a2").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owners_upgrade_from_the_api_while_turns_queue() {
+    let db = common::TestDb::migrated().await;
+    else_api::db::installation::setup(&db.pool).await.unwrap();
+    let fake = Arc::new(Fake::default());
+    let manager = Arc::new(ComputerManager::new(
+        db.pool.clone(),
+        fake.clone(),
+        ComputerConfig {
+            image: "img:new".into(),
+            ..config(2)
+        },
+    ));
+    manager.reconcile_startup().await.unwrap();
+    let registry = else_api::providers::Registry::new(vec![Arc::new(
+        else_api::providers::synthetic::Synthetic::new(Duration::from_millis(1)),
+    )]);
+    let app = TestApp::with_parts(Arc::new(db), 4, registry, Some(manager.clone()));
+    let bot: Uuid = app.create_bot("Upgrade").await.parse().unwrap();
+    let path = format!("/v1/bots/{bot}/computer");
+
+    let (turn, _) = ready(&manager, bot, "turn:gone").await;
+    manager.release(turn).await.unwrap();
+    first_stop(&app, &manager, &fake, bot).await;
+    sqlx::query("UPDATE bot_computers SET image = 'img:old' WHERE bot_id = ?1")
+        .bind(bot)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    let shown = app.owner("GET", &path, None).await.body;
+    assert_eq!(
+        (&shown["image"], &shown["latest_image"], &shown["upgrade"]),
+        (
+            &serde_json::json!("img:old"),
+            &serde_json::json!("img:new"),
+            &serde_json::Value::Null
+        )
+    );
+
+    let (held, _) = ready(&manager, bot, "cli:held").await;
+    let (desktop, _) = ready(&manager, bot, &format!("desktop:{bot}")).await;
+    let upgrade = format!("{path}/upgrade");
+    assert_eq!(
+        app.owner("POST", &upgrade, None).await.status,
+        StatusCode::ACCEPTED
+    );
+    let failed = settled(&app, &path).await;
+    assert_eq!(failed["upgrade"]["state"], "failed", "{failed}");
+    assert!(
+        failed["upgrade"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("idle")),
+        "{failed}"
+    );
+    assert_eq!(failed["image"], "img:old");
+
+    manager.release(held).await.unwrap();
+    *fake.create_delay.lock().unwrap() = Duration::from_millis(500);
+    assert_eq!(
+        app.owner("POST", &upgrade, None).await.status,
+        StatusCode::ACCEPTED
+    );
+    let again = app.owner("POST", &upgrade, None).await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+    assert_eq!(
+        app.owner("GET", &path, None).await.body["upgrade"]["state"],
+        "running"
+    );
+    assert!(
+        matches!(
+            manager.acquire(bot, "turn:during").await.unwrap(),
+            Acquire::Queued { .. }
+        ),
+        "a turn queues instead of waiting for the upgrade"
+    );
+
+    let done = settled(&app, &path).await;
+    assert_eq!(
+        (&done["image"], &done["upgrade"]),
+        (&serde_json::json!("img:new"), &serde_json::Value::Null),
+        "{done}"
+    );
+    let desktop_released: bool = sqlx::query_scalar(
+        "SELECT released_at IS NOT NULL AND end_reason = 'upgrade' FROM computer_leases WHERE id = ?1",
+    )
+    .bind(desktop)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert!(desktop_released, "the owner's desktop session ended");
+    let latest = app.owner("POST", &upgrade, None).await;
+    assert_eq!(latest.status, StatusCode::CONFLICT, "{:?}", latest.body);
+}
+
+async fn settled(app: &TestApp, path: &str) -> serde_json::Value {
+    for _ in 0..200 {
+        let body = app.owner("GET", path, None).await.body;
+        if body["upgrade"]["state"] != "running" {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the upgrade did not finish");
+}

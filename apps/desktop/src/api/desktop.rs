@@ -30,6 +30,25 @@ pub struct ComputerState {
     pub desired_state: String,
     #[serde(default)]
     pub desktop_available: bool,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub latest_image: Option<String>,
+    #[serde(default)]
+    pub upgrade: Option<ComputerUpgrade>,
+}
+
+impl ComputerState {
+    pub fn outdated(&self) -> bool {
+        matches!((&self.image, &self.latest_image), (Some(image), Some(latest)) if image != latest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ComputerUpgrade {
+    Running,
+    Failed { error: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,10 +261,24 @@ impl Client {
     }
 
     pub async fn resume_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(bot, "resume").await
+    }
+
+    /// Starts moving the computer to the server's latest image; the
+    /// computer state reports its progress.
+    pub async fn upgrade_computer(self: Arc<Self>, bot: Uuid) -> Result<(), ClientError> {
+        self.post_computer(bot, "upgrade").await
+    }
+
+    async fn post_computer(
+        self: Arc<Self>,
+        bot: Uuid,
+        action: &'static str,
+    ) -> Result<(), ClientError> {
         let this = self.clone();
         self.run(async move {
             let request = this
-                .request(Method::POST, &format!("/v1/bots/{bot}/computer/resume"))
+                .request(Method::POST, &format!("/v1/bots/{bot}/computer/{action}"))
                 .timeout(Duration::from_secs(15));
             let response = this.send_request(request).await?;
             let status = response.status();
@@ -539,6 +572,37 @@ mod tests {
     fn client(origin: Origin) -> Arc<Client> {
         let token = OwnerToken::parse(&"T".repeat(43)).unwrap();
         Arc::new(Client::new(origin, &token, tokio::runtime::Handle::current()).unwrap())
+    }
+
+    #[test]
+    fn computer_state_reports_an_outdated_image_and_upgrade_progress() {
+        let parse =
+            |json: serde_json::Value| -> ComputerState { serde_json::from_value(json).unwrap() };
+        let base = serde_json::json!({ "state": "stopped", "desired_state": "auto" });
+        assert!(
+            !parse(base.clone()).outdated(),
+            "an older server sends no images"
+        );
+        let outdated = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "image": "img:old", "latest_image": "img:new", "upgrade": null,
+        }));
+        assert!(outdated.outdated());
+        assert_eq!(outdated.upgrade, None);
+        let running = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto", "upgrade": { "state": "running" },
+        }));
+        assert_eq!(running.upgrade, Some(ComputerUpgrade::Running));
+        let failed = parse(serde_json::json!({
+            "state": "stopped", "desired_state": "auto",
+            "upgrade": { "state": "failed", "error": "busy" },
+        }));
+        assert_eq!(
+            failed.upgrade,
+            Some(ComputerUpgrade::Failed {
+                error: "busy".into()
+            })
+        );
     }
 
     #[test]
