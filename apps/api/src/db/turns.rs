@@ -842,16 +842,12 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     );
     input.memory = memory?;
     let permissions = permissions?;
-    if input.delegation.origin == crate::app::providers::Origin::OwnerRequest {
-        input.standing_permissions = permissions
-            .into_iter()
-            .filter_map(|p| p.target)
-            .filter(|t| {
-                !input.delegation.delegated_task
-                    || matches!(t, crate::app::questions::PermissionTarget::Task { .. })
-            })
-            .collect();
-    }
+    let reach = input.grant_reach();
+    input.standing_permissions = permissions
+        .into_iter()
+        .filter_map(|p| p.target)
+        .filter(|t| reach.covers(t))
+        .collect();
     Ok(input)
 }
 

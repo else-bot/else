@@ -527,18 +527,58 @@ async fn work_delegated_for_an_owner_request_uses_but_never_records_a_task_grant
     }
 }
 
+const LIKES: &str = "Like relevant X lead posts";
+const X_LIKES: &str = "X @proliquid_xyz post likes via computer browser/CDP";
+
+fn like(task: &str, target: &str) -> Value {
+    json!({ "action": "click", "selector": "[data-testid=like]", "effect": "external",
+            "purpose": "Like a lead's post", "task_scope": { "task": task, "target": target } })
+}
+
+async fn runs_without_a_card(app: &TestApp, token: &str, args: Value) {
+    let ran = tool(app, token, "computer_browser", args).await;
+    assert!(
+        ran.body.to_string().contains("COMPUTER_UNAVAILABLE"),
+        "a granted call reaches the computer without a card: {}",
+        ran.body
+    );
+}
+
+async fn asks_for(app: &TestApp, token: &str, args: Value) -> Uuid {
+    let asked = tool(app, token, "computer_browser", args).await;
+    assert_eq!(asked.result["status"], "pending", "{}", asked.body);
+    asked.result["question_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+async fn choices_of(app: &TestApp, question: Uuid) -> Vec<String> {
+    let choices: String = sqlx::query_scalar("SELECT choices FROM owner_questions WHERE id = ?1")
+        .bind(question)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    serde_json::from_str::<Vec<Value>>(&choices)
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn routine_runs_keep_routine_grants_and_never_receive_task_grants() {
+async fn scheduled_routine_runs_use_task_grants_but_webhook_wakes_do_not() {
     let h = recorder::harness(8).await;
     let app = &h.app;
     let main = app.main_bot().await;
-    let authorization = "Always allow managing Tailscale over SSH on omarchy-m1.";
+    let authorization = "You are always approved to like posts.";
     let (setup, token) = h.running(&main, &format!("{GATE} {authorization}")).await;
     let created = tool(
         app,
         &token,
         "routine_create",
-        json!({ "name": "Tailscale", "prompt": format!("{GATE} Refresh Tailscale."),
+        json!({ "name": "Scout", "prompt": format!("{GATE} Scout X leads."),
                 "cron": "0 9 1 1 *" }),
     )
     .await;
@@ -547,11 +587,20 @@ async fn routine_runs_keep_routine_grants_and_never_receive_task_grants() {
         DateTime::parse_from_rfc3339(created.result["routine"]["next_run_at"].as_str().unwrap())
             .unwrap()
             .to_utc();
+    let webhook = tool(
+        app,
+        &token,
+        "webhook_create",
+        json!({ "name": "Lead alert", "prompt": format!("{GATE} Scout X leads.") }),
+    )
+    .await;
+    assert!(!webhook.error, "{}", webhook.body);
     let confirmed = tool(
         app,
         &token,
         "confirm_permission",
-        json!({ "target": task_target(TASK), "authorization": authorization }),
+        json!({ "target": { "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external" },
+                "authorization": authorization }),
     )
     .await;
     assert_eq!(confirmed.result["status"], "approved", "{}", confirmed.body);
@@ -568,24 +617,85 @@ async fn routine_runs_keep_routine_grants_and_never_receive_task_grants() {
             .await
             .unwrap();
     let (_, token) = h.started(run).await;
+    let input = h.inputs(run).await.last().unwrap().clone();
+    assert_eq!(
+        serde_json::to_value(&input.standing_permissions).unwrap(),
+        json!([{ "scope": "task", "task": LIKES, "target": X_LIKES, "kind": "external" }]),
+        "the run sees the saved task grant it may reuse"
+    );
+    runs_without_a_card(app, &token, like(LIKES, X_LIKES)).await;
     let refused = tool(
         app,
         &token,
         "confirm_permission",
-        json!({ "target": task_target(TASK), "authorization": "Refresh Tailscale." }),
+        json!({ "target": { "scope": "task", "task": LIKES, "target": "X @other", "kind": "external" },
+                "authorization": "Scout X leads." }),
     )
     .await;
-    assert!(refused.error, "{}", refused.body);
-    let mut action = tailscale("up");
-    action["authorization"] = json!("Refresh Tailscale.");
-    let (question, choices) = pending(app, &token, action).await;
-    assert_eq!(choices, ["approve", "deny", "approve_routine"]);
+    assert!(
+        refused.error,
+        "a routine prompt records no grant: {}",
+        refused.body
+    );
+    let other = asks_for(app, &token, like(LIKES, "X @other post likes")).await;
+    assert_eq!(choices_of(app, other).await, ALWAYS);
     h.release(run).await;
     wait(app, run, "waiting").await;
     assert_eq!(
-        answer(app, &main, question, "approve_task").await,
-        StatusCode::BAD_REQUEST
+        answer(app, &main, other, "approve_task").await,
+        StatusCode::OK
     );
-    assert_eq!(answer(app, &main, question, "deny").await, StatusCode::OK);
+    assert_eq!(
+        permissions(app, &main).await.len(),
+        2,
+        "the run's card saved a task grant"
+    );
+    let token = h.continued(run, &token).await;
+    let (cleanup, choices) = pending(
+        app,
+        &token,
+        json!({ "kind": "destructive", "action": "rm -rf cache" }),
+    )
+    .await;
+    assert_eq!(choices, ["approve", "deny", "approve_routine"]);
+    h.release(run).await;
+    wait(app, run, "waiting").await;
+    assert_eq!(answer(app, &main, cleanup, "deny").await, StatusCode::OK);
+    h.continued(run, &token).await;
+    h.release(run).await;
     wait(app, run, "completed").await;
+
+    let id = webhook.result["webhook"]["id"].as_str().unwrap();
+    let secret = webhook.result["token"].as_str().unwrap();
+    let fired = app
+        .call("POST", &format!("/webhooks/v1/{id}"), None, Some(secret))
+        .await;
+    assert_eq!(fired.status, StatusCode::ACCEPTED, "{}", fired.body);
+    let wake: Uuid = loop {
+        let found: Option<Uuid> =
+            sqlx::query_scalar("SELECT turn_id FROM webhook_runs WHERE turn_id IS NOT NULL")
+                .fetch_optional(&app.db.pool)
+                .await
+                .unwrap();
+        if let Some(turn) = found {
+            break turn;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let (_, token) = h.started(wake).await;
+    assert!(
+        h.inputs(wake)
+            .await
+            .last()
+            .unwrap()
+            .standing_permissions
+            .is_empty()
+    );
+    let asked = asks_for(app, &token, like(LIKES, X_LIKES)).await;
+    assert_eq!(
+        choices_of(app, asked).await,
+        ONCE,
+        "a webhook wake asks every time"
+    );
+    h.release(wake).await;
 }

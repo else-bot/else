@@ -19,7 +19,8 @@
 //! ends it. A tool grant covers one MCP tool and effect, and a task grant
 //! one declared task, target, and effect of host actions and computer tool calls. A tool grant
 //! applies only in the bot's owner requests; a task grant also in tasks
-//! delegated to the bot for an owner request, whose cards approve once. Which scope a card offers and which grant applies
+//! delegated to the bot for an owner request, whose cards approve once, and
+//! in scheduled runs of the bot's routines. Which scope a card offers and which grant applies
 //! come from the turn's source in the database; a task grant matches the
 //! declared task and target exactly and never interprets the action.
 
@@ -39,8 +40,8 @@ pub mod standing;
 use crate::app::providers::Origin;
 use crate::app::questions::{
     APPROVE, APPROVE_FOREVER, APPROVE_ROUTINE, APPROVE_TASK, APPROVE_TOOL, Action, Answer, Choice,
-    DESTRUCTIVE_SCOPE, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing, Status,
-    approval_choices,
+    DESTRUCTIVE_SCOPE, GrantReach, Kind, MAX_PER_TURN, Outcome, PermissionTarget, Spec, Standing,
+    Status, approval_choices,
 };
 
 /// A question as shown to the owner and recorded in events.
@@ -332,6 +333,26 @@ async fn scope(conn: &mut SqliteConnection, turn_id: Uuid) -> Result<Scope, sqlx
     })
 }
 
+/// Which saved grants `turn_id` may use.
+async fn reach(
+    conn: &mut SqliteConnection,
+    turn_id: Uuid,
+    scope: Scope,
+) -> Result<GrantReach, sqlx::Error> {
+    let owner_chat: Option<bool> = sqlx::query_scalar(
+        "SELECT c.kind = 'owner' FROM turns t JOIN conversations c ON c.id = t.conversation_id
+         WHERE t.id = ?1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(GrantReach::of(
+        super::delegations::origin(conn, turn_id).await?,
+        matches!(scope, Scope::Routine { .. }),
+        owner_chat.unwrap_or(false),
+    ))
+}
+
 /// What a gated computer tool call may do now.
 #[derive(Debug)]
 pub enum Gate {
@@ -364,7 +385,7 @@ async fn owner_message_quotes(
 /// this action in this request stands; an approval for exactly these
 /// arguments is consumed by this one call; a tool or task grant matching the
 /// action runs it in an owner request (a task grant also in work delegated
-/// for one); otherwise the owner is asked, on a
+/// for one and in a scheduled routine run); otherwise the owner is asked, on a
 /// card offering only the grant this turn's scope can receive. A host action
 /// without a task scope is offered no standing grant.
 pub async fn gate(pool: &SqlitePool, turn_id: Uuid, spec: &Spec) -> Result<Gate, RequestError> {
@@ -389,23 +410,17 @@ pub async fn gate_host(
         .await?
         .ok_or(RequestError::NotRunning)?;
     let scope = scope(&mut tx, turn_id).await?;
-    // A task grant also covers the bot's work that another bot delegated
-    // for an owner request; a tool grant covers only the owner's own chat.
-    let target = if super::delegations::origin(&mut tx, turn_id).await? == Origin::OwnerRequest {
-        spec.approval
-            .as_ref()
-            .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
-            .filter(|t| caller.owner_conversation || matches!(t, PermissionTarget::Task { .. }))
-    } else {
-        None
-    };
-    let granted = match (scope, &target) {
-        (Scope::Bot, Some(target)) => {
-            if has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await? {
-                Some(target.standing())
-            } else {
-                None
-            }
+    let reach = reach(&mut tx, turn_id, scope).await?;
+    let target = spec
+        .approval
+        .as_ref()
+        .and_then(|a| PermissionTarget::for_action(spec.kind, &a.action))
+        .filter(|t| reach.covers(t));
+    let granted = match &target {
+        Some(target)
+            if has_permission(&mut tx, caller.bot_id, &target.bot_scope().unwrap()).await? =>
+        {
+            Some(target.standing())
         }
         _ => None,
     };
@@ -465,7 +480,7 @@ pub async fn gate_host(
         return Ok(Gate::Run { standing: None });
     }
     let offer = match (scope, &target) {
-        (Scope::Bot, Some(target)) => Some(target.standing()),
+        (_, Some(target)) => Some(target.standing()),
         (Scope::Bot, None) if host => None,
         _ => scope.offer(),
     };
@@ -599,18 +614,14 @@ pub async fn answer(
     };
     let granted_scope = match standing {
         Some(standing) => {
-            if !matches!(scope(&mut tx, question.turn_id).await?, Scope::Bot)
-                || super::delegations::origin(&mut tx, question.turn_id).await?
-                    != Origin::OwnerRequest
-            {
-                return Err(SettleError::InvalidChoice);
-            }
+            let scope = scope(&mut tx, question.turn_id).await?;
+            let reach = reach(&mut tx, question.turn_id, scope).await?;
             Some(
                 question
                     .action
                     .as_ref()
                     .and_then(|a| PermissionTarget::for_action(question.kind, a))
-                    .filter(|target| target.standing() == standing)
+                    .filter(|target| target.standing() == standing && reach.covers(target))
                     .and_then(|target| target.bot_scope())
                     .ok_or(SettleError::InvalidChoice)?,
             )

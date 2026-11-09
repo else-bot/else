@@ -180,6 +180,16 @@ pub struct InstalledMcp {
     pub description: String,
 }
 
+impl TurnInput {
+    pub fn grant_reach(&self) -> super::questions::GrantReach {
+        super::questions::GrantReach::of(
+            self.delegation.origin,
+            matches!(self.run, Some(SavedRun::Routine(_))),
+            !self.delegation.delegated_task,
+        )
+    }
+}
+
 /// The saved task a turn runs instead of an owner message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedRun {
