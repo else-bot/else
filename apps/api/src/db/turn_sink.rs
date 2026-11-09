@@ -38,7 +38,13 @@ struct SinkState {
     delivered_drafts: Vec<Uuid>,
     delivered_socials: Vec<Uuid>,
     delivered_waits: Vec<Uuid>,
+    /// A delegated task: its text updates the delegating turn's progress.
+    delegated: bool,
+    progress_at: Option<std::time::Instant>,
 }
+
+/// How often a delegated task's streamed text republishes its handoff.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct SqliteSink {
     state: Actor<SinkState>,
@@ -70,6 +76,8 @@ impl SqliteSink {
                 delivered_secrets: input.secrets.iter().map(|o| o.id).collect(),
                 delivered_socials: input.social_setups.iter().map(|s| s.id).collect(),
                 delivered_waits: input.mcp_waits.iter().map(|w| w.id).collect(),
+                delegated: input.delegation.delegated_task,
+                progress_at: None,
                 delivered_questions: input.questions.iter().map(|o| o.id).collect(),
                 delivered_drafts: input
                     .outgoing_drafts
@@ -316,7 +324,17 @@ impl SinkState {
             let item = self
                 .write_text(&mut tx, self.assistant_item, &transcript, &chunk)
                 .await?;
+            let progressed = self.delegated
+                && self
+                    .progress_at
+                    .is_none_or(|at| at.elapsed() >= PROGRESS_EVERY);
+            if progressed {
+                crate::db::events::task_progressed(&mut tx, self.turn_id).await?;
+            }
             tx.commit().await?;
+            if progressed {
+                self.progress_at = Some(std::time::Instant::now());
+            }
             Ok(Some(item))
         }
         .await;

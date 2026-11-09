@@ -547,7 +547,7 @@ pub async fn continue_waiting(
            AND (NOT EXISTS (SELECT 1 FROM delegations
                             WHERE root_turn_id = ?1 AND status IN ('queued', 'running'))
                 OR EXISTS (SELECT 1 FROM delegations d
-                           WHERE d.root_turn_id = ?1 AND {})))",
+                           WHERE d.root_turn_id = ?1 AND {}))",
         crate::db::delegations::READY
     )))
     .bind(turn_id)

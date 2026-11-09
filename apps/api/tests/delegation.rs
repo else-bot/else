@@ -2243,3 +2243,44 @@ async fn a_routine_task_is_not_carried_onto_an_owner_message() {
         "an owner message would widen the routine task's authority"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_delegating_turn_hears_a_tasks_progress_while_its_message_streams() {
+    let app = app_with(2).await;
+    let growth = leaf(&app, "Growth").await;
+    let (main, root, token) = running_main(&app).await;
+    let task = format!(
+        "[synthetic:slow] Audit the indexing notice. {}",
+        "Report each affected URL and its state. ".repeat(8)
+    );
+    let reply = delegate(&app, &token, &growth, &task).await;
+    let task_id = tool_text(&reply)["task_id"].as_str().unwrap().to_owned();
+    let main: Uuid = main.parse().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let heard = turn_events(&app.db.pool, main, root)
+            .await
+            .into_iter()
+            .any(|(_, data)| {
+                data["turn"]["delegations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|d| {
+                        d["id"] == task_id.as_str()
+                            && d["status"] == "running"
+                            && d["progress"]
+                                .as_str()
+                                .is_some_and(|p| p.starts_with("Synthetic reply"))
+                    })
+            });
+        if heard {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no progress reached the delegating turn while the task ran"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
