@@ -288,6 +288,49 @@ async fn owner_routes_never_return_credentials_and_task_tokens_cannot_manage_acc
 }
 
 #[tokio::test]
+async fn the_owner_turns_new_mail_wake_ups_on_and_off_from_bot_details() {
+    let h = recorder::harness(4).await;
+    let account = account(&h.app).await;
+    let bot = h.app.create_bot("Mail helper").await;
+    let triggers = || async {
+        h.app
+            .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+            .await
+            .body["mail_triggers"]
+            .clone()
+    };
+    assert_eq!(triggers().await[0]["account_id"], json!(account.id));
+    assert_eq!(triggers().await[0]["wake"], false);
+    let path = format!(
+        "/v1/connectors/email/accounts/{}/bots/{bot}/wake",
+        account.id
+    );
+    let on = h.app.owner("PUT", &path, Some(json!({"wake":true}))).await;
+    assert_eq!(on.status, StatusCode::OK, "{}", on.body);
+    assert_eq!(triggers().await[0]["wake"], true);
+    let (_, token) = h.running(&bot, GATE).await;
+    let listed = tool(&h.app, &token, "mail_accounts", json!({})).await;
+    assert_eq!(
+        listed.result["accounts"][0]["permissions"],
+        json!({"read":true,"write":true,"send":true,"wake":true})
+    );
+    h.app.owner("PUT", &path, Some(json!({"wake":false}))).await;
+    assert_eq!(triggers().await[0]["wake"], false);
+    h.app
+        .owner(
+            "DELETE",
+            &format!("/v1/connectors/email/accounts/{}/bots/{bot}", account.id),
+            None,
+        )
+        .await;
+    assert_eq!(
+        triggers().await,
+        json!([]),
+        "an inbox the bot can't read is no trigger"
+    );
+}
+
+#[tokio::test]
 async fn accounts_are_available_to_bots_created_later_without_waking_them() {
     let h = recorder::harness(4).await;
     let account = account(&h.app).await;
@@ -1038,6 +1081,27 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     .unwrap();
     let answered = approve().await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
+    let bot_id: Uuid = bot.parse().unwrap();
+    let woken = |account| store::permissions(&app.db.pool, account, bot_id);
+    assert!(
+        woken(other_mailbox.id).await.unwrap().unwrap().wake,
+        "the signed-in inbox wakes the bot that asked for it"
+    );
+    assert!(!woken(unrelated.id).await.unwrap().unwrap().wake);
+    let triggers = app
+        .owner("GET", &format!("/v1/bots/{bot}/conversation"), None)
+        .await
+        .body["mail_triggers"]
+        .clone();
+    assert_eq!(
+        triggers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["address"].as_str().unwrap(), t["wake"].as_bool().unwrap()))
+            .collect::<Vec<_>>(),
+        [("bot@example.com", false), ("other@gmail.com", true)]
+    );
     let token = h.continued(turn, &token).await;
     let packet = h.packets().await.into_iter().last().unwrap();
     assert!(packet.contains("<email_connection"), "{packet}");

@@ -40,7 +40,8 @@ pub async fn notify(_conn: &mut SqliteConnection, _bot_id: Uuid) -> Result<(), s
 }
 
 /// The bot's current state, with its routines and their last runs, its
-/// social triggers, and its rules version: every routine, trigger, and turn change journals one.
+/// social and mail triggers, and its rules version: every routine, trigger,
+/// inbox, and turn change journals one.
 pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<(), sqlx::Error> {
     if let Some(mut bot) = bots::find_in(conn, bot_id).await? {
         bot.metadata_revision =
@@ -54,13 +55,15 @@ pub async fn bot_updated(conn: &mut SqliteConnection, bot_id: Uuid) -> Result<()
             .map(routine_json)
             .collect();
         let social_triggers = crate::socials::store::triggers(conn, bot_id).await?;
+        let mail_triggers = crate::connectors::store::mail_triggers(conn, bot_id).await?;
         let rules_version = super::rules::version(conn, bot_id).await?;
         append(
             conn,
             bot_id,
             "bot.updated",
             json!({ "bot_id": bot_id, "bot": bot_json(&bot), "routines": routines,
-                    "social_triggers": social_triggers, "rules_version": rules_version }),
+                    "social_triggers": social_triggers, "mail_triggers": mail_triggers,
+                    "rules_version": rules_version }),
         )
         .await?;
     }

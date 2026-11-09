@@ -639,15 +639,18 @@ pub async fn answer(
     }
     // An inbox card approves only the requested address, or an account of
     // its provider connected since it was asked: Google may authorize a
-    // different mailbox than the bot named.
+    // different mailbox than the bot named. The asking bot then wakes on
+    // that inbox's new mail.
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
-        let connected: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM connector_accounts WHERE state <> 'removed'
+        let connected: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM connector_accounts WHERE state <> 'removed'
                 AND (lower(json_extract(config, '$.address')) = ?1
                      OR (json_extract(config, '$.provider') = ?3
-                         AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2))))",
+                         AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))
+             ORDER BY lower(json_extract(config, '$.address')) = ?1 DESC, created_at DESC
+             LIMIT 1",
         )
         .bind(email_connection.address.to_lowercase())
         .bind(question.id)
@@ -658,10 +661,17 @@ pub async fn answer(
                 .unwrap_or_default()
                 .to_owned(),
         )
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if !connected {
+        let Some(account_id) = connected else {
             return Err(SettleError::InboxNotConnected);
+        };
+        match crate::connectors::store::wake_in(&mut tx, account_id, bot_id, true).await {
+            Ok(_) => {}
+            Err(crate::connectors::store::StoreError::Db(error)) => return Err(error.into()),
+            Err(error) => {
+                tracing::warn!(%account_id, %bot_id, %error, "inbox connected without wake-ups");
+            }
         }
     }
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(

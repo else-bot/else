@@ -93,6 +93,16 @@ pub struct Permissions {
     pub wake: bool,
 }
 
+/// An inbox a bot can read, and whether its new mail wakes the bot.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct MailTrigger {
+    pub account_id: Uuid,
+    pub address: String,
+    pub state: String,
+    pub health: String,
+    pub wake: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MessageRef {

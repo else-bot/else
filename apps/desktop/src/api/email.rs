@@ -27,6 +27,15 @@ impl EmailProvider {
     }
 }
 
+/// An inbox a bot can read, and whether its new mail wakes the bot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MailTrigger {
+    pub account_id: Uuid,
+    pub address: String,
+    pub state: String,
+    pub wake: bool,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct EmailEndpoint {
     pub host: String,
@@ -169,6 +178,21 @@ impl Client {
                 .map(|(_, body)| body.account)
         })
         .await
+    }
+
+    pub async fn set_email_wake(
+        self: Arc<Self>,
+        account: Uuid,
+        bot: Uuid,
+        wake: bool,
+    ) -> Result<(), ClientError> {
+        self.call::<Value>(
+            Method::PUT,
+            format!("/v1/connectors/email/accounts/{account}/bots/{bot}/wake"),
+            Some(json!({"wake":wake})),
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn introduce_email(

@@ -78,6 +78,7 @@ async fn snapshot(
         "older_before_seq": snapshot.older_before_seq,
         "routines": snapshot.routines.iter().map(routine_json).collect::<Vec<_>>(),
         "social_triggers": snapshot.social_triggers,
+        "mail_triggers": snapshot.mail_triggers,
         "rules_version": snapshot.rules_version,
     })))
 }

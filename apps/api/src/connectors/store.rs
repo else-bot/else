@@ -28,7 +28,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::types::{
-    Account, Credential, Cursor, MailCommand, MailConfig, Permissions, Provider, Scan,
+    Account, Credential, Cursor, MailCommand, MailConfig, MailTrigger, Permissions, Provider, Scan,
 };
 use crate::credentials::SecretKey;
 
@@ -266,6 +266,7 @@ pub async fn create(
     .bind(&sealed.cipher)
     .execute(&mut *tx)
     .await?;
+    inboxes_changed(&mut tx).await?;
     tx.commit().await?;
     Ok(Account {
         id,
@@ -475,15 +476,20 @@ pub async fn set_active(
     } else {
         ("paused", "active")
     };
-    sqlx::query(sqlx::AssertSqlSafe(format!(
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE connector_accounts SET state = ?2, generation = generation + 1, updated_at = {NOW}
          WHERE id = ?1 AND state = ?3"
     )))
     .bind(id)
     .bind(to)
     .bind(from)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if done.rows_affected() == 1 {
+        inboxes_changed(&mut tx).await?;
+    }
+    tx.commit().await?;
     account(pool, id).await
 }
 
@@ -536,6 +542,7 @@ pub async fn remove(pool: &SqlitePool, id: Uuid) -> Result<bool, StoreError> {
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    inboxes_changed(&mut tx).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -550,10 +557,53 @@ pub async fn set_permissions(
     bot_id: Uuid,
     p: &Permissions,
 ) -> Result<bool, StoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let changed = write_grant(&mut tx, account_id, bot_id, p).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Turn new-mail wake-ups on or off for one bot, keeping its other access.
+/// Waking needs read, so turning it on also grants read.
+pub async fn set_wake(
+    pool: &SqlitePool,
+    account_id: Uuid,
+    bot_id: Uuid,
+    wake: bool,
+) -> Result<bool, StoreError> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let changed = wake_in(&mut tx, account_id, bot_id, wake).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// [`set_wake`] inside the caller's immediate transaction.
+pub async fn wake_in(
+    conn: &mut SqliteConnection,
+    account_id: Uuid,
+    bot_id: Uuid,
+    wake: bool,
+) -> Result<bool, StoreError> {
+    let current = grant_in(conn, account_id, bot_id)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    let p = Permissions {
+        read: current.read || wake,
+        wake,
+        ..current
+    };
+    write_grant(conn, account_id, bot_id, &p).await
+}
+
+async fn write_grant(
+    tx: &mut SqliteConnection,
+    account_id: Uuid,
+    bot_id: Uuid,
+    p: &Permissions,
+) -> Result<bool, StoreError> {
     if !p.read && (p.write || p.send || p.wake) {
         return Err(StoreError::Invalid("write, send and wake need read"));
     }
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let live: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM connector_accounts WHERE id = ?1 AND state <> 'removed')
             AND EXISTS (SELECT 1 FROM bots WHERE id = ?2 AND status = 'active')",
@@ -620,8 +670,38 @@ pub async fn set_permissions(
     .bind(p.wake)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
+    crate::db::events::bot_updated(tx, bot_id).await?;
     Ok(true)
+}
+
+/// Every inbox one bot can read, and whether its new mail wakes the bot.
+pub async fn mail_triggers(
+    conn: &mut SqliteConnection,
+    bot_id: Uuid,
+) -> Result<Vec<MailTrigger>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT a.id AS account_id, a.address, a.state, a.health,
+                coalesce(g.can_wake, 0) AS wake
+         FROM connector_accounts a
+         LEFT JOIN connector_grants g ON g.account_id = a.id AND g.bot_id = ?1
+         WHERE a.state <> 'removed' AND coalesce(g.can_read, 1)
+         ORDER BY a.created_at, a.id",
+    )
+    .bind(bot_id)
+    .fetch_all(conn)
+    .await
+}
+
+/// Republish every active bot's state after an inbox was added, removed,
+/// paused, or resumed, since each bot lists the inboxes it can read.
+async fn inboxes_changed(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let bots: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM bots WHERE status = 'active'")
+        .fetch_all(&mut *conn)
+        .await?;
+    for bot in bots {
+        crate::db::events::bot_updated(conn, bot).await?;
+    }
+    Ok(())
 }
 
 fn permissions_of((read, write, send, wake): (bool, bool, bool, bool)) -> Permissions {
