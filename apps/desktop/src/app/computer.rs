@@ -507,25 +507,27 @@ impl ComputerView {
 
     /// Gives the guest the host clipboard's text when it changed since the
     /// guest last received it, so text copied inside the guest stays until
-    /// something new is copied on the host.
-    fn share_clipboard(&mut self, cx: &mut Context<Self>) {
+    /// something new is copied on the host. False when the host text is too
+    /// long, so a paste does not insert the guest's older text instead.
+    fn share_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.controlling() {
-            return;
+            return true;
         }
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
+            return true;
         };
         if text.is_empty() || self.shared_clipboard.as_ref() == Some(&text) {
-            return;
+            return true;
         }
         if text.len() > MAX_CLIPBOARD_BYTES {
             self.notice =
                 Some("The clipboard holds more text than the desktop takes (256 KB).".into());
             cx.notify();
-        } else {
-            self.send(DesktopCommand::Clipboard { text: text.clone() }, cx);
+            return false;
         }
+        self.send(DesktopCommand::Clipboard { text: text.clone() }, cx);
         self.shared_clipboard = Some(text);
+        true
     }
 
     fn sync_modifiers(&mut self, next: Modifiers, cx: &mut Context<Self>) {
@@ -546,8 +548,8 @@ impl ComputerView {
         if !self.controlling() {
             return;
         }
-        if down && pastes(stroke) {
-            self.share_clipboard(cx);
+        if down && pastes(stroke) && !self.share_clipboard(cx) {
+            return;
         }
         self.sync_modifiers(stroke.modifiers, cx);
         #[cfg(target_os = "macos")]
@@ -714,8 +716,9 @@ impl ComputerView {
                         button,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                             view.focus.focus(window, cx);
-                            if button == MouseButton::Middle {
-                                view.share_clipboard(cx);
+                            if button == MouseButton::Middle && !view.share_clipboard(cx) {
+                                cx.stop_propagation();
+                                return;
                             }
                             view.sync_modifiers(event.modifiers, cx);
                             view.pointer(event.position, view.buttons | button_mask(button), cx);
