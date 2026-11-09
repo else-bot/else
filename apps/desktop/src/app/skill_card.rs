@@ -47,7 +47,17 @@ impl ElseApp {
             }
             false
         });
+        let mut unopened = Vec::new();
         for install in installs {
+            if install.status == SkillInstallStatus::Pending
+                && view
+                    .skill_cards
+                    .get(&install.id)
+                    .is_none_or(|card| card.files.selected.is_none())
+                && install.files.iter().any(|file| file.path == "SKILL.md")
+            {
+                unopened.push(install.id);
+            }
             let card = view
                 .skill_cards
                 .entry(install.id)
@@ -65,6 +75,9 @@ impl ElseApp {
             } else if let Some(keys) = card.keys.take() {
                 keys.update(cx, |keys, cx| keys.clear(window, cx));
             }
+        }
+        for id in unopened {
+            self.select_skill_file(id, "SKILL.md".into(), window, cx);
         }
     }
 
@@ -260,9 +273,9 @@ impl ElseApp {
                     .text_color(theme.muted_foreground)
                     .child(format!("{bot} wants to install a skill")),
             )
-            .child(div().font_semibold().child(install.name.clone()))
+            .child(div().text_lg().font_semibold().child(install.name.clone()))
             .child(div().text_sm().child(install.description.clone()))
-            .child(source(&install.source, cx));
+            .child(h_flex().child(source(&install.source, cx)));
         if install.status != SkillInstallStatus::Pending {
             let (label, color) = match install.status {
                 SkillInstallStatus::Installed => ("Installed", theme.success),
@@ -292,12 +305,15 @@ impl ElseApp {
                             .small()
                             .ghost()
                             .label("Open in Settings")
-                            .on_click(|_, window, cx| {
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                // A click leaves nothing focused, and an action
+                                // without focus never reaches the Shell's handler.
+                                app.sidebar_focus.focus(window, cx);
                                 window.dispatch_action(
                                     Box::new(crate::connection::OpenSkillsSettings),
                                     cx,
                                 )
-                            }),
+                            })),
                     );
             }
             return body.child(settled).into_any_element();
@@ -309,20 +325,26 @@ impl ElseApp {
         let scripts = install.files.iter().filter(|file| file.script).count();
         let mut chips = h_flex().gap_2().flex_wrap().child(chip(
             format!(
-                "{} files · {} bytes",
+                "{} {} · {}",
                 install.files.len(),
-                install.files.iter().map(|file| file.size).sum::<u64>()
+                if install.files.len() == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                crate::skill_ui::size(install.files.iter().map(|file| file.size).sum::<u64>())
             ),
             theme.muted_foreground,
         ));
-        chips = chips.child(chip(
-            format!("{scripts} scripts"),
-            if scripts > 0 {
-                theme.warning
-            } else {
-                theme.muted_foreground
-            },
-        ));
+        if scripts > 0 {
+            chips = chips.child(chip(
+                format!(
+                    "{scripts} {} runs code",
+                    if scripts == 1 { "script" } else { "scripts" }
+                ),
+                theme.warning,
+            ));
+        }
         for var in &install.env {
             chips = chips.child(chip(format!("Needs {var}"), theme.muted_foreground));
         }

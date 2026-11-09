@@ -5,9 +5,10 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Selectable as _, Sizable as _,
-    StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, StyledExt as _,
+    h_flex, v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::model::{SkillFile, SkillSource};
@@ -161,41 +162,53 @@ impl SkillFiles {
     ) -> AnyElement {
         let theme = cx.theme();
         let select = std::rc::Rc::new(select);
-        let mut tree = v_flex().w(px(190.)).flex_none().gap_1();
+        let mut list = v_flex().w_full();
         let mut paths: Vec<_> = files.iter().collect();
         paths.sort_by_key(|file| &file.path);
-        let mut directory = String::new();
         for file in paths {
-            let (parent, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
-            if parent != directory {
-                directory = parent.to_owned();
-                if !parent.is_empty() {
-                    tree = tree.child(
-                        div()
-                            .pt_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{parent}/")),
-                    );
-                }
-            }
             let path = file.path.clone();
             let pick = select.clone();
-            tree = tree.child(
-                Button::new(SharedString::from(format!("{id}-{}", file.path)))
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .ghost()
-                    .xsmall()
+            let selected = self.selected.as_ref() == Some(&file.path);
+            list = list.child(
+                h_flex()
+                    .id(SharedString::from(format!("{id}-{}", file.path)))
                     .w_full()
-                    .selected(self.selected.as_ref() == Some(&file.path))
-                    .icon(if file.script {
-                        IconName::Terminal
-                    } else {
-                        IconName::FileText
-                    })
-                    .label(name.to_owned())
-                    .accessibility_label(file.path.clone())
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.secondary))
+                    .hover(|row| row.bg(theme.secondary.opacity(0.6)))
+                    .child(
+                        Icon::new(if file.script {
+                            IconName::Terminal
+                        } else {
+                            IconName::FileText
+                        })
+                        .size_3()
+                        .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(file.path.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(size(file.size)),
+                    )
                     .on_click(move |_, window, cx| pick(path.clone(), window, cx)),
             );
         }
@@ -214,49 +227,57 @@ impl SkillFiles {
                 },
             )
         });
-        h_flex()
+        v_flex()
             .w_full()
             .min_w_0()
-            .items_start()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .id(SharedString::from(format!("{id}-tree")))
-                    .h(px(250.))
+                    .w_full()
+                    .max_h(px(168.))
+                    .p_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
                     .overflow_y_scrollbar()
-                    .child(tree),
+                    .child(list),
             )
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{} · Read-only",
+                        self.selected.as_deref().unwrap_or("Files")
+                    )),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-contents")))
+                    .w_full()
+                    .h(px(260.))
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.background)
+                    .overflow_y_scrollbar()
                     .child(
                         div()
+                            .font_family(theme.mono_font_family.clone())
                             .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{} · Read-only",
-                                self.selected.as_deref().unwrap_or("Files")
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{id}-contents")))
-                            .h(px(225.))
-                            .p_3()
-                            .rounded_md()
-                            .bg(theme.background)
-                            .overflow_y_scrollbar()
-                            .child(
-                                div()
-                                    .font_family(theme.mono_font_family.clone())
-                                    .text_xs()
-                                    .child(text),
-                            ),
+                            .child(text),
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// A byte count as people read it: 840 B, 6.2 KB.
+pub(crate) fn size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
     }
 }
 

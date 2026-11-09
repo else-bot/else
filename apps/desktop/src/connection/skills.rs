@@ -603,6 +603,7 @@ impl Shell {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
+                                                .truncate()
                                                 .child(entry.description.clone()),
                                         ),
                                 )
@@ -638,7 +639,8 @@ impl Shell {
                     .gap_3()
                     .pl_8()
                     .pb_4()
-                    .child(source(&entry.source, cx))
+                    .child(div().text_sm().child(entry.description.clone()))
+                    .child(h_flex().child(source(&entry.source, cx)))
                     .child(
                         div()
                             .text_xs()
@@ -682,12 +684,22 @@ impl Shell {
                         .p_3()
                         .rounded_md()
                         .bg(theme.secondary)
-                        .child(div().text_xs().font_semibold().child(entry.env.join(", ")));
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .child(if entry.env.len() == 1 { "Key" } else { "Keys" }),
+                        );
                     if entry.key_stored && !view.replacing {
                         key = key.child(
                             h_flex()
                                 .gap_2()
-                                .child(div().flex_1().text_sm().child("Set · ••••"))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_sm()
+                                        .child(format!("{} · set · ••••", entry.env.join(", "))),
+                                )
                                 .child(
                                     Button::new("skill-key-replace")
                                         .focus_ring(false)
