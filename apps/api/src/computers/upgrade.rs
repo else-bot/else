@@ -106,11 +106,18 @@ tar --numeric-owner -xpf "$2" --anchored --exclude=usr/local --exclude=opt
 tar --numeric-owner --skip-old-files -xpf "$2" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot
 rm -f "$2"
 rmdir "$(dirname "$2")" 2>/dev/null || true
+trap - EXIT
 shift 3
+present=""
 missing=""
 for p; do
-    [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || missing="$missing $p"
+    if [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ]; then
+        present="$present $p"
+    else
+        missing="$missing $p"
+    fi
 done
+[ -z "$present" ] || apt-mark manual $present >/dev/null 2>&1 || true
 if [ -n "$missing" ]; then
     mkdir -p /var/log/elsebot
     log=/var/log/elsebot/upgrade-packages.log
