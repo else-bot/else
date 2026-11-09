@@ -87,7 +87,9 @@ gpui_kit::assets::icon_assets!(
         Terminal,
         ShieldCheck,
         Star,
-        RotateCw
+        RotateCw,
+        Send,
+        ExternalLink
     ]
 );
 

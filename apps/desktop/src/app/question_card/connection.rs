@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::EmailProvider;
 use flow::{Consent, Flow, Resolution};
 
 mod flow;
@@ -7,6 +8,8 @@ pub(in crate::app) struct Form {
     flow: Flow,
     phase: Phase,
     request: Option<Task<()>>,
+    /// The sign-in page opened for this card, so the owner can reopen it.
+    signin_url: Option<String>,
 }
 
 enum Phase {
@@ -19,6 +22,8 @@ enum Phase {
     CheckFailed(String),
     Cancelling,
     Recorded,
+    /// The server recorded the owner's cancel; the card settles next.
+    Cancelled,
 }
 
 impl ElseApp {
@@ -59,6 +64,7 @@ impl ElseApp {
                     flow,
                     phase: Phase::Checking,
                     request: None,
+                    signin_url: None,
                 },
             );
         }
@@ -96,6 +102,7 @@ impl ElseApp {
             Ok(Resolution::Disconnected) => Phase::Ready(hint),
             Ok(Resolution::ConfirmationRequired(error)) => Phase::ConfirmationRequired(error),
             Ok(Resolution::Recorded) => Phase::Recorded,
+            Ok(Resolution::Cancelled) => Phase::Cancelled,
             Err(error) => Phase::CheckFailed(error.to_string()),
         };
         self.remeasure_row(RowKey::Question(flow.question), cx);
@@ -151,6 +158,7 @@ impl ElseApp {
             return;
         };
         form.phase = Phase::SigningIn;
+        form.signin_url = None;
         let flow = form.flow.clone();
         form.request = Some(cx.spawn(async move |this, cx| {
             let signin = async {
@@ -166,6 +174,14 @@ impl ElseApp {
                             .is_some_and(Question::is_pending);
                         if pending {
                             cx.open_url(signin.url());
+                            if let Some(form) = app
+                                .view
+                                .as_mut()
+                                .filter(|v| v.bot_id == flow.bot)
+                                .and_then(|v| v.connections.get_mut(&question))
+                            {
+                                form.signin_url = Some(signin.url().to_owned());
+                            }
                         }
                         pending
                     })
@@ -223,6 +239,18 @@ impl ElseApp {
         self.remeasure_row(RowKey::Question(question), cx);
     }
 
+    fn reopen_signin(&mut self, question: Uuid, cx: &mut Context<Self>) {
+        let url = self
+            .view
+            .as_ref()
+            .and_then(|v| v.connections.get(&question))
+            .filter(|form| matches!(form.phase, Phase::SigningIn))
+            .and_then(|form| form.signin_url.clone());
+        if let Some(url) = url {
+            cx.open_url(&url);
+        }
+    }
+
     fn cancel_connection(&mut self, question: Uuid, cx: &mut Context<Self>) {
         let Some(form) = self
             .view
@@ -240,7 +268,10 @@ impl ElseApp {
         form.phase = Phase::Cancelling;
         let flow = form.flow.clone();
         form.request = Some(cx.spawn(async move |this, cx| {
-            let result = flow.cancel().await;
+            let result = flow.cancel().await.map(|resolution| match resolution {
+                Resolution::Recorded => Resolution::Cancelled,
+                other => other,
+            });
             let _ = this.update(cx, |app, cx| app.resolved(&flow, result, None, cx));
         }));
         self.remeasure_row(RowKey::Question(question), cx);
@@ -249,136 +280,373 @@ impl ElseApp {
     pub(super) fn render_connection_card(
         &self,
         question: &Question,
+        bot_name: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let id = question.id;
-        let pending = question.is_pending();
-        let form = self.view.as_ref().and_then(|v| v.connections.get(&id));
-        let phase = form.map(|f| &f.phase);
-        let label = match phase {
-            _ if !pending
-                && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE) =>
-            {
-                "Connected"
-            }
-            _ if !pending => "Closed",
-            Some(Phase::Ready(_)) => form.map_or("Connect in browser", |f| f.flow.ready_label()),
-            Some(Phase::SigningIn) => "Waiting for sign-in…",
-            Some(Phase::Exchanging) => "Connecting…",
-            Some(Phase::Confirming) => "Confirming connection…",
-            Some(Phase::ConfirmationRequired(_)) => "Retry confirmation",
-            Some(Phase::CheckFailed(_)) => "Retry connection check",
-            Some(Phase::Cancelling) => "Cancelling…",
-            Some(Phase::Recorded) => "Recorded",
-            _ => "Checking connection…",
+        let expanded = self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.expanded_questions.contains(&id));
+        let note = |text: SharedString| {
+            div()
+                .text_xs()
+                .whitespace_normal()
+                .text_color(theme.muted_foreground)
+                .child(text)
         };
-        let locked = !pending || self.connection != Connection::Connected;
-        let can_activate = matches!(
-            phase,
-            Some(Phase::Ready(_) | Phase::ConfirmationRequired(_) | Phase::CheckFailed(_))
-        );
-        let can_cancel = matches!(
-            phase,
-            Some(Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_))
-        );
+        let account = Account::of(question, &theme);
+        if !question.is_pending() {
+            let connected = question.status == "answered"
+                && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE);
+            let (title, outcome) = if connected {
+                match &account.address {
+                    Some(_) => (
+                        format!("{} connected", account.provider),
+                        "Every bot can use it when you ask.".to_owned(),
+                    ),
+                    None => (
+                        question.title.clone(),
+                        "Connected. Every bot can use it when you ask.".to_owned(),
+                    ),
+                }
+            } else if question.status == "skipped" {
+                (
+                    question.title.clone(),
+                    "Skipped: you sent a new message instead.".to_owned(),
+                )
+            } else {
+                (
+                    question.title.clone(),
+                    "Cancelled before the connection finished.".to_owned(),
+                )
+            };
+            let mut card = v_flex()
+                .w_full()
+                .rounded(theme.radius_lg)
+                .bg(theme.secondary)
+                .child(
+                    receipt(id, connected, title, outcome, expanded, &theme)
+                        .when(expanded && question.context.is_some(), |button| {
+                            button.rounded_b(px(0.))
+                        })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.toggle_question_details(id, cx);
+                        })),
+                );
+            if expanded && let Some(context) = &question.context {
+                card = card.child(
+                    div()
+                        .w_full()
+                        .px_4()
+                        .pb_4()
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(theme.muted_foreground)
+                        .child(context.clone()),
+                );
+            }
+            return card.into_any_element();
+        }
+        let form = self.view.as_ref().and_then(|v| v.connections.get(&id));
+        let phase = form.map_or(&Phase::Checking, |f| &f.phase);
+        let error = match phase {
+            Phase::Ready(Some(error))
+            | Phase::CheckFailed(error)
+            | Phase::ConfirmationRequired(error) => Some(error.clone()),
+            _ => None,
+        };
+        let still = cx.reduce_motion();
+        let status = match phase {
+            _ if error.is_some() => pill(id, "Needs attention", theme.danger, false, still),
+            Phase::Ready(_) => pill(id, "Waiting for you", theme.warning, false, still),
+            Phase::SigningIn => pill(id, "Signing in", theme.info, true, still),
+            Phase::Exchanging | Phase::Confirming => {
+                pill(id, "Connecting", theme.info, true, still)
+            }
+            Phase::Recorded => pill(id, "Connected", theme.success, false, still),
+            Phase::Cancelled => pill(id, "Cancelled", theme.muted_foreground, false, still),
+            Phase::Cancelling => pill(id, "Cancelling", theme.muted_foreground, true, still),
+            _ => pill(id, "Checking", theme.muted_foreground, true, still),
+        };
+        let ready_label = form.map_or("Connect in browser", |f| f.flow.ready_label());
         let mut card = v_flex()
             .w_full()
-            .gap_2()
-            .p_3()
+            .gap_3()
+            .p_4()
             .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
             .bg(theme.secondary)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Account connection"),
-            )
-            .child(div().font_semibold().child(question.title.clone()));
-        if let Some(context) = &question.context {
-            card = card.child(
-                div()
-                    .w_full()
-                    .px_2p5()
-                    .py_2()
-                    .rounded(theme.radius)
-                    .bg(theme.background)
-                    .text_sm()
-                    .whitespace_normal()
-                    .child(context.clone()),
-            );
-        }
-        card = card
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("Sign in using your browser. Every bot may use the connected account."),
-            )
             .child(
                 h_flex()
                     .w_full()
-                    .justify_end()
-                    .gap_2()
+                    .gap_3()
+                    .child(tile(account.icon, account.tint))
                     .child(
-                        Button::new(SharedString::from(format!("connection-connect-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .label(label)
-                            .small()
-                            .primary()
-                            .disabled(locked || !can_activate)
-                            .on_click(
-                                cx.listener(move |app, _, _, cx| app.activate_connection(id, cx)),
-                            ),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .whitespace_normal()
+                                    .child(question.title.clone()),
+                            )
+                            .child(note(
+                                format!("{} · requested by {bot_name}", account.source).into(),
+                            )),
                     )
-                    .child(
-                        Button::new(SharedString::from(format!("connection-cancel-{id}")))
-                            .focus_ring(false)
-                            .cursor_pointer()
-                            .label("Cancel")
-                            .small()
-                            .ghost()
-                            .disabled(locked || !can_cancel)
-                            .on_click(
-                                cx.listener(move |app, _, _, cx| app.cancel_connection(id, cx)),
-                            ),
-                    ),
+                    .child(status),
             );
-        let error = match phase {
-            Some(
-                Phase::Ready(Some(error))
-                | Phase::CheckFailed(error)
-                | Phase::ConfirmationRequired(error),
-            ) => Some(error),
+        if let Some(context) = &question.context {
+            card = card.child(
+                div()
+                    .text_sm()
+                    .whitespace_normal()
+                    .text_color(theme.muted_foreground)
+                    .child(context.clone()),
+            );
+        }
+        if let Some(error) = error {
+            card = card.child(callout(error, &theme));
+        } else {
+            let now = match phase {
+                Phase::Ready(_) => Some(0),
+                Phase::SigningIn => Some(1),
+                Phase::Exchanging | Phase::Confirming | Phase::Recorded => Some(2),
+                _ => None,
+            };
+            if let Some(now) = now {
+                let recorded = matches!(phase, Phase::Recorded);
+                let labels = [
+                    if now > 0 {
+                        "Browser opened"
+                    } else {
+                        ready_label
+                    },
+                    "Grant access",
+                    "Confirm",
+                ];
+                card = card.child(h_flex().w_full().gap_1p5().children(
+                    labels.into_iter().enumerate().map(|(ix, label)| {
+                        let done = ix < now || recorded;
+                        let (bar, text) = if done {
+                            (theme.success, theme.muted_foreground)
+                        } else if ix == now {
+                            (theme.info, theme.foreground)
+                        } else {
+                            (theme.border, theme.muted_foreground.opacity(0.7))
+                        };
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1p5()
+                            .text_xs()
+                            .text_color(text)
+                            .child(div().h(px(3.)).rounded_full().bg(bar))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .when(done, |row| {
+                                        row.child(Icon::new(IconName::Check).size_3())
+                                    })
+                                    .child(div().truncate().child(if done {
+                                        label.to_owned()
+                                    } else {
+                                        format!("{} · {label}", ix + 1)
+                                    })),
+                            )
+                    }),
+                ));
+            }
+            let fact = |label: &'static str, value: AnyElement| {
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_3()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w(px(76.))
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(value))
+            };
+            let mut facts = v_flex()
+                .w_full()
+                .gap_1p5()
+                .px_3()
+                .py_2p5()
+                .rounded(theme.radius)
+                .bg(theme.background);
+            if let Some(address) = &account.address {
+                facts = facts.child(fact("Account", address.clone().into_any_element()));
+            }
+            if !account.scopes.is_empty() {
+                facts = facts.child(fact(
+                    "Scopes",
+                    h_flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(account.scopes.iter().map(|scope| {
+                            div()
+                                .px_1p5()
+                                .rounded(px(5.))
+                                .bg(theme.muted)
+                                .font_family(theme.mono_font_family.clone())
+                                .child(scope.clone())
+                        }))
+                        .into_any_element(),
+                ));
+            }
+            card = card.child(
+                facts
+                    .child(fact(
+                        "Used by",
+                        "Every bot on this server, when you ask".into_any_element(),
+                    ))
+                    .child(fact(
+                        "Credentials",
+                        "Stored on the server, never in chat".into_any_element(),
+                    )),
+            );
+        }
+        let locked = self.connection != Connection::Connected;
+        let can_cancel = matches!(
+            phase,
+            Phase::Ready(_) | Phase::SigningIn | Phase::CheckFailed(_)
+        );
+        let hint: Option<(Option<IconName>, &'static str)> = match phase {
+            Phase::Ready(None) => Some((Some(IconName::Lock), "Opens your browser")),
+            Phase::SigningIn => {
+                Some((None, "Finish in your browser. This card updates by itself."))
+            }
             _ => None,
         };
-        if let Some(error) = error {
-            card = card.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
-            );
-        }
-        if !pending {
-            let result = if question.status == "answered"
-                && question.answer.as_ref().and_then(QuestionAnswer::single) == Some(APPROVE)
-            {
-                "Account connected for every bot."
-            } else {
-                "Connection cancelled."
-            };
-            card = card.child(
-                div()
+        let action = match phase {
+            Phase::Ready(None) => Some((ready_label, Some(IconName::ExternalLink), true)),
+            Phase::Ready(Some(_)) => Some(("Sign in again", Some(IconName::ExternalLink), true)),
+            Phase::CheckFailed(_) => Some(("Check again", Some(IconName::RefreshCw), true)),
+            Phase::ConfirmationRequired(_) => {
+                Some(("Retry confirmation", Some(IconName::RefreshCw), true))
+            }
+            Phase::Checking => Some(("Checking…", None, false)),
+            Phase::Exchanging => Some(("Connecting…", None, false)),
+            Phase::Confirming => Some(("Confirming…", None, false)),
+            Phase::Cancelling => Some(("Cancelling…", None, false)),
+            Phase::Recorded => Some(("Connected", None, false)),
+            Phase::Cancelled => None,
+            Phase::SigningIn => None,
+        };
+        let mut footer = h_flex()
+            .w_full()
+            .gap_2()
+            .flex_wrap()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1p5()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(result),
+                    .when_some(hint, |row, (icon, text)| {
+                        row.when_some(icon, |row, icon| row.child(Icon::new(icon).size_3()))
+                            .child(text)
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("connection-cancel-{id}")))
+                    .focus_ring(false)
+                    .label("Cancel")
+                    .small()
+                    .ghost()
+                    .disabled(locked || !can_cancel)
+                    .when(!locked && can_cancel, |button| button.cursor_pointer())
+                    .on_click(cx.listener(move |app, _, _, cx| app.cancel_connection(id, cx))),
+            );
+        if matches!(phase, Phase::SigningIn) {
+            let reopen = form.is_some_and(|f| f.signin_url.is_some());
+            footer = footer.child(
+                Button::new(SharedString::from(format!("connection-reopen-{id}")))
+                    .focus_ring(false)
+                    .icon(IconName::ExternalLink)
+                    .label("Reopen browser")
+                    .small()
+                    .ghost()
+                    .disabled(locked || !reopen)
+                    .when(!locked && reopen, |button| button.cursor_pointer())
+                    .on_click(cx.listener(move |app, _, _, cx| app.reopen_signin(id, cx))),
             );
         }
-        card.into_any_element()
+        if let Some((label, icon, active)) = action {
+            footer = footer.child(
+                Button::new(SharedString::from(format!("connection-connect-{id}")))
+                    .focus_ring(false)
+                    .when_some(icon, |button, icon| button.icon(icon))
+                    .label(label)
+                    .small()
+                    .primary()
+                    .disabled(locked || !active)
+                    .when(!locked && active, |button| button.cursor_pointer())
+                    .on_click(cx.listener(move |app, _, _, cx| app.activate_connection(id, cx))),
+            );
+        }
+        card.child(footer).into_any_element()
+    }
+}
+
+/// What a connection card signs in to, as its header and facts show it.
+struct Account {
+    icon: IconName,
+    tint: Hsla,
+    /// The service name, such as Gmail or an MCP server's host.
+    provider: String,
+    /// Where the request points: the provider, or the MCP server's issuer.
+    source: String,
+    address: Option<String>,
+    scopes: Vec<String>,
+}
+
+impl Account {
+    fn of(question: &Question, theme: &Theme) -> Self {
+        if let Some(email) = question.email_connection() {
+            let provider = email.provider.label().to_owned();
+            return Self {
+                icon: IconName::Mail,
+                tint: match email.provider {
+                    EmailProvider::Gmail => theme.danger,
+                    EmailProvider::Microsoft => theme.info,
+                    _ => theme.muted_foreground,
+                },
+                source: provider.clone(),
+                provider,
+                address: Some(email.address.clone()),
+                scopes: Vec::new(),
+            };
+        }
+        let mcp = question.mcp_connection();
+        let id = mcp.map(|c| c.id.clone()).unwrap_or_default();
+        let host = mcp
+            .and_then(|c| c.provider.as_deref())
+            .map(|provider| {
+                provider
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/')
+                    .to_owned()
+            })
+            .filter(|host| !host.is_empty());
+        Self {
+            icon: IconName::Plug,
+            tint: theme.primary,
+            provider: id.clone(),
+            source: host.unwrap_or(id),
+            address: None,
+            scopes: mcp.map(|c| c.scopes.clone()).unwrap_or_default(),
+        }
     }
 }
 #[cfg(test)]

@@ -76,6 +76,8 @@ pub(super) enum Resolution {
     Disconnected,
     ConfirmationRequired(String),
     Recorded,
+    /// The card's own cancel, recorded by the server.
+    Cancelled,
 }
 
 /// How the MCP's shared account relates to this card's consent.
