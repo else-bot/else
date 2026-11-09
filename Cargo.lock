@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "else-api"
-version = "0.0.30"
+version = "0.0.43"
 dependencies = [
  "age",
  "anyhow",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "else-desktop"
-version = "0.0.30"
+version = "0.0.43"
 dependencies = [
  "anyhow",
  "axum",
@@ -2165,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "else-tailnet"
-version = "0.0.30"
+version = "0.0.43"
 dependencies = [
  "serde",
  "serde_json",
