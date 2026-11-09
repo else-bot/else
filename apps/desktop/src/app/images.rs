@@ -72,16 +72,19 @@ fn unavailable_image_label(node: &markdown::mdast::Node) -> Option<&str> {
     }
 }
 
+/// The message without the files drawn outside its text: images in the
+/// gallery and visuals below it.
 pub(super) fn without_images(source: &str, parts: &[MessagePart]) -> (String, Vec<MessagePart>) {
+    let drawn = |file: &Attachment| is_image(file) || super::visuals::is_visual(file);
     if !parts
         .iter()
-        .any(|part| matches!(part, MessagePart::File { file } if is_image(file)))
+        .any(|part| matches!(part, MessagePart::File { file } if drawn(file)))
     {
         return (source.to_owned(), parts.to_vec());
     }
     let parts: Vec<_> = parts
         .iter()
-        .filter(|part| !matches!(part, MessagePart::File { file } if is_image(file)))
+        .filter(|part| !matches!(part, MessagePart::File { file } if drawn(file)))
         .cloned()
         .collect();
     let text = parts

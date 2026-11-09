@@ -124,6 +124,8 @@ pub(super) struct RowText {
     key: RowKey,
     images: Entity<MessageImages>,
     _observe_images: Subscription,
+    visuals: Entity<super::visuals::MessageVisuals>,
+    _observe_visuals: Subscription,
 }
 
 enum Widget {
@@ -198,7 +200,9 @@ impl RowText {
             }
         };
         let (images, observe_images) =
-            ElseApp::message_images(client, key, bot, &parts, window, cx);
+            ElseApp::message_images(client.clone(), key, bot, &parts, window, cx);
+        let (visuals, observe_visuals) =
+            ElseApp::message_visuals(client, key, bot, &parts, window, cx);
         Self {
             source,
             mentions,
@@ -214,6 +218,8 @@ impl RowText {
             key,
             images,
             _observe_images: observe_images,
+            visuals,
+            _observe_visuals: observe_visuals,
         }
     }
 
@@ -289,6 +295,8 @@ impl RowText {
         };
         let (visible, visible_parts) = without_images(&body.text, &body.parts);
         self.images.update(cx, |images, cx| images.sync(&parts, cx));
+        self.visuals
+            .update(cx, |visuals, cx| visuals.sync(&parts, cx));
         let mut mentions = self.format.mentions(&visible, bots);
         self.bots = bots.clone();
         let content = plain_content(&visible, &visible_parts, &mut mentions);
@@ -446,6 +454,7 @@ impl RowText {
             .gap_2()
             .children(self.render_quote_preview(cx))
             .when(!self.display.text.trim().is_empty(), |column| column.child(body))
+            .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::visuals::is_visual(file))), |column| column.child(self.visuals.clone()))
             .when(self.parts.iter().any(|part| matches!(part, MessagePart::File { file } if super::images::is_image(file))), |column| column.child(self.images.clone()))
             .into_any_element()
     }

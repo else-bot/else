@@ -2197,6 +2197,7 @@ dependencies = [
  "chrono-tz",
  "dotenvy",
  "else-tailnet",
+ "else-visual",
  "futures-util",
  "gpui-kit",
  "iana-time-zone",
