@@ -732,9 +732,20 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
     .bind(turn.source_item_id)
     .fetch_one(&mut *conn)
     .await?;
-    let history: Vec<HistoryEntry> =
-        sqlx::query_as::<_, (i64, String, String, String, Json<Vec<MessagePart>>)>(
-            "SELECT t.turn_no, i.kind, i.text, t.status, coalesce(i.parts, i.assistant_parts, '[]')
+    let history: Vec<HistoryEntry> = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Json<Vec<MessagePart>>,
+        ),
+    >(
+        "SELECT t.turn_no, i.kind, i.text, t.status,
+                CASE WHEN t.status IN ('failed', 'uncertain') THEN t.error_message END,
+                coalesce(i.parts, i.assistant_parts, '[]')
          FROM items i JOIN turns t ON t.id = i.turn_id
          WHERE i.conversation_id = ?1 AND t.turn_no < ?2
            AND i.kind IN ('user', 'routine', 'connector', 'status', 'assistant')
@@ -742,20 +753,23 @@ pub async fn input(pool: &SqlitePool, turn_id: Uuid) -> Result<TurnInput, sqlx::
            -- A child's reply reached this bot as its delegation outcome.
            AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.id = i.id)
          ORDER BY t.turn_no, i.seq",
-        )
-        .bind(turn.conversation_id)
-        .bind(turn.turn_no)
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|(turn_no, kind, text, status, Json(parts))| HistoryEntry {
+    )
+    .bind(turn.conversation_id)
+    .bind(turn.turn_no)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .map(
+        |(turn_no, kind, text, status, error, Json(parts))| HistoryEntry {
             turn_no,
             kind,
             text,
             status,
+            error,
             parts,
-        })
-        .collect();
+        },
+    )
+    .collect();
     type Receipts = Json<std::collections::BTreeMap<String, String>>;
     let session = sqlx::query_as::<_, (String, String, i64, Option<i64>, Receipts, Receipts)>(
         "SELECT native_session_id, fingerprint, considered_through_turn, memory_revision, default_skills,

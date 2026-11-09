@@ -847,9 +847,10 @@ fn render(entry: &HistoryEntry) -> String {
         "status" => "Delegated task (another bot's request, not an owner message)",
         _ => "Assistant",
     };
-    let status = match entry.status.as_str() {
-        "completed" | "" => String::new(),
-        other => format!(", {other}"),
+    let status = match (entry.status.as_str(), &entry.error) {
+        ("completed" | "", _) => String::new(),
+        (other, Some(error)) => format!(", {other}: {error}"),
+        (other, None) => format!(", {other}"),
     };
     format!(
         "[turn {}{status}] {who}: {}\n",
