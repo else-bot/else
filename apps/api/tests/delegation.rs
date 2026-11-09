@@ -60,6 +60,19 @@ async fn running_main(app: &TestApp) -> (String, Uuid, String) {
     (main, turn_id, token)
 }
 
+async fn grant_delegate(app: &TestApp, turn: Uuid) -> String {
+    let (bot, conversation): (Uuid, Uuid) =
+        sqlx::query_as("SELECT bot_id, conversation_id FROM turns WHERE id = ?1")
+            .bind(turn)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    app.scheduler
+        .grants()
+        .issue(bot, conversation, turn, vec![Tool::Delegate], DEFAULT_TTL)
+        .await
+}
+
 async fn create_bot(app: &TestApp, token: &str, arguments: Value) -> common::Reply {
     app.call(
         "POST",
@@ -950,6 +963,49 @@ async fn an_owner_message_steers_a_running_delegated_task_and_reports_back() {
         result.as_deref().is_some_and(|r| r.contains(steer)),
         "the delegating bot gets the steered reply: {result:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_steering_message_runs_before_another_queued_task() {
+    let app = app_with(3).await;
+    let work = leaf(&app, "Work").await;
+    let other = leaf(&app, "Other").await;
+    let (_, _, token) = running_main(&app).await;
+    delegate(&app, &token, &work, "[synthetic:hang] first research").await;
+    let sent = app
+        .send(&other, Uuid::new_v4(), SLOW, Some("synthetic"))
+        .await;
+    let other_root: Uuid = sent.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(&app, other_root, "running").await;
+    let other_token = grant_delegate(&app, other_root).await;
+    delegate(
+        &app,
+        &other_token,
+        &work,
+        "[synthetic:hang] second research",
+    )
+    .await;
+    let children: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT d.child_turn_id FROM delegations d JOIN turns t ON t.id = d.child_turn_id
+         WHERE d.target_bot_id = ?1 ORDER BY t.turn_no",
+    )
+    .bind(work.parse::<Uuid>().unwrap())
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    let [first, second] = children[..] else {
+        panic!("two tasks: {children:?}");
+    };
+    wait_status(&app, first, "running").await;
+
+    let sent = app
+        .send(&work, Uuid::new_v4(), "Stop this.", Some("synthetic"))
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.body);
+    wait_status(&app, first, "interrupted").await;
+    app.wait_turn(sent.body["turn"]["id"].as_str().unwrap(), &["completed"])
+        .await;
+    wait_status(&app, second, "running").await;
 }
 
 async fn seed(db: &TestDb) -> (Uuid, Uuid, Uuid, Uuid) {
