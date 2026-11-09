@@ -806,6 +806,123 @@ async fn always_allow_covers_destructive_actions_only_until_revoked() {
     wait(&app, turn, "waiting").await;
 }
 
+fn unfollow_args(accounts: &str, target: &str, effect: &str) -> Value {
+    json!({ "command": format!("node unfollow.js {accounts}"), "effect": effect,
+            "purpose": "Unfollow people who have not replied in DM after 14 days",
+            "task_scope": { "task": "Unfollow X accounts that never replied", "target": target } })
+}
+
+fn choice_ids(card: &Value) -> Vec<String> {
+    card["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scoped_computer_call_can_be_always_allowed_for_its_task_and_target() {
+    let Harness { app, synthetic } = harness().await;
+    let main = app.main_bot().await;
+    let account = "X account @proliquid_xyz";
+    let (turn, token) = running(&app, &main).await;
+
+    let mut malformed = unfollow_args("@a", account, "external");
+    malformed["task_scope"]["target"] = json!(" ");
+    let refused = tool(&app, &token, "computer_run", malformed).await;
+    assert!(is_error(&refused), "{}", refused.body);
+    assert!(
+        tool_text(&refused)
+            .as_str()
+            .unwrap()
+            .starts_with("task_scope is {task, target}"),
+        "{}",
+        refused.body
+    );
+
+    let pending = tool_text(
+        &tool(
+            &app,
+            &token,
+            "computer_run",
+            unfollow_args("@UST_mean @rahulxero", account, "external"),
+        )
+        .await,
+    );
+    assert_eq!(pending["status"], "pending", "{pending}");
+    let question: Uuid = pending["question_id"].as_str().unwrap().parse().unwrap();
+    wait(&app, turn, "waiting").await;
+    let card = shown_turn(&app, &main, turn).await["questions"][0].clone();
+    assert_eq!(choice_ids(&card), ["approve", "deny", "approve_task"]);
+    assert_eq!(card["action"]["tool"], "computer_run");
+    assert_eq!(card["action"]["task_scope"]["target"], account);
+
+    let always = answer(&app, &main, question, "approve_task").await;
+    assert_eq!(always.status, StatusCode::OK, "{}", always.body);
+    let listed = app
+        .owner("GET", &format!("/v1/bots/{main}/permissions"), None)
+        .await;
+    assert_eq!(
+        listed.body["permissions"][0]["target"],
+        json!({ "scope": "task", "task": "Unfollow X accounts that never replied",
+                "target": account, "kind": "external" }),
+        "{}",
+        listed.body
+    );
+    wait(&app, turn, "completed").await;
+    let packet = synthetic.packets().await.last().unwrap().clone();
+    assert!(
+        packet.contains("Task scope: {\"task\":\"Unfollow X accounts that never replied\""),
+        "{packet}"
+    );
+
+    let (turn, token) = running(&app, &main).await;
+    let ran = tool(
+        &app,
+        &token,
+        "computer_run",
+        unfollow_args("@someone_else", account, "external"),
+    )
+    .await;
+    assert!(
+        tool_text(&ran)
+            .as_str()
+            .is_some_and(|t| t.starts_with("COMPUTER_UNAVAILABLE")),
+        "a later batch in the saved scope runs without a card: {}",
+        ran.body
+    );
+    let mut turn_token = (turn, token);
+    for (other, choices) in [
+        (
+            unfollow_args("@a", "X account @other", "external"),
+            &["approve", "deny", "approve_task"][..],
+        ),
+        (
+            unfollow_args("@a", account, "destructive"),
+            &["approve", "deny", "approve_task"][..],
+        ),
+        (
+            json!({ "command": "node unfollow.js @a", "effect": "external" }),
+            &["approve", "deny"][..],
+        ),
+    ] {
+        let (turn, token) = turn_token;
+        let asks = tool_text(&tool(&app, &token, "computer_run", other.clone()).await);
+        assert_eq!(asks["status"], "pending", "{other}: {asks}");
+        wait(&app, turn, "waiting").await;
+        let card = shown_turn(&app, &main, turn).await["questions"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(choice_ids(&card), choices, "{other}");
+        turn_token = running(&app, &main).await;
+    }
+    app.wait_turn(&turn_token.0.to_string(), &["running"]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn approval_records_never_store_typed_text() {
     let Harness { app, synthetic } = harness().await;

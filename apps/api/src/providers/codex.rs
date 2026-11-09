@@ -48,7 +48,7 @@ use crate::app::providers::{
 };
 
 pub const ID: &str = "codex";
-const PROMPT_VERSION: &str = "else-codex-v19";
+const PROMPT_VERSION: &str = "else-codex-v20";
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const MODELS: &[&str] = &[
     "gpt-6.1-sol",

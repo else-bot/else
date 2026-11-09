@@ -72,6 +72,15 @@ pub fn tool_list() -> Vec<Value> {
     let context = json!({ "type": "string", "maxLength": crate::app::questions::MAX_CONTEXT,
         "description": "Approval details shown to the owner, including recipient, destination, \
             and complete drafted message or proposed change. Never include credentials." });
+    let task_scope = json!({ "type": "object",
+        "description": "Required for repeated or scheduled destructive or external work, e.g. a weekly batch: \
+            the same task and target every time. The card then offers Always allow; a saved grant skips it.",
+        "properties": {
+            "task": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
+                "description": "Recurring work category, e.g. Unfollow X accounts that never replied." },
+            "target": { "type": "string", "minLength": 1, "maxLength": crate::app::questions::MAX_TASK_SCOPE,
+                "description": "Specific account or resource, e.g. X account @example." } },
+        "required": ["task", "target"], "additionalProperties": false });
     let approved_draft = json!({ "type": "string", "format": "uuid",
         "description": "Only with effect external: the id of the draft the owner approved, \
             instead of an approval card. Send exactly its content, once, then call \
@@ -91,7 +100,7 @@ pub fn tool_list() -> Vec<Value> {
                 "github": github.clone(),
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "approved_draft": approved_draft.clone() },
+                "task_scope": task_scope.clone(), "approved_draft": approved_draft.clone() },
                 "required": ["command", "effect"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -110,7 +119,7 @@ pub fn tool_list() -> Vec<Value> {
                                 "description": "One of your webhooks, fired when this job exits 0." },
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "approved_draft": approved_draft.clone() },
+                "task_scope": task_scope.clone(), "approved_draft": approved_draft.clone() },
                 "required": ["command", "effect"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -139,7 +148,8 @@ pub fn tool_list() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
                 "content": { "type": "string", "maxLength": 65536 },
-                "effect": effect.clone(), "purpose": purpose.clone(), "context": context.clone() },
+                "effect": effect.clone(), "purpose": purpose.clone(), "context": context.clone(),
+                "task_scope": task_scope.clone() },
                 "required": ["path", "content", "effect"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -181,7 +191,7 @@ pub fn tool_list() -> Vec<Value> {
                         action opens. Default dismiss keeps a page's unsent input." },
                 "effect": effect.clone(),
                 "purpose": purpose.clone(), "context": context.clone(),
-                "approved_draft": approved_draft.clone() },
+                "task_scope": task_scope.clone(), "approved_draft": approved_draft.clone() },
                 "required": ["action"], "additionalProperties": false },
             "annotations": guest,
         }),
@@ -228,7 +238,8 @@ pub fn tool_list() -> Vec<Value> {
                         "type": { "type": "string" },
                         "wait": { "type": "number", "minimum": 0, "maximum": 5 } } } },
                 "effect": effect,
-                "purpose": purpose, "context": context, "approved_draft": approved_draft },
+                "purpose": purpose, "context": context, "task_scope": task_scope,
+                "approved_draft": approved_draft },
                 "required": ["frame", "actions", "effect"], "additionalProperties": false },
             "annotations": guest.clone(),
         }),

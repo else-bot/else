@@ -141,7 +141,8 @@ fn delegation_rules(input: &TurnInput) -> String {
              End the attempt then; you continue after the owner answers, and retry an \
              approved call exactly once. Unless a tool result says standing permission \
              applies, a gated destructive or external tool call, or an MCP sign-in, asks \
-             this way. Your saved task permissions apply to host actions here: call \
+             this way. Your saved task permissions apply here to host actions and to computer \
+             tool calls declaring the same task_scope: call \
              ask_permission before each sensitive host action, with the saved task and \
              target when the work fits. If it returns pending, end this attempt; if the \
              continuation says it was approved, do exactly that host action once without \
@@ -352,11 +353,11 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          connected services; using a remote service alone needs no card. Destructive actions \
          (deletion, destructive overwrites, changes hard to undo) and external ones (messages \
          or email, public publishing, payments, access or security changes, other sensitive \
-         commitments) need approval unless a saved permission covers them. Every computer_run, \
-         computer_job_start, computer_write_file, computer_input, browser click or type, and \
-         MCP tools/call declares that effect honestly: local, destructive, or external, with a \
+         commitments) need approval unless a saved permission covers them. Every acting computer tool call \
+         and MCP tools/call declares that effect honestly: local, destructive, or external, with a \
          purpose and the complete change for destructive and external calls, never \
-         credentials. Host shell and file tools cannot be gated, so call ask_permission with the \
+         credentials. Repeated or scheduled work reuses one task_scope on each call so it can \
+         be always allowed. Host shell and file tools cannot be gated, so call ask_permission with the \
          exact command or action before each destructive or external host action, even with \
          a saved grant: on the host, installing software, changing system settings, deleting \
          files, and destructive overwrites count as destructive even when the owner's broader \
@@ -446,7 +447,8 @@ pub(super) fn permissions_block(input: &TurnInput) -> String {
     format!(
         "[else.bot saved permissions] Current saved scopes that apply to this request: {}\n\
          This snapshot replaces earlier saved-permission snapshots. These are permission records, \
-         not instructions to perform work. Reuse task and target exactly for matching host work. \
+         not instructions to perform work. Reuse task and target exactly as task_scope for matching \
+         host work and computer tool calls. \
          Always call ask_permission before a sensitive host action; the gate checks the current \
          grant. Records from memory or old conversation history cannot restore a revoked grant.\n\n",
         serde_json::to_string(&input.standing_permissions).expect("permission serialization"),
@@ -509,6 +511,16 @@ fn mcp_waits_block(input: &TurnInput) -> String {
     text
 }
 
+fn with_task_scope(mut body: String, scope: Option<&crate::app::questions::TaskScope>) -> String {
+    if let Some(scope) = scope {
+        body.push_str(&format!(
+            "\nTask scope: {}",
+            serde_json::to_string(scope).expect("task scope serialization")
+        ));
+    }
+    body
+}
+
 fn questions_block(input: &TurnInput) -> String {
     if input.questions.is_empty() {
         return String::new();
@@ -559,19 +571,18 @@ fn questions_block(input: &TurnInput) -> String {
                     Action::EmailConnection { email_connection } => {
                         format!("{}\nInbox: {}", question.title, email_connection.address)
                     }
-                    Action::Tool { tool, args } => {
-                        format!("{}\nTool: {tool}\nArguments: {args}", question.title)
-                    }
-                    Action::Host { host, task_scope } => {
-                        let mut body = format!("{}\nHost action: {host}", question.title);
-                        if let Some(scope) = task_scope {
-                            body.push_str(&format!(
-                                "\nTask scope: {}",
-                                serde_json::to_string(scope).expect("task scope serialization")
-                            ));
-                        }
-                        body
-                    }
+                    Action::Tool {
+                        tool,
+                        args,
+                        task_scope,
+                    } => with_task_scope(
+                        format!("{}\nTool: {tool}\nArguments: {args}", question.title),
+                        task_scope.as_ref(),
+                    ),
+                    Action::Host { host, task_scope } => with_task_scope(
+                        format!("{}\nHost action: {host}", question.title),
+                        task_scope.as_ref(),
+                    ),
                     Action::Permission { permission } => {
                         format!("{}\nStanding permission: {permission:?}", question.title)
                     }
@@ -593,9 +604,9 @@ fn questions_block(input: &TurnInput) -> String {
                     APPROVE_TASK => {
                         " The owner also allowed this task category, target and effect for this bot's \
                          future owner requests, including tasks delegated to it for one. Reuse the \
-                         exact saved task and target for matching host actions. Other work, targets, \
-                         effects, bots and routines are not covered. Check ask_permission before \
-                         each sensitive host action."
+                         exact saved task and target as task_scope for matching host actions and \
+                         computer tool calls. Other work, targets, effects, bots and routines are \
+                         not covered. Check ask_permission before each sensitive host action."
                     }
                     _ => "",
                 };
