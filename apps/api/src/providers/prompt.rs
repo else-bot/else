@@ -441,7 +441,7 @@ fn outcomes_without_social(input: &TurnInput) -> String {
 }
 
 pub(super) fn permissions_block(input: &TurnInput) -> String {
-    if input.delegation.origin != crate::app::providers::Origin::OwnerRequest {
+    if input.grant_reach() == crate::app::questions::GrantReach::Nothing {
         return String::new();
     }
     format!(
@@ -603,10 +603,11 @@ fn questions_block(input: &TurnInput) -> String {
                     }
                     APPROVE_TASK => {
                         " The owner also allowed this task category, target and effect for this bot's \
-                         future owner requests, including tasks delegated to it for one. Reuse the \
-                         exact saved task and target as task_scope for matching host actions and \
-                         computer tool calls. Other work, targets, effects, bots and routines are \
-                         not covered. Check ask_permission before each sensitive host action."
+                         future owner requests, including tasks delegated to it for one, and its \
+                         scheduled routine runs. Reuse the exact saved task and target as task_scope \
+                         for matching host actions and computer tool calls. Other work, targets, \
+                         effects and bots are not covered. Check ask_permission before each \
+                         sensitive host action."
                     }
                     _ => "",
                 };

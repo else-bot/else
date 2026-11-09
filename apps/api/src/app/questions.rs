@@ -78,8 +78,40 @@ pub enum Standing {
     Routine,
     /// One MCP tool and effect in the bot's owner requests.
     Tool,
-    /// One declared task on one target, with one effect, in the bot's owner requests.
+    /// One declared task on one target, with one effect, in the bot's owner
+    /// requests and scheduled runs of its routines.
     Task,
+}
+
+/// Which saved grants a turn may use, by what started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantReach {
+    /// The owner's own chat request: every saved grant.
+    OwnerChat,
+    /// Work delegated for an owner request, or a scheduled routine run.
+    Tasks,
+    /// Webhook wakes, events, and work delegated outside an owner request.
+    Nothing,
+}
+
+impl GrantReach {
+    pub fn of(origin: crate::app::providers::Origin, routine_run: bool, owner_chat: bool) -> Self {
+        use crate::app::providers::Origin;
+        match origin {
+            Origin::OwnerRequest if owner_chat => Self::OwnerChat,
+            Origin::OwnerRequest => Self::Tasks,
+            Origin::RoutineRun if routine_run => Self::Tasks,
+            _ => Self::Nothing,
+        }
+    }
+
+    pub fn covers(self, target: &PermissionTarget) -> bool {
+        match self {
+            Self::OwnerChat => true,
+            Self::Tasks => matches!(target, PermissionTarget::Task { .. }),
+            Self::Nothing => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
