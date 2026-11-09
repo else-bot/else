@@ -1399,3 +1399,53 @@ async fn a_newer_chat_message_carries_a_taken_over_task() {
         "{result:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_to_the_delegating_bot_receives_a_taken_over_task() {
+    let Harness { app, .. } = harness().await;
+    let main = app.main_bot().await;
+    let leaf = app.create_bot("Telegram").await;
+    let (root, task, _, _) = delegated_card(&app, &leaf).await;
+
+    let approval = app
+        .send(
+            &leaf,
+            Uuid::new_v4(),
+            "[synthetic:slow] Yes, publish it.",
+            Some("synthetic"),
+        )
+        .await;
+    let approval: Uuid = approval.body["turn"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait(&app, approval, "running").await;
+    let follow = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "Sorry, I meant Discord.",
+            Some("synthetic"),
+        )
+        .await;
+    assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
+    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait(&app, root, "interrupted").await;
+    wait(&app, approval, "completed").await;
+    wait(&app, follow, "completed").await;
+
+    let (state, carrier, delivered): (String, Uuid, Option<i64>) = sqlx::query_as(
+        "SELECT status, root_turn_id, delivered_attempt FROM delegations WHERE id = ?1",
+    )
+    .bind(task)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state, "completed",
+        "the owner's chat turn still reports back"
+    );
+    assert_eq!(carrier, follow, "the follow-up carries the task");
+    assert!(delivered.is_some(), "the follow-up received the outcome");
+}
