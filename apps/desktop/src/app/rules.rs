@@ -240,9 +240,8 @@ impl ElseApp {
             version,
             scroll,
         });
-        if let Some(version) = self.rules_file(bot).map(|file| file.version) {
-            self.preferences.rules_seen.insert(bot, version);
-            self.save_preferences(cx);
+        if tab == RulesTab::Rules {
+            self.mark_rules_seen(bot, cx);
         }
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -279,9 +278,23 @@ impl ElseApp {
         }
     }
 
+    /// Only the Rules tab shows the current file; viewing an older change in
+    /// History leaves newer ones unread.
+    fn mark_rules_seen(&mut self, bot: Uuid, cx: &mut Context<Self>) {
+        if let Some(version) = self.rules_file(bot).map(|file| file.version) {
+            self.preferences.rules_seen.insert(bot, version);
+            self.save_preferences(cx);
+        }
+    }
+
     fn set_rules_tab(&mut self, tab: RulesTab, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.rules_dialog {
-            dialog.tab = tab;
+        let Some(dialog) = &mut self.rules_dialog else {
+            return;
+        };
+        dialog.tab = tab;
+        let bot = dialog.bot;
+        if tab == RulesTab::Rules {
+            self.mark_rules_seen(bot, cx);
         }
         cx.notify();
     }
@@ -412,7 +425,9 @@ impl ElseApp {
             }))
             .child(
                 div()
-                    .flex_none()
+                    .min_w_0()
+                    .max_w(px(160.))
+                    .truncate()
                     .font_weight(FontWeight::MEDIUM)
                     .child(name),
             )
@@ -512,7 +527,12 @@ impl ElseApp {
             .get(&bot)
             .copied()
             .unwrap_or(file.version);
-        let fresh = file.changed_since(seen).len();
+        let changed = file.changed_since(seen);
+        let fresh = file
+            .sections
+            .iter()
+            .filter(|section| changed.contains(&section.title.to_lowercase()))
+            .count();
         let count = file.sections.len();
         let title = if count == 1 {
             "1 rule".to_owned()
