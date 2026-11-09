@@ -47,7 +47,10 @@ impl Effect {
 fn needs_effect(name: &str, args: &Value) -> bool {
     match name {
         "computer_run" | "computer_job_start" | "computer_input" | "computer_write_file" => true,
-        "computer_browser" => matches!(args["action"].as_str(), Some("click") | Some("type")),
+        "computer_browser" => {
+            matches!(args["action"].as_str(), Some("click") | Some("type"))
+                || args["dialog"] == "accept"
+        }
         _ => false,
     }
 }
@@ -162,13 +165,18 @@ fn approval_card(name: &str, args: &Value) -> (String, String) {
         _ => {
             let action = text("action");
             let selector = slice(text("selector"), 0, 300).1;
-            if action == "type" {
-                format!(
+            let step = match action {
+                "type" => format!(
                     "Browser: type {} characters into {selector}",
                     text("text").chars().count()
-                )
+                ),
+                "open" => format!("Browser: open {}", slice(text("url"), 0, 300).1),
+                _ => format!("Browser: {action} {selector}"),
+            };
+            if args["dialog"] == "accept" {
+                format!("{step}, accepting any dialog it opens")
             } else {
-                format!("Browser: {action} {selector}")
+                step
             }
         }
     };
@@ -334,6 +342,13 @@ mod tests {
             .unwrap(),
             None
         );
+        assert!(
+            declared_effect(
+                "computer_browser",
+                &json!({ "action": "open", "url": "https://x", "dialog": "accept" })
+            )
+            .is_err()
+        );
         assert_eq!(
             declared_effect("computer_read_file", &json!({ "path": "a" })).unwrap(),
             None
@@ -393,5 +408,13 @@ mod tests {
             &json!({ "action": "type", "selector": "#msg", "text": "secret words", "effect": "external" }),
         );
         assert_eq!(context, "Browser: type 12 characters into #msg");
+        let (_, context) = approval_card(
+            "computer_browser",
+            &json!({ "action": "open", "url": "https://x.com/home", "dialog": "accept", "effect": "destructive" }),
+        );
+        assert_eq!(
+            context,
+            "Browser: open https://x.com/home, accepting any dialog it opens"
+        );
     }
 }
