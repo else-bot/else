@@ -216,7 +216,6 @@ pub(super) struct MentionDisplay {
 }
 
 impl MentionDisplay {
-    /// `links` replace other disjoint source ranges with Markdown links.
     pub(super) fn new(
         source: &str,
         mentions: &[BotMention],

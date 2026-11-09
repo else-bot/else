@@ -538,7 +538,8 @@ async fn linked_project_files_attach_and_other_links_stay() {
         directory.path(),
         vec![
             "Files: [Revised daily CSV](evidence/daily_counts_utc.csv) · [Report](~/work/report.md) \
-             · [Evidence ZIP](/home/elsebot/work/evidence.zip) · [chart](chart.png) · [data][csv]. \
+             · [Evidence ZIP](/home/elsebot/work/evidence.zip) · [chart](chart.png) · [data][csv] \
+             ![Chart](chart.png). \
              See [site](https://example.com), [missing](missing.csv), [outside](../outside.csv), \
              [folder](evidence) and `[code](report.md)`.\n\n[csv]: evidence/daily_counts_utc.csv"
                 .into(),
@@ -559,7 +560,8 @@ async fn linked_project_files_attach_and_other_links_stay() {
     assert_eq!(
         messages[0]["text"],
         "Files: [File: daily_counts_utc.csv] · [File: report.md] · [File: evidence.zip] \
-         · [File: chart.png] · [File: daily_counts_utc.csv]. See [site](https://example.com), \
+         · [File: chart.png] · [File: daily_counts_utc.csv] [File: chart.png]. See \
+         [site](https://example.com), \
          [missing](missing.csv), [outside](../outside.csv), [folder](evidence) and \
          `[code](report.md)`.\n\n[csv]: evidence/daily_counts_utc.csv"
     );
@@ -582,9 +584,11 @@ async fn linked_project_files_attach_and_other_links_stay() {
             ("evidence.zip", "application/zip"),
             ("chart.png", "image/png"),
             ("daily_counts_utc.csv", "text/csv"),
+            ("chart.png", "image/png"),
         ]
     );
     assert_eq!(files[0].id, files[4].id);
+    assert_eq!(files[3].id, files[5].id);
     let saved = else_api::db::attachments::read(&app.db.pool, bot.parse().unwrap(), files[0].id)
         .await
         .unwrap()

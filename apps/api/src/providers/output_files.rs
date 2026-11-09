@@ -29,7 +29,7 @@ pub(crate) struct FileReply {
 
 /// Markdown image syntax shows a picture, so only decodable images attach;
 /// a link attaches any regular file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reference {
     Image,
     Link,
@@ -50,7 +50,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
         .open(project)
         .ok()?;
     let mut files = Vec::new();
-    let mut saved = HashMap::<(PathBuf, Reference), Attachment>::new();
+    let mut saved = HashMap::<PathBuf, Attachment>::new();
     let mut parts = Vec::new();
     let mut offset = 0;
     for (range, url, reference) in candidates {
@@ -67,7 +67,10 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
             .components()
             .filter(|component| *component != Component::CurDir)
             .collect();
-        let file = if let Some(file) = saved.get(&(key.clone(), reference)) {
+        let file = if let Some(file) = saved.get(&key) {
+            if reference == Reference::Image && !is_image(&file.media_type) {
+                continue;
+            }
             file.clone()
         } else {
             if files.len() == MAX_MESSAGE_FILES {
@@ -77,7 +80,7 @@ pub(crate) fn prepare(project: &Path, text: &str) -> Option<FileReply> {
                 continue;
             };
             let file = output.file.clone();
-            saved.insert((key, reference), file.clone());
+            saved.insert(key, file.clone());
             files.push(output);
             file
         };
@@ -226,18 +229,17 @@ fn read_file(root: &File, path: &Path, reference: Reference) -> Option<OutputFil
 /// Raster image types are reserved for bytes that decode, since the
 /// desktop shows those in its gallery.
 fn guessed_type(name: &str) -> String {
-    let guessed = mime_guess::from_path(name).first_raw();
-    match guessed.map(media_type) {
-        Some(Ok(guessed))
-            if !matches!(
-                guessed.as_str(),
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            ) =>
-        {
-            guessed
-        }
+    match mime_guess::from_path(name).first_raw().map(media_type) {
+        Some(Ok(guessed)) if !is_image(&guessed) => guessed,
         _ => "application/octet-stream".to_owned(),
     }
+}
+
+fn is_image(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 fn image_type(data: &[u8]) -> Option<&'static str> {

@@ -28,7 +28,6 @@ impl Preview {
     }
 }
 
-/// `bytes` adds a save button; a draft still being read has none.
 pub(super) fn show_preview(
     file: Attachment,
     preview: Preview,
