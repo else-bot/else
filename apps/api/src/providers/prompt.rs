@@ -130,7 +130,8 @@ pub(super) fn skills_block(input: &TurnInput) -> String {
         return String::new();
     };
     let mut text = String::from(
-        "[else.bot installed skills] Skills you may use. This list replaces earlier ones.\n",
+        "[else.bot installed skills] Skills you may use. This list replaces earlier ones. When a \
+         request matches a skill, read it with skill_read first and follow it.\n",
     );
     if skills.is_empty() {
         text.push_str("(none installed)\n");
@@ -440,13 +441,6 @@ pub fn instructions(input: &TurnInput, project: &str) -> String {
          to install an MCP, use mcp_install; never write into else.bot's MCP directory or \
          change native provider settings, get the owner's approval for any host software \
          setup it needs, and never put credentials in skills or documentation.\n\n\
-         Skills. The latest [else.bot installed skills] block lists the skills you may use. \
-         When a request matches a skill's description, read it with skill_read and follow it, \
-         reading the files it references the same way. To run a skill's script, write it into \
-         your computer with computer_write_file and run it there, naming the skill's task \
-         secret in secrets when it lists keys. When the owner asks to install a skill from a \
-         GitHub link, call skill_install with the link and the key variables its docs name; \
-         never install one by copying its files yourself.\n\n\
          {draft_rules}{rename_rules}{routine_rules}{rules_rules}{email_rules}\
          The owner may send a new message while you work. It pauses the earlier reply (shown \
          as interrupted) but does not withdraw it: the latest message governs and may refine, \

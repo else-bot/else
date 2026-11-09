@@ -216,6 +216,16 @@ async fn read(state: &AppState, grant: &Grant, args: &Value) -> Outcome {
         "content": content,
         "truncated": truncated,
     });
+    if skill.files.iter().any(|f| f.script) {
+        let secrets = if skill.env.is_empty() {
+            String::new()
+        } else {
+            format!(" with secrets [\"{}\"]", skill.secret)
+        };
+        result["next"] = json!(format!(
+            "To run one of its scripts, read it, write it into your computer with computer_write_file, and run it there{secrets}."
+        ));
+    }
     if args.get("path").is_none() {
         result["files"] = json!(skill.files);
         result["commit"] = json!(skill.source.commit);

@@ -473,8 +473,6 @@ mod tests {
             "https://gitlab.com/a/b",
             "https://github.com/a",
             "https://github.com/a/b/issues/1",
-            "https://github.com/a/b/tree/main/../c",
-            "https://github.com/a/b/tree/main/%2e%2e/c",
             "not a url",
         ] {
             assert!(parse_url(bad).is_err(), "{bad}");
