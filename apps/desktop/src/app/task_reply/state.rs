@@ -94,6 +94,7 @@ pub(in crate::app) fn task_replies(conversation: &Conversation) -> HashMap<Uuid,
             let state = match turn.status.as_str() {
                 "queued" => ReplyState::Queued,
                 "preparing" | "sending" | "running" => ReplyState::Working,
+                "waiting" if !turn.mcp_waits.is_empty() => ReplyState::Working,
                 "waiting" => ReplyState::Waiting,
                 "cancelling" => ReplyState::Stopping,
                 "completed" => ReplyState::Complete,

@@ -272,6 +272,36 @@ pub async fn expire(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
     Ok(expired.len())
 }
 
+/// A wait still checking its job, as the owner's turn view shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+pub struct Pending {
+    pub id: Uuid,
+    #[serde(skip)]
+    pub turn_id: Uuid,
+    pub mcp_id: String,
+}
+
+/// The pending waits of these turns.
+pub async fn pending_for_turns(
+    conn: &mut SqliteConnection,
+    turn_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<Pending>>, sqlx::Error> {
+    let rows: Vec<Pending> = sqlx::query_as(
+        "SELECT id, turn_id, mcp_id FROM mcp_waits
+         WHERE status = 'pending'
+           AND lower(hex(turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
+         ORDER BY created_at, id",
+    )
+    .bind(Json(turn_ids))
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_turn: std::collections::HashMap<Uuid, Vec<Pending>> = Default::default();
+    for wait in rows {
+        by_turn.entry(wait.turn_id).or_default().push(wait);
+    }
+    Ok(by_turn)
+}
+
 /// Settled waits of `turn_id` that no attempt has received yet.
 pub async fn undelivered(
     conn: &mut SqliteConnection,
