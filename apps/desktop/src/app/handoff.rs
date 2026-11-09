@@ -1,4 +1,5 @@
 use super::ElseApp;
+use super::conversation::RowKey;
 use super::task_reply::state::format_elapsed;
 use crate::avatar::bot_avatar;
 use crate::model::{Delegation, DelegationStatus};
@@ -37,17 +38,34 @@ impl Phase {
     }
 }
 
-fn status_label(status: DelegationStatus) -> &'static str {
-    match status {
-        DelegationStatus::Queued => "Queued",
-        DelegationStatus::Running => "Working",
-        DelegationStatus::Completed => "Replied",
-        DelegationStatus::Failed => "Failed",
-        DelegationStatus::Cancelled => "Stopped",
-    }
+/// A live council groups its members into these lanes, in this order.
+const LANES: [(DelegationStatus, &str); 5] = [
+    (DelegationStatus::Running, "working"),
+    (DelegationStatus::Completed, "replied"),
+    (DelegationStatus::Failed, "failed"),
+    (DelegationStatus::Cancelled, "stopped"),
+    (DelegationStatus::Queued, "queued"),
+];
+
+/// Queued members beyond this fold into "+N more" so a large council keeps its height.
+const QUEUED_SHOWN: usize = 4;
+
+/// Matches an xsmall button so lane labels line up with the first row of pills.
+const LANE_ROW_H: f32 = 20.;
+const PILL_MAX_W: f32 = 240.;
+
+fn task_summary(task: &str) -> String {
+    task.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl ElseApp {
+    fn expand_council(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(view) = self.view.as_mut() {
+            view.expanded_councils.insert(id);
+        }
+        self.remeasure_row(RowKey::Handoff(id), cx);
+    }
+
     pub(super) fn render_handoff(&self, id: Uuid, cx: &mut Context<Self>) -> AnyElement {
         self.handoff_card(id, cx)
             .unwrap_or_else(|| div().into_any_element())
@@ -166,6 +184,174 @@ impl ElseApp {
             );
         }
 
+        if council {
+            let expanded = view.expanded_councils.contains(&id);
+            let lanes = LANES.iter().filter_map(|&(status, label)| {
+                let members: Vec<_> = group.iter().filter(|d| d.status == status).collect();
+                if members.is_empty() {
+                    return None;
+                }
+                let dot = div().size(px(7.)).flex_none().rounded_full();
+                let dot = match status {
+                    DelegationStatus::Queued => dot
+                        .border_1()
+                        .border_color(theme.muted_foreground.opacity(0.7)),
+                    DelegationStatus::Running => dot.bg(theme.primary),
+                    DelegationStatus::Completed => dot.bg(theme.success),
+                    DelegationStatus::Failed => dot.bg(theme.danger),
+                    DelegationStatus::Cancelled => dot.bg(theme.muted_foreground),
+                };
+                let shown = if status == DelegationStatus::Queued && !expanded {
+                    QUEUED_SHOWN
+                } else {
+                    members.len()
+                };
+                let hidden = members.len().saturating_sub(shown);
+                let pills = members.iter().take(shown).map(|d| {
+                    let target = d.target_bot_id;
+                    Button::new(SharedString::from(format!("handoff-{id}-open-{target}")))
+                        .ghost()
+                        .xsmall()
+                        .rounded_full()
+                        .max_w(px(PILL_MAX_W))
+                        .focus_ring(false)
+                        .cursor_pointer()
+                        .accessibility_label(format!("Open chat with {}", name(d)))
+                        .on_click(
+                            cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
+                        )
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_1p5()
+                                .items_center()
+                                .text_xs()
+                                .when(status == DelegationStatus::Queued, |row| row.opacity(0.6))
+                                .children(avatar(d, 16.))
+                                .child(div().min_w_0().truncate().child(name(d))),
+                        )
+                });
+                Some(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2p5()
+                        .py_1()
+                        .child(
+                            h_flex()
+                                .w(px(84.))
+                                .h(px(LANE_ROW_H))
+                                .flex_none()
+                                .items_center()
+                                .gap_1p5()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(dot)
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.foreground)
+                                        .child(members.len().to_string()),
+                                )
+                                .child(label),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .flex_wrap()
+                                .gap_1()
+                                .children(pills)
+                                .when(hidden > 0, |row| {
+                                    row.child(
+                                        Button::new(SharedString::from(format!(
+                                            "handoff-{id}-more"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .rounded_full()
+                                        .focus_ring(false)
+                                        .cursor_pointer()
+                                        .label(format!("+{hidden} more"))
+                                        .accessibility_label(format!(
+                                            "Show {hidden} more queued bots"
+                                        ))
+                                        .on_click(
+                                            cx.listener(move |app, _, _, cx| {
+                                                app.expand_council(id, cx)
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+            });
+            return Some(
+                v_flex()
+                    .id(SharedString::from(format!("handoff-{id}")))
+                    .w_full()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .bg(theme.sidebar.opacity(0.6))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .px_3p5()
+                            .pt_3()
+                            .pb_2()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .pb_1()
+                                    .children(sender.map(|b| {
+                                        bot_avatar(
+                                            SharedString::from(format!("handoff-from-{id}")),
+                                            b.avatar,
+                                            px(22.),
+                                        )
+                                        .still()
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("The council is working on it"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{replied}/{} · {elapsed}",
+                                                group.len()
+                                            )),
+                                    ),
+                            )
+                            .children(lanes),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .px_3p5()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(theme.border.opacity(0.6))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(task_summary(&group[0].task)),
+                    )
+                    .into_any_element(),
+            );
+        }
+
         let wire = {
             let line = div()
                 .absolute()
@@ -203,74 +389,24 @@ impl ElseApp {
                 .child(line)
                 .child(dot)
         };
-        let targets = if council {
-            v_flex()
-                .flex_none()
-                .gap_1p5()
-                .children(group.iter().map(|d| {
-                    let target = d.target_bot_id;
-                    Button::new(SharedString::from(format!("handoff-{id}-open-{target}")))
-                        .ghost()
-                        .xsmall()
-                        .focus_ring(false)
-                        .cursor_pointer()
-                        .accessibility_label(format!("Open chat with {}", name(d)))
-                        .on_click(
-                            cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .text_xs()
-                                .children(avatar(d, 22.))
-                                .child(div().font_weight(FontWeight::MEDIUM).child(name(d)))
-                                .child(
-                                    div()
-                                        .text_color(if d.status == DelegationStatus::Failed {
-                                            theme.danger
-                                        } else {
-                                            theme.muted_foreground
-                                        })
-                                        .child(status_label(d.status)),
-                                ),
-                        )
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex_none()
-                .children(avatar(group[0], 40.))
-                .into_any_element()
-        };
-        let title = if council {
-            "The council is working on it".to_owned()
-        } else if group[0].status == DelegationStatus::Queued {
+        let target = div().flex_none().children(avatar(group[0], 40.));
+        let title = if group[0].status == DelegationStatus::Queued {
             format!("Handing off to {}", name(group[0]))
         } else {
             format!("{} is on it", name(group[0]))
         };
-        let footer = if council {
-            format!("{replied} of {} replied", group.len())
-        } else {
-            format!("{sender_name} continues when {} replies", name(group[0]))
-        };
-        let open = (!council)
-            .then(|| bot(group[0].target_bot_id))
-            .flatten()
-            .map(|b| {
-                let target = b.id;
-                Button::new(SharedString::from(format!("handoff-open-{id}")))
-                    .ghost()
-                    .xsmall()
-                    .focus_ring(false)
-                    .cursor_pointer()
-                    .label("Open chat")
-                    .accessibility_label(format!("Open chat with {}", b.name))
-                    .on_click(
-                        cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)),
-                    )
-            });
+        let footer = format!("{sender_name} continues when {} replies", name(group[0]));
+        let open = bot(group[0].target_bot_id).map(|b| {
+            let target = b.id;
+            Button::new(SharedString::from(format!("handoff-open-{id}")))
+                .ghost()
+                .xsmall()
+                .focus_ring(false)
+                .cursor_pointer()
+                .label("Open chat")
+                .accessibility_label(format!("Open chat with {}", b.name))
+                .on_click(cx.listener(move |app, _, window, cx| app.open_bot(target, window, cx)))
+        });
         Some(
             v_flex()
                 .id(SharedString::from(format!("handoff-{id}")))
@@ -295,7 +431,7 @@ impl ElseApp {
                             .still()
                         }))
                         .child(wire)
-                        .child(targets),
+                        .child(target),
                 )
                 .child(
                     v_flex()
@@ -333,13 +469,7 @@ impl ElseApp {
                                 .max_h(rems(2.5))
                                 .overflow_hidden()
                                 .text_color(theme.muted_foreground)
-                                .child(
-                                    group[0]
-                                        .task
-                                        .split_whitespace()
-                                        .collect::<Vec<_>>()
-                                        .join(" "),
-                                ),
+                                .child(task_summary(&group[0].task)),
                         ),
                 )
                 .child(
