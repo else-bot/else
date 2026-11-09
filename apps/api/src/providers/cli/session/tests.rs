@@ -29,6 +29,7 @@ pub(crate) fn input() -> TurnInput {
             kind: kind.into(),
             text: text.into(),
             status: "completed".into(),
+            error: None,
             parts: Vec::new(),
         })
         .collect(),
@@ -203,6 +204,7 @@ async fn a_warm_session_gets_only_what_it_lacks() {
         kind: "user".into(),
         text: "third".into(),
         status: "completed".into(),
+        error: None,
         parts: Vec::new(),
     });
     let resumed = PreparedTurn::new(&input, "fp".into(), Opened::Resumed(&session));

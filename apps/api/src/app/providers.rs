@@ -52,6 +52,8 @@ pub struct HistoryEntry {
     pub text: String,
     /// The owner turn's recorded status (`completed`, `interrupted`, ...).
     pub status: String,
+    /// Why a failed or uncertain turn ended that way.
+    pub error: Option<String>,
     /// A conversation message's ordered parts; empty for plain text.
     pub parts: Vec<MessagePart>,
 }

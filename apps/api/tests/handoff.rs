@@ -305,7 +305,7 @@ async fn interrupted_and_uncertain_turns_are_history_not_replayed() {
         "{packet}"
     );
     assert!(
-        packet.contains("[turn 3, uncertain] Owner: Pay the invoice"),
+        packet.contains("[turn 3, uncertain: Stopped before the synthetic provider acknowledged.] Owner: Pay the invoice"),
         "{packet}"
     );
     assert_eq!(packet.matches("What happened so far?").count(), 1);
@@ -354,7 +354,10 @@ async fn an_uncertain_handoff_is_recorded_and_its_session_retired() {
     assert_eq!(status, "completed");
     let packet = last(&b.packets().await);
     assert!(packet.contains("[turn 1] Owner: On A."), "{packet}");
-    assert!(packet.contains("[turn 2, uncertain] Owner: On B [synthetic:stall-send]"));
+    assert!(packet.contains(
+        "[turn 2, uncertain: Stopped before the synthetic provider acknowledged.] Owner: On B [synthetic:stall-send]"
+    ),
+    "{packet}");
     assert!(packet.ends_with("Next on B."));
     let _ = a;
 }

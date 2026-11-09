@@ -40,6 +40,7 @@ fn input(history: Vec<(i64, &str, &str)>) -> TurnInput {
                 kind: kind.into(),
                 text: text.into(),
                 status: "completed".into(),
+                error: None,
                 parts: Vec::new(),
             })
             .collect(),
