@@ -16,6 +16,7 @@ class OAuthServer(HTTPServer):
         self.refresh = set()
         self.revoked = False
         self.next_ttl = 3600
+        self.scopes = None
         self.events = []
 
 
@@ -42,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.path.startswith("/.well-known/"):
             self.event("discovery", path=path.path, authorization=bool(self.headers.get("Authorization")))
         if path.path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
-            self.reply(200, {"resource": server.base + "/mcp", "authorization_servers": [server.base], "scopes_supported": ["fixture.read", "fixture.write"]})
+            self.reply(200, {"resource": server.base + "/mcp", "authorization_servers": [server.base], "scopes_supported": server.scopes or ["fixture.read", "fixture.write"]})
         elif path.path == "/.well-known/oauth-authorization-server":
             self.reply(200, {
                 "issuer": server.base,
@@ -125,13 +126,18 @@ class Handler(BaseHTTPRequestHandler):
                 server.revoked = control["revoked"]
             if "next_ttl" in control:
                 server.next_ttl = control["next_ttl"]
+            if "scopes" in control:
+                server.scopes = control["scopes"]
             self.reply(200, {})
         elif self.path == "/mcp":
             message = json.loads(raw)
             authorization = self.headers.get("Authorization", "")
             if not authorization.startswith("Bearer ") or authorization[7:] not in server.access:
                 self.event("unauthorized", method=message.get("method"))
-                self.reply(401, headers={"WWW-Authenticate": f'Bearer resource_metadata="{server.base}/.well-known/oauth-protected-resource", scope="fixture.read"'})
+                challenge = f'Bearer resource_metadata="{server.base}/.well-known/oauth-protected-resource"'
+                if server.scopes is None:
+                    challenge += ', scope="fixture.read"'
+                self.reply(401, headers={"WWW-Authenticate": challenge})
                 return
             method = message.get("method")
             self.event("mcp", method=method)

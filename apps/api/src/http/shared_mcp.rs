@@ -420,17 +420,23 @@ pub(super) async fn auth_required(
         Ok(package) => package,
         Err(error) => return (tool_error(&error.to_string()), None),
     };
-    let context = format!(
-        "{}\nProvider: {}\nRequested scopes: {}\nEvery bot can use the connected account. Credentials stay on the server.",
-        purpose.unwrap_or("Use this MCP for the current request."),
-        connection
-            .provider
-            .as_deref()
-            .and_then(|value| reqwest::Url::parse(value).ok())
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_else(|| "MCP provider".into()),
-        connection.scopes.join(", ")
-    );
+    let describe = |scopes: &str| {
+        format!(
+            "{}\nProvider: {}\nRequested scopes: {scopes}\nEvery bot can use the connected account. Credentials stay on the server.",
+            purpose.unwrap_or("Use this MCP for the current request."),
+            connection
+                .provider
+                .as_deref()
+                .and_then(|value| reqwest::Url::parse(value).ok())
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "MCP provider".into()),
+        )
+    };
+    let mut context = describe(&connection.scopes.join(", "));
+    if context.len() > crate::app::questions::MAX_CONTEXT {
+        // The card still lists every scope from `McpConnection::scopes`.
+        context = describe(&format!("{} scopes", connection.scopes.len()));
+    }
     let spec = Spec::mcp_connection(
         McpConnection {
             id: id.clone(),
