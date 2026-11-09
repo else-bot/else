@@ -307,8 +307,11 @@ async fn replacing_a_different_package_waits_for_the_owner_and_resets_a_changed_
 const BENTO_HEADERS: [(&str, &str); 3] = [
     ("x-bento-publishable-key", "pk-private-1234"),
     ("x-bento-secret-key", "sk-private-5678"),
-    ("x-bento-site-uuid", "site-private-9012"),
+    ("x-bento-site-uuid", "90125678"),
 ];
+const ROTATED_SECRET: &str = "sk-rotated-4321";
+/// The secret key Bento accepts, replaced mid-test like a rotated key.
+static ACCEPTED_SECRET: std::sync::Mutex<&str> = std::sync::Mutex::new(BENTO_HEADERS[1].1);
 
 /// Bento's MCP as observed live: header credentials, 400 without them and
 /// no OAuth challenge, SSE replies, an empty 202 for notifications, and no
@@ -318,10 +321,15 @@ async fn bento(
     axum::Json(message): axum::Json<Value>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if BENTO_HEADERS
-        .iter()
-        .any(|(name, value)| headers.get(*name).and_then(|v| v.to_str().ok()) != Some(*value))
-    {
+    let accepted = *ACCEPTED_SECRET.lock().unwrap();
+    if BENTO_HEADERS.iter().any(|(name, value)| {
+        let value = if *name == "x-bento-secret-key" {
+            accepted
+        } else {
+            value
+        };
+        headers.get(*name).and_then(|v| v.to_str().ok()) != Some(value)
+    }) {
         return (StatusCode::BAD_REQUEST, "missing Bento credentials").into_response();
     }
     if message.get("id").is_none() {
@@ -336,7 +344,8 @@ async fn bento(
         }
         _ => {
             let echoed = format!("tags for site {}", BENTO_HEADERS[2].1);
-            json!({"content":[{"type":"text","text":echoed}]})
+            let site: u64 = BENTO_HEADERS[2].1.parse().unwrap();
+            json!({"content":[{"type":"text","text":echoed}],"structuredContent":{"site":site,"key":accepted}})
         }
     };
     let body = json!({"jsonrpc":"2.0","id":message["id"],"result":result});
@@ -419,6 +428,33 @@ async fn header_credentials_come_from_task_secrets_and_connect_without_oauth() {
     assert_eq!(
         called["result"]["content"][0]["text"],
         "tags for site [secret BENTO_SITE_UUID]"
+    );
+    assert_eq!(
+        called["result"]["structuredContent"]["site"],
+        "[secret BENTO_SITE_UUID]"
+    );
+    assert_eq!(
+        called["result"]["structuredContent"]["key"],
+        "[secret BENTO_SECRET_KEY]"
+    );
+
+    *ACCEPTED_SECRET.lock().unwrap() = ROTATED_SECRET;
+    let rotated = app
+        .owner(
+            "PUT",
+            "/v1/task-secrets/bento",
+            Some(json!({"env":{
+                "BENTO_PUBLISHABLE_KEY": BENTO_HEADERS[0].1,
+                "BENTO_SECRET_KEY": ROTATED_SECRET,
+                "BENTO_SITE_UUID": BENTO_HEADERS[2].1,
+            }})),
+        )
+        .await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
+    let called = result(&tool(&app, &token, "mcp_request", json!({"id":"bento","method":"tools/call","params":{"name":"bento_list_tags","arguments":{}},"effect":"local"})).await);
+    assert_eq!(
+        called["result"]["structuredContent"]["key"], "[secret BENTO_SECRET_KEY]",
+        "the next call sends the rotated key and redacts it"
     );
     server.abort();
 }

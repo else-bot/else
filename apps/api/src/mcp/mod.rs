@@ -385,6 +385,15 @@ impl TaskSecrets {
 fn redact(value: Value, set: &[task_secrets::Redact]) -> Value {
     match value {
         Value::String(text) => Value::String(task_secrets::redact(&text, set)),
+        Value::Number(number) => {
+            let text = number.to_string();
+            let redacted = task_secrets::redact(&text, set);
+            if redacted == text {
+                Value::Number(number)
+            } else {
+                Value::String(redacted)
+            }
+        }
         Value::Array(items) => Value::Array(items.into_iter().map(|v| redact(v, set)).collect()),
         Value::Object(fields) => Value::Object(
             fields
@@ -522,6 +531,8 @@ struct Slot {
     oauth_key: Option<Arc<crate::credentials::SecretKey>>,
     oauth_client: Option<Arc<oauth::RegisteredClient>>,
     task_secrets: Option<TaskSecrets>,
+    /// The filled config the live connection, if any, was opened with.
+    connected_with: Option<Transport>,
     retired: bool,
     gate: Arc<crate::maintenance::Gate>,
 }
@@ -538,9 +549,19 @@ impl Slot {
     }
 
     /// The package's connection config with its task secrets filled in.
-    async fn config(&self) -> Result<(Transport, Vec<task_secrets::Redact>), Error> {
+    /// A live connection made with other values, such as a secret the
+    /// owner since replaced, is closed so the next one sends these.
+    async fn config(&mut self) -> Result<(Transport, Vec<task_secrets::Redact>), Error> {
         let package = self.package().await?;
-        TaskSecrets::fill(self.task_secrets.as_ref(), &package.config).await
+        let (config, redact) =
+            TaskSecrets::fill(self.task_secrets.as_ref(), &package.config).await?;
+        if self.connected_with.as_ref() != Some(&config) {
+            if let Some(session) = self.session.as_mut() {
+                session.close().await;
+            }
+            self.connected_with = Some(config.clone());
+        }
+        Ok((config, redact))
     }
 
     async fn session(&mut self) -> Result<&mut oauth::Session, Error> {
@@ -632,6 +653,7 @@ impl Library {
                             oauth_key,
                             oauth_client,
                             task_secrets,
+                            connected_with: None,
                             retired: false,
                             gate,
                         }),
