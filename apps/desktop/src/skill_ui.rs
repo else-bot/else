@@ -190,7 +190,7 @@ impl SkillFiles {
                     .w_full()
                     .selected(self.selected.as_ref() == Some(&file.path))
                     .icon(if file.script {
-                        IconName::SquareTerminal
+                        IconName::Terminal
                     } else {
                         IconName::FileText
                     })

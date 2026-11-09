@@ -16,6 +16,7 @@ pub(super) enum SettingsSection {
     Email,
     Socials,
     Mcp,
+    Skills,
     Backups,
     Updates,
 }
@@ -173,11 +174,19 @@ impl Shell {
                 SettingsSection::Email => 1,
                 SettingsSection::Socials => 2,
                 SettingsSection::Mcp => 3,
-                SettingsSection::Backups => 4,
-                SettingsSection::Updates => 5,
+                SettingsSection::Skills => 4,
+                SettingsSection::Backups => 5,
+                SettingsSection::Updates => 6,
             }]
             .focus(window, cx);
             cx.notify();
+        }
+        if section == SettingsSection::Skills {
+            if self.skills.is_none() {
+                self.open_skills(window, cx);
+            }
+        } else {
+            self.clear_skills(window, cx);
         }
         if section == SettingsSection::Mcp {
             if self.mcp.is_none() {
@@ -270,7 +279,7 @@ impl Shell {
                 "App updates",
                 IconName::Download,
                 SettingsSection::Updates,
-                &setup.navigation_focus[5],
+                &setup.navigation_focus[6],
             ))
             .child(
                 div()
@@ -310,11 +319,18 @@ impl Shell {
                 &setup.navigation_focus[3],
             ))
             .child(nav_item(
+                "settings-skills",
+                "Skills",
+                IconName::FileText,
+                SettingsSection::Skills,
+                &setup.navigation_focus[4],
+            ))
+            .child(nav_item(
                 "settings-backups",
                 "Backups",
                 IconName::CloudUpload,
                 SettingsSection::Backups,
-                &setup.navigation_focus[4],
+                &setup.navigation_focus[5],
             ));
         let body = match section {
             SettingsSection::Server => self.render_server_settings(setup, window, cx),
@@ -323,6 +339,7 @@ impl Shell {
                 .into_any_element(),
             SettingsSection::Socials => div().children(self.socials.clone()).into_any_element(),
             SettingsSection::Mcp => self.render_mcp(window, cx),
+            SettingsSection::Skills => self.render_skills(cx),
             SettingsSection::Backups => self.render_backups(window, cx),
             SettingsSection::Updates => self.render_updates(cx),
         };
@@ -341,6 +358,7 @@ impl Shell {
             section,
             SettingsSection::Email
                 | SettingsSection::Socials
+                | SettingsSection::Skills
                 | SettingsSection::Mcp
                 | SettingsSection::Backups
         ) {
@@ -423,6 +441,7 @@ impl Shell {
                                 SettingsSection::Email => "settings-email-content",
                                 SettingsSection::Socials => "settings-socials-content",
                                 SettingsSection::Mcp => "settings-mcp-content",
+                                SettingsSection::Skills => "settings-skills-content",
                                 SettingsSection::Backups => "settings-backups-content",
                                 SettingsSection::Updates => "settings-updates-content",
                             })

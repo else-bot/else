@@ -61,7 +61,6 @@ gpui_kit::assets::icon_assets!(
         Search,
         ChevronUp,
         FileText,
-        SquareTerminal,
         Pause,
         LoaderCircle,
         CircleQuestionMark,

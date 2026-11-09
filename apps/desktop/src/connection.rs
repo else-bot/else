@@ -7,6 +7,7 @@ mod mcp;
 mod server_views;
 mod servers;
 mod settings;
+mod skills;
 mod updates;
 mod view;
 pub(crate) use view::brand_mark;
@@ -150,7 +151,7 @@ struct Setup {
     name: Entity<InputState>,
     error: Option<String>,
     focus: FocusHandle,
-    navigation_focus: [FocusHandle; 6],
+    navigation_focus: [FocusHandle; 7],
     _attempt: Option<Task<()>>,
 }
 
@@ -179,6 +180,7 @@ pub struct Shell {
     updates: updates::View,
     backups: Option<backups::View>,
     mcp: Option<mcp::View>,
+    skills: Option<skills::View>,
     socials: Option<Entity<crate::socials::SocialsView>>,
     email: Option<(Entity<crate::email::EmailSettings>, Subscription)>,
 }
@@ -248,6 +250,7 @@ impl Shell {
             updates,
             backups: None,
             mcp: None,
+            skills: None,
             socials: None,
             email: None,
         };
@@ -320,6 +323,7 @@ impl Shell {
             .active
             .as_ref()
             .map(|active| active.app.read(cx).panel_widths());
+        self.clear_skills(window, cx);
         self.clear_socials(window, cx);
         self.backups = None;
         self.mcp = None;
@@ -361,6 +365,9 @@ impl Shell {
         }
         let observer = cx.observe_in(&app, window, move |shell, app, window, cx| {
             if shell.active.as_ref().is_some_and(|active| active.id == id) {
+                if !app.read(cx).connected() {
+                    shell.clear_skill_keys(window, cx);
+                }
                 if let Some(socials) = &shell.socials {
                     let available = app.read(cx).social_network_available();
                     socials.update(cx, |view, cx| view.set_available(available, window, cx));
@@ -744,6 +751,7 @@ impl Shell {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_skills(window, cx);
         self.clear_socials(window, cx);
         if let Some(active) = &self.active {
             self.updates.dismiss();
@@ -795,6 +803,13 @@ impl Render for Shell {
                 .key_context(SHELL_CONTEXT)
                 .on_action(cx.listener(|shell, _: &OpenAppSettings, window, cx| {
                     shell.open_settings(window, cx)
+                }))
+                .on_action(cx.listener(|shell, _: &OpenSkillsSettings, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        return;
+                    }
+                    shell.open_settings(window, cx);
+                    shell.select_settings(settings::SettingsSection::Skills, window, cx);
                 }))
                 .on_action(cx.listener(|shell, _: &OpenEmailSettings, window, cx| {
                     if window.has_active_dialog(cx) {
