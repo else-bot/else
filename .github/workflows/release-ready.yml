@@ -1,7 +1,8 @@
 name: release-ready
 
 # Checks the release tooling and installers. Pull requests must also keep
-# the workspace version, which only the release workflow changes.
+# the workspace version, which only the release workflow changes, and must
+# pin a published guest base matching infra/guest's base inputs.
 on:
   pull_request:
     branches: [main]
@@ -48,3 +49,13 @@ jobs:
         run: |
           git fetch -q origin +refs/heads/main:refs/remotes/origin/main
           python3 scripts/guest_release.py gate --main-ref origin/main
+
+  guest-base:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Check the guest base pin
+        run: python3 scripts/guest_release.py --base check
