@@ -22,7 +22,7 @@ jq -n \
               node_helper: "/usr/local/lib/elsebot/cdp/cdp.mjs (import { connect } from it; no dependencies)",
               python_helper: "/usr/local/lib/elsebot/cdp/elsecdp.py (sys.path.insert(0, \"/usr/local/lib/elsebot/cdp\"); import elsecdp)",
               examples: ["/usr/local/lib/elsebot/cdp/example.mjs", "/usr/local/lib/elsebot/cdp/example.py"],
-              rules: "one controller at a time (connect() takes the browser lock computer_browser also uses); run scripts with computer_run or computer_job_start; an Uncertain error means an action may have happened: check the page before repeating it"},
+              rules: "one controller at a time (connect() takes the browser lock computer_browser also uses); run scripts with computer_run or computer_job_start; an Uncertain error means an action may have happened: check the page before repeating it; a native dialog raises DialogOpen until page.handleDialog answers it, and navigate() keeps a page that asks to confirm leaving (NavigationBlocked) unless told leave"},
     notes: ["Python packages go in a virtual environment: python3 -m venv .venv && .venv/bin/pip install ...",
             "Projects live under /home/elsebot/work and survive stop and start.",
             "No provider CLI, provider credential, or host access is installed here."]}'

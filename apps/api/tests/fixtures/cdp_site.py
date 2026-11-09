@@ -4,6 +4,7 @@
 /          a search form (input name=q, submit button)
 /search    results for ?q= (title "Results for <q>", #results)
 /slow      never finishes loading within a minute
+/draft     a textarea whose page asks to confirm leaving once it holds text
 /order     a page whose button POSTs to /count
 /count     POST: counts one order at once, then withholds the reply for
            30 s (so a test can cut the connection after the side effect
@@ -46,6 +47,10 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/slow":
             time.sleep(60)
             self.page("<title>Finally</title>")
+        elif url.path == "/draft":
+            self.page("<title>Draft</title><textarea id='draft'></textarea><script>"
+                      "addEventListener('beforeunload', e => { if (document.getElementById('draft').value) "
+                      "{ e.preventDefault(); e.returnValue = ''; } })</script>")
         elif url.path == "/order":
             self.page("<title>Order</title><button id='buy'>Buy</button>")
         elif url.path == "/count":

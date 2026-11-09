@@ -96,6 +96,8 @@ def run(runner):
                 "mcp-index-then-schema": (mcp_calls, "#17 Fix digest retry"),
                 "connect-gmail-from-chat": ([self.call("mail_connect", {"provider": "gmail", "address": "max@example.com"},
                                                        {"status": "pending_owner_auth", "parked": True})], "Sign in on the card above."),
+                "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
+                                                "The X draft asked to confirm leaving, so I kept it open."),
                 "thumbs-up-saves-no-rule": ([], ""),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
