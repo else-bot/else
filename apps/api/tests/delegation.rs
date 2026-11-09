@@ -885,43 +885,67 @@ async fn stopping_the_root_and_deleting_the_target_resolve_child_work() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_owner_follow_up_ends_a_waiting_root_and_its_task_only() {
-    let app = app_with(2).await;
-    let work = leaf(&app, "Work").await;
+async fn an_owner_follow_up_keeps_earlier_tasks_running_and_receives_every_reply() {
+    let app = app_with(3).await;
+    let growth = leaf(&app, "Growth").await;
+    let scout = leaf(&app, "Scout").await;
     let (main, root, token) = running_main(&app).await;
-    let reply = delegate(&app, &token, &work, "[synthetic:hang] long research").await;
-    let task_id: Uuid = tool_text(&reply)["task_id"]
+    let audit = format!(
+        "[synthetic:slow] Check the affected Search Console URLs and the X Ads campaign. {}",
+        "Report each URL and its indexing state. ".repeat(6)
+    );
+    let reply = delegate(&app, &token, &growth, &audit).await;
+    let audit_id: Uuid = tool_text(&reply)["task_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
     wait_status(&app, root, "waiting").await;
-    let child: Uuid = sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
-        .bind(task_id)
-        .fetch_one(&app.db.pool)
-        .await
-        .unwrap();
-    wait_status(&app, child, "running").await;
+    let audit_child: Uuid =
+        sqlx::query_scalar("SELECT child_turn_id FROM delegations WHERE id = ?1")
+            .bind(audit_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    wait_status(&app, audit_child, "running").await;
 
     let follow = app
         .send(
             &main,
             Uuid::new_v4(),
-            "Do the school part yourself.",
+            "[synthetic:slow] Also learn from Scout how to generate VIP4 redeem links.",
             Some("synthetic"),
         )
         .await;
     assert_eq!(follow.status, StatusCode::ACCEPTED, "{}", follow.body);
+    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
     wait_status(&app, root, "interrupted").await;
-    wait_status(&app, child, "interrupted").await;
-    let status: String = sqlx::query_scalar("SELECT status FROM delegations WHERE id = ?1")
-        .bind(task_id)
-        .fetch_one(&app.db.pool)
-        .await
+    wait_status(&app, follow, "running").await;
+    let token = grant_delegate(&app, follow).await;
+    let reply = delegate(&app, &token, &scout, "Explain how to generate VIP4 redeem links.").await;
+    let links_id: Uuid = tool_text(&reply)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
         .unwrap();
-    assert_eq!(status, "cancelled", "the task does not outlive its root");
-    app.wait_turn(follow.body["turn"]["id"].as_str().unwrap(), &["completed"])
+
+    app.wait_turn_for(&follow.to_string(), &["completed"], Duration::from_secs(60))
         .await;
+    let tasks: Vec<(Uuid, Uuid, String, Option<i64>)> = sqlx::query_as(
+        "SELECT id, root_turn_id, status, delivered_attempt FROM delegations
+         WHERE id IN (?1, ?2) ORDER BY created_at",
+    )
+    .bind(audit_id)
+    .bind(links_id)
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(tasks.len(), 2);
+    for (id, carrier, status, delivered) in tasks {
+        assert_eq!(carrier, follow, "{id} reports to the follow-up");
+        assert_eq!(status, "completed", "{id} kept running after the follow-up");
+        assert!(delivered.is_some(), "{id} reached the follow-up");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
