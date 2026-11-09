@@ -155,7 +155,7 @@ class _Socket:
         while b"\r\n\r\n" not in head:
             chunk = self.sock.recv(4096)
             if not chunk:
-                raise CdpError("DevTools closed the connection during the handshake")
+                raise TargetClosed("DevTools closed the connection during the handshake")
             head += chunk
         head, self.buf = head.split(b"\r\n\r\n", 1)
         accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
@@ -475,17 +475,30 @@ class Browser:
     def targets(self):
         return [t for t in _get_json("/json/list") if t.get("type") == "page"]
 
+    def _create_blank_tab(self):
+        """A browser that is shutting down still answers /json/version for a
+        moment, then drops the connection; a blank tab it made dies with it, so
+        creating one again on the next browser repeats no page work."""
+        deadline = time.monotonic() + self.timeout
+        while True:
+            version = ready(max(1, deadline - time.monotonic()))
+            try:
+                conn = _Connection(version["webSocketDebuggerUrl"], self.timeout, lambda msg: None)
+                try:
+                    return conn.call("Target.createTarget", {"url": "about:blank"}, mutating=False)["targetId"]
+                finally:
+                    conn.close()
+            except (TargetClosed, ConnectionError):
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.25)
+
     def page(self, id=None, url_prefix=None, title=None, create=None):
         """Attach to a page by id, url_prefix, or title; or create a new tab at
         a URL (shown in the visible window). Without a match and without
         create, the first page tab."""
         if create:
-            version = ready(self.timeout)
-            conn = _Connection(version["webSocketDebuggerUrl"], self.timeout, lambda msg: None)
-            try:
-                target_id = conn.call("Target.createTarget", {"url": "about:blank"})["targetId"]
-            finally:
-                conn.close()
+            target_id = self._create_blank_tab()
             target = next((t for t in self.targets() if t["id"] == target_id), None)
             if not target:
                 raise TargetClosed("the new tab disappeared")

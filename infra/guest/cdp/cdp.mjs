@@ -500,6 +500,28 @@ export class Browser {
     return (await getJson("/json/list")).filter((t) => t.type === "page");
   }
 
+  /** A browser that is shutting down still answers /json/version for a
+   * moment, then drops the connection; a blank tab it made dies with it, so
+   * creating one again on the next browser repeats no page work. */
+  async createBlankTab() {
+    const deadline = Date.now() + this.timeoutMs;
+    for (;;) {
+      const version = await ready({ timeoutMs: Math.max(1000, deadline - Date.now()) });
+      try {
+        const conn = new Connection(await Socket.open(version.webSocketDebuggerUrl, this.timeoutMs));
+        try {
+          return (await conn.call("Target.createTarget", { url: "about:blank" }, { mutating: false })).targetId;
+        } finally {
+          conn.close();
+        }
+      } catch (e) {
+        const dropped = e instanceof TargetClosed || ["ECONNRESET", "ECONNREFUSED", "EPIPE"].includes(e.code);
+        if (!dropped || Date.now() > deadline) throw e;
+        await sleep(250);
+      }
+    }
+  }
+
   /**
    * Attach to a page: by `id`, `urlPrefix`, or `title`; or `create` a new
    * tab at a URL (shown in the visible window). Without a match and without
@@ -508,14 +530,8 @@ export class Browser {
   async page({ id, urlPrefix, title, create } = {}) {
     let target;
     if (create) {
-      const version = await ready({ timeoutMs: this.timeoutMs });
-      const conn = new Connection(await Socket.open(version.webSocketDebuggerUrl, this.timeoutMs));
-      try {
-        const { targetId } = await conn.call("Target.createTarget", { url: "about:blank" });
-        target = (await this.targets()).find((t) => t.id === targetId);
-      } finally {
-        conn.close();
-      }
+      const targetId = await this.createBlankTab();
+      target = (await this.targets()).find((t) => t.id === targetId);
       if (!target) throw new TargetClosed("the new tab disappeared");
     } else {
       const pages = await this.targets();
