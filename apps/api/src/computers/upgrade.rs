@@ -19,6 +19,15 @@
 //! removed here. A failure before the switch removes only the replacement
 //! this upgrade created and leaves the bot on its old computer.
 //!
+//! Bots have root in their computer, so the archive also carries
+//! `/usr/local` and `/opt`, where the new image's own files win, and the
+//! old computer reports the APT packages marked manual beyond the image's
+//! own list (`manual` in `/etc/elsebot/image.json`; an image without it
+//! reports none). The new computer installs them again by name, so it gets
+//! the versions its archive has, and reports each one it could not install
+//! instead of failing. Other system changes, such as edits in `/etc`, stay
+//! behind.
+//!
 //! The owner starts one from the desktop ([`ComputerManager::start_upgrade`])
 //! or offline with `else-api upgrade-computer`. One started from the
 //! desktop holds a maintenance admission until it ends, so a backup or an
@@ -49,6 +58,7 @@ trap 'rm -f "$archive"' EXIT
 paths=""
 for p in home/elsebot var/lib/elsebot; do [ -e "$p" ] && paths="$paths $p"; done
 [ -n "$paths" ] || { echo "no user data to copy" >&2; exit 3; }
+for p in usr/local opt; do [ -d "$p" ] && paths="$paths $p"; done
 rm -f "$archive"
 need=$(du -skx $paths | awk '{s += $1} END {print s + 65536}')
 free=$(df -Pk /var/tmp | awk 'NR == 2 {print $4}')
@@ -57,6 +67,11 @@ tar --numeric-owner --sparse --one-file-system -cpf "$archive" $paths
 stat -c %s "$archive"
 sha256sum "$archive" | cut -d' ' -f1
 id -u elsebot 2>/dev/null || echo none
+if command -v jq >/dev/null && jq -e '.manual' /etc/elsebot/image.json >/dev/null 2>&1; then
+    jq -r '.manual[]' /etc/elsebot/image.json | sort -u > /var/tmp/else-image-packages
+    apt-mark showmanual | sort -u | comm -23 - /var/tmp/else-image-packages
+    rm -f /var/tmp/else-image-packages
+fi
 trap - EXIT"#;
 
 /// Close a running Chromium gracefully before the normal stop. SIGINT makes
@@ -87,9 +102,25 @@ need=$(( $(stat -c %s "$2") / 1024 + 65536 ))
 free=$(df -Pk / | awk 'NR == 2 {print $4}')
 [ "$free" -ge "$need" ] || { echo "not enough free disk to unpack: ${need} KiB needed, ${free} KiB free" >&2; exit 5; }
 echo "$1  $2" | sha256sum -c --quiet
-tar --numeric-owner -xpf "$2"
+tar --numeric-owner -xpf "$2" --anchored --exclude=usr/local --exclude=opt
+tar --numeric-owner --skip-old-files -xpf "$2" --anchored --exclude=home/elsebot --exclude=var/lib/elsebot
 rm -f "$2"
 rmdir "$(dirname "$2")" 2>/dev/null || true
+shift 3
+missing=""
+for p; do
+    [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+    mkdir -p /var/log/elsebot
+    log=/var/log/elsebot/upgrade-packages.log
+    export DEBIAN_FRONTEND=noninteractive
+    if ! { apt-get update && apt-get install -y $missing; } >>"$log" 2>&1 </dev/null; then
+        for p in $missing; do
+            apt-get install -y "$p" >>"$log" 2>&1 </dev/null || echo "unrestored $p"
+        done
+    fi
+fi
 sync
 cat /etc/elsebot/image.json 2>/dev/null || echo '{}'"#;
 
@@ -112,6 +143,27 @@ pub struct UpgradeReport {
     pub data_sha256: String,
     /// The new image's `/etc/elsebot/image.json`, when it has one.
     pub image_description: String,
+    /// APT packages the bot installed that the new computer could not
+    /// install again.
+    pub unrestored_packages: Vec<String>,
+}
+
+struct Copied {
+    bytes: u64,
+    sha256: String,
+    description: String,
+    unrestored: Vec<String>,
+}
+
+/// A Debian package name as `apt-mark showmanual` prints it, optionally
+/// with an `:arch` qualifier. The first character keeps `apt-get` from
+/// reading it as an option.
+fn package_name(name: &str) -> bool {
+    name.len() >= 2
+        && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+-.:".contains(c))
 }
 
 type UpgradeRow = (
@@ -519,7 +571,7 @@ impl ComputerManager {
             .copy_to_replacement(bot_id, &row, &to_runtime_name, image, &network, &staging)
             .await;
         let _ = std::fs::remove_dir_all(&staging);
-        let (bytes, sha256, description) = match copied {
+        let copied = match copied {
             Ok(done) => done,
             Err(err) => {
                 self.remove_guest_archive(&row.runtime_name).await;
@@ -579,12 +631,16 @@ impl ComputerManager {
         .await?;
         sqlx::query(
             "UPDATE computer_upgrades SET state = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
-                 data_bytes = ?2, data_sha256 = ?3
+                 data_bytes = ?2, data_sha256 = ?3, unrestored_packages = ?4
              WHERE id = ?1",
         )
         .bind(id)
-        .bind(bytes as i64)
-        .bind(&sha256)
+        .bind(copied.bytes as i64)
+        .bind(&copied.sha256)
+        .bind(
+            (!copied.unrestored.is_empty())
+                .then(|| serde_json::to_string(&copied.unrestored).expect("strings serialize")),
+        )
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -595,9 +651,10 @@ impl ComputerManager {
             from_image: row.image,
             to_runtime_name,
             to_image: image.to_owned(),
-            data_bytes: bytes,
-            data_sha256: sha256,
-            image_description: description,
+            data_bytes: copied.bytes,
+            data_sha256: copied.sha256,
+            image_description: copied.description,
+            unrestored_packages: copied.unrestored,
         })
     }
 
@@ -609,7 +666,7 @@ impl ComputerManager {
         image: &str,
         network: &str,
         staging: &Path,
-    ) -> Result<(u64, String, String), ComputerError> {
+    ) -> Result<Copied, ComputerError> {
         use std::os::unix::fs::DirBuilderExt;
         let io = |e: std::io::Error| refused(format!("host staging: {e}"));
         let _ = std::fs::remove_dir_all(staging);
@@ -633,13 +690,15 @@ impl ComputerManager {
             )));
         }
         let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
-        let (Some(size), Some(sha256), Some(uid)) = (
+        let packages = lines.get(3..).unwrap_or_default();
+        let (Some(size), Some(sha256), Some(uid), true) = (
             lines.first().and_then(|s| s.parse::<u64>().ok()),
             lines
                 .get(1)
                 .filter(|s| s.len() == 64)
                 .map(|s| (*s).to_owned()),
             lines.get(2).map(|s| (*s).to_owned()),
+            packages.iter().all(|p| package_name(p)),
         ) else {
             return Err(refused("the old computer's archive report was unreadable"));
         };
@@ -699,14 +758,11 @@ impl ComputerManager {
                 mounts: self.project_mounts(bot_id)?,
             })
             .await?;
+        let mut args = vec!["-c", UNPACK, "sh", &sha256, GUEST_ARCHIVE, &uid];
+        args.extend(packages);
         let out = self
             .runtime
-            .exec(
-                to_runtime_name,
-                "/bin/sh",
-                &["-c", UNPACK, "sh", &sha256, GUEST_ARCHIVE, &uid],
-                COPY_TIMEOUT,
-            )
+            .exec(to_runtime_name, "/bin/sh", &args, COPY_TIMEOUT)
             .await?;
         if out.status != Some(0) {
             return Err(refused(format!(
@@ -714,9 +770,22 @@ impl ComputerManager {
                 super::bounded(out.stderr.trim(), 500)
             )));
         }
-        let description = out.stdout.trim().to_owned();
+        let mut unrestored = Vec::new();
+        let mut description = out.stdout.as_str();
+        while let Some((line, rest)) = description.split_once('\n') {
+            let Some(package) = line.strip_prefix("unrestored ") else {
+                break;
+            };
+            unrestored.push(package.to_owned());
+            description = rest;
+        }
         self.stop_confirmed(to_runtime_name).await?;
-        Ok((size, sha256, super::bounded(&description, 4000)))
+        Ok(Copied {
+            bytes: size,
+            sha256,
+            description: super::bounded(description.trim(), 4000),
+            unrestored,
+        })
     }
 
     /// Switch a bot back to the computer its last completed upgrade
@@ -791,6 +860,7 @@ impl ComputerManager {
             data_bytes: bytes.unwrap_or(0) as u64,
             data_sha256: sha256.unwrap_or_default(),
             image_description: String::new(),
+            unrestored_packages: Vec::new(),
         })
     }
 }

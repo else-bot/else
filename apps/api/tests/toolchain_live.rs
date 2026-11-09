@@ -690,3 +690,66 @@ async fn existing_computers_upgrade_explicitly_and_roll_back() {
         "kept"
     );
 }
+
+/// A desktop bot installs as root with sudo; an upgrade carries its APT
+/// packages, `/usr/local`, and `/opt`, and reports the package the new
+/// computer could not install again (one built locally, not in any archive).
+#[tokio::test(flavor = "multi_thread")]
+async fn bots_install_as_root_and_upgrades_carry_their_installs() {
+    if !live() {
+        eprintln!("SKIPPED: set ELSE_LIVE_VM=1 to boot real Microsandbox VMs");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("microsandbox");
+    std::fs::create_dir_all(&home).unwrap();
+    let _cleanup = Cleanup { home: home.clone() };
+    let next = "else-guest:3-next";
+    assert!(
+        std::process::Command::new("docker")
+            .args(["tag", "else-guest:3", next])
+            .status()
+            .unwrap()
+            .success()
+    );
+    load(&home, dir.path(), "else-guest:3");
+    load(&home, dir.path(), next);
+    let app = TestApp::installed().await;
+
+    let old = manager(&app, dir.path(), "else-guest:3").await;
+    let bot: Uuid = app.create_bot("Admin").await.parse().unwrap();
+    let installed = run(
+        &old,
+        bot,
+        "id -un && sudo -n apt-get update -qq && sudo -n apt-get install -y -qq tree >/dev/null && \
+         printf '#!/bin/sh\\necho bot-tool\\n' | sudo -n tee /usr/local/bin/bot-tool >/dev/null && \
+         sudo -n chmod 0755 /usr/local/bin/bot-tool && \
+         sudo -n mkdir -p /opt/kit && echo kit | sudo -n tee /opt/kit/version >/dev/null && \
+         mkdir -p /tmp/pkg/DEBIAN && \
+         printf 'Package: else-local-only\\nVersion: 1.0\\nArchitecture: all\\nMaintainer: else <noreply@else.bot>\\nDescription: built in the test\\n' \
+             > /tmp/pkg/DEBIAN/control && \
+         dpkg-deb --build /tmp/pkg /tmp/else-local-only.deb >/dev/null && \
+         sudo -n dpkg -i /tmp/else-local-only.deb >/dev/null && echo installed",
+        600,
+    )
+    .await;
+    assert_eq!(installed, "elsebot\ninstalled");
+    stop(&app, &old, bot).await;
+    drop(old);
+
+    let manager = manager(&app, dir.path(), next).await;
+    let started = Instant::now();
+    let report = manager.upgrade_image(bot, next, None).await.unwrap();
+    eprintln!("upgrade in {:?}: {report:?}", started.elapsed());
+    assert_eq!(report.unrestored_packages, vec!["else-local-only"]);
+    assert_eq!(
+        run(
+            &manager,
+            bot,
+            "command -v tree; bot-tool; cat /opt/kit/version; dpkg -s else-local-only >/dev/null 2>&1 || echo not-installed",
+            120,
+        )
+        .await,
+        "/usr/bin/tree\nbot-tool\nkit\nnot-installed"
+    );
+}
