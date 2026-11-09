@@ -110,7 +110,7 @@ impl BackupWorker {
                 replicator
                     .replicate_pending(&self.config.dir, &self.key)
                     .await
-                    .map_err(|e| e.to_string()),
+                    .map_err(Arc::new),
             );
         }
         self.apply_local_retention(&summary.set_id).await?;

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use common::{TestApp, TestDb};
 use else_api::backup::capture::{BackupConfig, Coordinator};
+use else_api::backup::chunks::{self, Index};
 use else_api::backup::replicate::Replicator;
 use else_api::backup::restore::{ComputerTarget, RestoreRequest, restore};
 use else_api::backup::s3::{Put, S3, S3Config};
@@ -124,6 +125,65 @@ fn set_key(s3: &S3, set: &str, object: &str) -> String {
     s3.key(&format!("sets/{set}/{object}"))
 }
 
+async fn chunk_ids(s3: &S3) -> Vec<String> {
+    let root = s3.key("chunks/");
+    let mut ids: Vec<String> = s3
+        .list(&root)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key.strip_prefix(&root).unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+async fn index(s3: &S3, set: &str) -> Index {
+    let complete = s3
+        .get_bytes(&set_key(s3, set, "complete.json"), 1 << 16)
+        .await
+        .unwrap();
+    let completion: backup::Completion = serde_json::from_slice(&complete).unwrap();
+    assert_eq!(completion.manifest.object, chunks::INDEX);
+    let sealed = s3
+        .get_bytes(&set_key(s3, set, chunks::INDEX), 1 << 26)
+        .await
+        .unwrap();
+    let identity = backup::identity_for(&key(), &completion.encryption).unwrap();
+    let plain = backup::open_small(&sealed, &identity, 1 << 26).unwrap();
+    Index::parse(&plain, &completion).unwrap()
+}
+
+fn referenced<'a>(indexes: impl IntoIterator<Item = &'a Index>) -> Vec<String> {
+    let mut ids: Vec<String> = indexes
+        .into_iter()
+        .flat_map(|i| i.chunk_ids().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Add `rows` rows of 32 KB of random text, so the next set has new chunks.
+async fn grow(app: &TestApp, rows: u32) {
+    sqlx::query("CREATE TABLE IF NOT EXISTS scratch (b text)")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i < ?1) INSERT INTO scratch SELECT hex(randomblob(16000)) FROM n")
+        .bind(rows)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+}
+
+async fn flip_byte(s3: &S3, key: &str) {
+    let mut bytes = s3.get_bytes(key, 1 << 30).await.unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0x01;
+    s3.put(key, bytes, false).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
 async fn sets_are_verified_by_readback_and_published_create_only() {
@@ -135,35 +195,24 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
     let summary = worker.run_once().await.unwrap();
     let stats = summary.remote.clone().unwrap().unwrap();
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
-    assert_eq!(stats.uploaded, 2, "manifest and dump");
+    assert!(stats.uploaded >= 1 && stats.reused == 0, "{stats:?}");
     assert_eq!(
         remote_state(&app, &summary.set_id).await.unwrap().0,
         "completed"
     );
-    let run: Option<String> =
-        sqlx::query_scalar("SELECT remote_status FROM backup_runs WHERE set_id = ?1")
-            .bind(&summary.set_id)
-            .fetch_one(&app.db.pool)
-            .await
-            .unwrap();
+    let (run, uploaded): (Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT b.remote_status, r.uploaded_bytes FROM backup_runs b
+         JOIN backup_remote r ON r.set_id = b.set_id WHERE b.set_id = ?1",
+    )
+    .bind(&summary.set_id)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
     assert_eq!(run.as_deref(), Some("completed"));
-    for artifact in &summary.manifest.artifacts {
-        let (len, sha) = s3
-            .get_with(
-                &set_key(&s3, &summary.set_id, &artifact.object),
-                u64::MAX,
-                |_| Ok(()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            (len, sha.as_str()),
-            (
-                artifact.ciphertext_bytes,
-                artifact.ciphertext_sha256.as_str()
-            )
-        );
-    }
+    assert_eq!(uploaded, Some(stats.uploaded_bytes as i64));
+    let index = index(&s3, &summary.set_id).await;
+    assert_eq!(index.manifest, summary.manifest);
+    assert_eq!(chunk_ids(&s3).await, referenced([&index]));
     let complete = set_key(&s3, &summary.set_id, "complete.json");
     let before = s3.get_bytes(&complete, 1 << 16).await.unwrap();
     assert_eq!(
@@ -173,31 +222,24 @@ async fn sets_are_verified_by_readback_and_published_create_only() {
         Put::Exists
     );
     assert_eq!(s3.get_bytes(&complete, 1 << 16).await.unwrap(), before);
-    assert_eq!(
-        before,
-        std::fs::read(summary.path.join("complete.json")).unwrap()
-    );
     let again = worker.replicate_now().await.unwrap().unwrap();
     assert_eq!(again.uploaded + again.completed.len(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn an_object_altered_before_publication_is_detected() {
+async fn a_chunk_altered_before_publication_is_detected() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
     let mut tampering = replicator(&app, &s3);
     let target = s3.clone();
-    tampering.before_publish = Some(Arc::new(move |set: String| {
+    tampering.before_publish = Some(Arc::new(move |_set: String| {
         let s3 = target.clone();
         Box::pin(async move {
-            let key = s3.key(&format!("sets/{set}/{}", backup::DATABASE));
-            let mut bytes = s3.get_bytes(&key, 1 << 30).await.unwrap();
-            let at = bytes.len() / 2;
-            bytes[at] ^= 0x01;
-            s3.put(&key, bytes, false).await.unwrap();
+            let id = chunk_ids(&s3).await.remove(0);
+            flip_byte(&s3, &s3.key(&format!("chunks/{id}"))).await;
         })
     }));
     let summary = worker(&app, dir.path(), tampering)
@@ -206,7 +248,7 @@ async fn an_object_altered_before_publication_is_detected() {
         .unwrap();
     let remote = summary.remote.clone().unwrap();
     assert!(
-        matches!(&remote, Err(e) if e.contains("does not match")),
+        matches!(&remote, Err(e) if e.to_string().contains("does not match")),
         "{remote:?}"
     );
     assert!(
@@ -227,76 +269,52 @@ async fn an_object_altered_before_publication_is_detected() {
     let worker = worker(&app, dir.path(), replicator(&app, &s3));
     let stats = worker.replicate_now().await.unwrap().unwrap();
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
-    assert_eq!(stats.uploaded, 1, "only the altered object again");
+    assert_eq!(stats.uploaded, 1, "only the altered chunk again: {stats:?}");
+    assert_eq!(
+        chunk_ids(&s3).await,
+        referenced([&index(&s3, &summary.set_id).await])
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn an_interrupted_upload_resumes_aborts_and_skips_what_matches() {
-    let _emulator = EMULATOR.read().await;
+async fn an_interrupted_upload_resumes_and_reuses_what_it_uploaded() {
+    // Exclusive: the fault point is global and every replication reaches it.
+    let _emulator = EMULATOR.write().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
-    sqlx::query("CREATE TABLE scratch (b text)")
-        .execute(&app.db.pool)
-        .await
-        .unwrap();
-    sqlx::query("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i < 300) INSERT INTO scratch SELECT hex(randomblob(32000)) FROM n")
-        .execute(&app.db.pool).await.unwrap();
-    let mut small_parts = replicator(&app, &s3);
-    small_parts.part_bytes = 5 * 1024 * 1024;
-    let worker = worker(&app, dir.path(), small_parts.clone());
-    else_api::faults::arm("replication.after_part");
+    grow(&app, 600).await;
+    let worker = worker(&app, dir.path(), replicator(&app, &s3));
+    else_api::faults::arm("replication.after_chunk");
     let summary = worker.run_once().await.unwrap();
     assert!(
         matches!(summary.remote, Some(Err(_))),
         "{:?}",
         summary.remote
     );
-    let open = s3
-        .list_multipart(&s3.key(&format!("sets/{}/", summary.set_id)))
-        .await
-        .unwrap();
-    assert_eq!(open.len(), 1, "the crash left a multipart upload");
     assert_eq!(
         s3.head(&set_key(&s3, &summary.set_id, "complete.json"))
             .await
             .unwrap(),
         None
     );
+    let left = chunk_ids(&s3).await;
+    assert!(!left.is_empty(), "the crash left uploaded chunks");
     let restarted = BackupWorker::new(
         app.db.pool.clone(),
         DatabaseParams::parse(app.db.url.expose()).unwrap(),
         Arc::new(key()),
         config(dir.path()),
     )
-    .with_replicator(small_parts);
+    .with_replicator(replicator(&app, &s3));
     let stats = restarted.replicate_now().await.unwrap().unwrap();
-    assert_eq!(stats.aborted, 1);
-    assert_eq!(stats.skipped, 1, "the manifest already matched");
-    assert_eq!(stats.uploaded, 1);
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
-    assert!(
-        s3.list_multipart(&s3.key(&format!("sets/{}/", summary.set_id)))
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let dump = summary
-        .manifest
-        .artifacts
-        .iter()
-        .find(|a| a.kind == "sqlite")
-        .unwrap();
-    let (_, sha) = s3
-        .get_with(
-            &set_key(&s3, &summary.set_id, backup::DATABASE),
-            u64::MAX,
-            |_| Ok(()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sha, dump.ciphertext_sha256);
+    assert!(stats.reused >= left.len(), "{stats:?}");
+    assert!(stats.uploaded >= 1, "{stats:?}");
+    let index = index(&s3, &summary.set_id).await;
+    assert!(left.iter().all(|id| index.chunk_ids().any(|c| c == id)));
+    assert_eq!(chunk_ids(&s3).await, referenced([&index]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,29 +365,90 @@ async fn an_unreachable_bucket_leaves_the_local_set_and_retries_later() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn remote_retention_keeps_the_newest_complete_sets() {
+async fn remote_retention_keeps_the_newest_complete_sets_and_sweeps_their_chunks() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
     let dir = tempfile::tempdir().unwrap();
     let mut r = replicator(&app, &s3);
     r.keep = 2;
+    r.grace = chrono::Duration::zero();
     let mut w = worker(&app, dir.path(), r.clone());
     w.config.keep = 2;
     let mut ids = Vec::new();
+    let mut last = None;
     for _ in 0..4 {
-        ids.push(w.run_once().await.unwrap().set_id);
+        grow(&app, 200).await;
+        let summary = w.run_once().await.unwrap();
+        ids.push(summary.set_id);
+        last = summary.remote;
     }
+    let stats = last.unwrap().unwrap();
+    assert!(stats.swept >= 1, "{stats:?}");
+    assert!(stats.reused >= 1, "{stats:?}");
     assert_eq!(r.completed_remote().await.unwrap(), ids[2..].to_vec());
     let keys = s3.list(&s3.key("sets/")).await.unwrap();
     assert!(
         keys.iter()
-            .all(|(k, _)| ids[2..].iter().any(|id| k.contains(id.as_str())))
+            .all(|o| ids[2..].iter().any(|id| o.key.contains(id.as_str())))
     );
+    let kept = [index(&s3, &ids[2]).await, index(&s3, &ids[3]).await];
+    assert_eq!(
+        chunk_ids(&s3).await,
+        referenced(&kept),
+        "only kept sets' chunks remain"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT stored_bytes FROM backup_bucket_usage WHERE destination = ?1")
+            .bind(s3.destination())
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    let listed: u64 = s3
+        .list(&s3.key(""))
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.size)
+        .sum();
+    assert_eq!(stored as u64, listed);
     assert_eq!(
         backup::completed_sets(&dir.path().join("backups")).unwrap(),
         ids[2..].to_vec()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
+async fn unreferenced_chunks_within_the_grace_period_are_kept() {
+    let _emulator = EMULATOR.read().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = replicator(&app, &s3);
+    r.keep = 1;
+    let mut w = worker(&app, dir.path(), r.clone());
+    w.config.keep = 1;
+    grow(&app, 200).await;
+    let first = w.run_once().await.unwrap().set_id;
+    let orphans = chunk_ids(&s3).await;
+    sqlx::query("DELETE FROM scratch")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("VACUUM").execute(&app.db.pool).await.unwrap();
+    let second = w.run_once().await.unwrap();
+    assert_eq!(
+        r.completed_remote().await.unwrap(),
+        std::slice::from_ref(&second.set_id)
+    );
+    assert_ne!(first, second.set_id);
+    let listed = chunk_ids(&s3).await;
+    assert!(
+        orphans.iter().all(|id| listed.contains(id)),
+        "a fresh unreferenced chunk is kept"
+    );
+    assert_eq!(second.remote.unwrap().unwrap().swept, 0);
 }
 
 #[derive(Default)]
@@ -649,14 +728,14 @@ async fn a_real_bucket_round_trip_when_authorized() {
     .await
     .unwrap();
     else_api::backup::restore::open_set(&downloaded, &key()).unwrap();
-    for (key, _) in s3.list(&s3.key("")).await.unwrap() {
-        s3.delete(&key).await.unwrap();
+    for object in s3.list(&s3.key("")).await.unwrap() {
+        s3.delete(&object.key).await.unwrap();
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
-async fn a_recorded_completion_is_not_trusted_without_its_payload() {
+async fn a_recorded_completion_is_not_trusted_without_its_index() {
     let _emulator = EMULATOR.read().await;
     let app = populated().await;
     let s3 = bucket().await;
@@ -668,21 +747,153 @@ async fn a_recorded_completion_is_not_trusted_without_its_payload() {
         .execute(&app.db.pool)
         .await
         .unwrap();
-    let key = set_key(&s3, &summary.set_id, backup::DATABASE);
-    let mut bytes = s3.get_bytes(&key, 1 << 30).await.unwrap();
-    bytes[10] ^= 0x01;
-    s3.put(&key, bytes, false).await.unwrap();
+    flip_byte(&s3, &set_key(&s3, &summary.set_id, chunks::INDEX)).await;
     let stats = w.replicate_now().await.unwrap().unwrap();
-    assert_eq!(stats.uploaded, 1, "the damaged object was repaired");
     assert_eq!(stats.completed, std::slice::from_ref(&summary.set_id));
-    let dump = summary
-        .manifest
-        .artifacts
-        .iter()
-        .find(|a| a.kind == "sqlite")
+    assert_eq!(stats.uploaded, 0, "every chunk was still there: {stats:?}");
+    assert_eq!(index(&s3, &summary.set_id).await.manifest, summary.manifest);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
+async fn a_damaged_chunk_is_repaired_from_the_local_set_or_reported() {
+    let _emulator = EMULATOR.read().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    grow(&app, 200).await;
+    let mut r = replicator(&app, &s3);
+    r.sample = 1000;
+    let w = worker(&app, dir.path(), r);
+    let summary = w.run_once().await.unwrap();
+    assert!(matches!(summary.remote, Some(Ok(_))));
+    let ids = chunk_ids(&s3).await;
+    let chunk = s3.key(&format!("chunks/{}", ids[0]));
+    flip_byte(&s3, &chunk).await;
+    let stats = w.replicate_now().await.unwrap().unwrap();
+    assert_eq!((stats.damaged, stats.repaired), (1, 1), "{stats:?}");
+    assert_eq!(chunk_ids(&s3).await, ids);
+    let clean = w.replicate_now().await.unwrap().unwrap();
+    assert_eq!((clean.damaged, clean.repaired), (0, 0), "{clean:?}");
+    flip_byte(&s3, &chunk).await;
+    std::fs::remove_dir_all(summary.path).unwrap();
+    let lost = w.replicate_now().await.unwrap_err().to_string();
+    assert!(
+        lost.contains("cannot be restored") && lost.contains(&summary.set_id),
+        "{lost}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
+async fn a_bucket_rule_that_expires_chunks_is_refused() {
+    let _emulator = EMULATOR.read().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    s3.put_lifecycle(
+        "<LifecycleConfiguration><Rule><ID>expire-old</ID><Status>Enabled</Status>\
+         <Filter><Prefix>else-test/</Prefix></Filter><Expiration><Days>30</Days></Expiration>\
+         </Rule></LifecycleConfiguration>",
+    )
+    .await
+    .unwrap();
+    let summary = worker(&app, dir.path(), replicator(&app, &s3))
+        .run_once()
+        .await
         .unwrap();
-    let (_, sha) = s3.get_with(&key, u64::MAX, |_| Ok(())).await.unwrap();
-    assert_eq!(sha, dump.ciphertext_sha256);
+    let remote = summary.remote.unwrap();
+    assert!(
+        matches!(&remote, Err(e) if matches!(**e, BackupError::Refused(_)) && e.to_string().contains("expire-old")),
+        "{remote:?}"
+    );
+    assert!(chunk_ids(&s3).await.is_empty(), "nothing was uploaded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the optional Compose S3 emulator; run with --ignored"]
+async fn a_set_built_from_earlier_runs_chunks_restores_into_a_fresh_database() {
+    let _emulator = EMULATOR.read().await;
+    let app = populated().await;
+    let s3 = bucket().await;
+    let dir = tempfile::tempdir().unwrap();
+    let w = worker(&app, dir.path(), replicator(&app, &s3));
+    grow(&app, 400).await;
+    let first = w.run_once().await.unwrap();
+    grow(&app, 20).await;
+    let second = w.run_once().await.unwrap();
+    app.create_bot("Later").await;
+    let third = w.run_once().await.unwrap();
+    for summary in [&second, &third] {
+        let stats = summary.remote.clone().unwrap().unwrap();
+        assert!(stats.reused >= 1, "{stats:?}");
+    }
+    let (first_index, third_index) = (
+        index(&s3, &first.set_id).await,
+        index(&s3, &third.set_id).await,
+    );
+    let shared = referenced([&first_index])
+        .into_iter()
+        .filter(|id| third_index.chunk_ids().any(|c| c == id))
+        .count();
+    assert!(
+        shared >= 1,
+        "the third set uses chunks the first run uploaded"
+    );
+    let source: Vec<String> =
+        sqlx::query_scalar("SELECT json_array(hex(id), name) FROM bots ORDER BY 1")
+            .fetch_all(&app.db.pool)
+            .await
+            .unwrap();
+    assert!(source.iter().any(|row| row.contains("Later")), "{source:?}");
+    let scratch: i64 = sqlx::query_scalar("SELECT count(*) FROM scratch")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir.path().join("backups")).unwrap();
+    let downloaded = else_api::backup::replicate::download_set(
+        &s3,
+        &third.set_id,
+        &dir.path().join("download"),
+        &key(),
+        1 << 30,
+    )
+    .await
+    .unwrap();
+    let params = DatabaseParams::parse(app.db.url.expose()).unwrap();
+    let target = format!("else_restore_{}", Uuid::new_v4().simple());
+    let restored = restore(RestoreRequest {
+        set_dir: &downloaded,
+        key: &key(),
+        server: &params,
+        target_database: &target,
+        staging_parent: &dir.path().join("staging"),
+        max_bytes: 1 << 30,
+        computers: None,
+    })
+    .await;
+    let target_options = params.with_database(&target).options;
+    let rows = match &restored {
+        Ok(_) => {
+            let mut conn = sqlx::SqliteConnection::connect_with(&target_options)
+                .await
+                .unwrap();
+            let bots: Vec<String> =
+                sqlx::query_scalar("SELECT json_array(hex(id), name) FROM bots ORDER BY 1")
+                    .fetch_all(&mut conn)
+                    .await
+                    .unwrap();
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM scratch")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+            Some((bots, count))
+        }
+        Err(_) => None,
+    };
+    common::remove_database(&params.options, &target);
+    restored.unwrap();
+    assert_eq!(rows.unwrap(), (source, scratch));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -31,6 +31,9 @@ fn service(state: &AppState) -> Result<&Backups, ApiError> {
 fn error(error: Error) -> ApiError {
     match error {
         Error::Invalid(message) => ApiError::bad_request("invalid_backup_settings", message),
+        Error::ExpiringRule(_) => {
+            ApiError::bad_request("backup_bucket_expires_objects", error.to_string())
+        }
         Error::Conflict => {
             ApiError::new(StatusCode::CONFLICT, "revision_conflict", error.to_string())
         }

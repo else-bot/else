@@ -62,6 +62,33 @@ impl Format {
 
 type Builder = tar::Builder<zstd::stream::write::Encoder<'static, BufWriter<File>>>;
 
+macro_rules! tune {
+    ($encoder:expr) => {{
+        $encoder.long_distance_matching(true)?;
+        $encoder.window_log(WINDOW_LOG)?;
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32);
+        $encoder.multithread(workers)
+    }};
+}
+
+/// Compress `tar` as [`Format::TarZstd`] while it is read.
+pub fn compress<R: Read>(
+    tar: R,
+) -> std::io::Result<zstd::stream::read::Encoder<'static, BufReader<R>>> {
+    let mut encoder = zstd::stream::read::Encoder::new(tar, LEVEL)?;
+    tune!(encoder)?;
+    Ok(encoder)
+}
+
+/// The tar inside a [`Format::TarZstd`] archive.
+pub fn decompress<R: Read>(
+    archive: R,
+) -> std::io::Result<zstd::stream::read::Decoder<'static, BufReader<R>>> {
+    let mut decoder = zstd::stream::read::Decoder::new(archive)?;
+    decoder.window_log_max(WINDOW_LOG)?;
+    Ok(decoder)
+}
+
 /// Archive `dir` into `target` (created new, mode 0600) as
 /// [`Format::TarZstd`]. Returns the paths, relative to `dir`, of entries that
 /// could not be read and were left out.
@@ -76,10 +103,7 @@ pub fn archive(dir: &Path, target: &Path) -> Result<Vec<PathBuf>, BackupError> {
         .map_err(fail)?;
     let mut encoder =
         zstd::stream::write::Encoder::new(BufWriter::new(file), LEVEL).map_err(fail)?;
-    encoder.long_distance_matching(true).map_err(fail)?;
-    encoder.window_log(WINDOW_LOG).map_err(fail)?;
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32);
-    encoder.multithread(workers).map_err(fail)?;
+    (|| tune!(encoder))().map_err(fail)?;
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(false);
     let mut unreadable = Vec::new();
@@ -195,12 +219,7 @@ pub fn unpack(archive: &Path, dir: &Path, format: Format) -> Result<(), BackupEr
     let reader: Box<dyn Read> = match format {
         Format::Tar => Box::new(BufReader::new(file)),
         Format::TarZstd => {
-            let mut decoder = zstd::stream::read::Decoder::new(file)
-                .map_err(|e| BackupError::io(archive.display(), e))?;
-            decoder
-                .window_log_max(WINDOW_LOG)
-                .map_err(|e| BackupError::io(archive.display(), e))?;
-            Box::new(decoder)
+            Box::new(decompress(file).map_err(|e| BackupError::io(archive.display(), e))?)
         }
     };
     let mut tar = tar::Archive::new(reader);

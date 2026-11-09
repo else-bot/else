@@ -11,6 +11,9 @@ use crate::credentials::SecretKey;
 pub enum Error {
     #[error("{0}")]
     Invalid(&'static str),
+    /// The bucket expires objects that incremental sets still use.
+    #[error("{}", super::replicate::expiring_rule_message(.0))]
+    ExpiringRule(String),
     #[error("Backup settings changed. Reload and try again.")]
     Conflict,
     #[error("A backup is running. Wait for it to finish before changing settings.")]

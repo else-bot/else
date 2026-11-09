@@ -14,6 +14,7 @@
 //! and whether the set recovers the whole assistant.
 
 pub mod capture;
+pub mod chunks;
 pub mod mcp;
 pub mod projects;
 pub mod replicate;

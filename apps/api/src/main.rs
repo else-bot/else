@@ -210,7 +210,12 @@ fn run_backup() -> anyhow::Result<()> {
         println!("backup set: {}", summary.path.display());
         println!("coverage: {}", summary.manifest.coverage.note);
         match &summary.remote {
-            Some(Ok(stats)) => println!("remote: {} sets replicated", stats.completed.len()),
+            Some(Ok(stats)) => println!(
+                "remote: {} sets replicated, {} new chunks and {} bytes uploaded",
+                stats.completed.len(),
+                stats.uploaded,
+                stats.uploaded_bytes
+            ),
             Some(Err(err)) => println!("remote: failed ({err}); the local set is complete"),
             None => {}
         }

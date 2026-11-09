@@ -185,6 +185,7 @@ impl DestinationForm {
             .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Bucket", &self.bucket, busy)).child(self.field("Folder / key prefix", &self.prefix, busy)))
             .child(h_flex().items_start().gap_4().when(stacked, |row| row.flex_col()).child(self.field("Access key ID", &self.access, busy)).child(self.field("Secret access key", &self.secret, busy)))
             .child(div().text_xs().text_color(theme.muted_foreground).child(if self.saved_secret { "Leave the secret blank to keep the saved key. A new key replaces it only after saving." } else { "Credentials are encrypted on the workspace server." }))
+            .child(div().text_xs().text_color(theme.muted_foreground).child("Backups share unchanged data between copies. Do not add a bucket rule that expires objects under this prefix: it would delete data newer backups still use."))
             .child(Button::new("backup-advanced").focus_ring(false).cursor_pointer().small().label(if self.advanced { "Hide advanced settings" } else { "Advanced connection settings" }).disabled(busy).on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(Editor::Destination(form)) = shell.backups.as_mut().and_then(|view| view.editor.as_mut()) { form.advanced = !form.advanced; }
                 cx.notify();
@@ -300,7 +301,7 @@ impl PolicyForm {
             .child(h_flex().gap_4().items_start().when(stacked, |row| row.flex_col()).child(field("Remote interval (hours)", &self.hours)).child(field("Backups to keep", &self.keep)))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Use 0 hours for manual backups. Local backups keep their existing schedule."))
             .child(div().text_xs().text_color(theme.muted_foreground).child("Only complete remote backups count. Older copies are removed after a new backup is verified. The last full workspace backup may be kept in addition to this count."))
-            .when_some(snapshot.estimate.as_ref().zip(self.values(cx).ok()), |content, (estimate, (_, keep))| content.child(div().text_xs().child(format!("About {} for {keep} copies at the estimated size. Actual storage may vary.", super::view::bytes(estimate.bytes.saturating_mul(keep as u64))))))
+            .when_some(snapshot.estimate.as_ref().zip(self.values(cx).ok()), |content, (estimate, (_, keep))| content.child(div().text_xs().child(format!("The first upload is about {}. Later backups add only what changed, so {keep} copies store far less than {keep} full copies.", super::view::bytes(estimate.bytes)))))
     }
 }
 

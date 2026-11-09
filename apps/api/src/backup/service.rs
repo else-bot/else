@@ -39,7 +39,11 @@ pub struct Estimate {
 pub struct Recent {
     pub set_id: String,
     pub finished_at: Option<String>,
+    /// The encrypted size of the whole set.
     pub bytes: Option<u64>,
+    /// What its remote run wrote to the bucket: only the chunks the bucket
+    /// lacked. Absent for sets replicated before incremental uploads.
+    pub uploaded_bytes: Option<u64>,
     pub local_status: String,
     pub remote_status: Option<String>,
     pub error: Option<String>,
@@ -57,6 +61,8 @@ pub struct Snapshot {
     pub estimate: Option<Estimate>,
     pub recent: Vec<Recent>,
     pub remote_count: usize,
+    /// Bytes stored under the destination's prefix after the last
+    /// retention, or the sum of the kept sets' sizes before one was measured.
     pub remote_bytes: u64,
     pub unavailable_reason: Option<String>,
     pub last_error: Option<String>,
@@ -97,7 +103,8 @@ enum Job {
 
 enum Failure {
     Capture(String),
-    Upload,
+    /// A refusal the owner can act on, such as an expiring lifecycle rule.
+    Upload(Option<String>),
 }
 
 impl Failure {
@@ -110,10 +117,18 @@ impl Failure {
         })
     }
 
+    fn upload(error: &BackupError) -> Self {
+        Self::Upload(match error {
+            BackupError::Refused(message) => Some(message.clone()),
+            _ => None,
+        })
+    }
+
     fn message(&self) -> String {
         match self {
             Self::Capture(message) => message.clone(),
-            Self::Upload => "Remote upload failed. Check the endpoint, bucket permissions, and credentials. The local backup is kept.".into(),
+            Self::Upload(Some(message)) => format!("Remote upload refused. {message} The local backup is kept."),
+            Self::Upload(None) => "Remote upload failed. Check the endpoint, bucket permissions, and credentials. The local backup is kept.".into(),
         }
     }
 }
@@ -149,7 +164,7 @@ impl Engine {
                     .replicate_now()
                     .await
                     .map(|_| ())
-                    .map_err(|_| Failure::Upload),
+                    .map_err(|e| Failure::upload(&e)),
                 Job::Local => worker
                     .run_local_until(&cancel)
                     .await
@@ -161,7 +176,7 @@ impl Engine {
                         .await
                         .map_err(Failure::capture)?;
                     match summary.remote {
-                        Some(Err(_)) => Err(Failure::Upload),
+                        Some(Err(error)) => Err(Failure::upload(&error)),
                         _ => Ok(()),
                     }
                 }
@@ -325,6 +340,10 @@ impl Backups {
             if !matches!(result, Ok(Ok(()))) || !matches!(cleanup, Some(Ok(Ok(())))) {
                 return Err(Error::Invalid("Connection check failed. Verify the endpoint, keys, and bucket list, read, write, and delete permissions."));
             }
+            let rules = tokio::time::timeout(Duration::from_secs(15), s3.expiring_rule(&s3.key(super::chunks::CHUNKS))).await;
+            if let Ok(Ok(Some(rule))) = rules {
+                return Err(Error::ExpiringRule(rule));
+            }
             Ok(())
         }).await.map_err(|_| Error::Unavailable)?
     }
@@ -339,11 +358,11 @@ impl Backups {
             .transpose()
             .map_err(|_| Error::Unavailable)?;
         let history = async {
-            sqlx::query("SELECT r.set_id, COALESCE(r.verified_at, b.finished_at) AS finished_at, b.ciphertext_bytes, COALESCE(b.local_status, 'completed') AS local_status, r.state AS remote_status, r.error FROM backup_remote r LEFT JOIN backup_runs b ON b.set_id = r.set_id WHERE r.destination = ?1 ORDER BY COALESCE(r.verified_at, b.finished_at, r.updated_at) DESC, r.set_id DESC LIMIT 10")
+            sqlx::query("SELECT r.set_id, COALESCE(r.verified_at, b.finished_at) AS finished_at, b.ciphertext_bytes, r.uploaded_bytes, COALESCE(b.local_status, 'completed') AS local_status, r.state AS remote_status, r.error FROM backup_remote r LEFT JOIN backup_runs b ON b.set_id = r.set_id WHERE r.destination = ?1 ORDER BY COALESCE(r.verified_at, b.finished_at, r.updated_at) DESC, r.set_id DESC LIMIT 10")
                 .bind(&destination_id).fetch_all(&self.pool).await
         };
         let totals = async {
-            sqlx::query("SELECT COUNT(*) AS count, COALESCE(SUM(b.ciphertext_bytes), 0) AS bytes FROM backup_remote r LEFT JOIN backup_runs b ON b.set_id = r.set_id WHERE r.destination = ?1 AND r.state = 'completed'")
+            sqlx::query("SELECT COUNT(*) AS count, COALESCE((SELECT stored_bytes FROM backup_bucket_usage WHERE destination = ?1), SUM(b.ciphertext_bytes), 0) AS bytes FROM backup_remote r LEFT JOIN backup_runs b ON b.set_id = r.set_id WHERE r.destination = ?1 AND r.state = 'completed'")
                 .bind(&destination_id).fetch_one(&self.pool).await
         };
         let latest = async {
@@ -358,6 +377,9 @@ impl Backups {
                 finished_at: row.get("finished_at"),
                 bytes: row
                     .get::<Option<i64>, _>("ciphertext_bytes")
+                    .map(|n| n.max(0) as u64),
+                uploaded_bytes: row
+                    .get::<Option<i64>, _>("uploaded_bytes")
                     .map(|n| n.max(0) as u64),
                 local_status: row.get("local_status"),
                 remote_status: row.get("remote_status"),
@@ -537,7 +559,7 @@ async fn run(
                                     remote_at = Some(Instant::now() + remote_retry);
                                     retry_at = None;
                                 }
-                                Failure::Upload => {
+                                Failure::Upload(_) => {
                                     retry_at = Some(Instant::now() + remote_retry);
                                     remote_at = Some(Instant::now() + Duration::from_secs(settings.interval_secs));
                                 }
