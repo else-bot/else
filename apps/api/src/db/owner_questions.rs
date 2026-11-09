@@ -626,18 +626,27 @@ pub async fn answer(
             _ => {}
         }
     }
-    // An inbox card approves only an account connected since it was asked,
-    // or the requested address: Google may authorize a different mailbox.
+    // An inbox card approves only the requested address, or an account of
+    // its provider connected since it was asked: Google may authorize a
+    // different mailbox than the bot named.
     if choice == Some(APPROVE)
         && let Some(Action::EmailConnection { email_connection }) = &question.action
     {
         let connected: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM connector_accounts WHERE state <> 'removed'
                 AND (lower(json_extract(config, '$.address')) = ?1
-                     OR created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2)))",
+                     OR (json_extract(config, '$.provider') = ?3
+                         AND created_at >= (SELECT created_at FROM owner_questions WHERE id = ?2))))",
         )
         .bind(email_connection.address.to_lowercase())
         .bind(question.id)
+        .bind(
+            serde_json::to_value(email_connection.provider)
+                .map_err(|err| sqlx::Error::Encode(Box::new(err)))?
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
         .fetch_one(&mut *tx)
         .await?;
         if !connected {

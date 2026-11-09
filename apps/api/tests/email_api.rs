@@ -1015,7 +1015,27 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     let early = approve().await;
     assert_eq!(early.status, StatusCode::CONFLICT, "{}", early.body);
     assert_eq!(early.body["error"]["code"], "inbox_not_connected");
-    let other_mailbox = account(app).await;
+    let unrelated = account(app).await;
+    let still_early = approve().await;
+    assert_eq!(
+        still_early.status,
+        StatusCode::CONFLICT,
+        "an IMAP inbox is not this sign-in"
+    );
+    let other_mailbox = store::create(
+        &app.db.pool,
+        app.state.secret_key.as_ref().unwrap(),
+        &Provider::Gmail.config("other@gmail.com".into()).unwrap(),
+        &Credential::OAuth2 {
+            client_id: "desktop".into(),
+            client_secret: None,
+            refresh_token: "private-refresh".into(),
+            access_token: None,
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
     let answered = approve().await;
     assert_eq!(answered.status, StatusCode::OK, "{}", answered.body);
     let token = h.continued(turn, &token).await;
@@ -1039,6 +1059,14 @@ async fn a_bot_asks_the_owner_to_sign_in_to_an_inbox_from_chat() {
     )
     .await;
     assert_eq!(known.result["status"], "connected", "{}", known.body);
-    assert_eq!(known.result["account_id"], other_mailbox.id.to_string());
+    assert_eq!(known.result["account_id"], unrelated.id.to_string());
+    let chosen = tool(
+        app,
+        &token,
+        "mail_connect",
+        json!({"provider":"gmail","address":"other@gmail.com"}),
+    )
+    .await;
+    assert_eq!(chosen.result["account_id"], other_mailbox.id.to_string());
     h.release(turn).await;
 }
