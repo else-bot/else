@@ -89,7 +89,6 @@ pub enum Transport {
         /// each time a connection opens, so no value is saved here.
         #[serde(default)]
         headers: BTreeMap<String, String>,
-        /// Task secrets that set the placeholders' variables.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         secrets: Vec<String>,
     },
@@ -284,10 +283,8 @@ impl Transport {
     }
 }
 
-/// Task secrets one HTTP MCP may name, as for one guest command.
 const MAX_SECRETS: usize = task_secrets::MAX_PER_COMMAND;
 
-/// `template` with each `${VAR}` replaced by `value(VAR)`.
 fn fill<'a>(
     template: &str,
     mut value: impl FnMut(&str) -> Result<&'a str, Error>,
@@ -307,7 +304,6 @@ fn fill<'a>(
     Ok(out)
 }
 
-/// Where HTTP MCP headers find the owner's task secrets.
 #[derive(Clone)]
 pub struct TaskSecrets {
     pool: sqlx::SqlitePool,
@@ -381,7 +377,6 @@ impl TaskSecrets {
     }
 }
 
-/// `value` with every task secret value in its strings redacted.
 fn redact(value: Value, set: &[task_secrets::Redact]) -> Value {
     match value {
         Value::String(text) => Value::String(task_secrets::redact(&text, set)),
@@ -612,7 +607,6 @@ impl Library {
         self
     }
 
-    /// Check that `config`'s task secrets exist and set every placeholder.
     pub async fn check_secrets(&self, config: &Transport) -> Result<(), Error> {
         TaskSecrets::fill(self.task_secrets.as_ref(), config)
             .await

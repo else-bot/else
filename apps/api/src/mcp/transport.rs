@@ -780,12 +780,17 @@ print(json.dumps({'jsonrpc':'2.0', 'id':message['id'], 'result':{}}), flush=True
         use tracing_subscriber::layer::SubscriberExt;
         let capture = Capture::default();
         let writer = capture.clone();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(move || writer.clone()),
-        );
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("trace"))
+            .with(tracing_subscriber::filter::filter_fn(|meta| {
+                !crate::connectors::sensitive_log_target(meta.target())
+            }))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone()),
+            );
         let _logging = tracing::subscriber::set_default(subscriber);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

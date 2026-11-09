@@ -31,6 +31,7 @@ pub fn sensitive_log_target(target: &str) -> bool {
         "h2",
         "rustls",
         "tokio_rustls",
+        "rmcp",
     ]
     .iter()
     .any(|prefix| {
