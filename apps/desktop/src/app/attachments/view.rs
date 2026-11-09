@@ -5,6 +5,7 @@ use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::InlineTokenContext;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -27,7 +28,14 @@ impl Preview {
     }
 }
 
-pub(super) fn show_preview(file: Attachment, preview: Preview, window: &mut Window, cx: &mut App) {
+/// `bytes` adds a save button; a draft still being read has none.
+pub(super) fn show_preview(
+    file: Attachment,
+    preview: Preview,
+    bytes: Option<Arc<Vec<u8>>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.open_dialog(cx, move |dialog, _, _| {
         let content = match &preview {
             Preview::Image(image) => div()
@@ -59,7 +67,50 @@ pub(super) fn show_preview(file: Attachment, preview: Preview, window: &mut Wind
                     .child(format!("{} · {}", file.media_type, file_size(file.size))),
             )
             .child(content)
+            .when_some(bytes.clone(), |dialog, bytes| {
+                let file = file.clone();
+                dialog.footer(
+                    h_flex().child(
+                        Button::new("save-file")
+                            .focus_ring(false)
+                            .cursor_pointer()
+                            .label("Save to disk")
+                            .on_click(move |_, window, cx| {
+                                save(&file.name, bytes.clone(), window, cx)
+                            }),
+                    ),
+                )
+            })
     });
+}
+
+fn save(name: &str, bytes: Arc<Vec<u8>>, window: &mut Window, cx: &mut App) {
+    let directory = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let prompt = cx.prompt_for_new_path(&directory, Some(name));
+    let name = name.to_owned();
+    window
+        .spawn(cx, async move |cx| {
+            let result = match prompt.await {
+                Ok(Ok(Some(path))) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            std::fs::write(path, bytes.as_slice()).map_err(|e| e.to_string())
+                        })
+                        .await
+                }
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = result {
+                let _ = cx.update(|window, cx| {
+                    window.push_notification(format!("Could not save {name}: {error}"), cx)
+                });
+            }
+        })
+        .detach();
 }
 
 pub(in crate::app) fn chip(

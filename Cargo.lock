@@ -2091,6 +2091,7 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "markdown",
+ "mime_guess",
  "percent-encoding",
  "png 0.18.1",
  "rcgen",

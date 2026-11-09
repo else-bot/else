@@ -14,7 +14,7 @@ mod fingerprints;
 pub mod grok;
 pub mod grok_home;
 pub mod host;
-pub(crate) mod output_images;
+pub(crate) mod output_files;
 pub mod prompt;
 pub mod synthetic;
 

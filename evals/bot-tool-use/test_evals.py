@@ -99,13 +99,19 @@ def run(runner):
                 "browser-keeps-blocked-draft": ([self.call("computer_browser", {"action": "open", "url": "https://example.com/changelog"})],
                                                 "The X draft asked to confirm leaving, so I kept it open."),
                 "thumbs-up-saves-no-rule": ([], ""),
+                "link-project-files": ([], "[CSV](hypertracker-evidence/cloudflare-only/daily_counts_utc.csv) · "
+                                           "[Report](~/work/hypertracker-evidence/cloudflare-only/report.md)",
+                                       "Both are in your artifact store: `daily_counts_utc.csv` and `report.md`."),
                 "correction-saves-rule": ([self.call("rules_update", {"section": "Summaries", "content": "Never: headings.",
                                                                       "owner_words": "I never want headings in summaries."})], "Got it."),
             }
             for case in runner.load_cases():
                 with self.subTest(case=case["id"]):
-                    calls, final = examples[case["id"]]
+                    calls, final, *bad_final = examples[case["id"]]
                     self.assertTrue(self.passed(case["expect"], calls, final))
+                    if bad_final:
+                        self.assertFalse(self.passed(case["expect"], calls, bad_final[0]))
+                        continue
                     bad = [] if calls else [self.call("memory_read")]
                     self.assertFalse(self.passed(case["expect"], bad, final))
 
