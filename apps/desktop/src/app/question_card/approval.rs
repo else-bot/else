@@ -17,10 +17,10 @@ fn scope(choice: &QuestionChoice, question: &Question, bot: &str) -> (String, St
         APPROVE_TASK => (
             "Always for this task".into(),
             question.task_scope().map_or_else(
-                || format!("Remembers this task and action type for future chats with {bot}."),
+                || format!("Remembers this task and action type for {bot}'s future chats and scheduled routine runs."),
                 |scope| {
                     format!(
-                        "Remembers {} on {} for future chats with {bot}.",
+                        "Remembers {} on {} for {bot}'s future chats and scheduled routine runs.",
                         scope.task, scope.target
                     )
                 },

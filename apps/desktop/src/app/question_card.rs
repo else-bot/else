@@ -64,7 +64,7 @@ fn outcome(question: &Question, bot_name: &str) -> String {
                 )
             }
             (true, Some(APPROVE_TASK)) => question.task_scope().map_or_else(
-                || "Approved. This task and action type are allowed in future chats with this bot.".into(),
+                || "Approved. This task and action type are allowed in future chats and scheduled routine runs of this bot.".into(),
                 |scope| format!("Always allowed for this bot: {} on {}.", scope.task, scope.target),
             ),
             (true, Some(DENY)) => "Denied.".into(),

@@ -19,7 +19,7 @@ pub struct Update {
 }
 
 /// The blocks for this turn, by receipt key. An empty block does not apply
-/// to this turn (a routine run has no saved-permission snapshot): it is not
+/// to this turn (a webhook wake has no saved-permission snapshot): it is not
 /// sent and the session keeps the receipt of the copy it holds.
 fn blocks(input: &TurnInput) -> [(&'static str, String); 4] {
     [
