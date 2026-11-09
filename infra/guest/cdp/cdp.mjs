@@ -95,7 +95,7 @@ const DROPPED = ["ECONNRESET", "ECONNREFUSED", "EPIPE"];
 /** The endpoint of a browser that replaced `endpoint`, or `error` once
  * `deadline` passes with the same browser still answering. */
 async function replacement(endpoint, deadline, error) {
-  while (Date.now() < deadline) {
+  while (deadline - Date.now() > 250) {
     await sleep(250);
     const next = await ready({ timeoutMs: Math.max(1, deadline - Date.now()) }).catch(() => null);
     if (next && next.webSocketDebuggerUrl !== endpoint) return next.webSocketDebuggerUrl;
@@ -130,7 +130,7 @@ export async function ready({ timeoutMs = 30000 } = {}) {
   let started = fs.existsSync(SCREEN) || !canRun(DESKTOP);
   while (Date.now() < deadline) {
     try {
-      return await getJson("/json/version");
+      return await getJson("/json/version", Math.min(2000, Math.max(1, deadline - Date.now())));
     } catch (e) {
       last = e;
       if (!started) {
@@ -513,27 +513,37 @@ export class Browser {
   }
 
   /** Open a blank tab and return its target ID. A browser that is shutting
-   * down still answers /json/version for a moment, then drops connections, so
-   * a failed handshake (nothing sent) is retried, and a request it dropped is
-   * sent again only to the browser that replaced it, whose tabs are new. */
+   * down still answers /json/version for a moment, then refuses or drops
+   * connections, so a failed handshake or a refusal (no tab made) is retried,
+   * and a request it dropped is sent again only to the browser that replaced
+   * it, whose tabs are new. */
   async createBlankTab() {
     const deadline = Date.now() + this.timeoutMs;
-    const left = () => Math.max(1, deadline - Date.now());
-    let endpoint = (await ready({ timeoutMs: left() })).webSocketDebuggerUrl;
+    const left = () => deadline - Date.now();
+    const expired = () => new BrowserNotReady(`no browser opened a new tab within ${this.timeoutMs} ms`);
+    let endpoint = (await ready({ timeoutMs: this.timeoutMs })).webSocketDebuggerUrl;
     for (;;) {
+      if (left() <= 0) throw expired();
       let conn;
       try {
         conn = new Connection(await Socket.open(endpoint, left()));
       } catch (e) {
         const unsent = e instanceof TargetClosed || DROPPED.includes(e.code) || e.status === 404;
-        if (!unsent || Date.now() >= deadline) throw e;
+        if (!unsent || left() <= 250) throw e;
         await sleep(250);
         endpoint = (await ready({ timeoutMs: left() })).webSocketDebuggerUrl;
         continue;
       }
       try {
+        if (left() <= 0) throw expired();
         return (await conn.call("Target.createTarget", { url: "about:blank" }, { timeoutMs: left() })).targetId;
       } catch (e) {
+        if (e instanceof CdpError) {
+          if (left() <= 250) throw e;
+          await sleep(250);
+          endpoint = (await ready({ timeoutMs: left() })).webSocketDebuggerUrl;
+          continue;
+        }
         if (!(e instanceof Uncertain) || !conn.closed) throw e;
         endpoint = await replacement(endpoint, Math.min(deadline, Date.now() + 10000), e);
       } finally {

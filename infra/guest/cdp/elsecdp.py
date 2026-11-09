@@ -117,7 +117,7 @@ def _get_json(path, timeout=2):
 def _replacement(endpoint, deadline, error):
     """The endpoint of a browser that replaced endpoint, or error once the
     monotonic deadline passes with the same browser still answering."""
-    while time.monotonic() < deadline:
+    while deadline - time.monotonic() > 0.25:
         time.sleep(0.25)
         try:
             found = ready(max(0.001, deadline - time.monotonic()))["webSocketDebuggerUrl"]
@@ -137,7 +137,7 @@ def ready(timeout=30):
     started = os.path.exists(SCREEN) or not os.access(DESKTOP, os.X_OK)
     while time.monotonic() < deadline:
         try:
-            return _get_json("/json/version")
+            return _get_json("/json/version", min(2, max(0.001, deadline - time.monotonic())))
         except Exception as e:  # noqa: BLE001 - any failure means not yet
             last = e
             if not started:
@@ -496,27 +496,38 @@ class Browser:
 
     def _create_blank_tab(self):
         """Open a blank tab and return its target ID. A browser that is shutting
-        down still answers /json/version for a moment, then drops connections,
-        so a failed handshake (nothing sent) is retried, and a request it
-        dropped is sent again only to the browser that replaced it, whose tabs
-        are new."""
+        down still answers /json/version for a moment, then refuses or drops
+        connections, so a failed handshake or a refusal (no tab made) is
+        retried, and a request it dropped is sent again only to the browser that
+        replaced it, whose tabs are new."""
         deadline = time.monotonic() + self.timeout
-        left = lambda: max(0.001, deadline - time.monotonic())
-        endpoint = ready(left())["webSocketDebuggerUrl"]
+        left = lambda: deadline - time.monotonic()
+        expired = lambda: BrowserNotReady(f"no browser opened a new tab within {self.timeout} s")
+        endpoint = ready(self.timeout)["webSocketDebuggerUrl"]
         while True:
+            if left() <= 0:
+                raise expired()
             try:
                 conn = _Connection(endpoint, left(), lambda msg: None)
             except (ConnectionError, CdpError) as e:
                 unsent = isinstance(e, (TargetClosed, ConnectionError)) or getattr(e, "status", None) == 404
-                if not unsent or time.monotonic() >= deadline:
+                if not unsent or left() <= 0.25:
                     raise
                 time.sleep(0.25)
                 endpoint = ready(left())["webSocketDebuggerUrl"]
                 continue
             try:
+                if left() <= 0:
+                    raise expired()
                 return conn.call("Target.createTarget", {"url": "about:blank"}, left())["targetId"]
-            except (Uncertain, TargetClosed) as e:
-                if not conn.closed:
+            except CdpError as e:
+                if type(e) is CdpError:
+                    if left() <= 0.25:
+                        raise
+                    time.sleep(0.25)
+                    endpoint = ready(left())["webSocketDebuggerUrl"]
+                    continue
+                if not isinstance(e, (Uncertain, TargetClosed)) or not conn.closed:
                     raise
                 endpoint = _replacement(endpoint, min(deadline, time.monotonic() + 10), e)
             finally:
