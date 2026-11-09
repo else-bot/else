@@ -9,6 +9,9 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// About three rows; more scroll inside the tray so the composer stays put.
+const MAX_ROWS_HEIGHT: f32 = 240.;
+
 /// The first non-empty line of a task's latest message, as plain text.
 fn first_line(text: &str) -> Option<String> {
     let line = text.lines().find(|line| !line.trim().is_empty())?;
@@ -254,7 +257,16 @@ impl ElseApp {
                 .border_color(theme.border.opacity(0.6))
                 .bg(theme.sidebar.opacity(0.6))
                 .child(header)
-                .children(rows.into_iter().flatten())
+                .when_some(rows, |tray, rows| {
+                    tray.child(
+                        v_flex()
+                            .id("waiting-tray-rows")
+                            .w_full()
+                            .max_h(px(MAX_ROWS_HEIGHT))
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
+                })
                 .into_any_element(),
         )
     }

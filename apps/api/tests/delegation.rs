@@ -2115,3 +2115,131 @@ async fn a_follow_up_does_not_wait_on_a_task_that_waits_on_it() {
         "carrying the outbound task would leave both turns waiting on each other"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_wakes_the_parent_while_another_task_still_runs() {
+    let app = app_with(3).await;
+    let growth = leaf(&app, "Growth").await;
+    let scout = leaf(&app, "Scout").await;
+    let (main, root, token) = running_main(&app).await;
+    let audit = delegate(
+        &app,
+        &token,
+        &growth,
+        "[synthetic:hang] Audit the indexing notice.",
+    )
+    .await;
+    let audit_id: Uuid = tool_text(&audit)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_status(&app, root, "waiting").await;
+
+    let follow = app
+        .send(
+            &main,
+            Uuid::new_v4(),
+            "[synthetic:slow] Also learn from Scout how to generate VIP4 redeem links.",
+            Some("synthetic"),
+        )
+        .await;
+    let follow: Uuid = follow.body["turn"]["id"].as_str().unwrap().parse().unwrap();
+    wait_status(&app, follow, "running").await;
+    let token = grant_delegate(&app, follow).await;
+    let links = delegate(
+        &app,
+        &token,
+        &scout,
+        "Explain how to generate VIP4 redeem links.",
+    )
+    .await;
+    let links_id: Uuid = tool_text(&links)["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let (delivered, attempt, status): (Option<i64>, i64, String) = sqlx::query_as(
+            "SELECT d.delivered_attempt, t.attempt, t.status FROM delegations d, turns t
+             WHERE d.id = ?1 AND t.id = ?2",
+        )
+        .bind(links_id)
+        .bind(follow)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+        if delivered.is_some() && status == "waiting" {
+            assert_eq!(
+                delivered,
+                Some(attempt),
+                "the latest attempt read Scout's reply"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Scout's reply never reached the follow-up: {delivered:?} {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (carrier, status): (Uuid, String) =
+        sqlx::query_as("SELECT root_turn_id, status FROM delegations WHERE id = ?1")
+            .bind(audit_id)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (carrier, status.as_str()),
+        (follow, "running"),
+        "Growth keeps working"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_task_is_not_carried_onto_an_owner_message() {
+    let db = TestDb::migrated().await;
+    let (main, root, child, delegation) = seed(&db).await;
+    let (conversation, item): (Uuid, Uuid) =
+        sqlx::query_as("SELECT conversation_id, owner_item_id FROM turns WHERE id = ?1")
+            .bind(root)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, conversation_id, seq, turn_id, kind, text)
+         VALUES (?1, ?2, (SELECT last_item_seq + 1 FROM conversations WHERE id = ?2),
+                 ?3, 'routine', 'Weekly audit')",
+    )
+    .bind(item)
+    .bind(conversation)
+    .bind(root)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE conversations SET last_item_seq = last_item_seq + 1 WHERE id = ?1")
+        .bind(conversation)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    set_status(&db, child, "running").await;
+    set_status(&db, root, "waiting").await;
+    follow_up(&db, main).await;
+    let carrier: Uuid = sqlx::query_scalar("SELECT root_turn_id FROM delegations WHERE id = ?1")
+        .bind(delegation)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let child_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?1")
+        .bind(child)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (carrier, child_status.as_str()),
+        (root, "cancelling"),
+        "an owner message would widen the routine task's authority"
+    );
+}

@@ -413,7 +413,7 @@ pub struct Delegation {
     /// Messages the task has written so far.
     #[serde(default)]
     pub updates: i64,
-    /// While the task runs, the start of its latest finished message.
+    /// While the task runs, the start of its latest message.
     #[serde(default)]
     pub progress: Option<String>,
 }

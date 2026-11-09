@@ -391,8 +391,20 @@ impl SinkState {
         .bind(self.turn_id)
         .fetch_one(&mut *tx)
         .await?;
+        let (tasks_pending, ready): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT (SELECT count(*) FROM delegations
+                     WHERE root_turn_id = ?1 AND status IN ('queued', 'running')),
+                    (SELECT count(*) FROM delegations d
+                     WHERE d.root_turn_id = ?1 AND {})",
+            crate::db::delegations::READY
+        )))
+        .bind(self.turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
         let parks = current != "cancelling" && matches!(status, "completed" | "interrupted");
-        let status = if parks && pending > 0 {
+        let status = if parks && pending == tasks_pending && ready > 0 {
+            "queued"
+        } else if parks && pending > 0 {
             "waiting"
         } else if parks && unseen > 0 {
             "queued"
@@ -531,6 +543,10 @@ impl SinkState {
                             &self.delivered_waits,
                         )
                         .await?;
+                        if !self.delivered.is_empty() {
+                            crate::db::events::turn_changed(&mut tx, self.bot_id, self.turn_id)
+                                .await?;
+                        }
                         tx.commit().await
                     }
                     .await;
@@ -733,12 +749,18 @@ impl SinkState {
         self.flush().await?;
         if self.pending.is_empty() {
             let result: Result<(), sqlx::Error> = async {
-                if let (Some(item), Some(reply)) =
-                    (self.assistant_item, self.prepare_files().await?)
-                {
+                let ended = self.assistant_item.is_some();
+                let files = match self.assistant_item {
+                    Some(item) => self.prepare_files().await?.map(|reply| (item, reply)),
+                    None => None,
+                };
+                if ended {
                     let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-                    self.write_files(&mut tx, item, &reply, "('sending', 'running')")
-                        .await?;
+                    if let Some((item, reply)) = &files {
+                        self.write_files(&mut tx, *item, reply, "('sending', 'running')")
+                            .await?;
+                    }
+                    crate::db::events::task_progressed(&mut tx, self.turn_id).await?;
                     tx.commit().await?;
                 }
                 Ok(())

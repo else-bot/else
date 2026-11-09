@@ -76,10 +76,6 @@ pub async fn item_upsert(
     item_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let item = turns::load_item(conn, item_id).await?;
-    if item.kind == "assistant" {
-        // A delegated task's new message updates its handoff's progress.
-        root_changed(conn, item.turn_id).await?;
-    }
     if item.hidden
         || matches!(item.kind.as_str(), "routine" | "connector")
         || is_task(conn, item.conversation_id).await?
@@ -173,6 +169,14 @@ async fn reply_drafts_changed(
         append(conn, bot_id, "turn.updated", data).await?;
     }
     Ok(())
+}
+
+/// A delegated task finished a message: its handoff shows the new progress.
+pub async fn task_progressed(
+    conn: &mut SqliteConnection,
+    task_turn: Uuid,
+) -> Result<(), sqlx::Error> {
+    root_changed(conn, task_turn).await
 }
 
 /// Republish the delegating turns of `task_turn`, a child turn or the owner

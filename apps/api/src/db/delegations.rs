@@ -33,6 +33,17 @@ pub const PER_ATTEMPT: i64 = 1;
 pub const MAX_COUNCIL_BOTS: usize = 32;
 pub const MAX_TASK_BYTES: usize = 8_000;
 
+/// SQL over a delegation `d`: its outcome is unread and its batch has
+/// settled. A batch is what one provider attempt sent, an individual task
+/// or a council; a task carried from an earlier owner message (attempt 0)
+/// stands alone. Matches the wake condition of the `turns_delegation_child`
+/// trigger, so the parent reads each batch as soon as it lands.
+pub const READY: &str = "d.delivered_attempt IS NULL
+     AND d.status IN ('completed', 'failed', 'cancelled')
+     AND NOT EXISTS (SELECT 1 FROM delegations p
+                     WHERE p.root_turn_id = d.root_turn_id AND p.status IN ('queued', 'running')
+                       AND d.parent_attempt > 0 AND p.parent_attempt = d.parent_attempt)";
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DelegateError {
     #[error("only a bot's own conversation can delegate; delegated tasks cannot delegate")]
@@ -94,7 +105,7 @@ pub struct Handoff {
     pub seen: bool,
     /// Messages the task's turn has written so far.
     pub updates: i64,
-    /// While the task runs, the start of its latest finished message.
+    /// While the task runs, the start of its latest message.
     pub progress: Option<String>,
 }
 
@@ -114,7 +125,7 @@ pub async fn for_turns(
                     (SELECT substr(i.text, 1, 400) FROM items i
                      WHERE i.turn_id = coalesce(d.takeover_turn_id, d.child_turn_id)
                        AND i.kind = 'assistant'
-                     ORDER BY i.seq DESC LIMIT 1 OFFSET 1)
+                     ORDER BY i.seq DESC LIMIT 1)
                 END AS progress
          FROM delegations d JOIN bots b ON b.id = d.target_bot_id
          WHERE lower(hex(d.root_turn_id)) IN (SELECT replace(value, '-', '') FROM json_each(?1))
@@ -481,7 +492,9 @@ pub async fn take_over(
 /// in the target's chat however this conversation ends; this message waits
 /// for it unless that task already waits on this message, in which case
 /// the caller stops it. Carried tasks keep attempt 0, so they count neither
-/// toward this message's budget nor as its attempt's own delegation.
+/// toward this message's budget nor as its attempt's own delegation. A task
+/// still running for a routine run is not carried: its authority comes from
+/// its root's source item, and an owner message would widen it.
 pub async fn carry_forward(
     conn: &mut SqliteConnection,
     conversation_id: Uuid,
@@ -493,7 +506,10 @@ pub async fn carry_forward(
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE delegations SET root_turn_id = ?3, parent_attempt = 0
          WHERE root_turn_id IN ({EARLIER})
-           AND ((takeover_turn_id IS NULL AND status IN ('queued', 'running'))
+           AND ((takeover_turn_id IS NULL AND status IN ('queued', 'running')
+                 AND root_turn_id IN (SELECT t.id FROM turns t
+                                      JOIN items i ON i.id = t.owner_item_id
+                                      WHERE i.kind = 'user'))
                 OR (delivered_attempt IS NULL AND status IN ('completed', 'failed', 'cancelled')))"
     )))
     .bind(conversation_id)
@@ -664,7 +680,7 @@ pub async fn publish_reply(conn: &mut SqliteConnection, turn: Uuid) -> Result<()
 
 pub use crate::app::providers::DelegationOutcome as Outcome;
 
-/// Outcomes of a root's children not yet given to a parent attempt.
+/// Outcomes of a root's settled batches not yet given to a parent attempt.
 pub async fn undelivered(
     conn: &mut SqliteConnection,
     root: Uuid,
@@ -679,13 +695,12 @@ pub async fn undelivered(
         result: Option<String>,
         error: Option<String>,
     }
-    let rows: Vec<OutcomeRow> = sqlx::query_as(
+    let rows: Vec<OutcomeRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.target_bot_id, b.name AS target_name, d.task, d.status, d.result, d.error
              FROM delegations d JOIN bots b ON b.id = d.target_bot_id
-             WHERE d.root_turn_id = ?1 AND d.delivered_attempt IS NULL
-               AND d.status IN ('completed', 'failed', 'cancelled')
-             ORDER BY d.created_at",
-    )
+             WHERE d.root_turn_id = ?1 AND {READY}
+             ORDER BY d.created_at"
+    )))
     .bind(root)
     .fetch_all(&mut *conn)
     .await?;
